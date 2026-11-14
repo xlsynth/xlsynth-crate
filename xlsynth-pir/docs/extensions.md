@@ -350,52 +350,59 @@ Also add tests in the same style as the existing extension tests:
 - g8r lowering and prep-for-gatify coverage under `xlsynth-g8r/tests/`
 - Fuzz target coverage when the op affects `xlsynth-g8r` behavior
 
-## Bidirectional block ports
+## Bidirectional block nets
 
-A block declares a pin in its port list and marks it as bidirectional with
-a typed `ext_inout` declaration in the body. The declaration can carry
-`sv_type`. Reads and drives refer to the pin by name.
+A block declares each resolved wire as an `ext_inout_net` resource. The optional
+`ports` list exposes a net through any number of public inout pins. Each listed
+name must appear exactly once in the block header with the net's exact type.
+The declaration may also carry an `sv_type` annotation. Omitting `ports`
+makes the wire private to the block and its connected children.
 
 ```text
 package pads
 
-top block pad_cell(drive: bits[4], oe: bits[1], pad: bits[4], observed: bits[4]) {
-  ext_inout pad(bits[4])
-  drive: bits[4] = input_port(name=drive, id=1)
+block device(io: bits[8]) {
+  ext_inout_net pin(bits[8], ports=[io])
+}
+
+top block parent(tx: bits[8], oe: bits[1], rx: bits[8]) {
+  ext_inout_net bus(bits[8])
+  instantiation a(block=device, kind=block)
+  instantiation b(block=device, kind=block)
+  tx: bits[8] = input_port(name=tx, id=1)
   oe: bits[1] = input_port(name=oe, id=2)
-  sample: bits[4] = ext_inout_port_input(name=pad, id=3)
-  enable_drive: () = ext_inout_port_output(drive, oe, name=pad, id=4)
-  observed: () = output_port(sample, name=observed, id=5)
+  link_a: () = ext_instantiation_inout(instantiation=a, port_name=io, net=bus, id=3)
+  link_b: () = ext_instantiation_inout(instantiation=b, port_name=io, net=bus, id=4)
+  send: () = ext_inout_drive(tx, oe, net=bus, id=5)
+  sample: bits[8] = ext_inout_read(net=bus, id=6)
+  rx: () = output_port(sample, name=rx, id=7)
 }
 ```
 
-A read returns the resolved value. The optional local driver takes data of the
-pin's exact type and one active-high `bits[1]` enable for the entire pin.
-Codegen emits `assign pad = oe ? drive : 'z;`. An undriven wire reads as high
-impedance, and conflicting equal-strength drivers resolve to X on the
-conflicting bits. A pin used only for pass-through needs only its declaration.
+Both child pins connect to one internal `wire [7:0] bus`. The parent drives
+it with `assign bus = oe ? tx : 'z;` and reads the resolved value. Each net
+can have any number of reads and at most one local drive operation. The data
+must match the net type exactly. The active-high `bits[1]` enable controls
+the whole wire. Each child inout requires exactly one binding. A parent that
+only connects children needs no read, drive, or enable.
 
-Each child inout has one connection in the parent:
+To expose the example's wire, add `pad: bits[8]` to the parent header and
+`ports=[pad]` to its net declaration. To expose two names, declare both
+in the header and use `ports=[pad_a, pad_b]`. Flat codegen ties public
+aliases with bidirectional `tran` primitives. Four-state RTL simulation
+resolves undriven wires to Z and conflicting equal-strength drives to X on
+the affected bits. Synthesis support for public aliases depends on the tool.
+For example, Yosys 0.68's Verilog writer can turn a `tran` into a one-way
+assignment.
 
-- **Direct binding.** `ext_instantiation_inout(instantiation=u, port_name=io, parent_port=pad, id=6)`
-  emits `.io(pad)`. Each bound child pin and its parent pin must have the same
-  type. Multiple children can bind to the same parent pin.
-- **Private connection.** Read or drive a child pin using either or both
-  of the following operations. They use one internal wire connected to `u.io`.
-  The parent can have only ordinary ports.
+Hierarchy verification follows electrical aliases across instances. Feedback
+from a read to a driver on the same resolved net through either data or enable
+is invalid. Registers break combinational feedback. Use `block2sv --layout=none`
+(the default) for RTL. Evaluation, formal and gate projection, desugared/FFI
+extension emission, and pipeline layout reject inout nets, including unused
+private declarations.
 
-```text
-rx: bits[4] = ext_instantiation_inout_output(instantiation=u, port_name=io, id=7)
-send: () = ext_instantiation_inout_input(drive, oe, instantiation=u, port_name=io, id=8)
-```
-
-Reads can share a pin or private connection. A block can add at most one local
-driver per declared pin or private connection. Combinational feedback from a
-resolved value to a contributing drive or enable is invalid. A register breaks
-that feedback path.
-
-The parser accepts the older combined `ext_inout_port(drive, oe, name=pad)`
-syntax and prints the declaration and split operations on serialization. Use
-`block2sv --layout=none` (the default) for RTL. Evaluation, formal projection,
-gate lowering, desugared/FFI extension emission, and pipeline layout reject
-inouts.
+The Rust parser accepts the previous `ext_inout` declarations, split port and
+instance access operations, `parent_port` bindings, and combined
+`ext_inout_port` syntax. Serialization emits net declarations and generic
+read, drive, and binding operations.

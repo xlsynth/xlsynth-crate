@@ -58,9 +58,11 @@ struct field ordering policies are exported from the same module.
 - Synchronous and asynchronous active-high or active-low resets, load enables,
   state feedback, and optional register-generation templates.
 - Transitive block hierarchy and existing foreign-function instantiations.
-- Bidirectional pins in flat layout with a whole-port active-high output enable.
-  Each local driver emits `assign pad = oe ? drive : 'z;`. A child inout binds directly
-  to the parent pin or to a private wire that the parent can read and drive. See the
+- A declared inout net supports any number of child pin connections and one local
+  driver, emitted as `assign pad = oe ? drive : 'z;`. A private net gets one
+  module-local wire. A public net uses its first port in header order. Additional
+  aliases connect through bidirectional Verilog `tran` primitives. The emitted RTL
+  preserves four-state resolution across aliases. Synthesis support depends on the tool. See the
   [shared bus](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir) and
   [private request/reply](tests/goldens/block2sv/hierarchy/private_request_reply.golden.ir) examples.
 - Width-specific automatic SystemVerilog helpers for mixed-width multiplication,
@@ -93,8 +95,8 @@ the statements within each stage, retaining the register sections.
 feed-forward pipeline stages from the existing registers and adds stage and
 register comments without changing their timing. Pipeline layout requires
 consistent stage dependencies and rejects register feedback. A selected top
-or instantiated child with an inout port requires `Layout::None`, even when
-the pin has no feedback.
+or instantiated child that declares an inout net requires `Layout::None`,
+including a private net with no reads or drivers.
 Literals and pure constant-only expressions can be shared across stages without
 extra registers. They are emitted before their earliest consumer and are not
 required to have the same stage number as every consuming register write.

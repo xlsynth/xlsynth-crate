@@ -39,44 +39,21 @@ impl BlockEmitter<'_, '_> {
             }
         }
         let result = match &node.payload {
-            NodePayload::ExtInoutPortOutput {
-                name,
+            NodePayload::ExtInoutDrive {
+                net,
                 drive,
                 output_enable,
             } => {
-                self.emit_pin_drive(self.ports[name].to_expr(), *drive, *output_enable)?;
+                self.emit_pin_drive(self.inout_nets[net.as_str()].expr, *drive, *output_enable)?;
                 None
             }
             NodePayload::ExtInstantiationInout {
                 instantiation,
                 port_name,
-                parent_port,
+                net,
             } => {
-                self.connect_instance_port(
-                    instantiation,
-                    port_name,
-                    Value::signal(self.ports[parent_port]),
-                );
+                self.connect_instance_port(instantiation, port_name, self.inout_nets[net.as_str()]);
                 None
-            }
-            NodePayload::ExtInstantiationInoutInput {
-                instantiation,
-                port_name,
-                drive,
-                output_enable,
-            } => {
-                let pin =
-                    self.private_pin(instantiation, port_name, self.block.get_node_ty(*drive));
-                self.emit_pin_drive(pin.expr, *drive, *output_enable)?;
-                None
-            }
-            NodePayload::ExtInstantiationInoutOutput {
-                instantiation,
-                port_name,
-            } => {
-                let pin = self.private_pin(instantiation, port_name, &node.ty);
-                self.values[node_ref.index] = Some(pin);
-                return Ok(());
             }
             NodePayload::InstantiationInput {
                 instantiation,
@@ -349,7 +326,7 @@ impl BlockEmitter<'_, '_> {
                 let refs = terms.iter().map(|term| term.operand).collect::<Vec<_>>();
                 Some(Value::expression(expression, self.operand_depth(&refs)))
             }
-            NodePayload::ExtInoutPortInput { .. }
+            NodePayload::ExtInoutRead { .. }
             | NodePayload::InputPort { .. }
             | NodePayload::OutputPort { .. }
             | NodePayload::Param
@@ -377,24 +354,6 @@ impl BlockEmitter<'_, '_> {
             .entry(instance.to_owned())
             .or_default()
             .insert(port.to_owned(), value);
-    }
-
-    /// Declares the shared net for a private child pin at its first read or
-    /// drive.
-    fn private_pin(&mut self, instance: &str, port: &str, ty: &Type) -> Value {
-        if let Some(&wire) = self
-            .instance_connections
-            .get(instance)
-            .and_then(|ports| ports.get(port))
-        {
-            return wire;
-        }
-        let name = self.unique_name(&format!("{instance}_{port}"));
-        let data_type = self.value_type(ty);
-        let wire = self.file.add_wire(self.module, &name, &data_type);
-        let value = Value::signal(wire).with_type(ty);
-        self.connect_instance_port(instance, port, value);
-        value
     }
 
     /// Appends a continuous driver that releases the whole pin when disabled.

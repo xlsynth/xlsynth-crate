@@ -22,7 +22,7 @@ const SHARED_INOUT: &str = include_str!("goldens/block2sv/hierarchy/shared_inout
 #[test]
 fn invalid_inout_bindings_fail_before_emission() {
     let source = SHARED_INOUT.split("// OPTIONS").next().unwrap();
-    let link = "  left_link: () = ext_instantiation_inout(instantiation=left, port_name=io, parent_port=pad, id=18)";
+    let link = "  left_link: () = ext_instantiation_inout(instantiation=left, port_name=io, net=bus, id=18)";
     let wrong_bindings = [
         (link, ""),
         (
@@ -33,21 +33,15 @@ fn invalid_inout_bindings_fail_before_emission() {
             "ext_instantiation_inout(instantiation=left",
             "ext_instantiation_inout(instantiation=absent",
         ),
-        (
-            "port_name=io, parent_port=pad",
-            "port_name=drive, parent_port=pad",
-        ),
-        ("parent_port=pad", "parent_port=left_data"),
-        ("parent_port=pad", "parent_port=seen"),
-        ("parent_port=pad", "parent_port=sample"),
+        ("port_name=io, net=bus", "port_name=drive, net=bus"),
+        ("port_name=io, net=bus", "port_name=io, net=left_data"),
+        ("port_name=io, net=bus", "port_name=io, net=seen"),
+        ("port_name=io, net=bus", "port_name=io, net=sample"),
         (
             "instantiation_input(left_data, instantiation=left, port_name=drive",
             "instantiation_input(left_data, instantiation=left, port_name=io",
         ),
-        (
-            "ext_inout_port_output(drive, oe",
-            "ext_inout_port_output(drive, drive",
-        ),
+        ("ext_inout_drive(drive, oe", "ext_inout_drive(drive, drive"),
     ];
     for (from, to) in wrong_bindings {
         let ir = source.replacen(from, to, 1);
@@ -98,7 +92,7 @@ fn register_breaks_an_inout_feedback_path() {
     assert_eq!(
         emit_system_verilog(&package, &pipeline).unwrap_err(),
         BlockCodegenError::NotPipeline(
-            "block `registered_pad` cannot use layout=pipeline with inout port `pin`; use layout=none"
+            "block `registered_pad` cannot use layout=pipeline with inout net `pin`; use layout=none"
                 .into()
         )
     );
@@ -119,10 +113,34 @@ fn pipeline_layout_rejects_an_unaccessed_pin_in_a_private_child() {
     assert_eq!(
         error,
         BlockCodegenError::NotPipeline(
-            "block `contact` cannot use layout=pipeline with inout port `io`; use layout=none"
+            "block `contact` cannot use layout=pipeline with inout net `io`; use layout=none"
                 .into()
         )
     );
+}
+
+#[test]
+fn an_unused_private_net_requires_flat_layout() {
+    let ir = "package p
+top block unused() { ext_inout_net floating(bits[3]) }";
+    let package = Parser::new(ir).parse_and_validate_package().unwrap();
+    let options = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    assert_eq!(
+        emit_system_verilog(&package, &options).unwrap_err(),
+        BlockCodegenError::NotPipeline(
+            "block `unused` cannot use layout=pipeline with inout net `floating`; use layout=none"
+                .into()
+        )
+    );
+    let flat = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
+    assert_eq!(
+        flat.system_verilog,
+        "module unused;\n  wire [2:0] floating;\nendmodule\n"
+    );
+    assert!(xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "unused").is_err());
 }
 
 #[test]
@@ -153,10 +171,7 @@ top block cell_io(data: bits[4], oe: bits[1], io: bits[4]) {
     let error = Parser::new(&child_scalar)
         .parse_and_validate_package()
         .unwrap_err();
-    assert!(
-        error.to_string().contains("requires parent inout"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("references net"), "{error}");
 }
 
 #[test]
@@ -168,18 +183,18 @@ fn inout_projection_checks_only_the_selected_hierarchy() {
     assert!(
         xlsynth_pir::block2fn::block_package_to_fn(&package, &options)
             .unwrap_err()
-            .contains("ext_inout_port")
+            .contains("ext_inout_net")
     );
     let evaluation_error = xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "pads")
         .err()
         .expect("an inout pin cannot be evaluated");
-    assert!(evaluation_error.to_string().contains("ext_inout_port"));
+    assert!(evaluation_error.to_string().contains("ext_inout_net"));
     assert!(xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "listener").is_ok());
     assert!(
         xlsynth_pir::block_transition::lower_block_transition(&package, "pad_cell")
             .err()
             .expect("an inout pin cannot be projected to a transition")
-            .contains("ext_inout_port")
+            .contains("ext_inout_net")
     );
     package.set_top_block("listener").unwrap();
     let result = xlsynth_pir::block2fn::block_package_to_fn(&package, &options).unwrap();

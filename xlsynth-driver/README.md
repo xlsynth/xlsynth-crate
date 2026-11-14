@@ -689,13 +689,12 @@ for example, `bits[8][3][2]` becomes `logic [1:0][2:0][7:0]`. Tuples remain flat
 packed vectors. Element-zero packing, bounds behavior, and explicit `sv_type`
 port overrides are preserved.
 
-Declare a bidirectional pin as `pad: bits[4]` in the block header and
-`ext_inout pad(bits[4])` in the body. `ext_inout_port_input(name=pad)` samples
-the resolved pin. `ext_inout_port_output(drive, oe, name=pad)` emits
-`assign pad = oe ? drive : 'z;`. A direct `ext_instantiation_inout` binding
-emits `.io(pad)` on the child. To connect a child pin to a private wire, use
-`ext_instantiation_inout_output` to read it, `ext_instantiation_inout_input`
-to drive it, or both. Use the default `--layout=none` for inout designs.
+Declare a resolved wire with `ext_inout_net bus(bits[4])`. The optional
+`ports=[pad]` attribute exposes it through a matching block-header port.
+`ext_inout_read(net=bus)` samples the wire and `ext_inout_drive(tx, oe, net=bus)`
+adds a whole-wire, active-high driver. Multiple child inouts can bind directly
+to the same net with `ext_instantiation_inout`. A private wire needs no
+public ports. Use the default `--layout=none` for inout designs.
 See the [PIR extension reference](../xlsynth-pir/docs/extensions.md).
 
 ```shell
@@ -709,7 +708,7 @@ Flags:
   package top is used; a package with exactly one block also selects that block.
 - `--layout <none|pipeline>` selects the emitted source organization. The default
   is `none`. Pipeline layout requires a feed-forward register graph and rejects
-  any inout port in the selected top or its transitive children.
+  any inout net in the selected top or its transitive children, including private nets.
 - `--module_name <NAME>` overrides the generated top module name.
 - `--array_index_bounds_checking <BOOL>` controls out-of-range array indexing
   (default: `true`).

@@ -8,7 +8,7 @@ use crate::{IrFormatPreference, IrValue};
 
 use crate::{ir, ir_parser, ir_utils::operands};
 
-pub use crate::ir_block::{Block, BlockPort, BlockReset, InoutPort};
+pub use crate::ir_block::{Block, BlockPort, BlockReset, InoutNet};
 
 pub use xlsynth_ir_value::{ArrayTypeData, StartAndLimit, Type};
 
@@ -316,33 +316,21 @@ pub enum NodePayload {
         start: NodeRef,
         update_value: NodeRef,
     },
-    /// Samples a declared bidirectional port.
-    ExtInoutPortInput {
-        name: String,
+    /// Samples the resolved value of a declared electrical net.
+    ExtInoutRead {
+        net: String,
     },
-    /// Drives a declared bidirectional port when enabled.
-    ExtInoutPortOutput {
-        name: String,
+    /// Drives the named net while the whole-net enable is asserted.
+    ExtInoutDrive {
+        net: String,
         drive: NodeRef,
         output_enable: NodeRef,
     },
-    /// Drives the private net connected to a child pin when enabled.
-    ExtInstantiationInoutInput {
-        instantiation: String,
-        port_name: String,
-        drive: NodeRef,
-        output_enable: NodeRef,
-    },
-    /// Samples the private net connected to a child pin.
-    ExtInstantiationInoutOutput {
-        instantiation: String,
-        port_name: String,
-    },
-    /// Electrical binding from a child pin to the immediate parent's inout.
+    /// Connects a child inout port to a net in this block.
     ExtInstantiationInout {
         instantiation: String,
         port_name: String,
-        parent_port: String,
+        net: String,
     },
     /// Extension (non-upstream) op: carry-out bit of addition.
     ///
@@ -501,10 +489,8 @@ impl NodePayload {
     pub fn is_extension_op(&self) -> bool {
         matches!(
             self,
-            NodePayload::ExtInoutPortInput { .. }
-                | NodePayload::ExtInoutPortOutput { .. }
-                | NodePayload::ExtInstantiationInoutInput { .. }
-                | NodePayload::ExtInstantiationInoutOutput { .. }
+            NodePayload::ExtInoutRead { .. }
+                | NodePayload::ExtInoutDrive { .. }
                 | NodePayload::ExtInstantiationInout { .. }
                 | NodePayload::ExtCarryOut { .. }
                 | NodePayload::ExtPrioEncode { .. }
@@ -519,10 +505,8 @@ impl NodePayload {
         match self {
             NodePayload::Nil => "nil",
             NodePayload::Param => "param",
-            NodePayload::ExtInoutPortInput { .. } => "ext_inout_port_input",
-            NodePayload::ExtInoutPortOutput { .. } => "ext_inout_port_output",
-            NodePayload::ExtInstantiationInoutInput { .. } => "ext_instantiation_inout_input",
-            NodePayload::ExtInstantiationInoutOutput { .. } => "ext_instantiation_inout_output",
+            NodePayload::ExtInoutRead { .. } => "ext_inout_read",
+            NodePayload::ExtInoutDrive { .. } => "ext_inout_drive",
             NodePayload::ExtInstantiationInout { .. } => "ext_instantiation_inout",
             NodePayload::InputPort { .. } => "input_port",
             NodePayload::OutputPort { .. } => "output_port",
@@ -662,42 +646,24 @@ impl NodePayload {
                 }
                 parts
             }
-            NodePayload::ExtInoutPortInput { name } => vec![format!("name={name}")],
-            NodePayload::ExtInoutPortOutput {
-                name,
+            NodePayload::ExtInoutRead { net } => vec![format!("net={net}")],
+            NodePayload::ExtInoutDrive {
+                net,
                 drive,
                 output_enable,
             } => vec![
                 format_operand(*drive),
                 format_operand(*output_enable),
-                format!("name={name}"),
-            ],
-            NodePayload::ExtInstantiationInoutInput {
-                instantiation,
-                port_name,
-                drive,
-                output_enable,
-            } => vec![
-                format_operand(*drive),
-                format_operand(*output_enable),
-                format!("instantiation={instantiation}"),
-                format!("port_name={port_name}"),
-            ],
-            NodePayload::ExtInstantiationInoutOutput {
-                instantiation,
-                port_name,
-            } => vec![
-                format!("instantiation={instantiation}"),
-                format!("port_name={port_name}"),
+                format!("net={net}"),
             ],
             NodePayload::ExtInstantiationInout {
                 instantiation,
                 port_name,
-                parent_port,
+                net,
             } => vec![
                 format!("instantiation={instantiation}"),
                 format!("port_name={port_name}"),
-                format!("parent_port={parent_port}"),
+                format!("net={net}"),
             ],
             NodePayload::OutputPort { name, arg, sv_type } => {
                 let mut parts = vec![format_operand(*arg), format!("name={name}")];
@@ -1255,11 +1221,9 @@ impl NodeGraph {
     pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
         for node in &self.nodes {
             let pin = match &node.payload {
-                NodePayload::ExtInoutPortInput { name }
-                | NodePayload::ExtInoutPortOutput { name, .. } => name,
-                NodePayload::ExtInstantiationInoutInput { port_name, .. }
-                | NodePayload::ExtInstantiationInoutOutput { port_name, .. } => port_name,
-                NodePayload::ExtInstantiationInout { parent_port, .. } => parent_port,
+                NodePayload::ExtInoutRead { net }
+                | NodePayload::ExtInoutDrive { net, .. }
+                | NodePayload::ExtInstantiationInout { net, .. } => net,
                 _ => continue,
             };
             return Err(format!(
@@ -1808,7 +1772,7 @@ impl Package {
     /// parse.
     pub fn uses_pir_extensions(&self) -> bool {
         self.members.iter().any(|member| {
-            matches!(member, PackageMember::Block(block) if block.inout_ports().next().is_some())
+            matches!(member, PackageMember::Block(block) if !block.inout_nets.is_empty())
                 || member
                     .graph()
                     .nodes

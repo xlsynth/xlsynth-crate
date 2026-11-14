@@ -746,6 +746,33 @@ fn private_inout_exchanges_request_and_reply_with_a_released_cycle() {
     .unwrap();
 }
 
+#[test]
+fn independent_private_nets_keep_their_drivers_isolated() {
+    simulate_inout_fixture(
+        include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir"),
+        r#"
+module tb;
+  reg [3:0] tx = 4'b1010, external_data = 4'bzzzz;
+  reg oe = 0;
+  wire [3:0] rx;
+  host dut(.*);
+  assign dut.reader.leaf.io = external_data;
+  initial begin
+    #1; if (rx !== 4'bzzzz || dut.writer.leaf.io !== 4'bzzzz) $fatal;
+    oe = 1;
+    #1; if (rx !== 4'bzzzz || dut.writer.leaf.io !== tx) $fatal;
+    external_data = 4'b0101;
+    #1; if (rx !== external_data || dut.writer.leaf.io !== tx) $fatal;
+    oe = 0;
+    #1; if (rx !== external_data || dut.writer.leaf.io !== 4'bzzzz) $fatal;
+    $finish;
+  end
+endmodule
+"#,
+    )
+    .unwrap();
+}
+
 /// Compiles and runs the flat RTL with a testbench that checks resolved values.
 fn simulate_inout_fixture(ir: &str, testbench: &str) -> Result<(), Box<dyn std::error::Error>> {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()?;

@@ -62,7 +62,7 @@ pub mod structural_similarity;
 pub use xlsynth_ir_value::{ir_values, value};
 
 pub use ir_builder::{
-    BInoutPort, BInstantiation, BRegister, BValue, BlockBuilder, BlockCycleConnection,
+    BInoutNet, BInoutPort, BInstantiation, BRegister, BValue, BlockBuilder, BlockCycleConnection,
     BlockCycleStep, BuilderError, FnBuilder, NaryAddOptions, NaryAddTerm, NormalizeLeftOptions,
     RegisterWriteOptions, ResetBehavior,
 };

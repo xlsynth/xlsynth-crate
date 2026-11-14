@@ -182,28 +182,19 @@ fn hash_payload_attributes(
             update_hash_string_attribute(hasher, "format", format);
             update_hash_i64(hasher, *verbosity);
         }
-        NodePayload::ExtInoutPortInput { name } | NodePayload::ExtInoutPortOutput { name, .. } => {
-            update_hash_string_attribute(hasher, "port_name", name);
+        NodePayload::ExtInoutRead { net } | NodePayload::ExtInoutDrive { net, .. } => {
+            update_hash_string_attribute(hasher, "net", net);
         }
         NodePayload::ExtInstantiationInout {
             instantiation,
             port_name,
-            parent_port,
+            net,
         } => {
             update_hash_str(hasher, instantiation);
             update_hash_str(hasher, port_name);
-            update_hash_str(hasher, parent_port);
+            update_hash_str(hasher, net);
         }
-        NodePayload::ExtInstantiationInoutInput {
-            instantiation,
-            port_name,
-            ..
-        }
-        | NodePayload::ExtInstantiationInoutOutput {
-            instantiation,
-            port_name,
-        }
-        | NodePayload::InstantiationInput {
+        NodePayload::InstantiationInput {
             instantiation,
             port_name,
             ..
@@ -376,16 +367,19 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
             attrs.push(format!("to_apply={to_apply}"));
             attrs.push(format!("len={}", operands.len()));
         }
-        NodePayload::ExtInstantiationInoutInput {
+        NodePayload::ExtInoutRead { net } | NodePayload::ExtInoutDrive { net, .. } => {
+            attrs.push(format!("net={net}"))
+        }
+        NodePayload::ExtInstantiationInout {
             instantiation,
             port_name,
-            ..
+            net,
+        } => {
+            attrs.push(format!("instantiation={instantiation}"));
+            attrs.push(format!("port_name={port_name}"));
+            attrs.push(format!("net={net}"));
         }
-        | NodePayload::ExtInstantiationInoutOutput {
-            instantiation,
-            port_name,
-        }
-        | NodePayload::InstantiationInput {
+        NodePayload::InstantiationInput {
             instantiation,
             port_name,
             ..

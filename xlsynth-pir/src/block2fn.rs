@@ -180,7 +180,7 @@ pub fn replace_combinational_block_logic(
                 port_pairs.push((*old, new));
                 ports.push(BlockPort::Output(new));
             }
-            BlockPort::Inout(_) => return Err("block2fn: ext_inout_port is Verilog-only".into()),
+            BlockPort::Inout(_) => return Err("block2fn: ext_inout_net is Verilog-only".into()),
             BlockPort::Clock(name) => ports.push(BlockPort::Clock(name.clone())),
         }
     }
@@ -274,7 +274,7 @@ fn rename_logic_conflicting_with_ports(
     for port in &template.ports {
         match port {
             BlockPort::Inout(pin) => {
-                reserved_names.insert(pin.name.clone());
+                reserved_names.insert(pin.clone());
             }
             BlockPort::Input(port) | BlockPort::Output(port) => {
                 reserved_names.insert(template.port_name(*port).to_string());

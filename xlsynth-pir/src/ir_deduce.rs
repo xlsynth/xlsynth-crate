@@ -160,13 +160,10 @@ where
     match payload {
         NodePayload::Nil => Ok(Some(Type::nil())),
         NodePayload::Param | NodePayload::InputPort { .. } => Ok(None),
-        NodePayload::ExtInoutPortInput { .. } | NodePayload::ExtInstantiationInoutOutput { .. } => {
-            Ok(None)
-        }
+        NodePayload::ExtInoutRead { .. } => Ok(None),
         NodePayload::OutputPort { .. }
         | NodePayload::ExtInstantiationInout { .. }
-        | NodePayload::ExtInoutPortOutput { .. }
-        | NodePayload::ExtInstantiationInoutInput { .. } => Ok(Some(Type::nil())),
+        | NodePayload::ExtInoutDrive { .. } => Ok(Some(Type::nil())),
 
         NodePayload::Tuple(_) => {
             let mut elems: Vec<Box<Type>> = Vec::with_capacity(operand_types.len());

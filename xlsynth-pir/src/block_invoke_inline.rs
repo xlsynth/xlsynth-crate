@@ -365,7 +365,8 @@ fn block_names(block: &Block) -> HashSet<String> {
             .iter()
             .map(|instance| instance.name.clone()),
     );
-    names.extend(block.inout_ports().map(|pin| pin.name.clone()));
+    names.extend(block.inout_ports().map(str::to_owned));
+    names.extend(block.inout_nets.iter().map(|net| net.name.clone()));
     for node in &block.nodes {
         match &node.payload {
             NodePayload::InputPort { name, .. }

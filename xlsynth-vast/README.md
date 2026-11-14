@@ -36,6 +36,11 @@ Reusable register-building and expression-reduction utilities are available
 through `xlsynth_vast::helpers`. Configuration-specific register templates are
 provided separately by `xlsynth::vast_helpers`.
 
+Use `VastFile::add_inout` for a public bidirectional net and
+`VastFile::add_tran` to connect two nets in both directions. A width of one
+emits a scalar `tran`. Larger widths emit a primitive array that connects
+corresponding bits.
+
 ## Automatic functions
 
 Procedural bodies support both ordinary `case` (`block_add_case`) and wildcard

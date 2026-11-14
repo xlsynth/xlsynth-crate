@@ -435,6 +435,23 @@ fn emit_member(file: &VastFile, member: &MemberData) -> String {
                 emit_expr(file, *rhs)
             )
         }
+        MemberData::Tran {
+            name,
+            width,
+            left,
+            right,
+        } => {
+            let range = if *width == 1 {
+                String::new()
+            } else {
+                format!("[{}:0]", width - 1)
+            };
+            format!(
+                "tran {name}{range}({}, {});",
+                emit_expr(file, left.to_expr()),
+                emit_expr(file, right.to_expr())
+            )
+        }
         MemberData::Instantiation(handle) => emit_instantiation(file, *handle),
         MemberData::Function(handle) => emit_function(file, *handle),
         MemberData::Always(handle) => emit_always(file, *handle),

@@ -869,7 +869,7 @@ pub fn validate_block(
 /// Identifies ancestors of inout blocks, including those exposing only ordinary
 /// ports.
 fn hierarchy_contains_inouts(block: &Block, prior: &HashSet<&str>) -> bool {
-    block.inout_ports().next().is_some()
+    !block.inout_nets.is_empty()
         || block.instantiations.iter().any(|inst| {
             inst.kind == InstantiationKind::Block && prior.contains(inst.block.as_str())
         })
@@ -951,16 +951,7 @@ fn validate_block_inout_hierarchy(
         })
 }
 
-/// Records how a child pin is connected in one instance of its parent.
-#[derive(Clone, Copy)]
-enum PinConnection {
-    Missing,
-    Bound,
-    Private { driven: bool },
-}
-
-/// Checks pin types, per-endpoint drive uniqueness, and complete instance
-/// wiring.
+/// Checks declared net types, local drivers, and bindings of all child inouts.
 fn validate_inout_bindings(
     block: &Block,
     prior: &HashMap<String, &Block>,
@@ -969,125 +960,96 @@ fn validate_inout_bindings(
         block: block.name.clone(),
         reason,
     };
-    let pins: HashMap<_, _> = block
-        .inout_ports()
-        .map(|pin| (pin.name.as_str(), &pin.ty))
-        .collect();
-    let mut local_drivers = HashSet::new();
-    let mut children = BTreeMap::new();
-    for inst in &block.instantiations {
-        if inst.kind == InstantiationKind::Block {
-            for pin in prior[&inst.block].inout_ports() {
-                children.insert(
-                    (inst.name.as_str(), pin.name.as_str()),
-                    (&pin.ty, PinConnection::Missing),
-                );
+    let mut nets = HashMap::new();
+    let mut aliases = HashSet::new();
+    for net in &block.inout_nets {
+        if net.name.is_empty() || nets.insert(net.name.as_str(), &net.ty).is_some() {
+            return Err(error(format!(
+                "empty or duplicate inout net name '{}'",
+                net.name
+            )));
+        }
+        if net.ty.contains_token() || net.ty.checked_bit_count().is_none_or(|width| width == 0) {
+            return Err(error(format!(
+                "inout net '{}' requires a nonempty, token-free type",
+                net.name
+            )));
+        }
+        for name in &net.ports {
+            if !aliases.insert(name.as_str()) {
+                return Err(error(format!("duplicate inout port alias '{name}'")));
             }
         }
     }
+    for name in block.inout_ports() {
+        if !aliases.remove(name) {
+            return Err(error(format!(
+                "inout port '{name}' belongs to no declared net"
+            )));
+        }
+    }
+    if let Some(name) = aliases.iter().min() {
+        return Err(error(format!(
+            "inout net alias '{name}' is missing from the block's inout ports"
+        )));
+    }
+
+    let mut drivers = HashSet::new();
+    let mut expected = BTreeMap::new();
+    for inst in &block.instantiations {
+        if inst.kind == InstantiationKind::Block {
+            for net in &prior[&inst.block].inout_nets {
+                for alias in &net.ports {
+                    expected.insert((inst.name.as_str(), alias.as_str()), &net.ty);
+                }
+            }
+        }
+    }
+    // Keep the expected endpoints available after a binding, so a duplicate
+    // can be distinguished from binding an ordinary port or unknown instance.
+    let mut bound = HashSet::new();
     for node in &block.nodes {
-        let (pin_type, access_type) = match &node.payload {
-            NodePayload::ExtInoutPortInput { name }
-            | NodePayload::ExtInoutPortOutput { name, .. } => {
-                let &ty = pins
-                    .get(name.as_str())
-                    .ok_or_else(|| error(format!("no local inout port named '{name}'")))?;
-                let access_type =
-                    if let NodePayload::ExtInoutPortOutput { drive, .. } = &node.payload {
-                        if !local_drivers.insert(name) {
-                            return Err(error(format!("duplicate driver for inout port '{name}'")));
-                        }
-                        block.get_node_ty(*drive)
-                    } else {
-                        &node.ty
-                    };
-                (ty, access_type)
+        let (name, actual_type) = match &node.payload {
+            NodePayload::ExtInoutRead { net } => (net, &node.ty),
+            NodePayload::ExtInoutDrive { net, drive, .. } => {
+                if !drivers.insert(net) {
+                    return Err(error(format!("duplicate driver for inout net '{net}'")));
+                }
+                (net, block.get_node_ty(*drive))
             }
             NodePayload::ExtInstantiationInout {
                 instantiation,
                 port_name,
-                ..
-            }
-            | NodePayload::ExtInstantiationInoutInput {
-                instantiation,
-                port_name,
-                ..
-            }
-            | NodePayload::ExtInstantiationInoutOutput {
-                instantiation,
-                port_name,
+                net,
             } => {
-                let (ty, connection) = children
-                    .get_mut(&(instantiation.as_str(), port_name.as_str()))
-                    .ok_or_else(|| {
-                        error(format!(
-                            "no block instance inout named {instantiation}.{port_name}"
-                        ))
-                    })?;
-                if let NodePayload::ExtInstantiationInout { parent_port, .. } = &node.payload {
-                    match connection {
-                        PinConnection::Missing => *connection = PinConnection::Bound,
-                        PinConnection::Bound => {
-                            return Err(error(format!(
-                                "duplicate inout binding {instantiation}.{port_name}"
-                            )));
-                        }
-                        PinConnection::Private { .. } => {
-                            return Err(error(format!(
-                                "cannot both bind and access inout {instantiation}.{port_name}"
-                            )));
-                        }
-                    }
-                    if pins.get(parent_port.as_str()) != Some(&*ty) {
-                        return Err(error(format!(
-                            "binding {instantiation}.{port_name} requires parent inout '{parent_port}' of type {ty}"
-                        )));
-                    }
-                    continue;
+                let endpoint = (instantiation.as_str(), port_name.as_str());
+                let ty = expected.get(&endpoint).ok_or_else(|| {
+                    error(format!(
+                        "no block instance inout named {instantiation}.{port_name}"
+                    ))
+                })?;
+                if !bound.insert(endpoint) {
+                    return Err(error(format!(
+                        "duplicate inout binding {instantiation}.{port_name}"
+                    )));
                 }
-                let already_driven = match *connection {
-                    PinConnection::Missing => false,
-                    PinConnection::Bound => {
-                        return Err(error(format!(
-                            "cannot both bind and access inout {instantiation}.{port_name}"
-                        )));
-                    }
-                    PinConnection::Private { driven } => driven,
-                };
-                let access_type =
-                    if let NodePayload::ExtInstantiationInoutInput { drive, .. } = &node.payload {
-                        if already_driven {
-                            return Err(error(format!(
-                                "duplicate driver for inout {instantiation}.{port_name}"
-                            )));
-                        }
-                        *connection = PinConnection::Private { driven: true };
-                        block.get_node_ty(*drive)
-                    } else {
-                        *connection = PinConnection::Private {
-                            driven: already_driven,
-                        };
-                        &node.ty
-                    };
-                (*ty, access_type)
+                (net, *ty)
             }
             _ => continue,
         };
-        if pin_type != access_type {
+        let ty = nets
+            .get(name.as_str())
+            .ok_or_else(|| error(format!("undeclared inout net '{name}'")))?;
+        if actual_type != *ty {
             return Err(error(format!(
-                "{} node {} expects pin type {pin_type}, got {access_type}",
+                "{} node {} references net '{name}' of type {ty}, got {actual_type}",
                 node.payload.get_operator(),
                 node.text_id
             )));
         }
     }
-    if let Some(((inst, pin), _)) = children
-        .iter()
-        .find(|(_, (_, mode))| matches!(mode, PinConnection::Missing))
-    {
-        return Err(error(format!(
-            "missing inout binding or private access for {inst}.{pin}"
-        )));
+    if let Some((inst, pin)) = expected.keys().find(|endpoint| !bound.contains(*endpoint)) {
+        return Err(error(format!("missing inout binding {inst}.{pin}")));
     }
     Ok(())
 }
@@ -1167,20 +1129,7 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
                 clock_seen = true;
                 (name.as_str(), 0)
             }
-            BlockPort::Inout(pin) => {
-                if pin.ty.contains_token()
-                    || pin.ty.checked_bit_count().is_none_or(|width| width == 0)
-                {
-                    return Err(violation(
-                        0,
-                        format!(
-                            "inout '{}' requires a nonempty, token-free port type",
-                            pin.name
-                        ),
-                    ));
-                }
-                (pin.name.as_str(), 0)
-            }
+            BlockPort::Inout(name) => (name.as_str(), 0),
             BlockPort::Input(reference) | BlockPort::Output(reference) => {
                 let node = block.nodes.get(reference.index).ok_or_else(|| {
                     violation(
@@ -1511,10 +1460,8 @@ where
         match &node.payload {
             NodePayload::InputPort { .. }
             | NodePayload::OutputPort { .. }
-            | NodePayload::ExtInoutPortInput { .. }
-            | NodePayload::ExtInoutPortOutput { .. }
-            | NodePayload::ExtInstantiationInoutInput { .. }
-            | NodePayload::ExtInstantiationInoutOutput { .. }
+            | NodePayload::ExtInoutRead { .. }
+            | NodePayload::ExtInoutDrive { .. }
             | NodePayload::ExtInstantiationInout { .. }
                 if !allow_registers =>
             {

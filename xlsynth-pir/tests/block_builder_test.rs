@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 use xlsynth_pir::block_eval::BlockEvaluator;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
+use xlsynth_pir::block_transition::lower_block_transition;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::desugar_extensions::{
     ExtensionEmitMode, desugar_extensions_in_package, emit_package_with_extension_mode,
@@ -910,7 +911,7 @@ fn inout_builder_preserves_aggregate_pins_and_rejects_projection() {
     assert!(
         combinational_block_to_fn(child)
             .unwrap_err()
-            .contains("ext_inout_port")
+            .contains("ext_inout_net")
     );
     let mut parent = BlockBuilder::new("parent");
     let data = parent.input_port("data", ty).unwrap();
@@ -943,7 +944,7 @@ fn inout_builder_preserves_aggregate_pins_and_rejects_projection() {
             emit_package_with_extension_mode(&package, mode)
                 .unwrap_err()
                 .to_string()
-                .contains("ext_inout_port")
+                .contains("ext_inout_net")
         );
     }
 }
@@ -1034,4 +1035,101 @@ fn split_pin_backends_reject_unused_declarations_and_private_access() {
         let error = emit_package_with_extension_mode(&package, mode).unwrap_err();
         assert!(error.to_string().contains("inout"), "{error}");
     }
+}
+
+#[test]
+fn inout_net_builder_shares_private_wires_and_preserves_public_aliases() {
+    let mut leaf = BlockBuilder::new("leaf");
+    let ty = Type::Bits(8);
+    assert!(
+        leaf.declare_inout_net("pin", ty.clone(), &["a", "a"])
+            .is_err()
+    );
+    leaf.declare_inout_net("pin", ty.clone(), &["a", "b"])
+        .unwrap();
+    let mut package = leaf.build_package("nets").unwrap();
+    let child = package.get_block("leaf").unwrap();
+    assert_eq!(child.get_inout_net("pin").unwrap().ports, ["a", "b"]);
+    let mut builder = BlockBuilder::new("host");
+    let data = builder.input_port("bus", ty.clone()).unwrap();
+    let oe = builder.input_port("oe", Type::Bits(1)).unwrap();
+    let bus = builder.declare_inout_net("bus", ty.clone(), &[]).unwrap();
+    assert!(
+        builder
+            .declare_inout_net("bus", ty.clone(), &["unused"])
+            .is_err()
+    );
+    let spare = builder
+        .declare_inout_net("spare", ty.clone(), &["unused"])
+        .unwrap();
+    for instance_name in ["left", "right"] {
+        let instance = builder.instantiate(instance_name, child).unwrap();
+        builder.bind_inout_net(instance, "a", bus).unwrap();
+        builder.bind_inout_net(instance, "b", spare).unwrap();
+    }
+    builder.ext_inout_drive(bus, data, oe).unwrap();
+    let read = builder.ext_inout_read(spare).unwrap();
+    builder.output_port("sample", read).unwrap();
+    builder.build_into_package(&mut package).unwrap();
+    assert_pir_package(&package);
+}
+
+#[test]
+fn unused_private_net_is_unsupported_even_without_graph_nodes_or_ports() {
+    let mut builder = BlockBuilder::new("empty_bus");
+    builder
+        .declare_inout_net("bus", Type::Bits(8), &[])
+        .unwrap();
+    let package = builder.build_package("pins").unwrap();
+    assert!(package.uses_pir_extensions());
+    let block = package.get_block("empty_bus").unwrap();
+    assert!(block.ports.is_empty());
+    assert_eq!(block.nodes.len(), 1); // Nil sentinel
+    let diagnostic = "ext_inout_net 'bus' in 'empty_bus'";
+    let error = BlockEvaluator::prepare(&package, "empty_bus")
+        .err()
+        .expect("private net evaluation");
+    assert!(error.to_string().contains(diagnostic), "{error}");
+    assert!(
+        combinational_block_to_fn(block)
+            .unwrap_err()
+            .contains(diagnostic)
+    );
+    let transition_error = lower_block_transition(&package, &block.name)
+        .err()
+        .expect("transition projection must reject a private net");
+    assert!(transition_error.contains(diagnostic), "{transition_error}");
+    for mode in [
+        ExtensionEmitMode::Desugared,
+        ExtensionEmitMode::AsFfiFunction,
+    ] {
+        assert!(
+            emit_package_with_extension_mode(&package, mode)
+                .unwrap_err()
+                .to_string()
+                .contains(diagnostic)
+        );
+    }
+}
+
+#[test]
+fn implicit_child_net_names_reserve_later_explicit_resources() {
+    let mut leaf = BlockBuilder::new("leaf");
+    leaf.declare_inout_net("contact", Type::Bits(1), &["io"])
+        .unwrap();
+    let mut package = leaf.build_package("pins").unwrap();
+    let mut host = BlockBuilder::new("host");
+    let u = host
+        .instantiate("u", package.get_block("leaf").unwrap())
+        .unwrap();
+    let rx = host.ext_instantiation_inout_output(u, "io").unwrap();
+    let explicit = host.declare_inout_net("u_io", Type::Bits(2), &[]).unwrap();
+    let other = host.ext_inout_read(explicit).unwrap();
+    host.output_port("u_io__1", other).unwrap();
+    host.output_port("sample", rx).unwrap();
+    host.build_into_package(&mut package).unwrap();
+    let block = package.get_block("host").unwrap();
+    assert_eq!(block.get_inout_net("u_io").unwrap().ty, Type::Bits(2));
+    assert_eq!(block.get_inout_net("u_io__2").unwrap().ty, Type::Bits(1));
+    assert_pir_package(&package);
 }

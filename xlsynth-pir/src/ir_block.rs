@@ -6,11 +6,13 @@ use std::ops::{Deref, DerefMut};
 
 use crate::ir::{Fn, Instantiation, Node, NodeGraph, NodePayload, NodeRef, Register, Type};
 
-/// A declared electrical pin, independent of any SSA reads or drivers.
+/// A block-local electrical net shared by its public aliases and bound child
+/// ports.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InoutPort {
+pub struct InoutNet {
     pub name: String,
     pub ty: Type,
+    pub ports: Vec<String>,
     pub sv_type: Option<String>,
 }
 
@@ -19,7 +21,7 @@ pub struct InoutPort {
 pub enum BlockPort {
     Input(NodeRef),
     Output(NodeRef),
-    Inout(InoutPort),
+    Inout(String),
     Clock(String),
 }
 
@@ -40,6 +42,7 @@ pub struct BlockReset {
 pub struct Block {
     pub graph: NodeGraph,
     pub ports: Vec<BlockPort>,
+    pub inout_nets: Vec<InoutNet>,
     pub reset: Option<BlockReset>,
     pub registers: Vec<Register>,
     pub instantiations: Vec<Instantiation>,
@@ -78,10 +81,8 @@ impl Block {
                 node.payload,
                 NodePayload::InputPort { .. }
                     | NodePayload::OutputPort { .. }
-                    | NodePayload::ExtInoutPortInput { .. }
-                    | NodePayload::ExtInoutPortOutput { .. }
-                    | NodePayload::ExtInstantiationInoutInput { .. }
-                    | NodePayload::ExtInstantiationInoutOutput { .. }
+                    | NodePayload::ExtInoutRead { .. }
+                    | NodePayload::ExtInoutDrive { .. }
                     | NodePayload::ExtInstantiationInout { .. }
             )
         }) {
@@ -115,6 +116,7 @@ impl Block {
         let mut block = Self {
             graph: function.graph,
             ports: Vec::new(),
+            inout_nets: Vec::new(),
             reset: None,
             registers: Vec::new(),
             instantiations: Vec::new(),
@@ -207,6 +209,7 @@ impl Block {
         Self {
             graph: NodeGraph::new(name),
             ports: Vec::new(),
+            inout_nets: Vec::new(),
             reset: None,
             registers: Vec::new(),
             instantiations: Vec::new(),
@@ -230,19 +233,19 @@ impl Block {
     }
 
     /// Iterates bidirectional pins in declaration order, including unused pins.
-    pub fn inout_ports(&self) -> impl Iterator<Item = &InoutPort> {
+    pub fn inout_ports(&self) -> impl Iterator<Item = &str> {
         self.ports.iter().filter_map(|port| match port {
-            BlockPort::Inout(pin) => Some(pin),
+            BlockPort::Inout(name) => Some(name.as_str()),
             _ => None,
         })
     }
 
     /// Rejects an inout interface even when no graph node reads or drives it.
     pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
-        if let Some(pin) = self.inout_ports().next() {
+        if let Some(net) = self.inout_nets.first() {
             return Err(format!(
-                "{backend}: ext_inout_port '{}' in '{}' requires block-to-Verilog codegen",
-                pin.name, self.name
+                "{backend}: ext_inout_net '{}' in '{}' requires block-to-Verilog codegen",
+                net.name, self.name
             ));
         }
         self.graph.reject_inouts(backend)
@@ -289,8 +292,15 @@ impl Block {
     }
 
     /// Finds a bidirectional pin by its semantic port name.
-    pub fn get_inout_port(&self, name: &str) -> Option<&InoutPort> {
-        self.inout_ports().find(|pin| pin.name == name)
+    pub fn get_inout_port(&self, name: &str) -> Option<&InoutNet> {
+        self.inout_nets
+            .iter()
+            .find(|net| net.ports.iter().any(|port| port == name))
+    }
+
+    /// Finds a block-local net by its resource name.
+    pub fn get_inout_net(&self, name: &str) -> Option<&InoutNet> {
+        self.inout_nets.iter().find(|net| net.name == name)
     }
 
     /// Finds an output port by its semantic name.
@@ -460,6 +470,63 @@ impl Block {
 impl std::fmt::Display for Block {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&crate::ir_parser::emit_block(self, false))
+    }
+}
+
+/// Allocates block-local net names without capturing existing IR names or net
+/// references.
+pub(crate) struct InoutNetNames {
+    taken: std::collections::HashSet<String>,
+    next_suffix: std::collections::HashMap<String, usize>,
+}
+
+impl InoutNetNames {
+    pub(crate) fn new(block: &Block) -> Self {
+        let mut taken = std::collections::HashSet::new();
+        for net in &block.inout_nets {
+            taken.insert(net.name.clone());
+            taken.extend(net.ports.iter().cloned());
+        }
+        for port in &block.ports {
+            if let BlockPort::Clock(name) | BlockPort::Inout(name) = port {
+                taken.insert(name.clone());
+            }
+        }
+        taken.extend(block.registers.iter().map(|reg| reg.name.clone()));
+        taken.extend(block.instantiations.iter().map(|inst| inst.name.clone()));
+        for node in &block.nodes {
+            taken.extend(node.name.iter().cloned());
+            let name = match &node.payload {
+                NodePayload::InputPort { name, .. } | NodePayload::OutputPort { name, .. } => name,
+                NodePayload::Assert { label, .. } | NodePayload::Cover { label, .. } => label,
+                // An undeclared reference must still fail verification after
+                // migration.
+                NodePayload::ExtInoutRead { net }
+                | NodePayload::ExtInoutDrive { net, .. }
+                | NodePayload::ExtInstantiationInout { net, .. } => net,
+                _ => continue,
+            };
+            taken.insert(name.clone());
+        }
+        Self {
+            taken,
+            next_suffix: Default::default(),
+        }
+    }
+
+    /// Claims the stem when available and otherwise advances its suffix cursor.
+    pub(crate) fn allocate(&mut self, stem: &str) -> String {
+        if self.taken.insert(stem.to_owned()) {
+            return stem.to_owned();
+        }
+        let suffix = self.next_suffix.entry(stem.to_owned()).or_insert(1);
+        loop {
+            let candidate = format!("{stem}__{suffix}");
+            *suffix += 1;
+            if self.taken.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
     }
 }
 

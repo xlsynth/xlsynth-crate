@@ -7,9 +7,10 @@ module tb;
 
   task check(input [3:0] expected);
     #1;
-    if (rx !== expected || rx_again !== expected || dut.u_device.io !== expected)
-      $fatal(1, "expected %b on the private wire; saw %b, %b, %b",
-             expected, rx, rx_again, dut.u_device.io);
+    if (rx !== expected || rx_again !== expected ||
+        dut.u_device.io !== expected || dut.monitor !== expected)
+      $fatal(1, "expected %b on the private wire; saw %b, %b, %b, %b",
+             expected, rx, rx_again, dut.u_device.io, dut.monitor);
   endtask
 
   task tick;

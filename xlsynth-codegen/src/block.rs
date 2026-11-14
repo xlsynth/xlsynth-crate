@@ -106,6 +106,7 @@ pub(crate) struct BlockEmitter<'a, 'file> {
     pub(crate) module: VastModule,
     pub(crate) values: Vec<Option<Value>>,
     pub(crate) ports: BTreeMap<String, LogicRef>,
+    pub(crate) inout_nets: BTreeMap<&'a str, Value>,
     pub(crate) register_refs: BTreeMap<String, LogicRef>,
     pub(crate) users: Vec<Vec<NodeRef>>,
     pub(crate) names: BTreeSet<String>,
@@ -201,11 +202,11 @@ fn validate_single_register_writes(block: &Block) -> Result<(), BlockCodegenErro
 /// Checks which operations the requested layout can emit.
 fn validate_supported_nodes(block: &Block, layout: Layout) -> Result<(), BlockCodegenError> {
     if layout == Layout::Pipeline
-        && let Some(pin) = block.inout_ports().next()
+        && let Some(net) = block.inout_nets.first()
     {
         return Err(BlockCodegenError::NotPipeline(format!(
-            "block `{}` cannot use layout=pipeline with inout port `{}`; use layout=none",
-            block.name, pin.name
+            "block `{}` cannot use layout=pipeline with inout net `{}`; use layout=none",
+            block.name, net.name
         )));
     }
     for node in &block.nodes {
@@ -376,6 +377,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             module,
             values: vec![None; block.nodes.len()],
             ports: BTreeMap::new(),
+            inout_nets: BTreeMap::new(),
             register_refs: BTreeMap::new(),
             users,
             names: BTreeSet::new(),
@@ -434,7 +436,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             }
         }
         for pin in self.block.inout_ports() {
-            reserve(&pin.name, "port")?;
+            reserve(pin, "port")?;
         }
         for instance in &self.block.instantiations {
             reserve(&instance.name, "instance")?;
@@ -459,11 +461,20 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Emits representable ports in the source block's original header order.
     fn emit_ports(&mut self) -> Result<(), BlockCodegenError> {
-        let mut custom_types = BTreeSet::new();
+        let mut alias_signals = BTreeMap::<&str, Vec<LogicRef>>::new();
+        let public_nets = self
+            .block
+            .inout_nets
+            .iter()
+            .flat_map(|net| net.ports.iter().map(move |port| (port.as_str(), net)))
+            .collect::<BTreeMap<_, _>>();
         for port in &self.block.ports {
             let (name, ir_type, sv_type) = match port {
                 BlockPort::Clock(name) => (name.as_str(), &Type::Bits(1), None),
-                BlockPort::Inout(pin) => (pin.name.as_str(), &pin.ty, pin.sv_type.as_deref()),
+                BlockPort::Inout(alias) => {
+                    let net = public_nets[alias.as_str()];
+                    (alias.as_str(), &net.ty, net.sv_type.as_deref())
+                }
                 BlockPort::Input(node) | BlockPort::Output(node) => {
                     let sv_type = match &self.block.get_node(*node).payload {
                         NodePayload::InputPort { sv_type, .. }
@@ -485,22 +496,16 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 continue;
             }
             validate_external_identifier(name, "port")?;
-            let data_type = if self.options.emit_sv_types {
-                if let Some(sv_type) = sv_type {
-                    custom_types.insert(name);
-                    if let Some((package, ty)) = sv_type.rsplit_once("::") {
-                        self.file.make_extern_package_type(package, ty)
-                    } else {
-                        self.file.make_extern_type(sv_type)
-                    }
-                } else {
-                    self.value_type(ir_type)
-                }
-            } else {
-                self.value_type(ir_type)
-            };
+            let data_type = self.declared_data_type(ir_type, sv_type);
             let signal = match port {
-                BlockPort::Inout(_) => self.file.add_inout(self.module, name, &data_type),
+                BlockPort::Inout(_) => {
+                    let signal = self.file.add_inout(self.module, name, &data_type);
+                    alias_signals
+                        .entry(&public_nets[name].name)
+                        .or_default()
+                        .push(signal);
+                    signal
+                }
                 BlockPort::Output(_) => self.file.add_logic_output(self.module, name, &data_type),
                 BlockPort::Input(_) | BlockPort::Clock(_) => {
                     self.file.add_logic_input(self.module, name, &data_type)
@@ -509,21 +514,83 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             self.ports.insert(name.to_owned(), signal);
         }
 
+        self.emit_inout_nets(&alias_signals)?;
         for (index, node) in self.block.nodes.iter().enumerate() {
-            if let NodePayload::InputPort { name, .. } | NodePayload::ExtInoutPortInput { name } =
-                &node.payload
-            {
-                if let Some(signal) = self.ports.get(name).copied() {
-                    let value = Value::signal(signal).with_width(node.ty.bit_count());
-                    self.values[index] = Some(if custom_types.contains(name.as_str()) {
-                        value
-                    } else {
-                        value.with_type(&node.ty)
-                    });
+            match &node.payload {
+                NodePayload::InputPort { name, sv_type } => {
+                    if let Some(&signal) = self.ports.get(name) {
+                        let value = Value::signal(signal);
+                        self.values[index] =
+                            Some(if self.options.emit_sv_types && sv_type.is_some() {
+                                value.with_width(node.ty.bit_count())
+                            } else {
+                                value.with_type(&node.ty)
+                            });
+                    }
+                }
+                NodePayload::ExtInoutRead { net } => {
+                    self.values[index] = Some(self.inout_nets[net.as_str()]);
+                }
+                _ => {
+                    // Other values are computed in topological order.
                 }
             }
         }
         Ok(())
+    }
+
+    /// Allocates each electrical net and joins its public aliases in header
+    /// order.
+    fn emit_inout_nets(
+        &mut self,
+        alias_signals: &BTreeMap<&str, Vec<LogicRef>>,
+    ) -> Result<(), BlockCodegenError> {
+        for net in &self.block.inout_nets {
+            let width = net.ty.bit_count();
+            let signal = match alias_signals
+                .get(net.name.as_str())
+                .and_then(|aliases| aliases.split_first())
+            {
+                Some((&first, aliases)) => {
+                    for &alias in aliases {
+                        let tie =
+                            self.unique_name(&format!("{}_tie", self.file.logic_ref_name(alias)));
+                        self.file.add_tran(self.module, &tie, width, first, alias)?;
+                    }
+                    first
+                }
+                None => {
+                    let name = self.unique_name(&net.name);
+                    let ty = self.declared_data_type(&net.ty, net.sv_type.as_deref());
+                    self.file.add_wire(self.module, &name, &ty)
+                }
+            };
+            let value = Value::signal(signal);
+            let value = if self.options.emit_sv_types && net.sv_type.is_some() {
+                value.with_width(width)
+            } else {
+                value.with_type(&net.ty)
+            };
+            self.inout_nets.insert(&net.name, value);
+        }
+
+        Ok(())
+    }
+
+    /// Chooses a declared SystemVerilog type, including optional external
+    /// types.
+    fn declared_data_type(&mut self, ty: &Type, sv_type: Option<&str>) -> VastDataType {
+        if self.options.emit_sv_types
+            && let Some(sv_type) = sv_type
+        {
+            if let Some((package, ty)) = sv_type.rsplit_once("::") {
+                self.file.make_extern_package_type(package, ty)
+            } else {
+                self.file.make_extern_type(sv_type)
+            }
+        } else {
+            self.value_type(ty)
+        }
     }
 
     /// Emits existing register state and ordinary dependency-ordered logic.
@@ -538,7 +605,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             match &self.block.get_node(node_ref).payload {
                 NodePayload::Nil
                 | NodePayload::InputPort { .. }
-                | NodePayload::ExtInoutPortInput { .. }
+                | NodePayload::ExtInoutRead { .. }
                 | NodePayload::OutputPort { .. } => {
                     // Reserved nodes and parameters are represented by module
                     // ports.
@@ -890,7 +957,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                     .map(|port| match port {
                         BlockPort::Clock(name) => name.as_str(),
                         BlockPort::Input(node) | BlockPort::Output(node) => child.port_name(*node),
-                        BlockPort::Inout(pin) => pin.name.as_str(),
+                        BlockPort::Inout(alias) => alias.as_str(),
                     })
                     .collect::<Vec<_>>();
                 connections.sort_by_key(|(name, _)| {
@@ -991,7 +1058,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         for (index, node) in self.block.nodes.iter().enumerate() {
             if matches!(
                 node.payload,
-                NodePayload::InputPort { .. } | NodePayload::ExtInoutPortInput { .. }
+                NodePayload::InputPort { .. } | NodePayload::ExtInoutRead { .. }
             ) && matches!(node.ty, Type::Array(_))
                 && let Some(value) = self.values[index]
                 && value.array_rank == 0

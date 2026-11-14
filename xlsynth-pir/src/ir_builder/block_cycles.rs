@@ -5,40 +5,160 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{BlockCycleConnection, BlockCycleStep, BuilderError};
-use crate::ir::{Block, BlockPort, InstantiationKind, NodePayload, NodeRef, Package};
+use crate::ir::{
+    Block, BlockPort, Instantiation, InstantiationKind, NodePayload, NodeRef, Package,
+};
 use crate::ir_utils::operands;
 
 type InputDependencies = BTreeSet<String>;
 type OutputDependencies = BTreeMap<String, InputDependencies>;
 
-/// Identifies one resolved electrical net within a block instance.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum PinNet<'a> {
-    Port(&'a str),
-    Private(&'a str, &'a str),
+/// Boundary relations of one block definition. All aliases of an electrical
+/// net share a representative port in the dependency summary.
+#[derive(Default)]
+struct BlockSummary {
+    outputs: OutputDependencies,
+    port_classes: BTreeMap<String, String>,
 }
 
-/// Extends the SSA dependency graph with one vertex per accessed electrical
-/// net. A pin read depends on its net, and the net depends on every driver.
+/// A connected set of local net declarations, joined through child aliases.
+#[derive(Default)]
+struct NetClass<'a> {
+    public_name: Option<&'a str>,
+    witness: Option<NodeRef>,
+}
+
+/// Extends SSA dependencies with a vertex per electrically distinct net.
 struct DependencyGraph<'a> {
     edges: Vec<Vec<NodeRef>>,
-    nets: BTreeMap<PinNet<'a>, NodeRef>,
-    /// For each extra vertex, retain its boundary identity and an actual IR
-    /// node for cycle diagnostics.
-    net_origins: Vec<(PinNet<'a>, NodeRef)>,
+    local_nets: BTreeMap<&'a str, NodeRef>,
+    public_nets: BTreeMap<&'a str, NodeRef>,
+    classes: Vec<NetClass<'a>>,
 }
 
 impl<'a> DependencyGraph<'a> {
-    /// Reuses the net vertex for all reads, drivers and bindings of one pin.
-    fn net(&mut self, pin: PinNet<'a>, origin: NodeRef) -> NodeRef {
-        *self.nets.entry(pin).or_insert_with(|| {
-            let vertex = NodeRef {
-                index: self.edges.len(),
+    /// Collapses passive aliases before adding directed driver and read edges.
+    fn new(
+        block: &'a Block,
+        definitions: &BTreeMap<&str, &Instantiation>,
+        summaries: &BTreeMap<String, BlockSummary>,
+    ) -> Result<Self, BuilderError> {
+        let mut edges = Vec::with_capacity(block.nodes.len() + block.inout_nets.len());
+        for node in &block.nodes {
+            let deps = operands(&node.payload);
+            // The builder can call this before its structural verifier. An
+            // out-of-bounds SSA operand must never alias an added net vertex.
+            if let Some(bad) = deps.iter().find(|dep| dep.index >= block.nodes.len()) {
+                return Err(invalid(format!(
+                    "block '{}' references missing node {}",
+                    block.name, bad.index
+                )));
+            }
+            edges.push(deps);
+        }
+
+        let names: BTreeMap<_, _> = block
+            .inout_nets
+            .iter()
+            .enumerate()
+            .map(|(i, net)| (net.name.as_str(), i))
+            .collect();
+        let mut ties = vec![Vec::new(); block.inout_nets.len()];
+        let mut first_bindings = BTreeMap::new();
+        for node in &block.nodes {
+            let NodePayload::ExtInstantiationInout {
+                instantiation,
+                port_name,
+                net,
+            } = &node.payload
+            else {
+                continue;
             };
-            self.edges.push(Vec::new());
-            self.net_origins.push((pin, origin));
-            vertex
+            let index = *names
+                .get(net.as_str())
+                .ok_or_else(|| invalid(format!("undeclared inout net '{net}'")))?;
+            let canonical = definitions
+                .get(instantiation.as_str())
+                .filter(|instance| instance.kind == InstantiationKind::Block)
+                .and_then(|instance| summaries.get(&instance.block))
+                .and_then(|child| child.port_classes.get(port_name))
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "no block instance inout named {instantiation}.{port_name}"
+                    ))
+                })?;
+            let first = *first_bindings
+                .entry((instantiation, canonical))
+                .or_insert(index);
+            if first != index {
+                ties[first].push(index);
+                ties[index].push(first);
+            }
+        }
+
+        // Each component includes transitively joined aliases from different
+        // instances. Each declared net and each tie is visited once.
+        let mut vertices = vec![None; block.inout_nets.len()];
+        let mut classes = Vec::new();
+        let mut pending = Vec::new();
+        for start in 0..vertices.len() {
+            if vertices[start].is_some() {
+                continue;
+            }
+            let vertex = NodeRef { index: edges.len() };
+            edges.push(Vec::new());
+            classes.push(NetClass::default());
+            vertices[start] = Some(vertex);
+            pending.push(start);
+            while let Some(index) = pending.pop() {
+                for &other in &ties[index] {
+                    if vertices[other].is_none() {
+                        vertices[other] = Some(vertex);
+                        pending.push(other);
+                    }
+                }
+            }
+        }
+        let mut local_nets = BTreeMap::new();
+        let mut public_nets = BTreeMap::new();
+        for (net, vertex) in block.inout_nets.iter().zip(vertices) {
+            let vertex = vertex.expect("visited each net component");
+            local_nets.insert(net.name.as_str(), vertex);
+            for name in &net.ports {
+                public_nets.insert(name.as_str(), vertex);
+            }
+        }
+        for name in block.inout_ports() {
+            let vertex = public_nets
+                .get(name)
+                .ok_or_else(|| invalid(format!("inout port '{name}' has no declared net")))?;
+            classes[vertex.index - block.nodes.len()]
+                .public_name
+                .get_or_insert(name);
+        }
+        Ok(Self {
+            edges,
+            local_nets,
+            public_nets,
+            classes,
         })
+    }
+
+    /// Records a concrete IR node to identify a resolved net in a cycle.
+    fn net(
+        &mut self,
+        name: &str,
+        node: NodeRef,
+        node_count: usize,
+    ) -> Result<NodeRef, BuilderError> {
+        let vertex = *self
+            .local_nets
+            .get(name)
+            .ok_or_else(|| invalid(format!("undeclared inout net '{name}'")))?;
+        self.classes[vertex.index - node_count]
+            .witness
+            .get_or_insert(node);
+        Ok(vertex)
     }
 }
 
@@ -46,7 +166,7 @@ impl<'a> DependencyGraph<'a> {
 /// package.
 #[derive(Default)]
 pub(crate) struct BlockHierarchy {
-    summaries: BTreeMap<String, OutputDependencies>,
+    summaries: BTreeMap<String, BlockSummary>,
     active: BTreeSet<String>,
 }
 
@@ -111,57 +231,24 @@ impl BlockHierarchy {
                 self.summarize(child, package)?;
             }
         }
-        let mut edges = Vec::with_capacity(block.nodes.len());
-        for node in &block.nodes {
-            let dependencies = operands(&node.payload);
-            // The builder can call this before its structural verifier. An
-            // out-of-bounds SSA operand must never alias an added net vertex.
-            if let Some(bad) = dependencies
-                .iter()
-                .find(|dep| dep.index >= block.nodes.len())
-            {
-                return Err(invalid(format!(
-                    "block '{}' references missing node {}",
-                    block.name, bad.index
-                )));
-            }
-            edges.push(dependencies);
-        }
-        let mut graph = DependencyGraph {
-            edges,
-            nets: BTreeMap::new(),
-            net_origins: Vec::new(),
-        };
+        let definitions: BTreeMap<_, _> = block
+            .instantiations
+            .iter()
+            .map(|inst| (inst.name.as_str(), inst))
+            .collect();
+        let mut graph = DependencyGraph::new(block, &definitions, &self.summaries)?;
         let mut input_connections: BTreeMap<&str, BTreeMap<&str, NodeRef>> = BTreeMap::new();
         let mut output_connections = Vec::new();
-        let mut child_pins = BTreeMap::new();
         for (index, node) in block.nodes.iter().enumerate() {
             let reference = NodeRef { index };
             match &node.payload {
-                NodePayload::ExtInoutPortInput { name } => {
-                    let net = graph.net(PinNet::Port(name), reference);
+                NodePayload::ExtInoutRead { net } => {
+                    let net = graph.net(net, reference, block.nodes.len())?;
                     graph.edges[index].push(net);
                 }
-                NodePayload::ExtInoutPortOutput { name, .. } => {
-                    let net = graph.net(PinNet::Port(name), reference);
+                NodePayload::ExtInoutDrive { net, .. } => {
+                    let net = graph.net(net, reference, block.nodes.len())?;
                     graph.edges[net.index].push(reference);
-                }
-                NodePayload::ExtInstantiationInoutInput {
-                    instantiation,
-                    port_name,
-                    ..
-                }
-                | NodePayload::ExtInstantiationInoutOutput {
-                    instantiation,
-                    port_name,
-                } => {
-                    let net = graph.net(PinNet::Private(instantiation, port_name), reference);
-                    child_pins.insert((instantiation, port_name), net);
-                    if matches!(node.payload, NodePayload::ExtInstantiationInoutInput { .. }) {
-                        graph.edges[net.index].push(reference);
-                    } else {
-                        graph.edges[index].push(net);
-                    }
                 }
                 NodePayload::InstantiationInput {
                     instantiation,
@@ -182,28 +269,26 @@ impl BlockHierarchy {
                 NodePayload::ExtInstantiationInout {
                     instantiation,
                     port_name,
-                    parent_port,
+                    net,
                 } => {
-                    let net = graph.net(PinNet::Port(parent_port), reference);
-                    child_pins.insert((instantiation, port_name), net);
+                    let net = graph.net(net, reference, block.nodes.len())?;
+                    // Graph construction has resolved every binding's instance
+                    // and public alias, including during builder prechecks.
+                    let child = &self.summaries[&definitions[instantiation.as_str()].block];
+                    if child.port_classes[port_name] == *port_name {
+                        // Each child net has exactly one boundary
+                        // representative. Passive aliases already share a
+                        // vertex in this graph.
+                        input_connections
+                            .entry(instantiation)
+                            .or_default()
+                            .insert(port_name, net);
+                        output_connections.push((instantiation, port_name, net.index));
+                    }
                 }
                 _ => { /* Other nodes have no implicit instance connections. */ }
             }
         }
-        for ((instance, pin), net) in child_pins {
-            // A child's read senses this net, and its driver contributes
-            // dependencies to this same net. A passive binding adds no edge.
-            input_connections
-                .entry(instance)
-                .or_default()
-                .insert(pin, net);
-            output_connections.push((instance, pin, net.index));
-        }
-        let definitions: BTreeMap<_, _> = block
-            .instantiations
-            .iter()
-            .map(|instance| (instance.name.as_str(), instance))
-            .collect();
         for (instantiation, port_name, index) in output_connections {
             let edges = &mut graph.edges[index];
             let definition = definitions.get(instantiation.as_str()).ok_or_else(|| {
@@ -216,7 +301,7 @@ impl BlockHierarchy {
             match definition.kind {
                 InstantiationKind::Block => {
                     let summary = &self.summaries[&definition.block];
-                    let inputs = summary.get(port_name).ok_or_else(|| {
+                    let inputs = summary.outputs.get(port_name).ok_or_else(|| {
                         invalid(format!(
                             "unknown output '{port_name}' on child '{}'",
                             definition.block
@@ -290,9 +375,11 @@ fn verify_graph_acyclic(block: &Block, graph: &DependencyGraph) -> Result<(), Bu
 
 /// Converts the cyclic segment of the DFS path into block-local text IDs.
 fn cycle_error(block: &Block, graph: &DependencyGraph, path: &[(usize, usize)]) -> BuilderError {
-    let witness = |index| {
+    let witness = |index: usize| {
         block.nodes.get(index).unwrap_or_else(|| {
-            let (_, origin) = graph.net_origins[index - block.nodes.len()];
+            let origin = graph.classes[index - block.nodes.len()]
+                .witness
+                .expect("a net on a directed cycle has an access or a binding");
             block.get_node(origin)
         })
     };
@@ -340,11 +427,11 @@ fn cycle_error(block: &Block, graph: &DependencyGraph, path: &[(usize, usize)]) 
 fn graph_output_dependencies(
     block: &Block,
     graph: &DependencyGraph,
-) -> Result<OutputDependencies, BuilderError> {
+) -> Result<BlockSummary, BuilderError> {
     // Tag visits by output instead of clearing O(nodes) storage for each cone.
     let mut visited = vec![None; graph.edges.len()];
     let mut pending = Vec::new();
-    let mut summary = BTreeMap::new();
+    let mut summary = BlockSummary::default();
     for port in &block.ports {
         let (name, root) = match port {
             BlockPort::Output(reference) => {
@@ -353,16 +440,24 @@ fn graph_output_dependencies(
                 else {
                     return Err(invalid("block output references an invalid node"));
                 };
-                (name, Some(*reference))
+                (name, *reference)
             }
-            BlockPort::Inout(pin) => (&pin.name, graph.nets.get(&PinNet::Port(&pin.name)).copied()),
+            BlockPort::Inout(name) => {
+                let root = graph.public_nets[name.as_str()];
+                let representative = graph.classes[root.index - block.nodes.len()]
+                    .public_name
+                    .expect("public net has a representative");
+                summary
+                    .port_classes
+                    .insert(name.clone(), representative.to_string());
+                if representative != name {
+                    continue;
+                }
+                (name, root)
+            }
             BlockPort::Clock(_) | BlockPort::Input(_) => continue,
         };
-        let inputs = summary.entry(name.clone()).or_insert_with(BTreeSet::new);
-        let Some(root) = root else {
-            // A declared pin without any accesses or bindings has no drivers.
-            continue;
-        };
+        let inputs = summary.outputs.entry(name.clone()).or_default();
         visited[root.index] = Some(root);
         pending.push(root);
         while let Some(vertex) = pending.pop() {
@@ -370,12 +465,11 @@ fn graph_output_dependencies(
                 if let NodePayload::InputPort { name, .. } = &node.payload {
                     inputs.insert(name.clone());
                 }
-            } else if let (PinNet::Port(name), _) =
-                graph.net_origins[vertex.index - block.nodes.len()]
+            } else if let Some(name) = graph.classes[vertex.index - block.nodes.len()].public_name
                 && vertex != root
             {
-                // An external drive of another public pin can affect this
-                // output. The root pin must summarize only its own drivers.
+                // Other public nets can be externally driven. The root net
+                // summarizes its own drivers, independent of its alias names.
                 inputs.insert(name.to_string());
             }
             for dependency in &graph.edges[vertex.index] {
@@ -406,6 +500,44 @@ mod tests {
     }
 
     #[test]
+    fn builder_cycle_precheck_handles_unverified_inout_bindings() {
+        let source = r#"package precheck
+block child(a: bits[1], b: bits[1], sensed: bits[1]) {
+  ext_inout_net wire(bits[1], ports=[a, b])
+  read: bits[1] = ext_inout_read(net=wire, id=1)
+  sensed: () = output_port(read, name=sensed, id=2)
+}
+top block parent() {
+  ext_inout_net local(bits[1])
+  instantiation c(block=child, kind=block)
+  first: () = ext_instantiation_inout(instantiation=c, port_name=a, net=local, id=3)
+  second: () = ext_instantiation_inout(instantiation=c, port_name=b, net=local, id=4)
+  sense: bits[1] = instantiation_output(instantiation=c, port_name=sensed, id=5)
+}
+"#;
+        for (from, to) in [
+            ("net=local, id=3", "net=absent, id=3"),
+            (
+                "instantiation=c, port_name=b",
+                "instantiation=absent, port_name=b",
+            ),
+            ("port_name=b, net=", "port_name=absent, net="),
+            (
+                "first: () = ext_instantiation_inout(instantiation=c, port_name=a, net=local, id=3)",
+                "",
+            ),
+        ] {
+            let malformed = source.replace(from, to);
+            let package = Parser::new(&malformed).parse_package().unwrap();
+            assert!(
+                verify_block_combinational_cycles(package.get_top_block().unwrap(), &package)
+                    .is_err(),
+                "{malformed}"
+            );
+        }
+    }
+
+    #[test]
     fn summaries_keep_shared_and_independent_output_cones_separate() {
         let source = r#"package shared_cones
 top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8], direct: bits[8]) {
@@ -433,7 +565,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
             ),
             ("direct".into(), BTreeSet::from(["z".into()])),
         ]);
-        assert_eq!(hierarchy.summaries["child"], expected);
+        assert_eq!(hierarchy.summaries["child"].outputs, expected);
 
         let mut root_check = BlockHierarchy::default();
         root_check
@@ -458,7 +590,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
         hierarchy
             .summarize(package.get_top_block().unwrap(), &package)
             .unwrap();
-        assert_eq!(hierarchy.summaries["disjoint"], expected);
+        assert_eq!(hierarchy.summaries["disjoint"].outputs, expected);
     }
 
     #[test]

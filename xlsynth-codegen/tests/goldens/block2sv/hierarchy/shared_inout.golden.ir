@@ -1,11 +1,11 @@
 package pads
 
 block pad_cell(drive: bits[4], oe: bits[1], io: bits[4], observed: bits[4]) {
-  ext_inout io(bits[4])
+  ext_inout_net io(bits[4], ports=[io])
   drive: bits[4] = input_port(name=drive, id=1)
   oe: bits[1] = input_port(name=oe, id=2)
-  io: bits[4] = ext_inout_port_input(name=io, id=3)
-  enable_io: () = ext_inout_port_output(drive, oe, name=io, id=125)
+  io: bits[4] = ext_inout_read(net=io, id=3)
+  enable_io: () = ext_inout_drive(drive, oe, net=io, id=125)
   observed: () = output_port(io, name=observed, id=4)
 }
 
@@ -14,8 +14,8 @@ block listener(value: bits[4], observed: bits[4]) {
   observed: () = output_port(value, name=observed, id=6)
 }
 
-top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_oe: bits[1], pad: bits[4], seen: bits[4]) {
-  ext_inout pad(bits[4])
+top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_oe: bits[1], pad: bits[4], pad_b: bits[4], seen: bits[4]) {
+  ext_inout_net bus(bits[4], ports=[pad_b, pad])
   instantiation left(block=pad_cell, kind=block)
   instantiation right(block=pad_cell, kind=block)
   instantiation sense(block=listener, kind=block)
@@ -23,13 +23,13 @@ top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_
   right_data: bits[4] = input_port(name=right_data, id=8)
   left_oe: bits[1] = input_port(name=left_oe, id=9)
   right_oe: bits[1] = input_port(name=right_oe, id=10)
-  pad: bits[4] = ext_inout_port_input(name=pad, id=13)
+  pad: bits[4] = ext_inout_read(net=bus, id=13)
   left_drive: () = instantiation_input(left_data, instantiation=left, port_name=drive, id=14)
   right_drive: () = instantiation_input(right_data, instantiation=right, port_name=drive, id=15)
   left_enable: () = instantiation_input(left_oe, instantiation=left, port_name=oe, id=16)
   right_enable: () = instantiation_input(right_oe, instantiation=right, port_name=oe, id=17)
-  left_link: () = ext_instantiation_inout(instantiation=left, port_name=io, parent_port=pad, id=18)
-  right_link: () = ext_instantiation_inout(instantiation=right, port_name=io, parent_port=pad, id=19)
+  left_link: () = ext_instantiation_inout(instantiation=left, port_name=io, net=bus, id=18)
+  right_link: () = ext_instantiation_inout(instantiation=right, port_name=io, net=bus, id=19)
   sense_input: () = instantiation_input(pad, instantiation=sense, port_name=value, id=20)
   sample: bits[4] = instantiation_output(instantiation=sense, port_name=observed, id=21)
   seen: () = output_port(sample, name=seen, id=22)
@@ -59,8 +59,10 @@ top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_
 // EXPECT-SV:   input logic left_oe,
 // EXPECT-SV:   input logic right_oe,
 // EXPECT-SV:   inout wire [3:0] pad,
+// EXPECT-SV:   inout wire [3:0] pad_b,
 // EXPECT-SV:   output logic [3:0] seen
 // EXPECT-SV: );
+// EXPECT-SV:   tran pad_b_tie[3:0](pad, pad_b);
 // EXPECT-SV:   logic [3:0] sample;
 // EXPECT-SV:   logic [3:0] left_sample;
 // EXPECT-SV:   logic [3:0] right_sample;

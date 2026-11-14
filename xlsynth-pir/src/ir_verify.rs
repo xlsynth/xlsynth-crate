@@ -81,17 +81,11 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
             | NodePayload::Param
             | NodePayload::Literal(_)
             | NodePayload::InputPort { .. }
-            | NodePayload::ExtInoutPortInput { .. }
-            | NodePayload::ExtInstantiationInoutOutput { .. } => {
+            | NodePayload::ExtInoutRead { .. } => {
                 // Leaf nodes do not reference operands.
             }
             NodePayload::ExtInstantiationInout { .. } => { /* A binding names its pins. */ }
-            NodePayload::ExtInoutPortOutput {
-                drive,
-                output_enable,
-                ..
-            }
-            | NodePayload::ExtInstantiationInoutInput {
+            NodePayload::ExtInoutDrive {
                 drive,
                 output_enable,
                 ..
@@ -443,13 +437,12 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
         NodePayload::ExtInstantiationInout { .. } => {
             expect_type(&node.ty, &Type::nil(), "ext_instantiation_inout result")
         }
-        NodePayload::ExtInoutPortInput { .. } | NodePayload::ExtInstantiationInoutOutput { .. } => {
+        NodePayload::ExtInoutRead { .. } => {
             // The block verifies the read type against its endpoint
             // declaration.
             Ok(())
         }
-        NodePayload::ExtInoutPortOutput { output_enable, .. }
-        | NodePayload::ExtInstantiationInoutInput { output_enable, .. } => {
+        NodePayload::ExtInoutDrive { output_enable, .. } => {
             expect_type(ty(*output_enable), &Type::Bits(1), "inout output enable")?;
             expect_type(&node.ty, &Type::nil(), "inout drive result")
         }

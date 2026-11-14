@@ -240,7 +240,7 @@ fn pipeline_layout_rejects_reachable_inouts() {
     assert!(pads.stdout.is_empty());
     assert_eq!(
         String::from_utf8(pads.stderr).unwrap(),
-        "error: block `pad_cell` cannot use layout=pipeline with inout port `io`; use layout=none\n"
+        "error: block `pad_cell` cannot use layout=pipeline with inout net `io`; use layout=none\n"
     );
 
     let listener = run_top("listener");
