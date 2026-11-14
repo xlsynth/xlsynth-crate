@@ -4,7 +4,9 @@ use std::io::Write;
 
 use anyhow::Context;
 use clap::ArgMatches;
-use xlsynth_codegen::{BlockCodegenOptions, Layout, emit_system_verilog};
+use xlsynth_codegen::{
+    BlockCodegenOptions, Layout, emit_system_verilog, inline_invokes_for_codegen,
+};
 use xlsynth_pir::ir_parser::Parser;
 
 /// Parses package-form block IR and emits its selected block as SystemVerilog.
@@ -55,6 +57,7 @@ pub fn handle_block2sv(matches: &ArgMatches) -> anyhow::Result<()> {
         );
     }
 
+    let package = inline_invokes_for_codegen(package, options.top.as_deref())?;
     let output = emit_system_verilog(&package, &options)?;
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();

@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth::vast_helpers::{RegisterDefinition, RegisterScope, Reset};
-use xlsynth_pir::block_invoke_inline::BlockInvokeInliner;
 use xlsynth_pir::ir::{
     Binop, Block, BlockPort, InstantiationKind, MemberType, NodePayload, NodeRef, Package,
     PackageMember, Register, Type, Unop,
 };
 use xlsynth_pir::ir_utils::{get_topological, operands};
+use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_pir::{IrFormatPreference, IrValue};
 use xlsynth_vast::{
     Expr, IndexableExpr, LiteralFormat, LogicRef, VastDataType, VastFile, VastFileType, VastModule,
@@ -106,6 +106,7 @@ pub(crate) struct BlockEmitter<'a, 'file> {
     pub(crate) module: VastModule,
     pub(crate) values: Vec<Option<Value>>,
     pub(crate) ports: BTreeMap<String, LogicRef>,
+    pub(crate) inout_nets: BTreeMap<&'a str, Value>,
     pub(crate) register_refs: BTreeMap<String, LogicRef>,
     pub(crate) users: Vec<Vec<NodeRef>>,
     pub(crate) names: BTreeSet<String>,
@@ -114,8 +115,8 @@ pub(crate) struct BlockEmitter<'a, 'file> {
     pub(crate) arithmetic_helpers: BTreeMap<crate::arithmetic::ArithmeticHelper, String>,
     pub(crate) slice_helpers: BTreeMap<crate::slicing::SliceHelper, String>,
     pub(crate) current_stage: Option<usize>,
-    pub(crate) instance_inputs: BTreeMap<(String, String), Expr>,
-    pub(crate) instance_outputs: BTreeMap<(String, String), Expr>,
+    /// Connections indexed by instance, then by child port.
+    pub(crate) instance_connections: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 /// Emits a package after validating its selected block top.
@@ -125,23 +126,11 @@ pub(crate) fn emit_package(
     mut top_register_names: Option<&mut BTreeMap<String, String>>,
 ) -> Result<BlockCodegenOutput, BlockCodegenError> {
     let top = select_top(package, options.top.as_deref())?;
-    let mut inliner = BlockInvokeInliner::new(package).map_err(BlockCodegenError::InvalidBlock)?;
-
-    let mut ordered = Vec::new();
-    let mut visited = BTreeSet::new();
-    let mut visiting = BTreeSet::new();
-    collect_dependencies(package, top, &mut ordered, &mut visited, &mut visiting)?;
-    // Hierarchy and pipeline layout must see the same data dependencies as
-    // emission, including when a function ignores one of its arguments.
-    let expanded = ordered
-        .into_iter()
-        .map(|block| {
-            inliner
-                .inline_block(&block.name)
-                .map_err(BlockCodegenError::Unsupported)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let ordered: Vec<&Block> = expanded.iter().map(|block| block.as_ref()).collect();
+    let ordered = blocks_in_emission_order(package, top)?;
+    for block in &ordered {
+        validate_supported_nodes(block, options.layout)?;
+    }
+    verify_package(package).map_err(|error| BlockCodegenError::InvalidBlock(error.to_string()))?;
     let blocks = ordered.iter().map(|&b| (b.name.as_str(), b)).collect();
     for &block in &ordered {
         validate_single_register_writes(block)?;
@@ -210,29 +199,59 @@ fn validate_single_register_writes(block: &Block) -> Result<(), BlockCodegenErro
     Ok(())
 }
 
-/// Rejects operations that must be lowered before SystemVerilog emission.
-fn validate_supported_nodes(block: &Block) -> Result<(), BlockCodegenError> {
-    if block
-        .nodes
-        .iter()
-        .any(|node| matches!(node.payload, NodePayload::CountedFor { .. }))
+/// Checks which operations the requested layout can emit.
+fn validate_supported_nodes(block: &Block, layout: Layout) -> Result<(), BlockCodegenError> {
+    if layout == Layout::Pipeline
+        && let Some(net) = block.inout_nets.first()
     {
-        return Err(BlockCodegenError::Unsupported(format!(
-            "counted_for is not supported in `{}`; unroll loops before block2sv code generation",
-            block.name
+        return Err(BlockCodegenError::NotPipeline(format!(
+            "block `{}` cannot use layout=pipeline with inout net `{}`; use layout=none",
+            block.name, net.name
         )));
     }
-    if block
-        .nodes
-        .iter()
-        .any(|node| matches!(node.payload, NodePayload::Map { .. }))
-    {
+    for node in &block.nodes {
+        let (operation, lowering) = match &node.payload {
+            NodePayload::ExtInoutPort { name, .. } if layout == Layout::Pipeline => {
+                return Err(BlockCodegenError::NotPipeline(format!(
+                    "block `{}` cannot use layout=pipeline with inout port `{name}`; use layout=none",
+                    block.name,
+                )));
+            }
+            NodePayload::Invoke { to_apply, .. } => {
+                return Err(unsupported_invoke(block, to_apply));
+            }
+            NodePayload::CountedFor { .. } => ("counted_for", "unroll loops"),
+            NodePayload::Map { .. } => ("map", "expand maps"),
+            _ => continue,
+        };
         return Err(BlockCodegenError::Unsupported(format!(
-            "map is not supported in `{}`; expand maps before block2sv code generation",
+            "{operation} is not supported in `{}`; {lowering} before block2sv code generation",
             block.name
         )));
     }
     Ok(())
+}
+
+/// Identifies a function call that the caller must inline before emission.
+pub(crate) fn unsupported_invoke(block: &Block, callee: &str) -> BlockCodegenError {
+    BlockCodegenError::Unsupported(format!(
+        "block `{}` contains an invoke of `{callee}`. Inline function calls before SystemVerilog emission.",
+        block.name
+    ))
+}
+
+/// Inlines function calls in the selected top and its transitive child blocks.
+pub fn inline_invokes_for_codegen(
+    package: Package,
+    explicit_top: Option<&str>,
+) -> Result<Package, BlockCodegenError> {
+    let top = select_top(&package, explicit_top)?;
+    let names = blocks_in_emission_order(&package, top)?
+        .into_iter()
+        .map(|block| block.name.clone())
+        .collect::<Vec<_>>();
+    xlsynth_pir::block_invoke_inline::inline_block_invokes_in_blocks(package, &names)
+        .map_err(BlockCodegenError::InvalidBlock)
 }
 
 /// Selects the explicitly requested, marked, or uniquely available block.
@@ -284,6 +303,22 @@ fn select_top<'a>(
 }
 
 /// Appends each transitive child once, before the block which instantiates it.
+fn blocks_in_emission_order<'a>(
+    package: &'a Package,
+    top: &'a str,
+) -> Result<Vec<&'a Block>, BlockCodegenError> {
+    let mut ordered = Vec::new();
+    collect_dependencies(
+        package,
+        top,
+        &mut ordered,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+    )?;
+    Ok(ordered)
+}
+
+/// Visits instantiated blocks in declaration order for deterministic emission.
 fn collect_dependencies<'a>(
     package: &'a Package,
     name: &'a str,
@@ -348,6 +383,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             module,
             values: vec![None; block.nodes.len()],
             ports: BTreeMap::new(),
+            inout_nets: BTreeMap::new(),
             register_refs: BTreeMap::new(),
             users,
             names: BTreeSet::new(),
@@ -356,8 +392,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             arithmetic_helpers: BTreeMap::new(),
             slice_helpers: BTreeMap::new(),
             current_stage: None,
-            instance_inputs: BTreeMap::new(),
-            instance_outputs: BTreeMap::new(),
+            instance_connections: BTreeMap::new(),
         }
     }
 
@@ -367,7 +402,6 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         child_timings: &mut ChildTimings<'a>,
         summarize_for_parent: bool,
     ) -> Result<(), BlockCodegenError> {
-        validate_supported_nodes(self.block)?;
         self.reserve_fixed_names()?;
         self.emit_ports()?;
         self.emit_arithmetic_helpers()?;
@@ -402,7 +436,12 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         if let Some(clock) = self.block.clock_port_name() {
             reserve(clock, "port")?;
         }
-        for port in self.block.input_ports().chain(self.block.output_ports()) {
+        for port in self
+            .block
+            .input_ports()
+            .chain(self.block.output_ports())
+            .chain(self.block.inout_ports())
+        {
             if self.block.port_type(port).bit_count() != 0 {
                 reserve(self.block.port_name(port), "port")?;
             }
@@ -430,65 +469,134 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Emits representable ports in the source block's original header order.
     fn emit_ports(&mut self) -> Result<(), BlockCodegenError> {
+        let mut aliases = BTreeMap::<&str, Vec<NodeRef>>::new();
         for port in &self.block.ports {
-            let (name, ir_type, sv_type, is_output) = match port {
-                BlockPort::Clock(name) => (name.clone(), Type::Bits(1), None, false),
-                BlockPort::Input(node) | BlockPort::Output(node) => {
+            let (name, ir_type, sv_type) = match port {
+                BlockPort::Clock(name) => (name.as_str(), &Type::Bits(1), None),
+                BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
                     let sv_type = match &self.block.get_node(*node).payload {
                         NodePayload::InputPort { sv_type, .. }
                         | NodePayload::OutputPort { sv_type, .. } => sv_type.as_deref(),
+                        NodePayload::ExtInoutPort { net, sv_type, .. } => {
+                            if let Some(net) = net {
+                                aliases.entry(net).or_default().push(*node);
+                            }
+                            sv_type.as_deref()
+                        }
                         _ => unreachable!("verified block data port"),
                     };
                     (
-                        self.block.port_name(*node).to_string(),
-                        self.block.port_type(*node).clone(),
+                        self.block.port_name(*node),
+                        self.block.port_type(*node),
                         sv_type,
-                        matches!(port, BlockPort::Output(_)),
                     )
                 }
             };
-            if self.ports.contains_key(&name) {
+            if self.ports.contains_key(name) {
                 continue;
             }
             let width = ir_type.bit_count();
             if width == 0 {
                 continue;
             }
-            validate_external_identifier(&name, "port")?;
-            let data_type = if self.options.emit_sv_types {
-                if let Some(sv_type) = sv_type {
-                    if let Some((package, ty)) = sv_type.rsplit_once("::") {
-                        self.file.make_extern_package_type(package, ty)
-                    } else {
-                        self.file.make_extern_type(sv_type)
-                    }
-                } else {
-                    self.value_type(&ir_type)
+            validate_external_identifier(name, "port")?;
+            let data_type = self.declared_data_type(ir_type, sv_type);
+            let signal = match port {
+                BlockPort::Inout(_) => self.file.add_inout(self.module, name, &data_type),
+                BlockPort::Output(_) => self.file.add_logic_output(self.module, name, &data_type),
+                BlockPort::Input(_) | BlockPort::Clock(_) => {
+                    self.file.add_logic_input(self.module, name, &data_type)
                 }
-            } else {
-                self.value_type(&ir_type)
             };
-            let signal = if is_output {
-                self.file.add_logic_output(self.module, &name, &data_type)
-            } else {
-                self.file.add_logic_input(self.module, &name, &data_type)
-            };
-            self.ports.insert(name, signal);
+            self.ports.insert(name.to_owned(), signal);
         }
 
+        self.emit_inout_nets(&aliases)?;
         for (index, node) in self.block.nodes.iter().enumerate() {
-            if let NodePayload::InputPort { name, sv_type } = &node.payload {
-                if let Some(signal) = self.ports.get(name).copied() {
-                    let value = Value::signal(signal).with_width(node.ty.bit_count());
-                    self.values[index] = Some(if self.options.emit_sv_types && sv_type.is_some() {
-                        value
-                    } else {
-                        value.with_type(&node.ty)
-                    });
+            match &node.payload {
+                NodePayload::InputPort { name, sv_type } => {
+                    if let Some(&signal) = self.ports.get(name) {
+                        let value = Value::signal(signal);
+                        self.values[index] =
+                            Some(if self.options.emit_sv_types && sv_type.is_some() {
+                                value.with_width(node.ty.bit_count())
+                            } else {
+                                value.with_type(&node.ty)
+                            });
+                    }
+                }
+                NodePayload::ExtInoutRead { net } => {
+                    self.values[index] = Some(self.inout_nets[net.as_str()]);
+                }
+                _ => {
+                    // Other values are computed in topological order.
                 }
             }
         }
         Ok(())
+    }
+
+    /// Allocates each electrical net and joins its public aliases in header
+    /// order.
+    fn emit_inout_nets(
+        &mut self,
+        aliases: &BTreeMap<&str, Vec<NodeRef>>,
+    ) -> Result<(), BlockCodegenError> {
+        for net in &self.block.inout_nets {
+            let value = if let Some((&first, others)) = aliases
+                .get(net.name.as_str())
+                .and_then(|ports| ports.split_first())
+            {
+                let signal = self.ports[self.block.port_name(first)];
+                for &other in others {
+                    let name = self.block.port_name(other);
+                    let tie = self.unique_name(&format!("{name}_tie"));
+                    self.file.add_tran(
+                        self.module,
+                        &tie,
+                        net.ty.bit_count(),
+                        signal,
+                        self.ports[name],
+                    )?;
+                }
+                let value = Value::signal(signal);
+                if self.options.emit_sv_types
+                    && matches!(
+                        &self.block.get_node(first).payload,
+                        NodePayload::ExtInoutPort {
+                            sv_type: Some(_),
+                            ..
+                        }
+                    )
+                {
+                    value.with_width(net.ty.bit_count())
+                } else {
+                    value.with_type(&net.ty)
+                }
+            } else {
+                let name = self.unique_name(&net.name);
+                let ty = self.value_type(&net.ty);
+                Value::signal(self.file.add_wire(self.module, &name, &ty)).with_type(&net.ty)
+            };
+            self.inout_nets.insert(&net.name, value);
+        }
+        Ok(())
+    }
+
+    /// Chooses a declared SystemVerilog type, including optional external
+    /// types.
+    fn declared_data_type(&mut self, ty: &Type, sv_type: Option<&str>) -> VastDataType {
+        if self.options.emit_sv_types
+            && let Some(sv_type) = sv_type
+        {
+            if let Some((package, ty)) = sv_type.rsplit_once("::") {
+                self.file.make_extern_package_type(package, ty)
+            } else {
+                self.file.make_extern_type(sv_type)
+            }
+        } else {
+            self.value_type(ty)
+        }
     }
 
     /// Emits existing register state and ordinary dependency-ordered logic.
@@ -503,6 +611,8 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             match &self.block.get_node(node_ref).payload {
                 NodePayload::Nil
                 | NodePayload::InputPort { .. }
+                | NodePayload::ExtInoutRead { .. }
+                | NodePayload::ExtInoutPort { .. }
                 | NodePayload::OutputPort { .. } => {
                     // Reserved nodes and parameters are represented by module
                     // ports.
@@ -822,11 +932,11 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         for instance in &self.block.instantiations {
             validate_external_identifier(&instance.name, "instance")?;
             let mut connections = self
-                .instance_inputs
-                .iter()
-                .chain(self.instance_outputs.iter())
-                .filter(|((name, _), _)| name == &instance.name)
-                .map(|((_, port), expr)| (port.clone(), *expr))
+                .instance_connections
+                .remove(&instance.name)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(port, value)| (port, value.expr))
                 .collect::<Vec<_>>();
 
             if instance.kind == InstantiationKind::Block {
@@ -853,7 +963,9 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                     .iter()
                     .map(|port| match port {
                         BlockPort::Clock(name) => name.as_str(),
-                        BlockPort::Input(node) | BlockPort::Output(node) => child.port_name(*node),
+                        BlockPort::Input(node)
+                        | BlockPort::Output(node)
+                        | BlockPort::Inout(node) => child.port_name(*node),
                     })
                     .collect::<Vec<_>>();
                 connections.sort_by_key(|(name, _)| {
@@ -952,8 +1064,10 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     /// their explicitly requested SystemVerilog types.
     fn emit_input_array_views(&mut self) -> Result<(), BlockCodegenError> {
         for (index, node) in self.block.nodes.iter().enumerate() {
-            if matches!(node.payload, NodePayload::InputPort { .. })
-                && matches!(node.ty, Type::Array(_))
+            if matches!(
+                node.payload,
+                NodePayload::InputPort { .. } | NodePayload::ExtInoutRead { .. }
+            ) && matches!(node.ty, Type::Array(_))
                 && let Some(value) = self.values[index]
                 && value.array_rank == 0
             {

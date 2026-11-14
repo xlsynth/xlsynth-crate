@@ -590,6 +590,35 @@ endmodule
 }
 
 #[test]
+fn tran_ties_scalar_and_vector_nets() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let module = file.add_module("pins");
+    let scalar = file.make_scalar_type();
+    let byte = file.make_bit_vector_type(8, false);
+    let a = file.add_inout(module, "a", &scalar);
+    let b = file.add_inout(module, "b", &scalar);
+    let c = file.add_inout(module, "c", &byte);
+    let d = file.add_inout(module, "d", &byte);
+    assert!(file.add_tran(module, "zero", 0, a, b).is_err());
+    file.add_tran(module, "link", 1, a, b).unwrap();
+    file.add_tran(module, "links", 8, c, d).unwrap();
+    assert!(file.add_tran(module, "link", 1, a, b).is_err());
+    assert_eq!(
+        file.emit(),
+        r#"module pins(
+  inout wire a,
+  inout wire b,
+  inout wire [7:0] c,
+  inout wire [7:0] d
+);
+  tran link(a, b);
+  tran links[7:0](c, d);
+endmodule
+"#
+    );
+}
+
+#[test]
 fn test_ternary() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("my_module");

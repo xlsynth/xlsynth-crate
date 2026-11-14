@@ -82,6 +82,35 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
 // Inlines all block instantiations in the package. All blocks are removed after
 // inlining except for the top block.
 pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String> {
+    if let Some(top) = pkg.get_top_block() {
+        let mut selected = std::collections::BTreeSet::new();
+        let mut pending = vec![top.name.clone()];
+        while let Some(name) = pending.pop() {
+            if selected.insert(name.clone())
+                && let Some(block) = pkg.get_block(&name)
+            {
+                block.reject_inouts("block inlining")?;
+                pending.extend(
+                    block
+                        .instantiations
+                        .iter()
+                        .filter(|i| i.kind == ir::InstantiationKind::Block)
+                        .map(|i| i.block.clone()),
+                );
+            }
+        }
+        pkg.members.retain(
+            |member| !matches!(member, PackageMember::Block(b) if !selected.contains(&b.name)),
+        );
+    } else {
+        // Without a selected block the inliner processes every block before
+        // pruning. Check their pins before mutating any of them.
+        for member in &pkg.members {
+            if let PackageMember::Block(block) = member {
+                block.reject_inouts("block inlining")?;
+            }
+        }
+    }
     loop {
         let mut progress = false;
         let mut has_instantiations = false;
@@ -478,6 +507,24 @@ mod tests {
     use super::*;
     use crate::ir_parser::Parser;
     use crate::ir_query::{matches_node, parse_query};
+
+    #[test]
+    fn inlining_with_a_function_top_rejects_declaration_only_pins_before_pruning() {
+        let source = r#"package pads
+top fn main(x: bits[1] id=1) -> bits[1] {
+  ret result: bits[1] = identity(x, id=2)
+}
+block ordinary() {}
+block cell(pad: bits[1]) {
+  pad: () = ext_inout_port(name=pad, id=3)
+}
+"#;
+        let mut package = Parser::new(source).parse_and_validate_package().unwrap();
+        let before = package.to_string();
+        let error = inline_all_blocks_in_package(&mut package).unwrap_err();
+        assert!(error.contains("ext_inout_port"), "{error}");
+        assert_eq!(package.to_string(), before);
+    }
 
     fn parse_pkg(text: &str) -> ir::Package {
         let mut parser = Parser::new(text);

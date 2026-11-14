@@ -154,6 +154,7 @@ pub fn lower_block_to_sequential_gate_fn_with_controls(
     block: &Block,
     gatify_options: GatifyOptions,
 ) -> Result<SequentialGateFn, String> {
+    block.reject_inouts("block2sequential")?;
     if !block.instantiations.is_empty() {
         return Err(
             "block2sequential: block contains instantiations; lower a package so they can be inlined"

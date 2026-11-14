@@ -8,7 +8,7 @@ use crate::{IrFormatPreference, IrValue};
 
 use crate::{ir, ir_parser, ir_utils::operands};
 
-pub use crate::ir_block::{Block, BlockPort, BlockReset};
+pub use crate::ir_block::{Block, BlockPort, BlockReset, InoutNet};
 
 pub use xlsynth_ir_value::{ArrayTypeData, StartAndLimit, Type};
 
@@ -316,6 +316,29 @@ pub enum NodePayload {
         start: NodeRef,
         update_value: NodeRef,
     },
+    /// Declares a public bidirectional port, optionally joined to a local net.
+    ExtInoutPort {
+        name: String,
+        port_type: Type,
+        net: Option<String>,
+        sv_type: Option<String>,
+    },
+    /// Samples the resolved value of a declared electrical net.
+    ExtInoutRead {
+        net: String,
+    },
+    /// Drives the named net while the whole-net enable is asserted.
+    ExtInoutDrive {
+        net: String,
+        drive: NodeRef,
+        output_enable: NodeRef,
+    },
+    /// Connects a child inout port to a net in this block.
+    ExtInstantiationInout {
+        instantiation: String,
+        port_name: String,
+        net: String,
+    },
     /// Extension (non-upstream) op: carry-out bit of addition.
     ///
     /// Semantics: for `lhs, rhs: bits[w]` and `c_in: bits[1]`, returns
@@ -473,7 +496,11 @@ impl NodePayload {
     pub fn is_extension_op(&self) -> bool {
         matches!(
             self,
-            NodePayload::ExtCarryOut { .. }
+            NodePayload::ExtInoutPort { .. }
+                | NodePayload::ExtInoutRead { .. }
+                | NodePayload::ExtInoutDrive { .. }
+                | NodePayload::ExtInstantiationInout { .. }
+                | NodePayload::ExtCarryOut { .. }
                 | NodePayload::ExtPrioEncode { .. }
                 | NodePayload::ExtClz { .. }
                 | NodePayload::ExtNormalizeLeft { .. }
@@ -486,6 +513,10 @@ impl NodePayload {
         match self {
             NodePayload::Nil => "nil",
             NodePayload::Param => "param",
+            NodePayload::ExtInoutPort { .. } => "ext_inout_port",
+            NodePayload::ExtInoutRead { .. } => "ext_inout_read",
+            NodePayload::ExtInoutDrive { .. } => "ext_inout_drive",
+            NodePayload::ExtInstantiationInout { .. } => "ext_instantiation_inout",
             NodePayload::InputPort { .. } => "input_port",
             NodePayload::OutputPort { .. } => "output_port",
             NodePayload::Tuple(_) => "tuple",
@@ -617,13 +648,36 @@ impl NodePayload {
                 .collect()
         };
         let result = match self {
-            NodePayload::InputPort { name, sv_type } => {
+            NodePayload::InputPort { name, sv_type }
+            | NodePayload::ExtInoutPort { name, sv_type, .. } => {
                 let mut parts = vec![format!("name={name}")];
+                if let NodePayload::ExtInoutPort { net: Some(net), .. } = self {
+                    parts.push(format!("net={net}"));
+                }
                 if let Some(sv_type) = sv_type {
                     parts.push(format!("sv_type=\"{}\"", escape_xls_ir_string(sv_type)));
                 }
                 parts
             }
+            NodePayload::ExtInoutRead { net } => vec![format!("net={net}")],
+            NodePayload::ExtInoutDrive {
+                net,
+                drive,
+                output_enable,
+            } => vec![
+                format_operand(*drive),
+                format_operand(*output_enable),
+                format!("net={net}"),
+            ],
+            NodePayload::ExtInstantiationInout {
+                instantiation,
+                port_name,
+                net,
+            } => vec![
+                format!("instantiation={instantiation}"),
+                format!("port_name={port_name}"),
+                format!("net={net}"),
+            ],
             NodePayload::OutputPort { name, arg, sv_type } => {
                 let mut parts = vec![format_operand(*arg), format!("name={name}")];
                 if let Some(sv_type) = sv_type {
@@ -1175,6 +1229,27 @@ pub struct NodeGraph {
 }
 
 impl NodeGraph {
+    /// Rejects resolved pin operations before a consumer projects the graph to
+    /// two-state values.
+    pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
+        for node in &self.nodes {
+            let pin = match &node.payload {
+                NodePayload::ExtInoutPort { name, .. } => name,
+                NodePayload::ExtInoutRead { net }
+                | NodePayload::ExtInoutDrive { net, .. }
+                | NodePayload::ExtInstantiationInout { net, .. } => net,
+                _ => continue,
+            };
+            return Err(format!(
+                "{backend}: {} '{}' in '{}' requires block-to-Verilog codegen",
+                node.payload.get_operator(),
+                pin,
+                self.name
+            ));
+        }
+        Ok(())
+    }
+
     /// Returns the last `ffi_proto` declaration, which is the one XLS uses.
     pub fn ffi_proto(&self) -> Option<&ForeignFunctionData> {
         self.outer_attrs
@@ -1659,6 +1734,14 @@ pub enum PackageMember {
 }
 
 impl PackageMember {
+    /// Rejects four-state nets before handing a member to a two-state backend.
+    pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
+        match self {
+            Self::Function(f) => f.reject_inouts(backend),
+            Self::Block(block) => block.reject_inouts(backend),
+        }
+    }
+
     /// Returns the shared graph without treating blocks as functions.
     pub fn graph(&self) -> &NodeGraph {
         match self {
@@ -1699,6 +1782,19 @@ pub struct Instantiation {
 }
 
 impl Package {
+    /// Reports PIR-only operations and declarations that upstream XLS cannot
+    /// parse.
+    pub fn uses_pir_extensions(&self) -> bool {
+        self.members.iter().any(|member| {
+            matches!(member, PackageMember::Block(block) if !block.inout_nets.is_empty())
+                || member
+                    .graph()
+                    .nodes
+                    .iter()
+                    .any(|node| node.payload.is_extension_op())
+        })
+    }
+
     /// Gets the explicitly named function, reporting an error if it is absent.
     pub fn get_named_or_top_or_sole_fn(&self, name: &str) -> Result<&Fn, String> {
         self.get_fn(name)

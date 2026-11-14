@@ -2,6 +2,7 @@
 
 use xlsynth_bx::{ResetBehavior, check_module, compile, empty_package, lower_module, parse_module};
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
+use xlsynth_pir::block_invoke_inline::inline_block_invokes_in_package;
 use xlsynth_pir::ir::{NodePayload, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
@@ -61,6 +62,7 @@ block products(clk, valid: bool, a: u8, b: u5, c: u12) -> Results {
             .any(|path| path == "xls/dslx/stdlib/std.x")
     );
 
+    let package = inline_block_invokes_in_package(package).unwrap();
     let sv = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
     let pipeline = compile_pipeline_module(&sv.system_verilog).unwrap();
     let mut runner = FixtureRunner::new(&pipeline).unwrap();

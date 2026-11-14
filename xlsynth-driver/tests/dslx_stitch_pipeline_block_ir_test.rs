@@ -7,7 +7,9 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use test_case::test_case;
+use xlsynth_pir::ir::{Binop, NodePayload};
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir::ir_utils::compute_users;
 use xlsynth_test_helpers::compare_golden_text;
 use xlsynth_vastly::{
     FixtureRunner, LogicBit, Signedness, Value4, compile_combo_module, compile_pipeline_module,
@@ -49,7 +51,8 @@ fn emitted_source_locations_refer_to_the_original_dslx_file() {
     fs::create_dir_all(directory.path().join(source.parent().unwrap())).unwrap();
     fs::write(
         directory.path().join(&source),
-        "fn alu_cycle0(x: u8) -> u8 { x + u8:1 }",
+        r#"fn add_one(x: u8, _unused: u8) -> u8 { x + u8:1 }
+fn alu_cycle0(x: u8, y: u8) -> u8 { add_one(x, y) }"#,
     )
     .unwrap();
     let ir = stdout(
@@ -60,12 +63,23 @@ fn emitted_source_locations_refer_to_the_original_dslx_file() {
             "--dslx_input_file",
             source.to_str().unwrap(),
             "--dslx_top=alu",
+            "--flop_inputs=false",
         ],
     )
     .unwrap();
     let package = Parser::new(&ir).parse_package().unwrap();
     assert_eq!(package.name, "alu.pipe");
     assert_eq!(package.file_table.id_to_path[&0], source.to_str().unwrap());
+    let block = package.get_top_block().unwrap();
+    let add = block
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, NodePayload::Binop(Binop::Add, _, _)))
+        .unwrap();
+    let pos = &add.pos.as_ref().unwrap()[0];
+    assert_eq!((pos.fileno, pos.lineno), (0, 0));
+    let unused = block.get_input_port("y").unwrap();
+    assert!(compute_users(block).get(&unused).unwrap().is_empty());
     // Native XLS prints the stored filename verbatim. Check both consumers
     // resolve the stage's positions to the same file.
     let native = xlsynth::IrPackage::parse_ir(&ir, None).unwrap().to_string();

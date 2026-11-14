@@ -436,7 +436,9 @@ xlsynth-driver gv2block \
 
 Compiles a `.bx` file to an XLS block IR package on stdout. A BX pipeline
 declares the registers between stages and can use blocks and functions from BX
-libraries or call imported DSLX functions for the combinational work. This `mul_inc.bx` captures
+libraries or call imported DSLX functions for the combinational work. The emitted
+blocks inline function calls recursively and preserve block instances and registers.
+This `mul_inc.bx` captures
 a product on one clock edge and the incremented product on the next.
 
 ```text
@@ -672,8 +674,11 @@ xlsynth-driver block2fn \
 
 Emits an XLS block IR package as synthesizable SystemVerilog using the native
 Rust block emitter. Existing registers, resets, load enables, and hierarchy are
-preserved. Each register must have exactly one write node. The emitter inlines
-the function body at each `invoke` node, including nested calls. Use an
+preserved. Each register must have exactly one write node. Before emission,
+the driver inlines ordinary `invoke` nodes throughout the selected block hierarchy,
+including nested calls. It verifies the expanded IR so combinational loop checks
+see the inputs each function actually uses. The Rust emitter requires callers to
+inline invokes in the blocks they pass for emission. Use an
 explicit external instantiation for a function marked `#[ffi_proto]`. Lower
 `map` operations and unroll `counted_for` loops before emission.
 Leading-zero counts, priority encoders, normalization, and
@@ -684,6 +689,18 @@ for example, `bits[8][3][2]` becomes `logic [1:0][2:0][7:0]`. Tuples remain flat
 packed vectors. Element-zero packing, bounds behavior, and explicit `sv_type`
 port overrides are preserved.
 
+Declare a resolved wire with `ext_inout_net bus(bits[4])`. A public header
+port `pad: bits[4]` connects to that wire through the block node
+`pin: () = ext_inout_port(name=pad, net=bus, id=1)`. Omitting `net` leaves
+the pin open inside the module. An optional `sv_type` on the port controls
+its SystemVerilog spelling. `ext_inout_read(net=bus)` samples the wire and
+`ext_inout_drive(tx, oe, net=bus)` adds a whole-wire, active-high driver.
+Multiple child pins can share the net through `ext_instantiation_inout`.
+A single child binding may be the only use of a private net. A net connected
+to a public pin also needs a second public pin, a child binding, a read, or a
+drive. Use the default `--layout=none` for inout designs.
+See the [PIR extension reference](../xlsynth-pir/docs/extensions.md).
+
 ```shell
 xlsynth-driver block2sv input.block.ir --top=my_block > output.sv
 xlsynth-driver block2sv input.block.ir --layout=pipeline > pipeline.sv
@@ -693,9 +710,9 @@ Flags:
 
 - `--top <BLOCK>` selects a block and overrides the package top. If omitted, the
   package top is used; a package with exactly one block also selects that block.
-- `--layout <none|pipeline>` controls only the emitted source organization. The
-  default is `none`; `pipeline` groups logic and registers by pipeline stage and
-  rejects register graphs that cannot be layered.
+- `--layout <none|pipeline>` selects the emitted source organization. The default
+  is `none`. Pipeline layout requires a feed-forward register graph and rejects
+  any inout port or net in the selected top or its transitive children, including open ports and private nets.
 - `--module_name <NAME>` overrides the generated top module name.
 - `--array_index_bounds_checking <BOOL>` controls out-of-range array indexing
   (default: `true`).
@@ -4627,8 +4644,8 @@ start at zero. Use `stitch-equiv` for a proof covering all permitted traces.
 Stitches the selected DSLX stage functions into a pipeline. By default, the
 command emits a Verilog or SystemVerilog module for each stage and a wrapper
 that connects them. With `--output-format=block-ir`, it emits a textual XLS IR
-package whose top block invokes the stage functions and implements the register
-boundaries. The block has a packed input port named for each parameter of the
+package whose top block contains the inlined stage logic and the registers
+between stages. The block has a packed input port named for each parameter of the
 first stage and drives the packed data output `out`. When a later stage takes
 multiple parameters, its first parameter receives the low bits of the preceding
 result and each successive parameter receives the next slice. Both formats use
@@ -4694,11 +4711,10 @@ at `1`, the direct RTL wrapper's conditional expression writes `X` to the
 first valid register. The default `block2sv` procedural `if (rst)` takes the
 else branch and writes `1`. XLS block IR represents reset as a single bit.
 
-The block IR package retains the stage bodies and their helper functions.
-`block2sv` inlines calls to DSLX function bodies when generating SystemVerilog.
-Its existing operation restrictions also apply to stage bodies. Expand `map`,
-unroll `counted_for`, and lower calls to FFI functions to external instantiations
-before rendering stages that use them.
+The block IR package retains the stage and helper function definitions. The stitcher
+recursively expands ordinary calls in the top block. A call to an FFI function
+requires an explicit external instantiation. Expand `map` and unroll `counted_for`
+before rendering stages that use them with `block2sv`.
 
 Tokens occupy no bits in a packed data port or register. To pack an array
 with data bits, the wrapper uses `array_index`, whose result type must be

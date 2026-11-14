@@ -20,25 +20,19 @@ fn verify_with_xlsynth(ir_text: &str) -> bool {
     }
 }
 
-fn ir_text_has_extension_ops(ir_text: &str) -> bool {
+fn ir_text_uses_pir_extensions(ir_text: &str) -> bool {
     let mut p = PirParser::new(ir_text);
     let Ok(pkg) = p.parse_package() else {
         return false;
     };
-    pkg.members.iter().any(|member| {
-        member
-            .graph()
-            .nodes
-            .iter()
-            .any(|n| n.payload.is_extension_op())
-    })
+    pkg.uses_pir_extensions()
 }
 
 fn assert_cross_validates_same(ir_text: &str) {
-    if ir_text_has_extension_ops(ir_text) {
+    if ir_text_uses_pir_extensions(ir_text) {
         // Early-return rationale: this test checks verification parity between
-        // PIR and upstream XLS. Upstream does not understand PIR extension ops
-        // (e.g. `ext_carry_out`). Extension behavior is covered by dedicated
+        // PIR and upstream XLS. Upstream does not understand PIR extension
+        // nodes or pin declarations. Extension behavior is covered by dedicated
         // PIR-level tests.
         return;
     }

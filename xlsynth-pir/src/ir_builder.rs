@@ -16,11 +16,12 @@ use crate::ir_verify::{
 };
 
 mod block;
-mod block_cycles;
+pub(crate) mod block_cycles;
 mod ops;
 
 pub use block::{
-    BInstantiation, BRegister, BlockBuilder, BlockState, RegisterWriteOptions, ResetBehavior,
+    BInoutNet, BInstantiation, BRegister, BlockBuilder, BlockState, RegisterWriteOptions,
+    ResetBehavior,
 };
 pub use ops::{NaryAddOptions, NaryAddTerm, NormalizeLeftOptions};
 

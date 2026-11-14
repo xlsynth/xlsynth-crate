@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog_with_register_names};
@@ -51,37 +52,44 @@ pub(super) struct Simulation {
 impl Simulation {
     pub(super) fn new(package: &Package, top: &str) -> Result<Self, String> {
         let package = flatten_block_hierarchy(package, top)?;
-        Self::compile_rtl(&package, top)
+        Self::compile_rtl(Cow::Owned(package), top, None)
     }
 
     /// Prepares RTL from the same flattened hierarchy used for PIR evaluation.
     pub(super) fn from_flattened(package: &Package, top: &str) -> Result<Self, String> {
-        // Only the RTL cross-check needs explicit iterations. PIR keeps the
-        // compact loop/map and the ordinary test simulator uses normal codegen.
-        if package.members.iter().any(|member| {
+        // Only the RTL cross-check unrolls loops and maps. PIR evaluates them
+        // directly. Ordinary function inlining does not need this budget.
+        const MAX_UNROLLED_NODES: usize = 65_536;
+        let has_loops = package.members.iter().any(|member| {
             member.graph().nodes.iter().any(|node| {
                 matches!(
                     node.payload,
                     NodePayload::Map { .. } | NodePayload::CountedFor { .. }
                 )
             })
-        }) {
-            const MAX_UNROLLED_NODES: usize = 65_536;
-            let mut inliner = BlockInvokeInliner::new(package)?;
-            let expanded = inliner
-                .inline_block_with_unrolling(top, MAX_UNROLLED_NODES)?
-                .into_owned();
-            let mut rtl_package = package.clone();
-            rtl_package.replace_block(top, expanded)?;
-            Self::compile_rtl(&rtl_package, top)
-        } else {
-            Self::compile_rtl(package, top)
-        }
+        });
+        Self::compile_rtl(
+            Cow::Borrowed(package),
+            top,
+            has_loops.then_some(MAX_UNROLLED_NODES),
+        )
     }
 
-    /// Compiles the supplied flattened block and binds its data ports and
-    /// state.
-    fn compile_rtl(package: &Package, top: &str) -> Result<Self, String> {
+    /// Inlines functions in the flattened test block, then compiles its RTL
+    /// and binds its data ports and state.
+    fn compile_rtl(
+        mut package: Cow<'_, Package>,
+        top: &str,
+        unroll_budget: Option<usize>,
+    ) -> Result<Self, String> {
+        let mut inliner = BlockInvokeInliner::new(&package)?;
+        let block = match unroll_budget {
+            Some(limit) => inliner.inline_block_with_unrolling(top, limit)?,
+            None => inliner.inline_block(top)?,
+        };
+        if let Cow::Owned(expanded) = block {
+            package.to_mut().replace_block(top, expanded)?;
+        }
         let block = package.get_block(top).ok_or("missing inlined test block")?;
         let reset = block.reset.as_ref();
         if reset.is_some_and(|r| r.asynchronous)
@@ -93,7 +101,7 @@ impl Simulation {
             return Err("BX test simulation does not support asynchronous reset".to_owned());
         }
         let rtl = emit_system_verilog_with_register_names(
-            package,
+            &package,
             &BlockCodegenOptions {
                 emit_sv_types: false,
                 ..Default::default()

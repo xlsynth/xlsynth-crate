@@ -227,7 +227,15 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     match payload {
         Nil => vec![],
         Param => vec![],
-        InputPort { .. } => vec![],
+        InputPort { .. }
+        | ExtInoutPort { .. }
+        | ExtInoutRead { .. }
+        | ExtInstantiationInout { .. } => vec![],
+        ExtInoutDrive {
+            drive,
+            output_enable,
+            ..
+        } => vec![*drive, *output_enable],
         OutputPort { arg, .. } => vec![*arg],
         Tuple(elems) => elems.clone(),
         Array(elems) => elems.clone(),
@@ -1110,6 +1118,18 @@ where
             name: name.clone(),
             sv_type: sv_type.clone(),
         },
+        NodePayload::ExtInoutDrive {
+            net,
+            drive,
+            output_enable,
+        } => NodePayload::ExtInoutDrive {
+            net: net.clone(),
+            drive: map((0, *drive)),
+            output_enable: map((1, *output_enable)),
+        },
+        NodePayload::ExtInoutPort { .. }
+        | NodePayload::ExtInoutRead { .. }
+        | NodePayload::ExtInstantiationInout { .. } => payload.clone(),
         NodePayload::OutputPort { name, arg, sv_type } => NodePayload::OutputPort {
             name: name.clone(),
             arg: map((0, *arg)),

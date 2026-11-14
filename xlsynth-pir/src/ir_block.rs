@@ -6,11 +6,20 @@ use std::ops::{Deref, DerefMut};
 
 use crate::ir::{Fn, Instantiation, Node, NodeGraph, NodePayload, NodeRef, Register, Type};
 
-/// One port in declaration order; a clock is not a graph value.
+/// A block-local electrical net referenced by port nodes, child bindings, and
+/// local accesses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InoutNet {
+    pub name: String,
+    pub ty: Type,
+}
+
+/// One interface port in declaration order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockPort {
     Input(NodeRef),
     Output(NodeRef),
+    Inout(NodeRef),
     Clock(String),
 }
 
@@ -31,6 +40,7 @@ pub struct BlockReset {
 pub struct Block {
     pub graph: NodeGraph,
     pub ports: Vec<BlockPort>,
+    pub inout_nets: Vec<InoutNet>,
     pub reset: Option<BlockReset>,
     pub registers: Vec<Register>,
     pub instantiations: Vec<Instantiation>,
@@ -67,7 +77,12 @@ impl Block {
         if function.nodes.iter().any(|node| {
             matches!(
                 node.payload,
-                NodePayload::InputPort { .. } | NodePayload::OutputPort { .. }
+                NodePayload::InputPort { .. }
+                    | NodePayload::OutputPort { .. }
+                    | NodePayload::ExtInoutPort { .. }
+                    | NodePayload::ExtInoutRead { .. }
+                    | NodePayload::ExtInoutDrive { .. }
+                    | NodePayload::ExtInstantiationInout { .. }
             )
         }) {
             return Err("function already contains block port nodes".to_string());
@@ -100,6 +115,7 @@ impl Block {
         let mut block = Self {
             graph: function.graph,
             ports: Vec::new(),
+            inout_nets: Vec::new(),
             reset: None,
             registers: Vec::new(),
             instantiations: Vec::new(),
@@ -192,6 +208,7 @@ impl Block {
         Self {
             graph: NodeGraph::new(name),
             ports: Vec::new(),
+            inout_nets: Vec::new(),
             reset: None,
             registers: Vec::new(),
             instantiations: Vec::new(),
@@ -214,6 +231,25 @@ impl Block {
         })
     }
 
+    /// Iterates bidirectional pins in declaration order, including unused pins.
+    pub fn inout_ports(&self) -> impl Iterator<Item = NodeRef> + '_ {
+        self.ports.iter().filter_map(|port| match port {
+            BlockPort::Inout(node) => Some(*node),
+            _ => None,
+        })
+    }
+
+    /// Rejects an inout interface even when no graph node reads or drives it.
+    pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
+        if let Some(net) = self.inout_nets.first() {
+            return Err(format!(
+                "{backend}: ext_inout_net '{}' in '{}' requires block-to-Verilog codegen",
+                net.name, self.name
+            ));
+        }
+        self.graph.reject_inouts(backend)
+    }
+
     /// Returns the optional clock's declared name.
     pub fn clock_port_name(&self) -> Option<&str> {
         self.ports.iter().find_map(|port| match port {
@@ -222,20 +258,24 @@ impl Block {
         })
     }
 
-    /// Returns the semantic name of an input or output node.
+    /// Returns the semantic name of an input, output, or inout node.
     pub fn port_name(&self, port: NodeRef) -> &str {
         match &self.get_node(port).payload {
-            NodePayload::InputPort { name, .. } | NodePayload::OutputPort { name, .. } => name,
+            NodePayload::InputPort { name, .. }
+            | NodePayload::OutputPort { name, .. }
+            | NodePayload::ExtInoutPort { name, .. } => name,
             _ => panic!("node {} is not a data port", port.index),
         }
     }
 
-    /// Returns the external data type; an output node itself has type `()`.
+    /// Returns the external data type, including for unit-valued output and
+    /// inout nodes.
     pub fn port_type(&self, port: NodeRef) -> &Type {
         let node = self.get_node(port);
         match node.payload {
             NodePayload::InputPort { .. } => &node.ty,
             NodePayload::OutputPort { arg, .. } => self.get_node_ty(arg),
+            NodePayload::ExtInoutPort { ref port_type, .. } => port_type,
             _ => panic!("node {} is not a data port", port.index),
         }
     }
@@ -254,6 +294,17 @@ impl Block {
             .find(|port| self.port_name(*port) == name)
     }
 
+    /// Finds a bidirectional pin by its semantic port name.
+    pub fn get_inout_port(&self, name: &str) -> Option<NodeRef> {
+        self.inout_ports()
+            .find(|port| self.port_name(*port) == name)
+    }
+
+    /// Finds a block-local net by its resource name.
+    pub fn get_inout_net(&self, name: &str) -> Option<&InoutNet> {
+        self.inout_nets.iter().find(|net| net.name == name)
+    }
+
     /// Finds an output port by its semantic name.
     pub fn get_output_port(&self, name: &str) -> Option<NodeRef> {
         self.output_ports()
@@ -265,6 +316,7 @@ impl Block {
             return Err(format!("invalid block port name {name:?}"));
         }
         if self.clock_port_name() == Some(name)
+            || self.get_inout_port(name).is_some()
             || self.nodes.iter().any(|node| {
                 node.name.as_deref() == Some(name)
                     || matches!(&node.payload,
@@ -356,7 +408,9 @@ impl Block {
     /// success, ordered ports and reset references follow the reordered nodes.
     pub fn compact_and_toposort(&mut self) -> Result<(), String> {
         let port_nodes = self.ports.iter().filter_map(|port| match port {
-            BlockPort::Input(node) | BlockPort::Output(node) => Some(*node),
+            BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
+                Some(*node)
+            }
             BlockPort::Clock(_) => None,
         });
         for node in port_nodes.chain(self.reset.iter().map(|reset| reset.port)) {
@@ -395,6 +449,7 @@ impl Block {
             .iter()
             .map(|port| match port {
                 BlockPort::Input(node) => remap(*node).map(BlockPort::Input),
+                BlockPort::Inout(node) => remap(*node).map(BlockPort::Inout),
                 BlockPort::Output(node) => remap(*node).map(BlockPort::Output),
                 BlockPort::Clock(name) => Ok(BlockPort::Clock(name.clone())),
             })
@@ -540,6 +595,27 @@ mod tests {
             });
             assert!(Block::from_function(invalid, None).is_err());
         }
+    }
+
+    #[test]
+    fn compaction_preserves_an_open_inout_and_rejects_its_removal() {
+        let mut block = Parser::new(
+            r#"block pads(pin: bits[8]) {
+  unused: bits[1] = literal(value=0, id=1)
+  node: () = ext_inout_port(name=pin, id=2)
+}"#,
+        )
+        .parse_block()
+        .unwrap();
+        let before = block.get_inout_port("pin").unwrap();
+        block.get_node_mut(NodeRef { index: 1 }).payload = NodePayload::Nil;
+        block.compact_and_toposort().unwrap();
+        let after = block.get_inout_port("pin").unwrap();
+        assert_ne!(before, after);
+        assert_eq!(block.get_node(after).text_id, 2);
+        assert_eq!(block.port_type(after), &Type::Bits(8));
+        block.get_node_mut(after).payload = NodePayload::Nil;
+        assert!(block.compact_and_toposort().is_err());
     }
 
     #[test]

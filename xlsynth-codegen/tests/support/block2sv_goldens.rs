@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pretty_assertions::assert_eq;
-use xlsynth_codegen::emit_system_verilog;
+use xlsynth_codegen::{emit_system_verilog, inline_invokes_for_codegen};
 
 #[path = "golden_fixture.rs"]
 mod golden_fixture;
@@ -61,7 +61,8 @@ pub(super) fn execute_golden_fixture(fixture: &GoldenFixture) -> Result<String, 
         .parse_package()
         .map_err(|error| format!("failed to parse block IR: {error}"))
         .and_then(|package| {
-            emit_system_verilog(&package, &fixture.options)
+            inline_invokes_for_codegen(package, fixture.options.top.as_deref())
+                .and_then(|package| emit_system_verilog(&package, &fixture.options))
                 .map(|output| output.system_verilog)
                 .map_err(|error| error.to_string())
         });

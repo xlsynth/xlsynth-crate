@@ -2,9 +2,13 @@
 
 use std::collections::BTreeSet;
 
+use xlsynth_pir::block_eval::BlockEvaluator;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
+use xlsynth_pir::block_transition::lower_block_transition;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
-use xlsynth_pir::desugar_extensions::desugar_extensions_in_package;
+use xlsynth_pir::desugar_extensions::{
+    ExtensionEmitMode, desugar_extensions_in_package, emit_package_with_extension_mode,
+};
 use xlsynth_pir::ir::{Block, MemberType, NodePayload, Package, PackageMember, Type};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
@@ -890,4 +894,167 @@ fn stage_keyword_is_rejected_without_poisoning_block_resources() {
             .collect::<Vec<_>>(),
         (1..=4).map(|id| id + maximum).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn inout_builder_preserves_aggregate_ports_and_rejects_invalid_connections() {
+    let ty = Type::Tuple(vec![Box::new(Type::Bits(128)), Box::new(Type::Bits(3))]);
+    let mut cell = BlockBuilder::new("cell");
+    let contact = cell.declare_inout_net("contact", ty.clone()).unwrap();
+    let pin = cell
+        .ext_inout_port("pad", ty.clone(), Some(contact))
+        .unwrap();
+    cell.set_port_sv_type(pin, Some("pkg::pad_t")).unwrap();
+    let sense = cell.ext_inout_read(contact).unwrap();
+    cell.output_port("observed", sense).unwrap();
+    let mut package = cell.build_package("pads").unwrap();
+    let child = package.get_block("cell").unwrap();
+    let port = child.get_inout_port("pad").unwrap();
+    assert_eq!(child.port_type(port), &ty);
+    assert_eq!(child.get_node_ty(port), &Type::nil());
+    assert!(
+        matches!(&child.get_node(port).payload, NodePayload::ExtInoutPort { sv_type: Some(sv), .. } if sv == "pkg::pad_t")
+    );
+
+    let mut parent = BlockBuilder::new("parent");
+    let data = parent.input_port("data", ty.clone()).unwrap();
+    let oe = parent.input_port("oe", Type::Bits(1)).unwrap();
+    let bus = parent.declare_inout_net("bus", ty.clone()).unwrap();
+    assert!(
+        parent
+            .ext_inout_port("io", ty.clone(), Some(contact))
+            .is_err()
+    );
+    assert!(
+        parent
+            .ext_inout_port("io", Type::Bits(131), Some(bus))
+            .is_err()
+    );
+    parent.ext_inout_port("io", ty, Some(bus)).unwrap();
+    assert!(parent.ext_inout_drive(bus, data, data).is_err());
+    assert!(parent.ext_inout_drive(bus, oe, oe).is_err());
+    parent.ext_inout_drive(bus, data, oe).unwrap();
+    assert!(parent.ext_inout_drive(bus, data, oe).is_err());
+    let instance = parent.instantiate("u", child).unwrap();
+    let observed = parent.instantiation_output(instance, "observed").unwrap();
+    parent.output_port("rx", observed).unwrap();
+    assert!(parent.bind_inout_net(instance, "pad", contact).is_err());
+    parent.bind_inout_net(instance, "pad", bus).unwrap();
+    assert!(parent.bind_inout_net(instance, "pad", bus).is_err());
+    parent.build_into_package(&mut package).unwrap();
+    assert_pir_package(&package);
+}
+
+#[test]
+fn open_inout_keeps_its_interface_and_is_rejected_by_two_state_backends() {
+    let mut leaf = BlockBuilder::new("leaf");
+    let ty = Type::new_array(Type::Bits(8), 2);
+    let open = leaf.ext_inout_port("pad", ty.clone(), None).unwrap();
+    leaf.set_port_sv_type(open, Some("pkg::lanes")).unwrap();
+    let mut package = leaf.build_package("pins").unwrap();
+    let child = package.get_block("leaf").unwrap();
+    assert!(child.inout_nets.is_empty());
+    assert!(package.uses_pir_extensions());
+    let port = child.get_inout_port("pad").unwrap();
+    assert_eq!(child.port_type(port), &ty);
+    assert!(
+        matches!(&child.get_node(port).payload, NodePayload::ExtInoutPort { net: None, sv_type: Some(sv), .. } if sv == "pkg::lanes")
+    );
+    assert_pir_package(&package);
+    let mut parent = BlockBuilder::new("parent");
+    let instance = parent.instantiate("u", child).unwrap();
+    let private = parent.declare_inout_net("bus", ty).unwrap();
+    parent.bind_inout_net(instance, "pad", private).unwrap();
+    parent.build_into_package(&mut package).unwrap();
+    for name in ["leaf", "parent"] {
+        let error = BlockEvaluator::prepare(&package, name)
+            .err()
+            .expect("inout evaluation");
+        assert!(error.to_string().contains("inout"), "{error}");
+        let error = combinational_block_to_fn(package.get_block(name).unwrap()).unwrap_err();
+        assert!(error.contains("inout"), "{error}");
+        let error = lower_block_transition(&package, name)
+            .err()
+            .expect("inout transition projection");
+        assert!(error.contains("inout"), "{error}");
+    }
+    for mode in [
+        ExtensionEmitMode::Desugared,
+        ExtensionEmitMode::AsFfiFunction,
+    ] {
+        let error = emit_package_with_extension_mode(&package, mode).unwrap_err();
+        assert!(error.to_string().contains("inout"), "{error}");
+    }
+}
+
+#[test]
+fn inout_net_builder_shares_private_wires_and_preserves_public_aliases() {
+    let mut leaf = BlockBuilder::new("leaf");
+    let ty = Type::Bits(8);
+    let pin = leaf.declare_inout_net("pin", ty.clone()).unwrap();
+    leaf.ext_inout_port("a", ty.clone(), Some(pin)).unwrap();
+    assert!(leaf.ext_inout_port("a", ty.clone(), Some(pin)).is_err());
+    leaf.ext_inout_port("b", ty.clone(), Some(pin)).unwrap();
+    let mut package = leaf.build_package("nets").unwrap();
+    let child = package.get_block("leaf").unwrap();
+    assert_eq!(
+        child
+            .inout_ports()
+            .map(|port| child.port_name(port))
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    let mut builder = BlockBuilder::new("host");
+    let data = builder.input_port("bus", ty.clone()).unwrap();
+    let oe = builder.input_port("oe", Type::Bits(1)).unwrap();
+    let bus = builder.declare_inout_net("bus", ty.clone()).unwrap();
+    assert!(builder.declare_inout_net("bus", ty.clone()).is_err());
+    let spare = builder.declare_inout_net("spare", ty.clone()).unwrap();
+    builder.ext_inout_port("external", ty, Some(spare)).unwrap();
+    for name in ["left", "right"] {
+        let instance = builder.instantiate(name, child).unwrap();
+        builder.bind_inout_net(instance, "a", bus).unwrap();
+        builder.bind_inout_net(instance, "b", spare).unwrap();
+    }
+    builder.ext_inout_drive(bus, data, oe).unwrap();
+    let read = builder.ext_inout_read(spare).unwrap();
+    builder.output_port("sample", read).unwrap();
+    builder.build_into_package(&mut package).unwrap();
+    assert_pir_package(&package);
+}
+
+#[test]
+fn unobserved_private_net_read_is_unsupported_even_without_public_ports() {
+    let mut builder = BlockBuilder::new("probe");
+    let bus = builder.declare_inout_net("bus", Type::Bits(8)).unwrap();
+    builder.ext_inout_read(bus).unwrap();
+    let package = builder.build_package("pins").unwrap();
+    assert!(package.uses_pir_extensions());
+    let block = package.get_block("probe").unwrap();
+    assert!(block.ports.is_empty());
+    let diagnostic = "ext_inout_net 'bus' in 'probe'";
+    let error = BlockEvaluator::prepare(&package, "probe")
+        .err()
+        .expect("private net evaluation");
+    assert!(error.to_string().contains(diagnostic), "{error}");
+    assert!(
+        combinational_block_to_fn(block)
+            .unwrap_err()
+            .contains(diagnostic)
+    );
+    let transition_error = lower_block_transition(&package, &block.name)
+        .err()
+        .expect("transition projection must reject a private net");
+    assert!(transition_error.contains(diagnostic), "{transition_error}");
+    for mode in [
+        ExtensionEmitMode::Desugared,
+        ExtensionEmitMode::AsFfiFunction,
+    ] {
+        assert!(
+            emit_package_with_extension_mode(&package, mode)
+                .unwrap_err()
+                .to_string()
+                .contains(diagnostic)
+        );
+    }
 }

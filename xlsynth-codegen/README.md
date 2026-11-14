@@ -7,10 +7,11 @@ and supported foreign-function instantiations.
 
 ## Rust API
 
-Parse and verify a package with `xlsynth-pir`, then emit its selected block:
+Parse a package with `xlsynth-pir`, inline function calls in the selected
+block hierarchy, and emit SystemVerilog:
 
 ```rust
-use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
+use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog, inline_invokes_for_codegen};
 use xlsynth_pir::ir_parser::Parser;
 
 let source = r#"package public_example
@@ -21,9 +22,10 @@ top block identity(data: bits[8], result: bits[8]) {
 }
 "#;
 
-let package = Parser::new(source).parse_and_verify_package().unwrap();
-let generated = emit_system_verilog(&package, &BlockCodegenOptions::default())
-    .unwrap();
+let options = BlockCodegenOptions::default();
+let package = Parser::new(source).parse_package().unwrap();
+let package = inline_invokes_for_codegen(package, options.top.as_deref()).unwrap();
+let generated = emit_system_verilog(&package, &options).unwrap();
 assert!(generated.system_verilog.contains("module identity("));
 assert!(generated.system_verilog.contains("assign result = data;"));
 ```
@@ -56,6 +58,15 @@ struct field ordering policies are exported from the same module.
 - Synchronous and asynchronous active-high or active-low resets, load enables,
   state feedback, and optional register-generation templates.
 - Transitive block hierarchy and existing foreign-function instantiations.
+- A declared inout net supports any number of child pin connections and one local
+  driver, emitted as `assign pad = oe ? drive : 'z;`. A private net gets one
+  module-local wire. A public `ext_inout_port` without a `net` emits an internally
+  open `inout wire`. Each port carries its own optional `sv_type`. A public net
+  uses its first connected port in header order. Additional
+  aliases connect through bidirectional Verilog `tran` primitives. The emitted RTL
+  preserves four-state resolution across aliases. Synthesis support depends on the tool. See the
+  [shared bus](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir) and
+  [private request/reply](tests/goldens/block2sv/hierarchy/private_request_reply.golden.ir) examples.
 - Width-specific automatic SystemVerilog helpers for mixed-width multiplication,
   partial products, and division/modulo, using original-width operands.
 - Priority selects lowered to compact `unique casez` helpers with disjoint
@@ -84,9 +95,10 @@ precede statements in flat layout; pipeline layout groups declarations before
 the statements within each stage, retaining the register sections.
 `Layout::Pipeline` reconstructs
 feed-forward pipeline stages from the existing registers and adds stage and
-register comments without changing their timing. Designs containing register
-feedback or inconsistent stage dependencies are rejected in pipeline layout;
-they remain supported by `Layout::None`.
+register comments without changing their timing. Pipeline layout requires
+consistent stage dependencies and rejects register feedback. A selected top
+or instantiated child with an inout port or net requires `Layout::None`, including
+a block containing only an open pin or a private net used only by a child pin.
 Literals and pure constant-only expressions can be shared across stages without
 extra registers. They are emitted before their earliest consumer and are not
 required to have the same stage number as every consuming register write.
@@ -116,10 +128,12 @@ child outputs are analyzed separately. Each declared register must have exactly
 one `register_read` and one `register_write`; multiple write nodes are rejected
 instead of silently dropping an update.
 
-The emitter inlines the function body at each `invoke` node, including nested
-calls and their assertion, coverage, and trace operations. Register
-boundaries are preserved. Use an explicit external instantiation for a function
-marked `#[ffi_proto]`. Lower `map` operations and unroll `counted_for` loops
+The emitter requires the selected block and its instantiated children to be
+free of `invoke` nodes. The `block2sv` CLI runs `inline_invokes_for_codegen`
+before emission. Rust callers can run the same stage to inline nested calls,
+including their assertions, coverage, and traces, while preserving register
+boundaries. Use an explicit external instantiation for a function marked
+`#[ffi_proto]`. Lower `map` operations and unroll `counted_for` loops
 before emission.
 
 Name collisions use double-underscore suffixes such as `add_3__1`.

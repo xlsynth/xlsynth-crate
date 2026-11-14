@@ -11,6 +11,7 @@ use xlsynth_bx::{
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
+use xlsynth_pir::block_invoke_inline::inline_block_invokes_in_package;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::ir::{NodePayload, Package};
 use xlsynth_pir::ir_eval::eval_fn_in_package_value;
@@ -42,6 +43,7 @@ fn chain_outputs(
     )?;
     xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
     inline_all_blocks_in_package(&mut package)?;
+    let package = inline_block_invokes_in_package(package)?;
     let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default())?;
     simulate_chain(&rtl.system_verilog, inputs).map_err(|e| format!("{e:?}").into())
 }

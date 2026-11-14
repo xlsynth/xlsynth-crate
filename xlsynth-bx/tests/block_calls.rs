@@ -3,6 +3,7 @@
 use xlsynth_bx::{ResetBehavior, check_module, compile, empty_package, parse_module};
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
+use xlsynth_pir::block_invoke_inline::inline_block_invokes_in_package;
 use xlsynth_pir::ir::NodePayload;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
@@ -54,6 +55,7 @@ pub block pipeline(clk, en: bool, x: u8) -> (bool, u16) {
     assert_eq!(parent.instantiations.len(), 1);
     xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
     inline_all_blocks_in_package(&mut package).unwrap();
+    let package = inline_block_invokes_in_package(package).unwrap();
     let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
     let module = compile_pipeline_module(&rtl.system_verilog).unwrap();
     let mut runner = FixtureRunner::new(&module).unwrap();

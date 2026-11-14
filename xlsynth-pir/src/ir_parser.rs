@@ -2015,6 +2015,15 @@ impl Parser {
         self.parse_node_ref(node_env, ctx)
     }
 
+    /// Parses a block-local electrical net declaration.
+    fn parse_inout_net(&mut self) -> Result<ir::InoutNet, ParseError> {
+        let name = self.pop_identifier_or_error("inout net name")?;
+        self.drop_or_error("(")?;
+        let ty = self.parse_type()?;
+        self.drop_or_error(")")?;
+        Ok(ir::InoutNet { name, ty })
+    }
+
     fn parse_register_decl(
         &mut self,
         block_name: &str,
@@ -2440,6 +2449,15 @@ impl Parser {
     }
 
     fn parse_node(&mut self, node_env: &mut IrNodeEnv) -> Result<ir::Node, ParseError> {
+        self.parse_node_with_block_header(node_env, None)
+    }
+
+    /// Resolves the physical type of an inout port from its block header.
+    fn parse_node_with_block_header(
+        &mut self,
+        node_env: &mut IrNodeEnv,
+        header_ports: Option<&BTreeMap<String, ir::Type>>,
+    ) -> Result<ir::Node, ParseError> {
         log::debug!("parse_node");
         let (name_or_id, dotted_prefix_opt) =
             self.pop_node_name_or_error_with_dotted("node name")?;
@@ -2456,32 +2474,51 @@ impl Parser {
 
         let mut port_pos = None;
         let (payload, id) = match operator.as_str() {
-            "input_port" | "output_port" => {
-                let arg = if operator == "output_port" {
-                    let arg = self.parse_node_ref(node_env, "output_port value")?;
+            "input_port" | "output_port" | "ext_inout_port" | "ext_inout_read" | "ext_inout_drive" => {
+                let has_drive = operator == "ext_inout_drive";
+                let key = if matches!(operator.as_str(), "ext_inout_read" | "ext_inout_drive") { "net" } else { "name" };
+                let drive = if has_drive {
+                    let drive = self.parse_node_ref(node_env, "inout drive")?;
+                    self.drop_or_error(",")?;
+                    Some(drive)
+                } else {
+                    None
+                };
+                let arg = if has_drive || operator == "output_port" {
+                    let role = if has_drive { "inout output enable" } else { "output_port value" };
+                    let arg = self.parse_node_ref(node_env, role)?;
                     self.drop_or_error(",")?;
                     Some(arg)
                 } else {
                     None
                 };
+                let mut bound_net = None;
                 let mut name = None;
                 let mut sv_type = None;
                 let mut saw_id = false;
                 loop {
                     self.drop_whitespace_and_comments();
-                    if self.peek_is("name=") {
+                    if (key == "net" && self.peek_is("net=")) || (key == "name" && self.peek_is("name=")) {
                         if name.is_some() {
-                            return Err(ParseError::new(format!("duplicate {operator} name attribute")));
+                            return Err(ParseError::new(format!("duplicate {operator} {key} attribute")));
                         }
-                        self.drop_or_error("name=")?;
-                        name = Some(self.pop_identifier_or_error("port name")?);
+                        name = Some(self.parse_identifier_attribute(key)?);
+                    } else if operator == "ext_inout_port" && self.peek_is("net=") {
+                        if bound_net.is_some() {
+                            return Err(ParseError::new(
+                                "duplicate ext_inout_port net attribute".to_string(),
+                            ));
+                        }
+                        bound_net = Some(self.parse_identifier_attribute("net")?);
                     } else if self.peek_is("id=") {
                         if saw_id {
                             return Err(ParseError::new(format!("duplicate {operator} id attribute")));
                         }
                         maybe_id = Some(self.parse_id_attribute()?);
                         saw_id = true;
-                    } else if self.peek_is("sv_type=") {
+                    } else if self.peek_is("sv_type=")
+                        && matches!(operator.as_str(), "input_port" | "output_port" | "ext_inout_port")
+                    {
                         if sv_type.is_some() {
                             return Err(ParseError::new(format!("duplicate {operator} sv_type attribute")));
                         }
@@ -2498,14 +2535,36 @@ impl Parser {
                         break;
                     }
                 }
-                let name = name.ok_or_else(|| ParseError::new(format!("{operator} missing name attribute")))?;
+                let name = name.ok_or_else(|| ParseError::new(format!("{operator} missing {key} attribute")))?;
                 let id = maybe_id.ok_or_else(|| ParseError::new(format!("{operator} missing id attribute")))?;
                 if id == 0 {
                     return Err(ParseError::new(format!("{operator} id must be greater than zero")));
                 }
-                let payload = match arg {
-                    Some(arg) => ir::NodePayload::OutputPort { name, arg, sv_type },
-                    None => ir::NodePayload::InputPort { name, sv_type },
+                let payload = match (operator.as_str(), drive, arg) {
+                    ("ext_inout_drive", Some(drive), Some(output_enable)) => ir::NodePayload::ExtInoutDrive { net: name, drive, output_enable },
+                    ("ext_inout_port", None, None) => {
+                        if node_ty != ir::Type::nil() {
+                            return Err(ParseError::new(format!(
+                                "ext_inout_port '{name}' must have () node type, got {node_ty}"
+                            )));
+                        }
+                        let header_ports = header_ports.ok_or_else(|| {
+                            ParseError::new("ext_inout_port requires a block header".to_string())
+                        })?;
+                        let port_type = header_ports.get(&name).ok_or_else(|| {
+                            ParseError::new(format!("port '{name}' not found in block header ports"))
+                        })?;
+                        ir::NodePayload::ExtInoutPort {
+                            name,
+                            port_type: port_type.clone(),
+                            net: bound_net,
+                            sv_type,
+                        }
+                    }
+                    ("ext_inout_read", None, None) => ir::NodePayload::ExtInoutRead { net: name },
+                    ("output_port", None, Some(arg)) => ir::NodePayload::OutputPort { name, arg, sv_type },
+                    ("input_port", None, None) => ir::NodePayload::InputPort { name, sv_type },
+                    _ => unreachable!("port arity is selected by its operator"),
                 };
                 (payload, id)
             }
@@ -3179,6 +3238,43 @@ impl Parser {
                     },
                     maybe_id.unwrap(),
                 )
+            }
+            "ext_instantiation_inout" => {
+                let mut instantiation = None;
+                let mut port_name = None;
+                let mut net = None;
+                let mut saw_id = false;
+                loop {
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("instantiation=") && instantiation.is_none() {
+                        instantiation = Some(self.parse_identifier_attribute("instantiation")?);
+                    } else if self.peek_is("port_name=") && port_name.is_none() {
+                        port_name = Some(self.parse_identifier_attribute("port_name")?);
+                    } else if self.peek_is("net=") && net.is_none() {
+                        net = Some(self.parse_identifier_attribute("net")?);
+                    } else if self.peek_is("id=") && !saw_id {
+                        maybe_id = Some(self.parse_id_attribute()?);
+                        saw_id = true;
+                    } else if self.peek_is("pos=") && port_pos.is_none() {
+                        port_pos = self.maybe_drop_pos_attribute()?;
+                    } else {
+                        return Err(ParseError::new(format!("unknown or duplicate {operator} attribute")));
+                    }
+                    if !self.try_drop(",") {
+                        break;
+                    }
+                }
+                let required = |field| ParseError::new(format!("{operator} missing {field}"));
+                let id = maybe_id.ok_or_else(|| required("id"))?;
+                if id == 0 {
+                    return Err(ParseError::new(format!("{operator} id must be greater than zero")));
+                }
+                let instantiation = instantiation.ok_or_else(|| required("instantiation"))?;
+                let port_name = port_name.ok_or_else(|| required("port_name"))?;
+                let payload = ir::NodePayload::ExtInstantiationInout {
+                    instantiation, port_name, net: net.ok_or_else(|| required("net"))?,
+                };
+                (payload, id)
             }
             "instantiation_output" => {
                 let mut instantiation: Option<String> = None;
@@ -3886,12 +3982,48 @@ impl Parser {
                 block.inner_attrs.push(source);
             }
         }
+        let mut net_names = BTreeSet::new();
         let mut node_env = IrNodeEnv::new();
         let mut port_nodes = BTreeMap::new();
+        let mut add_port = |name: &str, ty: &ir::Type, port: BlockPort| -> Result<(), ParseError> {
+            let declared_ty = header_ports.get(name).ok_or_else(|| {
+                ParseError::new(format!("port '{}' not found in block header ports", name))
+            })?;
+            if declared_ty != ty {
+                return Err(ParseError::new(format!(
+                    "port '{}' type mismatch: header declares {}, node has {}",
+                    name, declared_ty, ty
+                )));
+            }
+            if port_nodes.insert(name.to_owned(), port).is_some() {
+                return Err(ParseError::new(format!(
+                    "duplicate port node '{}' in block '{}'",
+                    name, block_name
+                )));
+            }
+            Ok(())
+        };
         let mut register_names = std::collections::HashSet::new();
         let mut instantiation_names = std::collections::HashSet::new();
         while !self.try_drop("}") {
             self.drop_whitespace_and_comments();
+            let start = self.offset;
+            if self.try_drop_keyword("ext_inout_net") {
+                self.drop_whitespace_and_comments();
+                if !self.peek_is(":") {
+                    let net = self.parse_inout_net()?;
+                    if !net_names.insert(net.name.clone()) {
+                        return Err(ParseError::new(format!(
+                            "duplicate inout net '{}' in block '{block_name}'",
+                            net.name
+                        )));
+                    }
+                    block.inout_nets.push(net);
+                    continue;
+                }
+                // A declaration keyword can also be an ordinary SSA node name.
+                self.offset = start;
+            }
             if self.try_drop_keyword("reg") {
                 block
                     .registers
@@ -3904,7 +4036,7 @@ impl Parser {
                     .push(self.parse_instantiation_decl(&block_name, &mut instantiation_names)?);
                 continue;
             }
-            let node = self.parse_node(&mut node_env)?;
+            let node = self.parse_node_with_block_header(&mut node_env, Some(&header_ports))?;
             let node_ref = ir::NodeRef {
                 index: block.nodes.len(),
             };
@@ -3934,6 +4066,9 @@ impl Parser {
                 ir::NodePayload::InputPort { name, .. } => {
                     Some((name, &node.ty, BlockPort::Input(node_ref)))
                 }
+                ir::NodePayload::ExtInoutPort {
+                    name, port_type, ..
+                } => Some((name, port_type, BlockPort::Inout(node_ref))),
                 ir::NodePayload::OutputPort { name, arg, .. } => {
                     if node.ty != ir::Type::nil() {
                         return Err(ParseError::new(format!(
@@ -3946,21 +4081,7 @@ impl Parser {
                 _ => None,
             };
             if let Some((name, ty, port)) = port {
-                let declared_ty = header_ports.get(name).ok_or_else(|| {
-                    ParseError::new(format!("port '{}' not found in block header ports", name))
-                })?;
-                if declared_ty != ty {
-                    return Err(ParseError::new(format!(
-                        "port '{}' type mismatch: header declares {}, node has {}",
-                        name, declared_ty, ty
-                    )));
-                }
-                if port_nodes.insert(name.clone(), port).is_some() {
-                    return Err(ParseError::new(format!(
-                        "duplicate port node '{}' in block '{}'",
-                        name, block_name
-                    )));
-                }
+                add_port(name, ty, port)?;
             }
             node_env
                 .add(node.name.clone(), node.text_id, node_ref)
@@ -4134,7 +4255,7 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
         .ports
         .iter()
         .map(|port| match port {
-            BlockPort::Input(nr) | BlockPort::Output(nr) => {
+            BlockPort::Input(nr) | BlockPort::Output(nr) | BlockPort::Inout(nr) => {
                 format!("{}: {}", block.port_name(*nr), block.port_type(*nr))
             }
             BlockPort::Clock(name) => format!("{}: clock", name),
@@ -4152,6 +4273,9 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
             reset.asynchronous,
             reset.active_low,
         ));
+    }
+    for net in &block.inout_nets {
+        lines.push(format!("  ext_inout_net {}({})", net.name, net.ty));
     }
     for reg in &block.registers {
         if let Some(reset_value) = &reg.reset_value {
@@ -5903,6 +6027,118 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
 "#;
 
     #[test]
+    fn inout_ports_roundtrip_with_private_nets_public_ties_and_open_pins() {
+        let source = r#"package pins
+
+block leaf(pin: bits[3], observed: bits[3]) {
+  ext_inout_net pad(bits[3])
+  physical_pin: () = ext_inout_port(name=pin, net=pad, id=1)
+  sample: bits[3] = ext_inout_read(net=pad, id=2)
+  observed: () = output_port(sample, name=observed, id=3)
+}
+
+top block top_pins(pad_a: (bits[2], bits[4][3]), oe: bits[1], pad_b: (bits[2], bits[4][3]), open_pin: bits[15], seen: bits[3]) {
+  ext_inout_net bus((bits[2], bits[4][3]))
+  ext_inout_net internal(bits[3])
+  instantiation child(block=leaf, kind=block)
+  pad_b: () = ext_inout_port(name=pad_b, net=bus, id=4)
+  oe: bits[1] = input_port(name=oe, id=5)
+  typed: () = ext_inout_port(name=pad_a, net=bus, sv_type="pkg::bus_t", id=6)
+  ext_inout_port.7: () = ext_inout_port(name=open_pin, sv_type="pkg::spare_t", id=7, pos=[(0,3,1)])
+  data: bits[3] = literal(value=3, id=8)
+  drive: () = ext_inout_drive(data, oe, net=internal, id=9)
+  bind_pin: () = ext_instantiation_inout(instantiation=child, port_name=pin, net=internal, id=10)
+  observed: bits[3] = instantiation_output(instantiation=child, port_name=observed, id=11)
+  seen: () = output_port(observed, name=seen, id=12)
+}
+"#;
+        let package = Parser::new(source).parse_and_validate_package().unwrap();
+        assert_eq!(package.to_string(), source);
+    }
+
+    #[test]
+    fn open_inout_port_requires_only_a_header_type_and_marks_the_package_as_extended() {
+        let source = r#"package pins
+
+top block pads(io: bits[129]) {
+  exposed: () = ext_inout_port(name=io, id=1)
+}
+"#;
+        let package = Parser::new(source).parse_and_validate_package().unwrap();
+        let block = package.get_block("pads").unwrap();
+        let pin = block.get_inout_port("io").unwrap();
+        assert_eq!(block.get_node_ty(pin), &ir::Type::nil());
+        assert_eq!(block.port_type(pin), &ir::Type::Bits(129));
+        assert_eq!(block.port_name(pin), "io");
+        assert!(package.uses_pir_extensions());
+        assert_eq!(package.to_string(), source);
+    }
+
+    #[test]
+    fn obsolete_inout_syntax_is_rejected() {
+        let prefix = "block dut(d: bits[1], pin: bits[1]) { d: bits[1] = input_port(name=d, id=1)";
+        for declaration in [
+            "ext_inout pin(bits[1])",
+            "ext_inout_net bus(bits[1], ports=[pin])",
+            "s: bits[1] = ext_inout_port(d, d, name=pin, id=2)",
+        ] {
+            let source = format!("{prefix} {declaration} }}");
+            assert!(Parser::new(&source).parse_block().is_err(), "{source}");
+        }
+
+        for attribute in ["ports=[]", r#"sv_type="legacy::net_t""#] {
+            let source = format!("block dut() {{ ext_inout_net bus(bits[1], {attribute}) }}");
+            assert!(Parser::new(&source).parse_block().is_err(), "{source}");
+        }
+
+        for access in [
+            "s: bits[1] = ext_inout_port_input(name=pin, id=2)",
+            "w: () = ext_inout_port_output(d, d, name=pin, id=2)",
+            "w: () = ext_instantiation_inout_input(d, d, instantiation=u, port_name=p, id=2)",
+            "s: bits[1] = ext_instantiation_inout_output(instantiation=u, port_name=p, id=2)",
+            "b: () = ext_instantiation_inout(instantiation=u, port_name=p, parent_port=pin, id=2)",
+        ] {
+            let source = format!(
+                "{prefix} ext_inout_net bus(bits[1]) instantiation u(block=leaf, kind=block) pin: () = ext_inout_port(name=pin, net=bus, id=3) {access} }}"
+            );
+            assert!(Parser::new(&source).parse_block().is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn inout_declaration_keywords_are_still_valid_node_names() {
+        for name in ["ext_inout", "ext_inout_net"] {
+            let input = format!(
+                "block ordinary({name}: bits[1]) {{\n  {name}: bits[1] = input_port(name={name}, id=1)\n}}"
+            );
+            let parsed = Parser::new(&input).parse_block().unwrap();
+            assert_eq!(emit_block(&parsed, false), input);
+        }
+    }
+
+    #[test]
+    fn inout_port_requires_a_unique_matching_header_and_well_formed_attributes() {
+        for body in [
+            "a: () = ext_inout_port(name=other, id=1)",
+            "a: () = ext_inout_port(name=pin, id=1) b: () = ext_inout_port(name=pin, id=2)",
+            "a: () = ext_inout_port(name=pin, id=1) b: bits[1] = input_port(name=pin, id=2)",
+            "a: bits[1] = ext_inout_port(name=pin, id=1)",
+            "a: () = ext_inout_port(net=bus, id=1)",
+            "a: () = ext_inout_port(name=pin, port_type=bits[1], id=1)",
+            "a: () = ext_inout_port(name=pin, net=bus, net=other, id=1)",
+            r#"a: () = ext_inout_port(name=pin, sv_type="A", sv_type="B", id=1)"#,
+            "a: () = ext_inout_port(name=pin, id=1) x: bits[1] = ext_inout_read(name=pin, id=2)",
+            r#"a: () = ext_inout_port(name=pin, id=1) x: bits[1] = ext_inout_read(net=pin, sv_type="A", id=2)"#,
+            "ext_inout_net bus(bits[1]) ext_inout_net bus(bits[1]) a: () = ext_inout_port(name=pin, id=1)",
+        ] {
+            let block = format!("block example(pin: bits[1]) {{ {body} }}");
+            assert!(Parser::new(&block).parse_block().is_err(), "{block}");
+        }
+        let function = "fn f(x: bits[1] id=1) -> () { ret a: () = ext_inout_port(name=x, id=2) }";
+        assert!(Parser::new(function).parse_fn().is_err());
+    }
+
+    #[test]
     fn test_roundtrip_block_preserves_interleaved_ports_and_systemverilog_types() {
         let block = Parser::new(BLK_INTERLEAVED_PORTS_AND_TYPES)
             .parse_block()
@@ -5911,7 +6147,9 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
             .ports
             .iter()
             .map(|port| match port {
-                BlockPort::Input(nr) | BlockPort::Output(nr) => block.port_name(*nr),
+                BlockPort::Input(nr) | BlockPort::Output(nr) | BlockPort::Inout(nr) => {
+                    block.port_name(*nr)
+                }
                 BlockPort::Clock(name) => name,
             })
             .collect();

@@ -1028,7 +1028,7 @@ If an imported function requires an implicit token, BX reports the DSLX call pat
 
 BX can follow a direct helper call in the body of a counted loop over a nonempty literal range, such as `for (_, acc) in u32:0..u32:1 { leaf::checked(acc) }(x)`. If the body branches between helpers, the range might be empty, or the initializer could introduce an earlier effect, BX reports the call path it can verify.
 
-Lowering emits an ordinary IR `invoke` and includes the specialized function and its callees. Some functions, including `std::popcount`, contain a loop in their original IR. Consumers such as `xlsynth-codegen` that require unrolled loops need an optimization step for those bodies before RTL emission.
+Lowering emits an ordinary IR `invoke` and includes the specialized function and its callees. When writing block IR, `bx2ir` inlines calls in block bodies, including nested calls, and retains the function definitions. Rust callers passing a lowered BX package to `xlsynth-codegen` can prepare it with `xlsynth_pir::block_invoke_inline::inline_block_invokes_in_package`. Some functions, including `std::popcount`, contain a loop in their original IR. These loops also need unrolling before RTL emission.
 
 ## Clocked blocks
 

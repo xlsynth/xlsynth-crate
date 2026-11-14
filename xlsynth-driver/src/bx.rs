@@ -16,6 +16,7 @@ use xlsynth_bx::{
 };
 use xlsynth_g8r::block2sequential::optimize_and_lower_bx_block;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
+use xlsynth_pir::block_invoke_inline::inline_block_invokes_in_package;
 use xlsynth_pir::ir::{MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::parse_xls_ir_package;
 use xlsynth_pir::ir_utils::is_valid_package_name;
@@ -307,7 +308,9 @@ fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Resu
 }
 
 pub fn bx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
-    write_stdout(&compile_input(matches, config)?.to_string());
+    let package = compile_input(matches, config)?;
+    let package = inline_block_invokes_in_package(package).map_err(anyhow::Error::msg)?;
+    write_stdout(&package.to_string());
     Ok(())
 }
 

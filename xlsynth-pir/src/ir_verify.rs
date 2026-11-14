@@ -10,7 +10,10 @@ use crate::ir_deduce::deduce_graph_result_type;
 
 mod package;
 
-pub(crate) use package::{CalleeLookup, validate_fn_with};
+pub(crate) use package::{
+    CalleeLookup, validate_fn_with, verify_block_structure_in_package,
+    verify_package_inout_hierarchies, verify_package_structure,
+};
 pub use package::{InstantiationPortDirection, ValidationError as VerifyError};
 
 /// Checks the sentinel and canonical parameter nodes without checking the body.
@@ -77,8 +80,22 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
             NodePayload::Nil
             | NodePayload::Param
             | NodePayload::Literal(_)
-            | NodePayload::InputPort { .. } => {
+            | NodePayload::InputPort { .. }
+            | NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInoutRead { .. } => {
                 // Leaf nodes do not reference operands.
+            }
+            NodePayload::ExtInstantiationInout { .. } => { /* A binding names its pins. */ }
+            NodePayload::ExtInoutDrive {
+                drive,
+                output_enable,
+                ..
+            } => {
+                check(*drive, format_args!("node {} inout.drive", i))?;
+                check(
+                    *output_enable,
+                    format_args!("node {} inout.output_enable", i),
+                )?;
             }
             NodePayload::OutputPort { arg, .. } => {
                 check(*arg, format_args!("node {} output_port.arg", i))?;
@@ -417,6 +434,21 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
         NodePayload::Param | NodePayload::InputPort { .. } => {
             // The owning function or block validates the input declaration.
             Ok(())
+        }
+        NodePayload::ExtInoutPort { .. } => {
+            expect_type(&node.ty, &Type::nil(), "ext_inout_port result")
+        }
+        NodePayload::ExtInstantiationInout { .. } => {
+            expect_type(&node.ty, &Type::nil(), "ext_instantiation_inout result")
+        }
+        NodePayload::ExtInoutRead { .. } => {
+            // The block verifies the read type against its endpoint
+            // declaration.
+            Ok(())
+        }
+        NodePayload::ExtInoutDrive { output_enable, .. } => {
+            expect_type(ty(*output_enable), &Type::Bits(1), "inout output enable")?;
+            expect_type(&node.ty, &Type::nil(), "inout drive result")
         }
         NodePayload::OutputPort { .. } => expect_type(&node.ty, &Type::nil(), "output_port result"),
         NodePayload::ArraySlice {

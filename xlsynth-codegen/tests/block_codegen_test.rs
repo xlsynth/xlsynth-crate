@@ -7,13 +7,226 @@ mod cases;
 mod support;
 use cases::*;
 use std::collections::BTreeSet;
-use xlsynth_codegen::{BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog};
+use xlsynth_codegen::{
+    BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog, inline_invokes_for_codegen,
+};
 use xlsynth_pir::ir::{BlockReset, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_vastly::{
     FixtureRunner, LogicBit, Signedness, Value4, compile_combo_module, compile_pipeline_module,
     eval_combo, plan_combo_eval,
 };
+
+const SHARED_INOUT: &str = include_str!("goldens/block2sv/hierarchy/shared_inout.golden.ir");
+
+#[test]
+fn invalid_inout_bindings_fail_before_emission() {
+    let source = SHARED_INOUT.split("// OPTIONS").next().unwrap();
+    let link = "  left_link: () = ext_instantiation_inout(instantiation=left, port_name=io, net=bus, id=18)";
+    let wrong_bindings = [
+        (link, ""),
+        (
+            "instantiation=right, port_name=io",
+            "instantiation=left, port_name=io",
+        ),
+        (
+            "ext_instantiation_inout(instantiation=left",
+            "ext_instantiation_inout(instantiation=absent",
+        ),
+        ("port_name=io, net=bus", "port_name=drive, net=bus"),
+        ("port_name=io, net=bus", "port_name=io, net=left_data"),
+        ("port_name=io, net=bus", "port_name=io, net=seen"),
+        ("port_name=io, net=bus", "port_name=io, net=sample"),
+        (
+            "instantiation_input(left_data, instantiation=left, port_name=drive",
+            "instantiation_input(left_data, instantiation=left, port_name=io",
+        ),
+        ("ext_inout_drive(drive, oe", "ext_inout_drive(drive, drive"),
+    ];
+    for (from, to) in wrong_bindings {
+        let ir = source.replacen(from, to, 1);
+        assert!(
+            Parser::new(&ir).parse_and_validate_package().is_err(),
+            "accepted {from} -> {to}"
+        );
+    }
+    // The listener's ordinary output feeds a sibling's local driver on the same
+    // net.
+    let original = "  left_drive: () = instantiation_input(left_data, instantiation=left, port_name=drive, id=14)";
+    let ir = source.replace(original, "").replace(
+        "  seen: ()",
+        &format!(
+            "{}\n  seen: ()",
+            original.replace("input(left_data", "input(sample")
+        ),
+    );
+    let error = Parser::new(&ir).parse_and_validate_package().unwrap_err();
+    assert!(error.to_string().contains("combinational cycle"), "{error}");
+
+    let enable =
+        "  left_enable: () = instantiation_input(left_oe, instantiation=left, port_name=oe, id=16)";
+    let ir = source.replace(enable, "").replace(
+        "  seen: ()",
+        &format!(
+            "  bit: bits[1] = bit_slice(sample, start=0, width=1, id=25)\n{}\n  seen: ()",
+            enable.replace("input(left_oe", "input(bit")
+        ),
+    );
+    let error = Parser::new(&ir).parse_and_validate_package().unwrap_err();
+    assert!(error.to_string().contains("combinational cycle"), "{error}");
+}
+
+#[test]
+fn register_breaks_an_inout_feedback_path() {
+    let source = include_str!("goldens/block2sv/registers/registered_inout.golden.ir");
+    let ir = source.replace(
+        "register_write(data, register=data_reg",
+        "register_write(pin, register=data_reg",
+    );
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
+    let pipeline = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    assert_eq!(
+        emit_system_verilog(&package, &pipeline).unwrap_err(),
+        BlockCodegenError::NotPipeline(
+            "block `registered_pad` cannot use layout=pipeline with inout net `pin`; use layout=none"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn pipeline_layout_rejects_a_wiring_only_child() {
+    let ir = include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir");
+    let package = Parser::new(ir).parse_and_validate_package().unwrap();
+    let error = emit_system_verilog(
+        &package,
+        &BlockCodegenOptions {
+            layout: Layout::Pipeline,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        BlockCodegenError::NotPipeline(
+            "block `contact` cannot use layout=pipeline with inout net `io`; use layout=none"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn an_open_pin_requires_flat_layout() {
+    let ir =
+        "package pins\ntop block probe(io: bits[1]) { pin: () = ext_inout_port(name=io, id=1) }";
+    let package = Parser::new(ir).parse_and_validate_package().unwrap();
+    let options = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    assert_eq!(
+        emit_system_verilog(&package, &options).unwrap_err(),
+        BlockCodegenError::NotPipeline(
+            "block `probe` cannot use layout=pipeline with inout port `io`; use layout=none".into()
+        ),
+    );
+}
+
+#[test]
+fn flat_codegen_rejects_an_unused_net_or_a_lone_public_pin() {
+    for (header, declaration, reason) in [
+        ("", "ext_inout_net floating(bits[3])", "has no connections"),
+        (
+            "floating: bits[3]",
+            "ext_inout_net floating(bits[3]) p: () = ext_inout_port(name=floating, id=1)",
+            "has no connections",
+        ),
+        (
+            "pad: bits[3]",
+            "ext_inout_net floating(bits[3]) p: () = ext_inout_port(name=pad, net=floating, id=1)",
+            "is connected only to public port 'pad'. To leave the port open, omit its net attribute and remove the net declaration",
+        ),
+    ] {
+        let ir = format!("package p\ntop block unused({header}) {{ {declaration} }}");
+        let package = Parser::new(&ir).parse_package().unwrap();
+        assert_eq!(
+            emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap_err(),
+            BlockCodegenError::InvalidBlock(format!(
+                "block 'unused' violates a resource invariant: inout net 'floating' {reason}"
+            )),
+        );
+    }
+}
+
+#[test]
+fn inout_data_types_and_enables_are_checked() {
+    let single = r#"package pads
+top block cell_io(data: bits[4], oe: bits[1], io: bits[4]) {
+  ext_inout_net pin(bits[4])
+  pad: () = ext_inout_port(name=io, net=pin, id=4)
+  data: bits[4] = input_port(name=data, id=1)
+  oe: bits[1] = input_port(name=oe, id=2)
+  drive: () = ext_inout_drive(data, oe, net=pin, id=3)
+}"#;
+    Parser::new(single).parse_and_validate_package().unwrap();
+    for (old, new) in [
+        ("ext_inout_drive(data, oe,", "ext_inout_drive(data,"),
+        ("ext_inout_drive(data, oe,", "ext_inout_drive(data, oe, oe,"),
+        ("ext_inout_drive(data, oe,", "ext_inout_drive(oe, oe,"),
+        ("oe: bits[1]", "oe: bits[2]"),
+        ("io: bits[4]", "io: bits[2][2]"),
+        ("bits[4]", "bits[0]"),
+        ("bits[4]", "(token, bits[4])"),
+    ] {
+        let ir = single.replace(old, new);
+        assert!(
+            Parser::new(&ir).parse_and_validate_package().is_err(),
+            "accepted {ir}"
+        );
+    }
+    // Equal flattened widths are insufficient when binding physical ports.
+    let ir = include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir");
+    let (contact, rest) = ir.split_once("\nblock forward").unwrap();
+    let child_scalar = format!(
+        "{}\nblock forward{rest}",
+        contact.replace("bits[2][2]", "bits[4]")
+    );
+    let error = Parser::new(&child_scalar)
+        .parse_and_validate_package()
+        .unwrap_err();
+    assert!(error.to_string().contains("references net"), "{error}");
+}
+
+#[test]
+fn inout_projection_checks_only_the_selected_hierarchy() {
+    let mut package = Parser::new(SHARED_INOUT)
+        .parse_and_validate_package()
+        .unwrap();
+    let options = xlsynth_pir::block2fn::Block2FnOptions::default();
+    assert!(
+        xlsynth_pir::block2fn::block_package_to_fn(&package, &options)
+            .unwrap_err()
+            .contains("ext_inout_net")
+    );
+    let evaluation_error = xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "pads")
+        .err()
+        .expect("an inout pin cannot be evaluated");
+    assert!(evaluation_error.to_string().contains("ext_inout_net"));
+    assert!(xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "listener").is_ok());
+    assert!(
+        xlsynth_pir::block_transition::lower_block_transition(&package, "pad_cell")
+            .err()
+            .expect("an inout pin cannot be projected to a transition")
+            .contains("ext_inout_net")
+    );
+    package.set_top_block("listener").unwrap();
+    let result = xlsynth_pir::block2fn::block_package_to_fn(&package, &options).unwrap();
+    assert_eq!(result.function.params.len(), 1);
+}
 
 #[test]
 fn simple_passthrough_has_stable_exact_systemverilog() {
@@ -883,8 +1096,9 @@ top block parent(clk: clock, value: bits[8], fast: bits[8], slow: bits[8]) {
     for expression in ["add(lhs, rhs, id=20)", "identity(lhs, id=20)"] {
         let source = ir.replace("add(lhs, rhs, id=20)", expression);
         assert_stock_xls_accepts(&source);
-        let generated = emit(
-            &source,
+        let expanded = inline_invokes_for_codegen(package(&source), None).unwrap();
+        let generated = support::TestRtl::emit(
+            &expanded,
             &BlockCodegenOptions {
                 layout: Layout::Pipeline,
                 ..BlockCodegenOptions::default()
@@ -1001,6 +1215,45 @@ fn hierarchy_emits_each_child_once_before_its_parent() {
 }
 
 #[test]
+fn direct_emission_requires_inlined_calls_only_in_reachable_blocks() {
+    let ir = r#"package selected_calls
+fn passthrough(x: bits[1] id=1) -> bits[1] {
+  ret x: bits[1] = param(name=x, id=1)
+}
+block caller() {
+  zero: bits[1] = literal(value=0, id=2)
+  unused: bits[1] = invoke(zero, to_apply=passthrough, id=3)
+}
+top block parent() {
+  instantiation child(block=caller, kind=block)
+}
+block independent() {
+}
+"#;
+    let parsed = package(ir);
+    for layout in [Layout::None, Layout::Pipeline] {
+        for top in ["parent", "caller", "independent"] {
+            let options = BlockCodegenOptions {
+                layout,
+                top: Some(top.to_owned()),
+                ..Default::default()
+            };
+            let result = emit_system_verilog(&parsed, &options);
+            if top == "independent" {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    BlockCodegenError::Unsupported(
+                        "block `caller` contains an invoke of `passthrough`. Inline function calls before SystemVerilog emission.".into()
+                    )
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn child_function_dependencies_determine_whether_feedback_is_combinational() {
     let ir = r#"package invoked_child
 
@@ -1024,7 +1277,7 @@ top block parent(value: bits[8], result: bits[8]) {
   result: () = output_port(received, name=result, id=9)
 }
 "#;
-    let parsed = package(ir);
+    let parsed = inline_invokes_for_codegen(package(ir), None).unwrap();
     for layout in [Layout::None, Layout::Pipeline] {
         for top in ["parent", "child"] {
             let options = BlockCodegenOptions {
@@ -1052,7 +1305,9 @@ top block parent(value: bits[8], result: bits[8]) {
     }
     // The same wiring becomes a real combinational loop when the callee
     // uses the argument driven by its own output.
-    let cyclic = package(&ir.replace("not(value,", "not(ignored,"));
+    let cyclic =
+        inline_invokes_for_codegen(package(&ir.replace("not(value,", "not(ignored,")), None)
+            .unwrap();
     assert!(matches!(
         emit_system_verilog(&cyclic, &BlockCodegenOptions::default()),
         Err(BlockCodegenError::InvalidBlock(message))
@@ -1104,7 +1359,7 @@ top block parent(clk: clock, value: bits[8], result: bits[8]) {
     ] {
         let source = ir.replace("not(value, id=3)", expression);
         assert_stock_xls_accepts(&source);
-        let parsed = package(&source);
+        let parsed = inline_invokes_for_codegen(package(&source), None).unwrap();
         let flat = support::TestRtl::emit(&parsed, &BlockCodegenOptions::default());
         // Vastly executes one module. Drive the emitted child's feedback port
         // from its last registered output, as it is wired in the parent.
@@ -1509,10 +1764,11 @@ top block wrapper(clk: clock, lhs: bits[8], rhs: bits[8], result: bits[8]) {
 }
 "#;
     assert_stock_xls_accepts(ir);
+    let expanded = inline_invokes_for_codegen(package(ir), None).unwrap();
     for layout in [Layout::None, Layout::Pipeline] {
         for emit_asserts in [true, false] {
-            let rtl = emit(
-                ir,
+            let rtl = support::TestRtl::emit(
+                &expanded,
                 &BlockCodegenOptions {
                     layout,
                     emit_asserts,
@@ -1843,7 +2099,7 @@ fn check_combinational_output(rtl: &str, inputs: &[(&str, u32, u64)], expected: 
 /// Checks the packed result of an invoked function under both codegen layouts.
 fn check_invoke_result(ir: &str, inputs: &[(&str, u32, u64)], expected: u64) {
     assert_stock_xls_accepts(ir);
-    let parsed = package(ir);
+    let parsed = inline_invokes_for_codegen(package(ir), None).unwrap();
     let block_name = &parsed.get_top_block().unwrap().name;
     for layout in [Layout::None, Layout::Pipeline] {
         let options = BlockCodegenOptions {
@@ -2100,13 +2356,14 @@ top block caller(empty: bits[0], out: bits[0]) {
 }
 "#;
     assert_stock_xls_accepts(ir);
+    let expanded = inline_invokes_for_codegen(package(ir), None).unwrap();
     for layout in [Layout::None, Layout::Pipeline] {
         let options = BlockCodegenOptions {
             layout,
             ..BlockCodegenOptions::default()
         };
         assert_eq!(
-            emit_system_verilog(&package(ir), &options).unwrap_err(),
+            emit_system_verilog(&expanded, &options).unwrap_err(),
             BlockCodegenError::Unsupported(
                 "counted_for is not supported in `caller`; unroll loops before block2sv code generation".to_owned()
             )
