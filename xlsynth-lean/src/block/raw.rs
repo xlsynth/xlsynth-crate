@@ -20,7 +20,8 @@ use xlsynth_pir::{
 
 use crate::LeanModuleName;
 use crate::block::BlockContext;
-use crate::local_expr::{LeanOperand, LocalRenderer, RenderError, write_elaboration_limits};
+use crate::block::segments::{Segments, bundle_value, is_interface_read, projection};
+use crate::local_expr::{LeanOperand, LocalRenderer, RenderError, write_body_elaboration_limits};
 use crate::support::write_file;
 
 /// Five Lean source files relating readable execution to the raw block model.
@@ -61,7 +62,8 @@ pub struct LeanBlockBundle {
 /// Do not treat `reset` as a constructor for initialized state: registers
 /// without a reset value still depend on the supplied old state.
 pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
-    let mut module = emit_with_context(&BlockContext::new(package, block)?, "XlsBlock")?;
+    let block = BlockContext::new(package, block)?;
+    let mut module = emit_with_context(&block, "XlsBlock", Segments::new(&block).as_ref())?;
     super::library_notation::add_to_module(&mut module);
     Ok(module)
 }
@@ -78,9 +80,11 @@ pub fn write_to(
     module_name: &LeanModuleName,
     root: &Path,
 ) -> Result<PathBuf> {
+    let block = BlockContext::new(package, block)?;
     let mut source = emit_with_context(
-        &BlockContext::new(package, block)?,
+        &block,
         &module_name.lean_identifier(),
+        Segments::new(&block).as_ref(),
     )?;
     super::library_notation::add_to_module(&mut source);
     let path = module_name.source_path();
@@ -89,8 +93,12 @@ pub fn write_to(
 }
 
 /// Render the raw declarations before the caller adds file-local library names.
-pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
-    emit_block(block, namespace).with_context(|| {
+pub(super) fn emit_with_context(
+    block: &BlockContext<'_>,
+    namespace: &str,
+    segments: Option<&Segments>,
+) -> Result<String> {
+    emit_block(block, namespace, segments).with_context(|| {
         format!(
             "Lean emission of block {} in package {}",
             block.graph.name, block.package_name
@@ -104,7 +112,11 @@ pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Re
 /// each output port, whose graph node itself has the empty tuple type.
 /// The supplied namespace owns the four physical records and their accessors,
 /// including when the caller chooses a dotted module name.
-fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
+fn emit_block(
+    block: &BlockContext<'_>,
+    namespace: &str,
+    segments: Option<&Segments>,
+) -> Result<String> {
     ensure!(
         block.graph.instantiations.is_empty(),
         "block instances are outside the supported Lean subset"
@@ -151,6 +163,15 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
             matches!(node.payload, NodePayload::Assert { .. }).then_some(NodeRef { index })
         })
         .collect();
+    for (index, node) in graph.nodes.iter().enumerate() {
+        if let NodePayload::RegisterRead { register } = &node.payload {
+            ensure!(
+                graph.registers.iter().any(|decl| decl.name == *register),
+                "{}: no declaration for register {register}",
+                node_context(block, NodeRef { index })
+            );
+        }
+    }
     let names: Vec<_> = (0..graph.nodes.len())
         .map(|index| {
             let reference = NodeRef { index };
@@ -174,9 +195,20 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         comment(&graph.name),
         comment(block.package_name)
     );
-    write_elaboration_limits(
+    let largest_body = match segments {
+        None => graph.nodes.len(),
+        Some(plan) => graph
+            .registers
+            .len()
+            .max(graph.input_ports().count())
+            .max(graph.output_ports().count())
+            .max(assertions.len())
+            .max(plan.leaves.iter().map(Vec::len).max().unwrap_or(0)),
+    };
+    write_body_elaboration_limits(
         &mut source,
-        std::iter::once(&graph.graph).chain(block.helpers.iter().map(|f| &f.graph)),
+        std::iter::once((&graph.graph, largest_body))
+            .chain(block.helpers.iter().map(|f| (&f.graph, f.nodes.len()))),
     );
     if graph
         .nodes
@@ -257,41 +289,68 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         "  next : State\n\
          \x20 output : Output\n\
          \x20 assertions : Assertions\n\
-         \x20 deriving L.Repr\n\n\
-         def eval (q : State) (x : Input) : Evaluation :=\n",
+         \x20 deriving L.Repr\n\n",
     );
-
-    for reference in ir_utils::get_topological_nodes(&graph.nodes) {
-        let node = graph.get_node(reference);
-        if !matches!(node.payload, NodePayload::Nil) {
-            let context = node_context(block, reference);
-            if let NodePayload::RegisterRead { register } = &node.payload {
-                ensure!(
-                    graph.registers.iter().any(|decl| decl.name == *register),
-                    "{context}: no declaration for register {register}"
-                );
-            }
-            let ty = lean_type(&node.ty).with_context(|| context.clone())?;
-            let expression = node_expression(namespace, graph, reference, |operand| {
-                Ok(LeanOperand::Atom(names[operand.index].clone()))
-            })
-            .with_context(|| context.clone())?;
-            writeln!(source, "  -- {}", comment(&context))?;
-            writeln!(
-                source,
-                "  let {} : {ty} := {expression}",
-                names[reference.index]
-            )?;
-        }
+    if let Some(plan) = segments {
+        write_stages(&mut source, namespace, block, plan, &names)?;
     }
+    source.push_str("def eval (q : State) (x : Input) : Evaluation :=\n");
+    let entry_value = |reference| {
+        // The first cut contains old registers, input ports, or the unit
+        // value of a write/output used as a data operand.
+        node_expression(namespace, graph, reference, |_| {
+            unreachable!("entry values have no operands")
+        })
+        .with_context(|| node_context(block, reference))
+    };
+    let finished = if let Some(plan) = segments {
+        let initial = bundle_value(&plan.cuts[0], entry_value)?;
+        writeln!(
+            source,
+            "  let xls_finished := {} {initial}",
+            plan.root().name()
+        )?;
+        Some(&plan.cuts[plan.root().end])
+    } else {
+        for reference in ir_utils::get_topological_nodes(&graph.nodes) {
+            if !matches!(graph.get_node(reference).payload, NodePayload::Nil) {
+                write_node_binding(
+                    &mut source,
+                    namespace,
+                    block,
+                    reference,
+                    &names[reference.index],
+                    |arg| names[arg.index].clone(),
+                )?;
+            }
+        }
+        None
+    };
 
+    let result_operand = |reference: NodeRef| -> Result<String> {
+        match finished {
+            None => Ok(names[reference.index].clone()),
+            Some(_) if is_interface_read(&graph.get_node(reference).payload) => {
+                entry_value(reference)
+            }
+            Some(wires) => {
+                let index = wires
+                    .binary_search_by_key(&reference.index, |wire| wire.index)
+                    .ok()
+                    .with_context(|| {
+                        format!("missing result wire: {}", node_context(block, reference))
+                    })?;
+                Ok(projection(wires.len(), index, "xls_finished"))
+            }
+        }
+    };
     let next_fields = block
         .graph
         .registers
         .iter()
         .zip(writes)
         .map(|(register, reference)| {
-            let expression = register_update(block, register, reference, &names)
+            let expression = register_update(block, register, reference, result_operand)
                 .with_context(|| node_context(block, reference))?;
             Ok((identifier(&register.name)?, expression))
         })
@@ -302,7 +361,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         .map(|port| {
             Ok((
                 identifier(graph.port_name(port))?,
-                names[graph.output_value(port).index].clone(),
+                result_operand(graph.output_value(port))?,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -314,7 +373,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
             };
             Ok((
                 identifier(&ir::node_textual_id(graph, *reference))?,
-                predicate(&names[activate.index]),
+                predicate(&result_operand(activate)?),
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -415,6 +474,59 @@ fn write_helper(source: &mut String, namespace: &str, function: &ir::Fn) -> Resu
     }
     let result = function.ret_node_ref.context("helper has no return node")?;
     writeln!(source, "  n{}\n", result.index)?;
+    Ok(())
+}
+
+/// Emit each computation once in a bounded leaf, passing live values directly
+/// across its boundary. Internal stages compose two earlier definitions.
+fn write_stages(
+    source: &mut String,
+    namespace: &str,
+    block: &BlockContext<'_>,
+    plan: &Segments,
+    names: &[String],
+) -> Result<()> {
+    plan.write_definitions(source, block, |source, leaf| {
+        let incoming = &plan.cuts[leaf];
+        let value = |reference: NodeRef| match incoming
+            .binary_search_by_key(&reference.index, |r| r.index)
+        {
+            Ok(index) => projection(incoming.len(), index, "w"),
+            Err(_) => names[reference.index].clone(),
+        };
+        for &reference in &plan.leaves[leaf] {
+            write_node_binding(
+                source,
+                namespace,
+                block,
+                reference,
+                &names[reference.index],
+                value,
+            )?;
+        }
+        let result = plan.leaf_result(leaf, |reference| Ok(value(reference)))?;
+        writeln!(source, "  {result}\n")?;
+        Ok(())
+    })
+}
+
+/// Both straight-line and segmented definitions render the same typed RHS.
+fn write_node_binding(
+    source: &mut String,
+    namespace: &str,
+    block: &BlockContext<'_>,
+    reference: NodeRef,
+    name: &str,
+    operand: impl Fn(NodeRef) -> String,
+) -> Result<()> {
+    let context = node_context(block, reference);
+    let ty = lean_type(block.graph.get_node_ty(reference)).with_context(|| context.clone())?;
+    let expression = node_expression(namespace, &block.graph, reference, |arg| {
+        Ok(LeanOperand::Atom(operand(arg)))
+    })
+    .with_context(|| context.clone())?;
+    writeln!(source, "  -- {}", comment(&context))?;
+    writeln!(source, "  let {name} : {ty} := {expression}")?;
     Ok(())
 }
 
@@ -721,13 +833,13 @@ pub(crate) fn node_expression(
 
 /// Compute one next-state field with reset taking precedence over load enable.
 ///
-/// The reference must be the selected write for this register, and every entry
-/// in `names` must denote an expression evaluated from old state.
+/// The reference must be the selected write for this register. Each operand
+/// is evaluated from old state.
 fn register_update(
     block: &BlockContext<'_>,
     register: &Register,
     reference: NodeRef,
-    names: &[String],
+    operand: impl Fn(NodeRef) -> Result<String>,
 ) -> Result<String> {
     let NodePayload::RegisterWrite {
         arg,
@@ -738,15 +850,16 @@ fn register_update(
     else {
         unreachable!("register writes were selected by payload")
     };
+    let data = operand(*arg)?;
     let enabled = if let Some(enable) = load_enable {
         format!(
             "(if {} then {} else q.{})",
-            predicate(&names[enable.index]),
-            names[arg.index],
+            predicate(&operand(*enable)?),
+            data,
             identifier(&register.name)?
         )
     } else {
-        names[arg.index].clone()
+        data
     };
     if let Some(signal) = reset {
         let behavior = block
@@ -760,7 +873,7 @@ fn register_update(
             .context("reset register has no reset value")?;
         Ok(format!(
             "(if {} == (L.BitVec.ofNat 1 {}) then {} else {enabled})",
-            names[signal.index],
+            operand(*signal)?,
             u8::from(!behavior.active_low),
             LocalRenderer::Block.literal(value)
         ))

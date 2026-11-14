@@ -124,6 +124,38 @@ example : sample 1 0 = (2, 2, 2, false) := by decide
 
 #[cfg(feature = "lean-tests")]
 #[test]
+fn segmented_raw_eval_keeps_disconnected_assertion_activation() {
+    use std::fmt::Write;
+
+    let mut ir = String::from(
+        r#"package flags
+top block flags(flag: bits[1], v0: bits[8], out: bits[8]) {
+  flag: bits[1] = input_port(name=flag, id=1)
+  v0: bits[8] = input_port(name=v0, id=2)
+  active: bits[1] = not(flag, id=3)
+  tok: token = literal(value=token, id=4)
+  checked: token = assert(tok, active, message="flag set", label="flag", id=5)
+"#,
+    );
+    // Only the assertion uses active. Its public result needs the predicate
+    // after the independent data path has crossed the cut.
+    for i in 1..=160 {
+        writeln!(ir, "  v{i}: bits[8] = not(v{}, id={})", i - 1, i + 5).unwrap();
+    }
+    ir.push_str("  out: () = output_port(v160, name=out, id=166)\n}");
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    check_block(
+        &package,
+        r#"
+open XlsBlock
+#guard (assertions {} {flag := 0, v0 := 0}).checked
+#guard !(assertions {} {flag := 1, v0 := 0}).checked
+"#,
+    );
+}
+
+#[cfg(feature = "lean-tests")]
+#[test]
 fn lowering_carry_preserves_source_identity_and_port_order() {
     let package = Parser::new(
         r#"package adder

@@ -35,9 +35,10 @@ use xlsynth_pir::{
 use crate::block::{
     BlockContext,
     raw::{self as lean, LeanBlockBundle, identifier, lean_type},
+    segments::{Segments, bundle_value, is_interface_read, projection},
     source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
 };
-use crate::local_expr::{LeanOperand, LocalRenderer};
+use crate::local_expr::{LeanOperand, LocalRenderer, balanced};
 
 /// Project an element from a physical XLS tuple, whose final pair ends in unit.
 fn tuple_element(tuple: &str, index: usize) -> String {
@@ -50,6 +51,41 @@ fn tuple_value(elements: impl DoubleEndedIterator<Item = String>) -> String {
     elements.rev().fold("()".to_string(), |tail, element| {
         format!("({element}, {tail})")
     })
+}
+
+/// Small evaluators expand anonymous terms in recovered enum match arms.
+/// Segmented evaluators bind each equation once and project incoming wires.
+#[derive(Clone, Copy)]
+enum OperandScope<'a> {
+    Local {
+        inline_depth: usize,
+    },
+    Cut {
+        wires: &'a [NodeRef],
+        bundle: &'a str,
+    },
+}
+
+impl OperandScope<'_> {
+    const LOCAL: Self = Self::Local { inline_depth: 0 };
+
+    fn incoming(self, reference: NodeRef) -> Option<String> {
+        if let Self::Cut { wires, bundle } = self {
+            wires
+                .binary_search_by_key(&reference.index, |wire| wire.index)
+                .ok()
+                .map(|index| projection(wires.len(), index, bundle))
+        } else {
+            None
+        }
+    }
+
+    fn with_inline_depth(self, inline_depth: usize) -> Self {
+        match self {
+            Self::Local { .. } => Self::Local { inline_depth },
+            Self::Cut { .. } => self,
+        }
+    }
 }
 
 /// Source type annotations and collision-free names for one block or helper
@@ -101,7 +137,8 @@ pub(super) fn emit(
     interface: &StatefulInterface,
 ) -> Result<LeanBlockBundle> {
     source_names::check_type_namespaces(declarations, interface)?;
-    let raw = lean::emit_with_context(block, "XlsBlock")?;
+    let segments = Segments::new(block);
+    let raw = lean::emit_with_context(block, "XlsBlock", segments.as_ref())?;
     let bx_module = &interface.bx_module;
     let bx_namespace = if bx_module.contains(':') {
         format!("file:{bx_module}")
@@ -116,19 +153,23 @@ pub(super) fn emit(
         &bx_namespace,
         &callables,
         None,
+        segments.is_some(),
     )?;
     let mut bundle = LeanBlockBundle {
         files: vec![
             ("Generated.lean".into(), raw),
             ("ReadableTypes.lean".into(), presentation.types_module()?),
-            ("ReadableGenerated.lean".into(), presentation.executable()?),
+            (
+                "ReadableGenerated.lean".into(),
+                presentation.executable(segments.as_ref())?,
+            ),
             (
                 "ReadableRepresentation.lean".into(),
                 presentation.representation()?,
             ),
             (
                 "ReadableCorrespondence.lean".into(),
-                presentation.correspondence()?,
+                presentation.correspondence(segments.as_ref())?,
             ),
         ],
     };
@@ -152,6 +193,7 @@ impl<'a> Presentation<'a> {
             self.bx_namespace,
             self.callables,
             Some((index, function)),
+            false,
         )
     }
 
@@ -169,6 +211,7 @@ impl<'a> Presentation<'a> {
         bx_namespace: &'a str,
         callables: &'a CallableNames<'a>,
         helper: Option<(usize, &'a ir::Fn)>,
+        segmented: bool,
     ) -> Result<Self> {
         let (helper_index, helper) = helper.unzip();
         let graph: &ir::NodeGraph = match helper {
@@ -213,6 +256,9 @@ impl<'a> Presentation<'a> {
         .collect();
         if helper.is_none() {
             used.extend(["q".to_owned(), "x".to_owned()]);
+        }
+        if segmented {
+            used.extend(["w".to_owned(), "xls_finished".to_owned()]);
         }
         let names = preferred
             .into_iter()
@@ -902,36 +948,38 @@ impl<'a> Presentation<'a> {
             .with_context(|| format!("register {name} has no declaration"))
     }
 
-    /// Inline anonymous structural expressions only within the given depth
-    /// budget.
-    ///
-    /// Named nodes keep their bindings so readable equations retain graph
-    /// sharing.
-    fn operand(&self, reference: NodeRef, depth: usize) -> Result<String> {
-        let node = self.graph.get_node(reference);
-        let structural = matches!(
-            node.payload,
-            NodePayload::Literal(_) | NodePayload::Tuple(_) | NodePayload::Sel { .. }
-        );
-        if depth > 0 && structural && node.name.is_none() {
-            self.expression(reference, depth - 1)
-        } else {
-            Ok(self.names[reference.index].clone())
-        }
-    }
-
-    /// Render an operand in the caller's source or physical representation.
+    /// A projected wire is already physical. A local binding has its inferred
+    /// source type. Inline only unnamed local expressions in recovered arms.
     fn typed_operand(
         &self,
         reference: NodeRef,
         target: Option<&SourceType>,
-        depth: usize,
+        scope: OperandScope<'_>,
     ) -> Result<String> {
-        self.coerce(
-            self.node_types[reference.index].as_ref(),
-            target,
-            &self.operand(reference, depth)?,
-        )
+        if let Some(value) = scope.incoming(reference) {
+            self.convert(target, &value, false)
+        } else {
+            let node = self.graph.get_node(reference);
+            let structural = matches!(
+                node.payload,
+                NodePayload::Literal(_) | NodePayload::Tuple(_) | NodePayload::Sel { .. }
+            );
+            let value = if let OperandScope::Local {
+                inline_depth: depth @ 1..,
+            } = scope
+                && structural
+                && node.name.is_none()
+            {
+                self.expression(reference, scope.with_inline_depth(depth - 1))?
+            } else {
+                self.names[reference.index].clone()
+            };
+            self.coerce(self.node_types[reference.index].as_ref(), target, &value)
+        }
+    }
+
+    fn operand(&self, reference: NodeRef, scope: OperandScope<'_>) -> Result<String> {
+        self.typed_operand(reference, self.node_types[reference.index].as_ref(), scope)
     }
 
     /// Recognize only the physical encodings used by supported two-bit enums.
@@ -948,22 +996,36 @@ impl<'a> Presentation<'a> {
     /// Returned encodings follow selector bit order, least-significant first,
     /// rather than enum declaration order; other selector shapes return `None`.
     fn enum_selector(&self, selector: NodeRef) -> Result<Option<enum_dispatch::Dispatch<'_>>> {
-        let comparisons = if let NodePayload::Nary(NaryOp::Concat, args) =
-            &self.graph.get_node(selector).payload
+        self.local_enum_selector(selector, OperandScope::LOCAL)
+    }
+
+    /// Reconstruct the selector only when its concat, comparisons and literals
+    /// execute in this leaf. An incoming wire may have any physical value.
+    fn local_enum_selector(
+        &self,
+        selector: NodeRef,
+        scope: OperandScope<'_>,
+    ) -> Result<Option<enum_dispatch::Dispatch<'_>>> {
+        let comparisons = if scope.incoming(selector).is_none()
+            && let NodePayload::Nary(NaryOp::Concat, args) = &self.graph.get_node(selector).payload
         {
             args.iter()
                 .rev()
                 .map(|reference| {
-                    if let NodePayload::Binop(Binop::Eq, left, right) =
-                        self.graph.get_node(*reference).payload
+                    if scope.incoming(*reference).is_none()
+                        && let NodePayload::Binop(Binop::Eq, left, right) =
+                            self.graph.get_node(*reference).payload
                     {
-                        self.literal_number(left)
-                            .map(|value| (right, enum_dispatch::Comparison::LiteralFirst(value)))
-                            .or_else(|| {
-                                self.literal_number(right).map(|value| {
-                                    (left, enum_dispatch::Comparison::LiteralLast(value))
-                                })
-                            })
+                        if let Some(value) = self.literal_number(left) {
+                            scope
+                                .incoming(left)
+                                .is_none()
+                                .then_some((right, enum_dispatch::Comparison::LiteralFirst(value)))
+                        } else {
+                            self.literal_number(right)
+                                .filter(|_| scope.incoming(right).is_none())
+                                .map(|value| (left, enum_dispatch::Comparison::LiteralLast(value)))
+                        }
                     } else {
                         None
                     }
@@ -997,11 +1059,11 @@ impl<'a> Presentation<'a> {
     /// Other operations reuse the raw operator translation with explicit
     /// codecs; the generated readable evaluator never delegates to the raw
     /// evaluator.
-    fn expression(&self, reference: NodeRef, depth: usize) -> Result<String> {
+    fn expression(&self, reference: NodeRef, scope: OperandScope<'_>) -> Result<String> {
         let node = self.graph.get_node(reference);
         let target = self.node_types[reference.index].as_ref();
-        let operand = |r| self.typed_operand(r, target, depth);
-        let boolean = |r| self.typed_operand(r, Some(&SourceType::Bool), depth);
+        let operand = |r| self.typed_operand(r, target, scope);
+        let boolean = |r| self.typed_operand(r, Some(&SourceType::Bool), scope);
         match &node.payload {
             NodePayload::CountedFor {
                 init,
@@ -1014,10 +1076,10 @@ impl<'a> Presentation<'a> {
                 if !invariant_args.is_empty() {
                     step.push_str(" · ·");
                     for (arg, (_, ty)) in invariant_args.iter().zip(&signature.params[2..]) {
-                        write!(step, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
+                        write!(step, " ({})", self.typed_operand(*arg, Some(ty), scope)?)?;
                     }
                 }
-                let init = self.typed_operand(*init, Some(&signature.result), depth)?;
+                let init = self.typed_operand(*init, Some(&signature.result), scope)?;
                 let call =
                     format!("(_root_.XlsBlock.countedFor {trip_count} {stride} ({step}) ({init}))");
                 self.coerce(Some(&signature.result), target, &call)
@@ -1028,7 +1090,7 @@ impl<'a> Presentation<'a> {
                 let signature = &self.interface.helpers[to_apply];
                 let mut call = self.callables.helpers[to_apply.as_str()].clone();
                 for (arg, (_, ty)) in operands.iter().zip(&signature.params) {
-                    write!(call, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
+                    write!(call, " ({})", self.typed_operand(*arg, Some(ty), scope)?)?;
                 }
                 self.coerce(Some(&signature.result), target, &format!("({call})"))
             }
@@ -1037,7 +1099,7 @@ impl<'a> Presentation<'a> {
                 let element = self.indexed_type(ty, 1)?;
                 let values = args
                     .iter()
-                    .map(|arg| self.typed_operand(*arg, Some(element), depth))
+                    .map(|arg| self.typed_operand(*arg, Some(element), scope))
                     .collect::<Result<Vec<_>>>()?;
                 Ok(LocalRenderer::Block.vector_literal(&values))
             }
@@ -1047,10 +1109,10 @@ impl<'a> Presentation<'a> {
                 let expr =
                     indices
                         .iter()
-                        .try_fold(self.operand(*array, depth)?, |items, index| {
+                        .try_fold(self.operand(*array, scope)?, |items, index| {
                             Ok::<_, anyhow::Error>(lean::array_read(
                                 &items,
-                                &self.typed_operand(*index, None, depth)?,
+                                &self.typed_operand(*index, None, scope)?,
                             ))
                         })?;
                 self.coerce(Some(self.indexed_type(ty, indices.len())?), target, &expr)
@@ -1064,12 +1126,12 @@ impl<'a> Presentation<'a> {
                 let element = self.indexed_type(ty, indices.len())?;
                 let indices = indices
                     .iter()
-                    .map(|index| self.typed_operand(*index, None, depth))
+                    .map(|index| self.typed_operand(*index, None, scope))
                     .collect::<Result<Vec<_>>>()?;
                 Ok(lean::array_write(
-                    &self.typed_operand(*array, Some(ty), depth)?,
+                    &self.typed_operand(*array, Some(ty), scope)?,
                     &indices,
-                    &self.typed_operand(*value, Some(element), depth)?,
+                    &self.typed_operand(*value, Some(element), scope)?,
                 ))
             }
             NodePayload::RegisterRead { register } => {
@@ -1093,25 +1155,28 @@ impl<'a> Presentation<'a> {
                         target,
                         &format!(
                             "({}).{}",
-                            self.operand(*tuple, depth)?,
+                            self.operand(*tuple, scope)?,
                             identifier(&field.name)?
                         ),
                     )
                 } else if let Some(ty) = &self.node_types[tuple.index]
                     && let SourceType::Tuple { members } = self.unalias(ty)?
+                    && scope.incoming(*tuple).is_none()
                 {
                     self.coerce(
                         Some(&members[*index]),
                         target,
                         &product_element(
-                            &self.operand(*tuple, depth)?,
+                            &self.operand(*tuple, scope)?,
                             *index,
                             members.len(),
                             true,
                         ),
                     )
                 } else {
-                    let physical = self.typed_operand(*tuple, None, depth)?;
+                    // Project before decoding so an incoming positional tuple
+                    // only converts the selected field.
+                    let physical = self.typed_operand(*tuple, None, scope)?;
                     self.convert(target, &tuple_element(&physical, *index), false)
                 }
             }
@@ -1126,7 +1191,7 @@ impl<'a> Presentation<'a> {
                         .map(|(field, arg)| {
                             Ok((
                                 identifier(&field.name)?,
-                                self.typed_operand(*arg, Some(&field.source_type), depth)?,
+                                self.typed_operand(*arg, Some(&field.source_type), scope)?,
                             ))
                         })
                         .collect::<Result<Vec<_>>>()?;
@@ -1135,11 +1200,11 @@ impl<'a> Presentation<'a> {
                     let values = args
                         .iter()
                         .zip(members)
-                        .map(|(arg, ty)| self.typed_operand(*arg, Some(ty), depth))
+                        .map(|(arg, ty)| self.typed_operand(*arg, Some(ty), scope))
                         .collect::<Result<Vec<_>>>()?;
                     Ok(product_value(&values, true))
                 } else {
-                    self.raw_expression(reference, depth)
+                    self.raw_expression(reference, scope)
                 }
             }
             NodePayload::Literal(_) if target.is_some() => {
@@ -1158,7 +1223,7 @@ impl<'a> Presentation<'a> {
                         identifier(member)?
                     ))
                 } else {
-                    self.raw_expression(reference, depth)
+                    self.raw_expression(reference, scope)
                 }
             }
             NodePayload::Unop(Unop::Not, arg) if node.ty == Type::Bits(1) => {
@@ -1172,8 +1237,12 @@ impl<'a> Presentation<'a> {
                     .map(|r| boolean(*r))
                     .collect::<Result<Vec<_>>>()?;
                 let symbol = if *op == NaryOp::And { " && " } else { " || " };
-                let prefix = if *op == NaryOp::Nor { "!" } else { "" };
-                Ok(format!("{prefix}({})", values.join(symbol)))
+                let expression = balanced(&values, "", symbol);
+                if *op == NaryOp::Nor {
+                    Ok(format!("(!{expression})"))
+                } else {
+                    Ok(expression)
+                }
             }
             NodePayload::Sel {
                 selector,
@@ -1192,23 +1261,24 @@ impl<'a> Presentation<'a> {
                 cases,
                 default: Some(default),
             } => {
-                if let Some(dispatch) = self.enum_selector(*selector)? {
+                if let Some(dispatch) = self.local_enum_selector(*selector, scope)? {
+                    let arm_scope = scope.with_inline_depth(12);
                     let arms = cases
                         .iter()
                         .chain([default])
-                        .map(|arm| self.typed_operand(*arm, target, 12))
+                        .map(|arm| self.typed_operand(*arm, target, arm_scope))
                         .collect::<Result<Vec<_>>>()?;
-                    let subject = self.operand(dispatch.subject, 0)?;
+                    let subject = self.operand(dispatch.subject, scope.with_inline_depth(0))?;
                     Ok(format!(
                         "(_root_.XlsReadable.EnumDispatch.{} {subject} {})",
                         self.enum_dispatch_name(node.text_id),
                         arms.join(" ")
                     ))
                 } else {
-                    self.raw_expression(reference, depth)
+                    self.raw_expression(reference, scope)
                 }
             }
-            _ => self.raw_expression(reference, depth),
+            _ => self.raw_expression(reference, scope),
         }
     }
 
@@ -1216,9 +1286,9 @@ impl<'a> Presentation<'a> {
     /// result.
     ///
     /// A call without a source signature resolves in `XlsBlock.Helpers`.
-    fn raw_expression(&self, reference: NodeRef, depth: usize) -> Result<String> {
+    fn raw_expression(&self, reference: NodeRef, scope: OperandScope<'_>) -> Result<String> {
         let expression = lean::node_expression("XlsBlock", self.graph, reference, |operand| {
-            self.typed_operand(operand, None, depth)
+            self.typed_operand(operand, None, scope)
                 .map(LeanOperand::Expression)
         })?;
         self.convert(
@@ -1228,6 +1298,45 @@ impl<'a> Presentation<'a> {
         )
     }
 
+    fn write_binding(
+        &self,
+        out: &mut String,
+        reference: NodeRef,
+        scope: OperandScope<'_>,
+    ) -> Result<()> {
+        let ty = if let Some(ty) = &self.node_types[reference.index] {
+            self.source_type(ty)?
+        } else {
+            lean_type(&self.block().graph.get_node(reference).ty)?
+        };
+        writeln!(
+            out,
+            "  -- {}\n  let {} : {ty} := {}",
+            lean::comment(&lean::node_context(self.block(), reference)),
+            self.names[reference.index],
+            self.expression(reference, scope)?
+        )?;
+        Ok(())
+    }
+
+    /// Each leaf accepts arbitrary physical wires and returns exactly the
+    /// values used beyond its end. A join composes its two adjacent stages.
+    fn write_segments(&self, out: &mut String, segments: &Segments) -> Result<()> {
+        segments.write_definitions(out, self.block(), |out, leaf| {
+            let scope = OperandScope::Cut {
+                wires: &segments.cuts[leaf],
+                bundle: "w",
+            };
+            for &reference in &segments.leaves[leaf] {
+                self.write_binding(out, reference, scope)?;
+            }
+            let values =
+                segments.leaf_result(leaf, |wire| self.typed_operand(wire, None, scope))?;
+            writeln!(out, "  {values}\n")?;
+            Ok(())
+        })
+    }
+
     /// Emit readable clock-step equations with physical ports and assertion
     /// results.
     ///
@@ -1235,8 +1344,8 @@ impl<'a> Presentation<'a> {
     /// All equations read old state, and reset takes precedence over load
     /// enable. The selected BX block's source name becomes an abbreviation
     /// for `XlsReadable.eval` in its declaring module.
-    fn executable(&self) -> Result<String> {
-        let block = self.block;
+    fn executable(&self, segments: Option<&Segments>) -> Result<String> {
+        let block = self.block();
         let mut out = format!(
             "-- Readable execution of XLS block {}.\n-- Equations come from block IR; names and types come from checked BX.\nimport Generated\nimport ReadableTypes\n\nnamespace XlsReadable\n\n",
             lean::comment(&block.graph.name)
@@ -1280,7 +1389,7 @@ impl<'a> Presentation<'a> {
                             out,
                             "  let {} : {ty} := {}",
                             model.names[reference.index],
-                            model.expression(reference, 0)?
+                            model.expression(reference, OperandScope::LOCAL)?
                         )?;
                     }
                 }
@@ -1290,7 +1399,7 @@ impl<'a> Presentation<'a> {
                     model.typed_operand(
                         function.ret_node_ref.context("helper has no return node")?,
                         Some(&signature.result),
-                        0
+                        OperandScope::LOCAL
                     )?
                 )?;
                 if top_level {
@@ -1339,39 +1448,68 @@ impl<'a> Presentation<'a> {
   assertions : Assertions
   deriving L.Repr
 
-def eval (q : State) (x : Input) : Evaluation :=
 "#,
         );
-        for reference in ir_utils::get_topological_nodes(&block.graph.nodes) {
-            let node = block.graph.get_node(reference);
-            if !matches!(node.payload, NodePayload::Nil) {
-                let ty = if let Some(ty) = &self.node_types[reference.index] {
-                    self.source_type(ty)?
-                } else {
-                    lean_type(&node.ty)?
-                };
-                writeln!(
-                    out,
-                    "  -- {}\n  let {} : {ty} := {}",
-                    lean::comment(&lean::node_context(block, reference)),
-                    self.names[reference.index],
-                    self.expression(reference, 0)?
-                )?;
-            }
+        if let Some(segments) = segments {
+            self.write_segments(&mut out, segments)?;
         }
+        out.push_str("def eval (q : State) (x : Input) : Evaluation :=\n");
+        let finished = if let Some(segments) = segments {
+            let root = segments.root();
+            let initial = bundle_value(&segments.cuts[root.start], |reference| {
+                self.convert(
+                    self.node_types[reference.index].as_ref(),
+                    &self.expression(reference, OperandScope::LOCAL)?,
+                    true,
+                )
+            })?;
+            writeln!(out, "  let xls_finished := {} ({initial})", root.name())?;
+            Some(&segments.cuts[root.end])
+        } else {
+            for reference in ir_utils::get_topological_nodes(&block.graph.nodes) {
+                if !matches!(block.graph.get_node(reference).payload, NodePayload::Nil) {
+                    self.write_binding(&mut out, reference, OperandScope::LOCAL)?;
+                }
+            }
+            None
+        };
+        let result_operand = |reference: NodeRef, target: Option<&SourceType>| {
+            if let Some(wires) = finished {
+                if is_interface_read(&block.graph.get_node(reference).payload) {
+                    // The wrapper still has the source input and old state.
+                    // A codec round trip need not reduce on a symbolic Bool.
+                    let source = self.expression(reference, OperandScope::LOCAL)?;
+                    self.coerce(self.node_types[reference.index].as_ref(), target, &source)
+                } else {
+                    let scope = OperandScope::Cut {
+                        wires,
+                        bundle: "xls_finished",
+                    };
+                    let value = scope.incoming(reference).with_context(|| {
+                        format!(
+                            "missing result wire: {}",
+                            lean::node_context(block, reference)
+                        )
+                    })?;
+                    self.convert(target, &value, false)
+                }
+            } else {
+                self.typed_operand(reference, target, OperandScope::LOCAL)
+            }
+        };
         let next = block.graph.registers.iter().enumerate().map(|(index, register)| {
             let node = block.graph.nodes.iter().find(|n| matches!(&n.payload, NodePayload::RegisterWrite { register: name, .. } if name == &register.name)).context("checked single register write")?;
             let NodePayload::RegisterWrite { arg, load_enable, reset, .. } = &node.payload else { unreachable!() };
             let target = self.register_type(&register.name)?;
-            let value = self.typed_operand(*arg, target.as_ref(), 0)?;
+            let value = result_operand(*arg, target.as_ref())?;
             let enabled = if let Some(enable) = load_enable {
-                format!("(if {} then {value} else q.{})", self.typed_operand(*enable, Some(&SourceType::Bool), 0)?, self.register_fields[index])
+                format!("(if {} then {value} else q.{})", result_operand(*enable, Some(&SourceType::Bool))?, self.register_fields[index])
             } else { value };
             let expression = if let Some(signal) = reset {
                 let behavior = block.graph.reset.as_ref().context("checked reset behavior")?;
                 let initial = LocalRenderer::Block.literal(register.reset_value.as_ref().context("checked reset value")?);
                 let initial = self.convert(target.as_ref(), &initial, false)?;
-                let condition = self.typed_operand(*signal, Some(&SourceType::Bool), 0)?;
+                let condition = result_operand(*signal, Some(&SourceType::Bool))?;
                 let condition = if behavior.active_low { format!("!{condition}") } else { condition };
                 format!("(if {condition} then {initial} else {enabled})")
             } else { enabled };
@@ -1385,7 +1523,7 @@ def eval (q : State) (x : Input) : Evaluation :=
                 let target = Some(&self.interface.outputs[index]);
                 Ok((
                     identifier(block.graph.port_name(port))?,
-                    self.typed_operand(block.graph.output_value(port), target, 0)?,
+                    result_operand(block.graph.output_value(port), target)?,
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1407,7 +1545,7 @@ def eval (q : State) (x : Input) : Evaluation :=
                         block.source_graph(reference),
                         reference,
                     ))?,
-                    self.typed_operand(activate, Some(&SourceType::Bool), 0)?,
+                    result_operand(activate, Some(&SourceType::Bool))?,
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1646,7 +1784,7 @@ end XlsReadable
     ///
     /// Restricting the rule to these functions avoids moving unrelated nested
     /// conditionals and reads through one another.
-    fn projection_functions(&self) -> Result<BTreeSet<String>> {
+    fn projection_functions(&self, include_tuple_projections: bool) -> Result<BTreeSet<String>> {
         let mut functions = BTreeSet::from([
             "XlsCodec.encodeBool".to_owned(),
             "XlsCodec.decodeBool".to_owned(),
@@ -1658,6 +1796,13 @@ end XlsReadable
                 declaration,
                 &name,
             )?);
+        }
+        // For wide cuts, enumerating the full tuple type for each field can
+        // exhaust the heartbeat budget as Lean compiles the segment tactic.
+        // Generic pair projections cover these unless vector indexing needs
+        // the typed projections in the final indexed rewrite.
+        if !include_tuple_projections {
+            return Ok(functions);
         }
         for graph in self.proof_graphs() {
             for node in &graph.nodes {
@@ -1680,7 +1825,7 @@ end XlsReadable
     /// the trip count. Otherwise normalize the two evaluations directly,
     /// preserving codec calls until round trips cancel. Lean must check the
     /// resulting proof. Agreement with XLS execution requires a separate check.
-    fn correspondence(&self) -> Result<String> {
+    fn correspondence(&self, segments: Option<&Segments>) -> Result<String> {
         if self
             .block
             .helpers
@@ -1694,7 +1839,7 @@ end XlsReadable
                 })
             })
         {
-            return self.loop_correspondence();
+            return self.loop_correspondence(segments);
         }
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
@@ -1740,38 +1885,8 @@ end XlsReadable
                 )?;
             }
         }
-        out.push_str("-- Arbitrary physical states and inputs: no reachability, enum legality or readiness premise.\ntheorem encoded_eval (q : State) (x : Input) :\n    encodeEvaluation (eval q x) = XlsBlock.eval (encodeState q) (encodeInput x) := by\n");
-        let mut serial = 0;
-        let patterns = self
-            .block()
-            .graph
-            .registers
-            .iter()
-            .map(|r| {
-                if let Some(ty) = self.register_type(&r.name)? {
-                    self.source_pattern(&ty, &mut serial)
-                } else {
-                    let name = format!("value{serial}");
-                    serial += 1;
-                    Ok(name)
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-        writeln!(out, "  rcases q with ⟨{}⟩", patterns.join(", "))?;
-        let interface = self.interface;
-        let inputs = self
-            .block
-            .graph
-            .input_ports()
-            .map(|port| {
-                self.source_pattern(
-                    &interface.inputs[self.block.graph.port_name(port)],
-                    &mut serial,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        writeln!(out, "  rcases x with ⟨{}⟩", inputs.join(", "))?;
-        let functions = self.projection_functions()?;
+        let functions = self
+            .projection_functions(segments.is_none() || self.proof_graphs().any(has_array_index))?;
         let indexed = self
             .proof_graphs()
             .any(has_array_index)
@@ -1801,24 +1916,24 @@ end XlsReadable
             rules.extend(dispatch_rules);
             rules.join(",\n       ")
         };
-        let mut helper_rules = String::new();
+        let mut helper_rules = Vec::new();
         for function in &self.block.helpers {
             if let Some(readable) = self.callables.helpers.get(function.name.as_str()) {
-                write!(
-                    helper_rules,
-                    ", {}, {}",
-                    readable,
-                    lean::helper_path("XlsBlock", &function.name)?
-                )?;
+                helper_rules.push(readable.clone());
+                helper_rules.push(lean::helper_path("XlsBlock", &function.name)?);
             }
         }
+        let mut normalize = String::new();
+        if !helper_rules.is_empty() {
+            writeln!(
+                normalize,
+                "  all_goals dsimp (config := {{ instances := true, failIfUnchanged := false }}) only [{}]",
+                helper_rules.join(", ")
+            )?;
+        }
         writeln!(
-            out,
+            normalize,
             r#"  all_goals
-    dsimp (config := {{ instances := true }}) only
-      [eval, XlsBlock.eval, encodeEvaluation, encodeState, encodeInput,
-       encodeOutput, encodeAssertions{helper_rules}]
-  all_goals
     -- Distribute encoders before exposing constructors and cancelling roundtrips.
     simp (config := {{ instances := true, failIfUnchanged := false }}) only
       [{structural_rules}]
@@ -1828,29 +1943,52 @@ end XlsReadable
       [XlsCodec.raw_select, raw_flag, raw_flag_zero, raw_not, raw_and, raw_or, decode_ofBool,
        {structural_rules}]"#
         )?;
+        if segments.is_some() {
+            // Cut inputs are arbitrary physical values. A source field read
+            // may project from a decoded struct, including through an alias.
+            let mut codecs = Vec::new();
+            for declaration in self.declarations {
+                let name = type_identifier(declaration.name())?;
+                match declaration {
+                    TypeDecl::Struct { .. } => codecs.push(format!("XlsCodec.{name}.decode")),
+                    TypeDecl::Alias { .. } => {
+                        codecs.push(format!("XlsCodec.{name}.encode"));
+                        codecs.push(format!("XlsCodec.{name}.decode"));
+                    }
+                    TypeDecl::Enum { .. } => {}
+                }
+            }
+            if !codecs.is_empty() {
+                writeln!(
+                    normalize,
+                    "  all_goals simp (config := {{ failIfUnchanged := false }}) only [{},\n       {structural_rules}]",
+                    codecs.join(", ")
+                )?;
+            }
+        }
         let final_encoders = self
             .declarations
             .iter()
             .filter_map(|declaration| match declaration {
                 TypeDecl::Enum { name, .. } | TypeDecl::Alias { name, .. } => {
-                    Some(identifier(name).map(|name| format!("XlsCodec.{name}.encode")))
+                    Some(type_identifier(name).map(|name| format!("XlsCodec.{name}.encode")))
                 }
                 _ => None,
             })
             .collect::<Result<Vec<_>>>()?;
         if !final_encoders.is_empty() {
             writeln!(
-                out,
+                normalize,
                 "  all_goals\n    -- Reduce aliases and enum constructors after codec round trips cancel.\n    dsimp (config := {{ instances := true, failIfUnchanged := false }}) only [{}]",
                 final_encoders.join(", ")
             )?;
         }
         // A source tuple is encoded one field at a time, while the raw
         // register update selects the entire physical tuple at once.
-        out.push_str("  all_goals try simp only [ite_prod_mk, L.ite_self]\n");
+        normalize.push_str("  all_goals try simp only [ite_prod_mk, L.ite_self]\n");
         if let Some(tactic) = indexed {
             writeln!(
-                out,
+                normalize,
                 r#"  all_goals first
     | with_reducible rfl
     | -- Compare indexed fields by mapping the projection over each vector.
@@ -1858,11 +1996,105 @@ end XlsReadable
 "#
             )?;
         } else {
-            out.push_str("  all_goals rfl\n\n");
+            normalize.push_str("  all_goals rfl\n\n");
+        }
+
+        if let Some(segments) = segments {
+            // Push a Boolean result's encoder toward its operands first.
+            // Rewriting raw gates in the opposite direction creates a
+            // decode and an encode at every level of a deep gate chain.
+            let normalize = normalize.trim_end();
+            writeln!(
+                out,
+                r#"local macro "xls_normalize" : tactic => `(tactic|
+  first
+  | rfl
+  | (simp only [{BOOLEAN_GATE_ENCODERS}] <;> done)
+  | (
+{normalize}))
+"#
+            )?;
+            self.segment_proofs(segments, &mut out, "xls_normalize")?;
+            // Keep the model opaque only while proving its public corollaries.
+            // Callers can still reduce both evaluators with rfl and decide.
+            let root = segments.root().name();
+            writeln!(
+                out,
+                "attribute [local irreducible] {root} XlsBlock.{root}\n"
+            )?;
+        }
+        out.push_str("-- Arbitrary physical states and inputs: no reachability, enum legality or readiness premise.\ntheorem encoded_eval (q : State) (x : Input) :\n    encodeEvaluation (eval q x) = XlsBlock.eval (encodeState q) (encodeInput x) := by\n");
+        self.introduce_state_and_input(&mut out)?;
+        out.push_str("  all_goals\n    dsimp (config := { instances := true }) only\n      [eval, XlsBlock.eval, encodeEvaluation, encodeState, encodeInput,\n       encodeOutput, encodeAssertions]\n");
+        if let Some(segments) = segments {
+            writeln!(
+                out,
+                "  all_goals simp (config := {{ failIfUnchanged := false }}) only [eq_{}]\n  all_goals xls_normalize\n",
+                segments.root().name()
+            )?;
+        } else {
+            writeln!(out, "{normalize}\n")?;
         }
         out.push_str(CORRESPONDENCE);
         out.push_str("\nend XlsReadable\n");
         Ok(out)
+    }
+
+    /// Prove each leaf for arbitrary values at its input cut. For a join, the
+    /// children's theorems rewrite their calls without opening either body.
+    fn segment_proofs(
+        &self,
+        segments: &Segments,
+        out: &mut String,
+        leaf_tactic: &str,
+    ) -> Result<()> {
+        for stage in segments.stages() {
+            let name = stage.name();
+            let input = segments.cut_type(self.block(), stage.start)?;
+            writeln!(
+                out,
+                "private theorem eq_{name} (w : {input}) :\n    {name} w = XlsBlock.{name} w := by\n  unfold {name} XlsBlock.{name}"
+            )?;
+            if let Some((left, right)) = stage.children() {
+                writeln!(out, "  rw [eq_{}, eq_{}]\n", left.name(), right.name())?;
+            } else {
+                writeln!(out, "  {leaf_tactic}\n")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn introduce_state_and_input(&self, out: &mut String) -> Result<()> {
+        let mut serial = 0;
+        let patterns = self
+            .block()
+            .graph
+            .registers
+            .iter()
+            .map(|r| {
+                if let Some(ty) = self.register_type(&r.name)? {
+                    self.source_pattern(&ty, &mut serial)
+                } else {
+                    let name = format!("value{serial}");
+                    serial += 1;
+                    Ok(name)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        writeln!(out, "  rcases q with ⟨{}⟩", patterns.join(", "))?;
+        let inputs = self
+            .block
+            .graph
+            .input_ports()
+            .map(|port| {
+                self.source_pattern(
+                    &self.interface.inputs[self.block.graph.port_name(port)],
+                    &mut serial,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        writeln!(out, "  rcases x with ⟨{}⟩", inputs.join(", "))?;
+        Ok(())
     }
 }
 
@@ -1887,11 +2119,14 @@ fn indexed_projection_simp(functions: &BTreeSet<String>) -> String {
     )
 }
 
-/// Distribute Boolean encoding across a conditional before reducing its arms.
+// Both correspondence strategies use these laws, but apply them in different
+// orders.
+const BOOLEAN_GATE_ENCODERS: &str =
+    "XlsCodec.encode_not, XlsCodec.encode_and, XlsCodec.encode_or, ↓ XlsCodec.encode_decodeBool";
 const BOOL_ENCODE_ITE: &str = "L.apply_ite XlsCodec.encodeBool";
 /// Cancel boolean codecs in either direction.
 const BOOL_ROUND_TRIP_RULES: [&str; 2] =
-    ["XlsCodec.decode_encodeBool", "XlsCodec.encode_decodeBool"];
+    ["XlsCodec.decode_encodeBool", "↓ XlsCodec.encode_decodeBool"];
 /// Distribute product projections and vector maps over a conditional.
 const PROJECTION_ITE_RULES: [&str; 3] = ["prod_fst_ite", "prod_snd_ite", "vector_map_ite"];
 /// Relate reads and updates in the physical array model to mapped Lean vectors.

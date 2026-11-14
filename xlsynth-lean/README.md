@@ -175,6 +175,13 @@ For example, if the destination package already has a function with the
 import's IR name, the renamed import still gets its own DSLX parameter names.
 Helpers whose source signature cannot be represented use their IR types.
 
+For large blocks the generator puts up to 160 graph computations in each
+leaf function. Each leaf reads the wires it needs and returns the values
+needed later. A balanced binary tree composes the leaves in dependency
+order. The public evaluator then assembles the outputs, register updates
+and assertions for the clock step. The correspondence proof checks each
+leaf locally and combines the results.
+
 `LeanBlockBundle::files` contains these five files in dependency order:
 
 1. `Generated.lean` - the exact raw emission of the lowered block.

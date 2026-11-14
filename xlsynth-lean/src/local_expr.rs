@@ -60,15 +60,24 @@ pub(crate) fn write_elaboration_limits<'a>(
     source: &mut String,
     graphs: impl IntoIterator<Item = &'a NodeGraph>,
 ) {
-    let mut max_nodes = 0;
+    write_body_elaboration_limits(source, graphs.into_iter().map(|g| (g, g.nodes.len())));
+}
+
+/// Segmented block models have bounded local definitions even when their
+/// combined graph is large. Aggregate types still need their instance budget.
+pub(crate) fn write_body_elaboration_limits<'a>(
+    source: &mut String,
+    graphs: impl IntoIterator<Item = (&'a NodeGraph, usize)>,
+) {
+    let mut max_body = 0;
     let mut instance_size = 1;
-    for graph in graphs {
-        max_nodes = max_nodes.max(graph.nodes.len());
+    for (graph, body_size) in graphs {
+        max_body = max_body.max(body_size);
         for n in &graph.nodes {
             instance_size = instance_size.max(packed_instance_size(&n.ty));
         }
     }
-    let depth = max_nodes.max(instance_size);
+    let depth = max_body.max(instance_size);
     if depth >= 256 {
         writeln!(
             source,

@@ -18,13 +18,13 @@ impl Presentation<'_> {
     ///
     /// Induction on the trip count lets each loop proof reuse its body helper's
     /// correspondence at every iteration, including when captures are present.
-    pub(super) fn loop_correspondence(&self) -> Result<String> {
+    pub(super) fn loop_correspondence(&self, segments: Option<&Segments>) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
         let mut eval_rules = self.enum_dispatch_laws(&mut out)?;
         self.proof_tactics(&mut out)?;
         if self.proof_graphs().any(has_array_index) {
-            let indexed = indexed_projection_simp(&self.projection_functions()?);
+            let indexed = indexed_projection_simp(&self.projection_functions(true)?);
             writeln!(
                 out,
                 "local macro \"xls_indexed_rfl\" : tactic =>\n  `(tactic| first | rfl | ({indexed}))\n"
@@ -141,6 +141,32 @@ private theorem countedFor_succ {w : L.Nat} {α : Type} (n stride : L.Nat) (f : 
         }
         let aliases = aliases.join(", ");
         let eval_close = close(self.graph);
+        let deps = if let Some(segments) = segments {
+            // Leaf inputs are arbitrary physical wires. Apply the helper and
+            // loop laws here, while the calls in each leaf are visible.
+            writeln!(
+                out,
+                r#"local macro "xls_segment_eq" : tactic => `(tactic|
+  first
+  | rfl
+  | (simp only [{BOOLEAN_GATE_ENCODERS}] <;> done)
+  | (
+    xls_normalize [{deps}]
+    all_goals first
+      | (xls_normalize [{aliases}] <;> {eval_close})
+      | (xls_codecs [{deps}] <;> (try simp only [split_prod_ite, prod_fst_ite, prod_snd_ite, L.ite_self]) <;> {eval_close})))
+"#
+            )?;
+            self.segment_proofs(segments, &mut out, "xls_segment_eq")?;
+            let root = segments.root().name();
+            writeln!(
+                out,
+                "attribute [local irreducible] {root} XlsBlock.{root}\n"
+            )?;
+            format!("eq_{root}")
+        } else {
+            deps
+        };
         writeln!(
             out,
             r#"theorem encoded_eval (q : State) (x : Input) :
