@@ -53,6 +53,83 @@ fn block_trace_observes_old_state_and_carries_simultaneous_writes() {
 }
 
 #[test]
+fn block_trace_carries_arrays_of_tuples_across_clocks() {
+    let package = Parser::new(
+        r#"package pipeline
+top block pipeline(clk: clock, data: (bits[3], bits[0], bits[65])[2], index: bits[1], empty: bits[0],
+                   selected: bits[65], old_data: (bits[3], bits[0], bits[65])[2], empty_out: bits[0]) {
+  reg saved((bits[3], bits[0], bits[65])[2])
+  data: (bits[3], bits[0], bits[65])[2] = input_port(name=data, id=1)
+  index: bits[1] = input_port(name=index, id=2)
+  empty: bits[0] = input_port(name=empty, id=3)
+  old: (bits[3], bits[0], bits[65])[2] = register_read(register=saved, id=4)
+  item: (bits[3], bits[0], bits[65]) = array_index(old, indices=[index], id=5)
+  payload: bits[65] = tuple_index(item, index=2, id=6)
+  write: () = register_write(data, register=saved, id=7)
+  empty_out: () = output_port(empty, name=empty_out, id=8)
+  old_data: () = output_port(old, name=old_data, id=9)
+  selected: () = output_port(payload, name=selected, id=10)
+}"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    let high = IrValue::parse_typed("bits[65]:0x10000000000000003").unwrap();
+    let empty = IrValue::parse_typed("bits[0]:0").unwrap();
+    let a = IrValue::make_tuple(&[
+        IrValue::make_ubits(3, 5).unwrap(),
+        empty.clone(),
+        high.clone(),
+    ]);
+    let b = IrValue::parse_typed("(bits[3]:2, bits[0]:0, bits[65]:7)").unwrap();
+    let initial = IrValue::make_array(&[a.clone(), b.clone()]).unwrap();
+    let first = IrValue::make_array(&[b.clone(), a]).unwrap();
+    let second = IrValue::make_array(&[b.clone(), b]).unwrap();
+    let trace = evaluator()
+        .eval_block_trace(
+            &package,
+            package.get_top_block().unwrap(),
+            std::slice::from_ref(&initial),
+            &[
+                vec![first.clone(), IrValue::bool(false), empty.clone()],
+                vec![second.clone(), IrValue::bool(true), empty.clone()],
+            ],
+        )
+        .unwrap();
+    assert_eq!(trace.len(), 2);
+    assert_eq!(trace[0].outputs, [high.clone(), initial, empty.clone()]);
+    assert_eq!(trace[0].next_state, std::slice::from_ref(&first));
+    assert_eq!(trace[1].outputs, [high, first, empty]);
+    assert_eq!(trace[1].next_state, [second]);
+}
+
+#[test]
+fn block_trace_rejects_equal_width_input_with_the_wrong_shape() {
+    let package = Parser::new(
+        r#"package input_shape
+top block input_shape(data: bits[1][2], out: bits[1][2]) {
+  data: bits[1][2] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    let tuple = IrValue::make_tuple(&[IrValue::bool(false), IrValue::bool(true)]);
+    let error = evaluator()
+        .eval_block_trace(
+            &package,
+            package.get_top_block().unwrap(),
+            &[],
+            &[vec![tuple]],
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "block inputs at cycle 0");
+    assert_eq!(
+        error.root_cause().to_string(),
+        "expected bits[1][2] for «data», got (bits[1], bits[1])"
+    );
+}
+
+#[test]
 fn block_trace_preserves_bits_above_the_machine_word() {
     let ir = include_str!("fixtures/block_step.ir").replace("bits[2]", "bits[65]");
     let package = Parser::new(&ir).parse_and_validate_package().unwrap();

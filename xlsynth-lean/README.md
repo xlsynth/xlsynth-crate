@@ -478,8 +478,8 @@ XLSYNTH_LEAN=/path/to/lean/bin/lean \
 For a stateful block, `LeanEvaluator::eval_block_trace` takes an initial register
 state and one input vector per clock. Each result contains the outputs observed
 on that clock and the register values carried into the next clock. Ports and
-registers use declaration order. This evaluator accepts bit-vector ports and
-registers.
+registers use declaration order. Each value has its declared XLS type, including
+arrays, tuples, and bit vectors of any supported width (even `bits[0]`).
 
 To compare generated block traces against the PIR interpreter, run:
 
