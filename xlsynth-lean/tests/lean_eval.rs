@@ -13,6 +13,7 @@ use xlsynth_ir_value::IrBits;
 use xlsynth_lean::{
     LeanError, LeanEvaluator, LeanExportOptions, LeanModuleName, export_gate_fn, write_lean_support,
 };
+use xlsynth_pir::{IrValue, ir_parser::Parser};
 
 static EVALUATOR: OnceLock<LeanEvaluator> = OnceLock::new();
 
@@ -23,6 +24,51 @@ fn evaluator() -> &'static LeanEvaluator {
             .expect("set XLSYNTH_LEAN to the actual Lean executable path");
         LeanEvaluator::new(PathBuf::from(executable)).unwrap()
     })
+}
+
+#[test]
+fn block_trace_observes_old_state_and_carries_simultaneous_writes() {
+    let package = Parser::new(include_str!("fixtures/block_step.ir"))
+        .parse_and_validate_package()
+        .unwrap();
+    let block = package.get_top_block().unwrap();
+    let word = |n| IrValue::make_ubits(2, n).unwrap();
+    let bit = |n| IrValue::make_ubits(1, n).unwrap();
+    // Starting at (2, 3), swap, reset a with enable low, then hold a.
+    // b samples old a on all three clocks, including the reset clock.
+    let inputs = vec![
+        vec![bit(1), bit(1)],
+        vec![bit(0), bit(0)],
+        vec![bit(1), bit(0)],
+    ];
+    let trace = evaluator()
+        .eval_block_trace(&package, block, &[word(2), word(3)], &inputs)
+        .unwrap();
+    let expected = [(2, [3, 2]), (3, [1, 3]), (1, [1, 1])];
+    assert_eq!(trace.len(), expected.len());
+    for (cycle, (output, next)) in trace.iter().zip(expected) {
+        assert_eq!(cycle.outputs, [word(output)]);
+        assert_eq!(cycle.next_state, next.map(word));
+    }
+}
+
+#[test]
+fn block_trace_preserves_bits_above_the_machine_word() {
+    let ir = include_str!("fixtures/block_step.ir").replace("bits[2]", "bits[65]");
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    let high = IrValue::parse_typed("bits[65]:0x10000000000000000").unwrap();
+    let low = IrValue::parse_typed("bits[65]:1").unwrap();
+    let enabled = IrValue::make_ubits(1, 1).unwrap();
+    let trace = evaluator()
+        .eval_block_trace(
+            &package,
+            package.get_top_block().unwrap(),
+            &[high.clone(), low.clone()],
+            &[vec![enabled.clone(), enabled]],
+        )
+        .unwrap();
+    assert_eq!(trace[0].outputs, std::slice::from_ref(&high));
+    assert_eq!(trace[0].next_state, [low, high]);
 }
 
 #[test]
