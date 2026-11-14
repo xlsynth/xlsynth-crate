@@ -168,6 +168,20 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         &mut source,
         std::iter::once(&graph.graph).chain(block.helpers.iter().map(|f| &f.graph)),
     );
+    if graph
+        .nodes
+        .iter()
+        .chain(block.helpers.iter().flat_map(|helper| &helper.nodes))
+        .any(|node| matches!(node.payload, NodePayload::CountedFor { .. }))
+    {
+        source.push_str(
+            "def countedFor {width : Nat} {α : Type} (tripCount stride : Nat)
+    (body : BitVec width → α → α) (init : α) : α :=
+  Nat.fold tripCount (fun iteration _ carry => body (BitVec.ofNat width (iteration * stride)) carry) init
+
+",
+        );
+    }
     for helper in &block.helpers {
         write_helper(&mut source, namespace, helper)?;
     }
@@ -499,6 +513,25 @@ pub(crate) fn node_expression(
                 write!(call, " {}", operand(*arg)?.into_argument())?;
             }
             Ok(call)
+        }
+        NodePayload::CountedFor {
+            init,
+            trip_count,
+            stride,
+            body,
+            invariant_args,
+        } => {
+            let mut step = helper_path(namespace, body)?;
+            if !invariant_args.is_empty() {
+                step.push_str(" · ·");
+                for arg in invariant_args {
+                    write!(step, " {}", operand(*arg)?.into_argument())?;
+                }
+            }
+            Ok(format!(
+                "_root_.{namespace}.countedFor {trip_count} {stride} ({step}) {}",
+                operand(*init)?.into_argument()
+            ))
         }
         NodePayload::RegisterRead { register } => Ok(format!("q.{}", identifier(register)?)),
         // These effects are collected by emit_block, including disconnected
