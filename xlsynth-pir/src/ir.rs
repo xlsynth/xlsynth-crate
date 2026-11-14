@@ -1105,6 +1105,19 @@ pub struct ResetAttribute {
     pub active_low: bool,
 }
 
+/// The original proc or function from which a block was lowered.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BlockProvenance {
+    pub name: String,
+    pub kind: BlockProvenanceKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockProvenanceKind {
+    Proc,
+    Function,
+}
+
 /// The decoded XLS foreign function metadata used for external implementations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignFunctionData {

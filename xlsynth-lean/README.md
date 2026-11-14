@@ -82,9 +82,8 @@ emitter's translation of PIR types, literals and local operations, including
 one-hot selection over tuples and arrays. Block emission reports an error for
 unsupported operations, including function calls, and for asynchronous resets.
 
-When starting from saved IR text, run native XLS verification and typed PIR
-validation on that text before selecting the block, as in the `export_block`
-example.
+When starting from saved IR text, call PIR's `Parser::parse_and_validate_package`
+before selecting the block, as in the `export_block` example.
 
 The generated `eval` takes arbitrary old registers and current inputs and
 returns outputs, next registers, and assertion results. Outputs read old
