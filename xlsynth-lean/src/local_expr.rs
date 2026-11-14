@@ -82,24 +82,25 @@ pub(crate) fn write_elaboration_limits<'a>(
 }
 
 /// Preserve operand order while keeping the Lean expression depth logarithmic.
-pub(crate) fn balanced_infix(operands: &[String], separator: &str) -> String {
-    fn emit(out: &mut String, operands: &[String], separator: &str) {
+pub(crate) fn balanced(operands: &[String], prefix: &str, separator: &str) -> String {
+    fn emit(out: &mut String, operands: &[String], prefix: &str, separator: &str) {
         match operands {
             [] => {}
             [operand] => out.push_str(operand),
             _ => {
                 let (left, right) = operands.split_at(operands.len() / 2);
                 out.push('(');
-                emit(out, left, separator);
+                out.push_str(prefix);
+                emit(out, left, prefix, separator);
                 out.push_str(separator);
-                emit(out, right, separator);
+                emit(out, right, prefix, separator);
                 out.push(')');
             }
         }
     }
 
     let mut expression = String::new();
-    emit(&mut expression, operands, separator);
+    emit(&mut expression, operands, prefix, separator);
     expression
 }
 
@@ -125,16 +126,8 @@ impl LocalRenderer {
     fn root(self) -> &'static str {
         match self {
             Self::Function => "",
-            Self::Block => "_root_.",
+            Self::Block => "L.",
         }
-    }
-
-    fn limited_offset(self, offset: &str, width: usize) -> String {
-        let min = match self {
-            Self::Function => "min",
-            Self::Block => "_root_.Nat.min",
-        };
-        format!("({min} {offset}.toNat {width})")
     }
 
     pub(crate) fn lean_type(self, ty: &Type) -> String {
@@ -163,7 +156,11 @@ impl LocalRenderer {
     pub(crate) fn vector_literal(self, fields: &[String]) -> String {
         let root = self.root();
         if fields.len() <= 64 {
-            return format!("#[{}].toVector", fields.join(", "));
+            let fields = fields.join(", ");
+            return match self {
+                Self::Function => format!("#[{fields}].toVector"),
+                Self::Block => format!("(L.Array.toVector #[{fields}])"),
+            };
         }
         let (left, right) = fields.split_at(fields.len() / 2);
         format!(
@@ -190,36 +187,92 @@ impl LocalRenderer {
         }
     }
 
+    /// Keep ordinary Lean syntax in public function models and name the library
+    /// operations explicitly in block equations.
+    fn infix(self, name: &str, symbol: &str, a: &str, b: &str) -> String {
+        match self {
+            Self::Function => format!("{a} {symbol} {b}"),
+            Self::Block => format!("L.BitVec.{name} {a} {b}"),
+        }
+    }
+
+    fn method(self, name: &str, a: &str, b: &str) -> String {
+        match self {
+            Self::Function => format!("{a}.{name} {b}"),
+            Self::Block => format!("L.BitVec.{name} {a} {b}"),
+        }
+    }
+
+    fn resize(self, name: &str, w: usize, a: &str) -> String {
+        match self {
+            Self::Function => format!("{a}.{name} {w}"),
+            Self::Block => format!("L.BitVec.{name} {w} {a}"),
+        }
+    }
+
+    fn complement(self, a: &str) -> String {
+        match self {
+            Self::Function => format!("~~~{a}"),
+            Self::Block => format!("L.BitVec.not {a}"),
+        }
+    }
+
+    fn to_nat(self, a: &str) -> String {
+        match self {
+            Self::Function => format!("{a}.toNat"),
+            Self::Block => format!("(L.BitVec.toNat {a})"),
+        }
+    }
+
+    fn limited_offset(self, a: &str, w: usize) -> String {
+        let offset = self.to_nat(a);
+        match self {
+            Self::Function => format!("(min {offset} {w})"),
+            Self::Block => format!("(L.Nat.min {offset} {w})"),
+        }
+    }
+
     /// The declared result width is significant for ordinary multiply and
     /// shifts.
     fn binary<E>(self, op: Binop, a: &str, b: &str, w: usize) -> Result<String, RenderError<E>> {
         let root = self.root();
         Ok(match op {
-            Binop::Add => format!("{a} + {b}"),
-            Binop::Sub => format!("{a} - {b}"),
-            Binop::Umul => format!("{a}.setWidth {w} * {b}.setWidth {w}"),
-            Binop::Smul => format!("{a}.signExtend {w} * {b}.signExtend {w}"),
+            Binop::Add => self.infix("add", "+", a, b),
+            Binop::Sub => self.infix("sub", "-", a, b),
+            Binop::Umul | Binop::Smul => {
+                let resize = if op == Binop::Umul {
+                    "setWidth"
+                } else {
+                    "signExtend"
+                };
+                let a = self.resize(resize, w, a);
+                let b = self.resize(resize, w, b);
+                match self {
+                    Self::Function => format!("{a} * {b}"),
+                    Self::Block => format!("L.BitVec.mul ({a}) ({b})"),
+                }
+            }
             Binop::Udiv => format!("{root}BitVec.smtUDiv {a} {b}"),
             Binop::Sdiv => format!("{IR}.sdiv {a} {b}"),
-            Binop::Umod => format!("if {b} == 0 then 0 else {a} % {b}"),
-            Binop::Smod => format!("if {b} == 0 then 0 else {a}.srem {b}"),
-            Binop::Shll => format!("{a} <<< {}", self.limited_offset(b, w)),
-            Binop::Shrl => format!("{a} >>> {}", self.limited_offset(b, w)),
-            Binop::Shra => format!("{a}.sshiftRight {}", self.limited_offset(b, w)),
+            Binop::Umod => format!("if {b} == 0 then 0 else {}", self.infix("umod", "%", a, b)),
+            Binop::Smod => format!("if {b} == 0 then 0 else {}", self.method("srem", a, b)),
+            Binop::Shll => self.infix("shiftLeft", "<<<", a, &self.limited_offset(b, w)),
+            Binop::Shrl => self.infix("ushiftRight", ">>>", a, &self.limited_offset(b, w)),
+            Binop::Shra => self.method("sshiftRight", a, &self.limited_offset(b, w)),
             Binop::Eq => format!("{root}BitVec.ofBool ({a} == {b})"),
             Binop::Ne => format!("{root}BitVec.ofBool ({a} != {b})"),
-            Binop::Ult => format!("{root}BitVec.ofBool ({a}.ult {b})"),
-            Binop::Ule => format!("{root}BitVec.ofBool ({a}.ule {b})"),
-            Binop::Ugt => format!("{root}BitVec.ofBool ({b}.ult {a})"),
-            Binop::Uge => format!("{root}BitVec.ofBool ({b}.ule {a})"),
-            Binop::Slt => format!("{root}BitVec.ofBool ({a}.slt {b})"),
-            Binop::Sle => format!("{root}BitVec.ofBool ({a}.sle {b})"),
-            Binop::Sgt => format!("{root}BitVec.ofBool ({b}.slt {a})"),
-            Binop::Sge => format!("{root}BitVec.ofBool ({b}.sle {a})"),
+            Binop::Ult => format!("{root}BitVec.ofBool ({})", self.method("ult", a, b)),
+            Binop::Ule => format!("{root}BitVec.ofBool ({})", self.method("ule", a, b)),
+            Binop::Ugt => format!("{root}BitVec.ofBool ({})", self.method("ult", b, a)),
+            Binop::Uge => format!("{root}BitVec.ofBool ({})", self.method("ule", b, a)),
+            Binop::Slt => format!("{root}BitVec.ofBool ({})", self.method("slt", a, b)),
+            Binop::Sle => format!("{root}BitVec.ofBool ({})", self.method("sle", a, b)),
+            Binop::Sgt => format!("{root}BitVec.ofBool ({})", self.method("slt", b, a)),
+            Binop::Sge => format!("{root}BitVec.ofBool ({})", self.method("sle", b, a)),
             Binop::Gate => {
                 let default = match self {
                     Self::Function => "default",
-                    Self::Block => "_root_.Inhabited.default",
+                    Self::Block => "L.Inhabited.default",
                 };
                 format!("if {a} == 1 then {b} else {default}")
             }
@@ -248,11 +301,17 @@ impl LocalRenderer {
             P::Literal(v) => self.literal(v),
             P::Tuple(rs) => tuple(&names(rs)?),
             P::Array(rs) => self.vector_literal(&names(rs)?),
-            P::ArrayConcat(rs) => balanced_infix(&names(rs)?, " ++ "),
+            P::ArrayConcat(rs) => match self {
+                Self::Function => balanced(&names(rs)?, "", " ++ "),
+                Self::Block => balanced(&names(rs)?, "L.Vector.append ", " "),
+            },
             P::TupleIndex { tuple, index } => format!("{}{}.1", name(*tuple)?, ".2".repeat(*index)),
             P::ArrayIndex { array, indices, .. } => {
                 indices.iter().try_fold(name(*array)?, |base, i| {
-                    Ok(format!("({IR}.arrayIndex {base} {}.toNat)", name(*i)?))
+                    Ok(format!(
+                        "({IR}.arrayIndex {base} {})",
+                        self.to_nat(&name(*i)?)
+                    ))
                 })?
             }
             P::ArrayUpdate {
@@ -274,8 +333,8 @@ impl LocalRenderer {
                         format!("v{depth}")
                     };
                     expr = format!(
-                        "{IR}.arrayModify {base} {}.toNat (fun {binder} => {expr})",
-                        name(*idx)?
+                        "{IR}.arrayModify {base} {} (fun {binder} => {expr})",
+                        self.to_nat(&name(*idx)?)
                     );
                 }
                 expr
@@ -285,45 +344,57 @@ impl LocalRenderer {
                 start,
                 width,
             } => format!(
-                "{IR}.arraySlice {width} {} {}.toNat",
+                "{IR}.arraySlice {width} {} {}",
                 name(*array)?,
-                name(*start)?
+                self.to_nat(&name(*start)?)
             ),
             P::Binop(op, a, b) => self.binary(*op, &name(*a)?, &name(*b)?, width(&n.ty)?)?,
             P::Unop(op, a) => {
                 let a = name(*a)?;
                 match op {
                     Unop::Identity => a,
-                    Unop::Neg => format!("-{a}"),
-                    Unop::Not => format!("~~~{a}"),
-                    Unop::Reverse => format!("{a}.reverse"),
+                    Unop::Neg => match self {
+                        Self::Function => format!("-{a}"),
+                        Self::Block => format!("L.BitVec.neg {a}"),
+                    },
+                    Unop::Not => self.complement(&a),
+                    Unop::Reverse => match self {
+                        Self::Function => format!("{a}.reverse"),
+                        Self::Block => format!("L.BitVec.reverse {a}"),
+                    },
                     Unop::OrReduce => format!("{root}BitVec.ofBool ({a} != 0)"),
                     Unop::AndReduce => {
                         format!("{root}BitVec.ofBool ({a} == {root}BitVec.allOnes _)")
                     }
-                    Unop::XorReduce => format!("{a}.cpop.setWidth 1"),
+                    Unop::XorReduce => match self {
+                        Self::Function => format!("{a}.cpop.setWidth 1"),
+                        Self::Block => format!("L.BitVec.setWidth 1 (L.BitVec.cpop {a})"),
+                    },
                 }
             }
             P::Nary(NaryOp::Concat, rs) if rs.is_empty() => "0".to_owned(),
             P::Nary(op, rs) => {
-                let sep = match op {
-                    NaryOp::And | NaryOp::Nand => " &&& ",
-                    NaryOp::Or | NaryOp::Nor => " ||| ",
-                    NaryOp::Xor => " ^^^ ",
-                    NaryOp::Concat => " ++ ",
+                let (named, infix) = match op {
+                    NaryOp::And | NaryOp::Nand => ("L.BitVec.and ", " &&& "),
+                    NaryOp::Or | NaryOp::Nor => ("L.BitVec.or ", " ||| "),
+                    NaryOp::Xor => ("L.BitVec.xor ", " ^^^ "),
+                    NaryOp::Concat => ("L.BitVec.append ", " ++ "),
                 };
-                let args = balanced_infix(&names(rs)?, sep);
+                let args = match self {
+                    Self::Function => balanced(&names(rs)?, "", infix),
+                    Self::Block => balanced(&names(rs)?, named, " "),
+                };
                 if matches!(op, NaryOp::Nand | NaryOp::Nor) {
-                    format!("~~~({args})")
+                    self.complement(&format!("({args})"))
                 } else {
                     args
                 }
             }
             P::SignExt { arg, new_bit_count } => {
-                format!("{}.signExtend {new_bit_count}", name(*arg)?)
+                self.resize("signExtend", *new_bit_count, &name(*arg)?)
             }
             P::ZeroExt { arg, new_bit_count } => {
-                format!("{}.setWidth {new_bit_count}", name(*arg)?)
+                self.resize("setWidth", *new_bit_count, &name(*arg)?)
             }
             P::BitSlice { arg, start, width } => {
                 format!("{root}BitVec.extractLsb' {start} {width} {}", name(*arg)?)
@@ -382,12 +453,13 @@ impl LocalRenderer {
                 let fallback = default
                     .or_else(|| cases.last().copied())
                     .ok_or_else(|| RenderError::Invalid("sel has no cases or default".into()))?;
-                format!(
-                    "#[{}].getD {}.toNat {}",
-                    names(cases)?.join(", "),
-                    name(*selector)?,
-                    name(fallback)?
-                )
+                let cases = names(cases)?.join(", ");
+                let index = self.to_nat(&name(*selector)?);
+                let fallback = name(fallback)?;
+                match self {
+                    Self::Function => format!("#[{cases}].getD {index} {fallback}"),
+                    Self::Block => format!("L.Array.getD #[{cases}] {index} {fallback}"),
+                }
             }
             _ => return Err(RenderError::Unsupported),
         })

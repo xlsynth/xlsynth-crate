@@ -100,10 +100,10 @@ pub(super) fn source_type_in(
     shadowed: &impl Fn(&str) -> bool,
 ) -> Result<String> {
     match ty {
-        SourceType::Bool => Ok("_root_.Bool".into()),
-        SourceType::Bits { width } => Ok(format!("_root_.BitVec {width}")),
+        SourceType::Bool => Ok("L.Bool".into()),
+        SourceType::Bits { width } => Ok(format!("L.BitVec {width}")),
         SourceType::Array { element, size } => Ok(format!(
-            "_root_.Vector ({}) {size}",
+            "L.Vector ({}) {size}",
             source_type_in(bx_namespace, element, current, shadowed)?
         )),
         SourceType::Tuple { members } => Ok(product_type(

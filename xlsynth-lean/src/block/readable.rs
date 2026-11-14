@@ -106,7 +106,7 @@ pub(super) fn emit(
         &callables,
         None,
     )?;
-    Ok(LeanBlockBundle {
+    let mut bundle = LeanBlockBundle {
         files: vec![
             ("Generated.lean".into(), raw),
             ("ReadableTypes.lean".into(), presentation.types_module()?),
@@ -120,7 +120,11 @@ pub(super) fn emit(
                 presentation.correspondence()?,
             ),
         ],
-    })
+    };
+    for (_, module) in &mut bundle.files {
+        super::library_notation::add_to_module(module);
+    }
+    Ok(bundle)
 }
 
 impl<'a> Presentation<'a> {
@@ -174,11 +178,6 @@ impl<'a> Presentation<'a> {
         }
         let reserved: BTreeSet<_> = preferred.iter().flatten().copied().collect();
         let mut used: BTreeSet<String> = [
-            "Bool",
-            "BitVec",
-            "Nat",
-            "Unit",
-            "Prod",
             "XlsCodec",
             "XlsBlock",
             "XlsReadable",
@@ -535,9 +534,7 @@ impl<'a> Presentation<'a> {
                 if item == "item" {
                     Ok(value.into())
                 } else {
-                    Ok(format!(
-                        "(_root_.Vector.map (fun item => {item}) ({value}))"
-                    ))
+                    Ok(format!("(L.Vector.map (fun item => {item}) ({value}))"))
                 }
             }
             Some(SourceType::Tuple { members }) => {
@@ -694,7 +691,7 @@ impl<'a> Presentation<'a> {
             writeln!(out, "namespace {namespace}\n")?;
             let derived = match declaration {
                 TypeDecl::Enum { name: original, .. } => Some((
-                    "Repr, DecidableEq",
+                    "L.Repr, L.DecidableEq",
                     self.write_enum(&mut out, original, &namespace, &name)?,
                 )),
                 TypeDecl::Struct { fields, .. } => {
@@ -706,7 +703,7 @@ impl<'a> Presentation<'a> {
                         fields,
                         self.declarations,
                     )?;
-                    Some(("Repr", backing))
+                    Some(("L.Repr", backing))
                 }
                 TypeDecl::Alias { target, .. } => {
                     writeln!(
@@ -730,7 +727,7 @@ impl<'a> Presentation<'a> {
             }
             writeln!(out, "end {namespace}\n")?;
         }
-        out.push_str("namespace XlsCodec\n\nattribute [local simp] Function.comp_def\n\n");
+        out.push_str("namespace XlsCodec\n\nattribute [local simp] L.Function.comp_def\n\n");
         out.push_str(&instances);
         out.push('\n');
         out.push_str(BOOL_REPRESENTATION);
@@ -749,15 +746,18 @@ impl<'a> Presentation<'a> {
                     ..
                 } => {
                     let cases = self.enum_cases(original)?;
-                    writeln!(out, "def encode : {source_type} → BitVec {width}")?;
+                    writeln!(out, "def encode : {source_type} → L.BitVec {width}")?;
                     for (member, value) in &cases {
                         writeln!(
                             out,
-                            "  | .{} => BitVec.ofNat {width} {value}",
+                            "  | .{} => L.BitVec.ofNat {width} {value}",
                             identifier(member)?
                         )?;
                     }
-                    writeln!(out, "\ndef decode (x : BitVec {width}) : {source_type} :=")?;
+                    writeln!(
+                        out,
+                        "\ndef decode (x : L.BitVec {width}) : {source_type} :="
+                    )?;
                     let (last, rest) = cases.split_last().context("empty physical enum")?;
                     for (member, value) in rest {
                         writeln!(out, "  if x = {value} then .{} else", identifier(member)?)?;
@@ -769,7 +769,7 @@ impl<'a> Presentation<'a> {
                     )?;
                     writeln!(
                         out,
-                        "@[simp] theorem encode_decode (x : BitVec {width}) : encode (decode x) = x := by\n  rcases two_bit_cases x with rfl | rfl | rfl | rfl <;> rfl\n"
+                        "@[simp] theorem encode_decode (x : L.BitVec {width}) : encode (decode x) = x := by\n  rcases two_bit_cases x with rfl | rfl | rfl | rfl <;> rfl\n"
                     )?;
                 }
                 TypeDecl::Struct { fields, .. } => {
@@ -1286,7 +1286,7 @@ impl<'a> Presentation<'a> {
             r#"  next : State
   output : Output
   assertions : Assertions
-  deriving Repr
+  deriving L.Repr
 
 def eval (q : State) (x : Input) : Evaluation :=
 "#,
@@ -1377,8 +1377,8 @@ def eval (q : State) (x : Input) : Evaluation :=
         let holds = assertions
             .iter()
             .rev()
-            .fold("True".into(), |tail, (name, _)| {
-                format!("And (checks.{name} = true) ({tail})")
+            .fold("L.True".into(), |tail, (name, _)| {
+                format!("L.And (checks.{name} = true) ({tail})")
             });
         writeln!(
             out,
@@ -1410,7 +1410,7 @@ def eval (q : State) (x : Input) : Evaluation :=
     /// Inputs and outputs use their source codecs and the block's port names.
     fn representation(&self) -> Result<String> {
         let mut out = String::from(
-            "import ReadableGenerated\n\nnamespace XlsReadable\n\nattribute [local simp] Function.comp_def\n\n",
+            "import ReadableGenerated\n\nnamespace XlsReadable\n\nattribute [local simp] L.Function.comp_def\n\n",
         );
         let encoded = self
             .block()
@@ -1719,7 +1719,7 @@ end XlsReadable
         let structural_rules = {
             let mut rules = functions
                 .into_iter()
-                .map(|f| format!("apply_ite {f}"))
+                .map(|f| format!("L.apply_ite {f}"))
                 .collect::<Vec<_>>();
             rules.extend(PROJECTION_ITE_RULES.map(str::to_owned));
             rules.extend(VECTOR_MAP_RULES.map(str::to_owned));
@@ -1787,7 +1787,7 @@ end XlsReadable
         }
         // A source tuple is encoded one field at a time, while the raw
         // register update selects the entire physical tuple at once.
-        out.push_str("  all_goals try simp only [ite_prod_mk, ite_self]\n");
+        out.push_str("  all_goals try simp only [ite_prod_mk, L.ite_self]\n");
         if let Some(tactic) = indexed {
             writeln!(
                 out,
@@ -1820,13 +1820,13 @@ fn indexed_projection_simp(functions: &BTreeSet<String>) -> String {
         .collect::<Vec<_>>()
         .join(",\n       ");
     format!(
-        "simp only [{rules},\n       vector_map_ite, Vector.map_map, Function.comp_def,\n       vector_map_append, Array.toVector, Vector.map_mk, List.map_toArray,\n       List.map_cons, List.map_nil] <;> rfl"
+        "simp only [{rules},\n       vector_map_ite, L.Vector.map_map, L.Function.comp_def,\n       vector_map_append, (L.Array.toVector ·), L.Vector.map_mk, L.List.map_toArray,\n       L.List.map_cons, L.List.map_nil] <;> rfl"
     )
 }
 
 // Both correspondence strategies use these laws, but apply them in different
 // orders.
-const BOOL_ENCODE_ITE: &str = "apply_ite XlsCodec.encodeBool";
+const BOOL_ENCODE_ITE: &str = "L.apply_ite XlsCodec.encodeBool";
 const BOOL_ROUND_TRIP_RULES: [&str; 2] =
     ["XlsCodec.decode_encodeBool", "XlsCodec.encode_decodeBool"];
 const PROJECTION_ITE_RULES: [&str; 3] = ["prod_fst_ite", "prod_snd_ite", "vector_map_ite"];
@@ -1834,10 +1834,10 @@ const VECTOR_MAP_RULES: [&str; 7] = [
     "_root_.XlsynthLean.IR.arrayIndex_eq_getD_back",
     "_root_.XlsynthLean.IR.arrayModify_eq_setIfInBounds",
     "vector_getD_back_map",
-    "Vector.map_setIfInBounds",
-    "Vector.map_map",
-    "Function.comp_def",
-    "Vector.map_id'",
+    "L.Vector.map_setIfInBounds",
+    "L.Vector.map_map",
+    "L.Function.comp_def",
+    "L.Vector.map_id'",
 ];
 
 fn codec_round_trip_rules(name: &str) -> [String; 2] {
@@ -1874,10 +1874,10 @@ fn declaration_functions(
 /// tuple needs one to distinguish it from the individual element.
 fn product_type(types: &[String], singleton_tuple: bool) -> String {
     match types {
-        [] => "_root_.Unit".into(),
-        [ty] if singleton_tuple => format!("(_root_.Prod ({ty}) _root_.Unit)"),
+        [] => "L.Unit".into(),
+        [ty] if singleton_tuple => format!("(L.Prod ({ty}) L.Unit)"),
         [ty] => ty.clone(),
-        [head, rest @ ..] => format!("(_root_.Prod ({head}) ({}))", product_type(rest, false)),
+        [head, rest @ ..] => format!("(L.Prod ({head}) ({}))", product_type(rest, false)),
     }
 }
 
@@ -1922,94 +1922,95 @@ fn physical_pattern(ty: &Type, serial: &mut usize) -> String {
 }
 
 /// Shared Boolean codecs and finite-bit lemmas used by generated source types.
-const BOOL_REPRESENTATION: &str = r#"def encodeBool (b : Bool) : BitVec 1 := BitVec.ofBool b
-def decodeBool (b : BitVec 1) : Bool := b == 1
+const BOOL_REPRESENTATION: &str = r#"def encodeBool (b : L.Bool) : L.BitVec 1 := L.BitVec.ofBool b
+def decodeBool (b : L.BitVec 1) : L.Bool := b == 1
 
-theorem one_bit_cases (b : BitVec 1) : b = 0 ∨ b = 1 := by
-  have bound := b.isLt
-  have alternatives : b.toNat = 0 ∨ b.toNat = 1 := by omega
+theorem one_bit_cases (b : L.BitVec 1) : b = 0 ∨ b = 1 := by
+  have bound := L.BitVec.isLt b
+  have alternatives : L.BitVec.toNat b = 0 ∨ L.BitVec.toNat b = 1 := by omega
   rcases alternatives with zero | one
-  · exact Or.inl (BitVec.eq_of_toNat_eq (by simpa using zero))
-  · exact Or.inr (BitVec.eq_of_toNat_eq (by simpa using one))
+  · exact L.Or.inl (L.BitVec.eq_of_toNat_eq (by simpa using zero))
+  · exact L.Or.inr (L.BitVec.eq_of_toNat_eq (by simpa using one))
 
-theorem two_bit_cases (b : BitVec 2) : b = 0 ∨ b = 1 ∨ b = 2 ∨ b = 3 := by
-  have bound := b.isLt
-  have alternatives : b.toNat = 0 ∨ b.toNat = 1 ∨ b.toNat = 2 ∨ b.toNat = 3 := by omega
+theorem two_bit_cases (b : L.BitVec 2) : b = 0 ∨ b = 1 ∨ b = 2 ∨ b = 3 := by
+  have bound := L.BitVec.isLt b
+  have alternatives : L.BitVec.toNat b = 0 ∨ L.BitVec.toNat b = 1 ∨ L.BitVec.toNat b = 2 ∨ L.BitVec.toNat b = 3 := by omega
   rcases alternatives with zero | one | two | three
-  · exact Or.inl (BitVec.eq_of_toNat_eq (by simpa using zero))
-  · exact Or.inr (Or.inl (BitVec.eq_of_toNat_eq (by simpa using one)))
-  · exact Or.inr (Or.inr (Or.inl (BitVec.eq_of_toNat_eq (by simpa using two))))
-  · exact Or.inr (Or.inr (Or.inr (BitVec.eq_of_toNat_eq (by simpa using three))))
+  · exact L.Or.inl (L.BitVec.eq_of_toNat_eq (by simpa using zero))
+  · exact L.Or.inr (L.Or.inl (L.BitVec.eq_of_toNat_eq (by simpa using one)))
+  · exact L.Or.inr (L.Or.inr (L.Or.inl (L.BitVec.eq_of_toNat_eq (by simpa using two))))
+  · exact L.Or.inr (L.Or.inr (L.Or.inr (L.BitVec.eq_of_toNat_eq (by simpa using three))))
 
-@[simp] theorem decode_encodeBool (b : Bool) : decodeBool (encodeBool b) = b := by
+@[simp] theorem decode_encodeBool (b : L.Bool) : decodeBool (encodeBool b) = b := by
   cases b <;> rfl
-@[simp] theorem encode_decodeBool (b : BitVec 1) : encodeBool (decodeBool b) = b := by
+@[simp] theorem encode_decodeBool (b : L.BitVec 1) : encodeBool (decodeBool b) = b := by
   rcases one_bit_cases b with rfl | rfl <;> rfl
-@[simp] theorem encode_not (b : Bool) : encodeBool (!b) = ~~~(encodeBool b) := by
+@[simp] theorem encode_not (b : L.Bool) : encodeBool (!b) = L.BitVec.not (encodeBool b) := by
   cases b <;> rfl
-@[simp] theorem encode_and (a b : Bool) : encodeBool (a && b) = (encodeBool a) &&& (encodeBool b) := by
+@[simp] theorem encode_and (a b : L.Bool) : encodeBool (a && b) = L.BitVec.and (encodeBool a) (encodeBool b) := by
   cases a <;> cases b <;> rfl
-@[simp] theorem encode_or (a b : Bool) : encodeBool (a || b) = (encodeBool a) ||| (encodeBool b) := by
+@[simp] theorem encode_or (a b : L.Bool) : encodeBool (a || b) = L.BitVec.or (encodeBool a) (encodeBool b) := by
   cases a <;> cases b <;> rfl
-@[simp] theorem raw_select {α : Type} (b : BitVec 1) (f t fallback : α) :
-    #[f, t].getD b.toNat fallback = (if decodeBool b then t else f) := by
+@[simp] theorem raw_select {α : Type} (b : L.BitVec 1) (f t fallback : α) :
+    L.Array.getD #[f, t] (L.BitVec.toNat b) fallback = (if decodeBool b then t else f) := by
   rcases one_bit_cases b with rfl | rfl <;> rfl
 
 "#;
 
 /// Rewrite rules aligning raw one-bit operations with readable Boolean
 /// expressions.
-const BOOL_CORRESPONDENCE: &str = r#"private theorem raw_not (b : BitVec 1) :
-    ~~~b = XlsCodec.encodeBool (!XlsCodec.decodeBool b) := by
+const BOOL_CORRESPONDENCE: &str = r#"private theorem raw_not (b : L.BitVec 1) :
+    L.BitVec.not b = XlsCodec.encodeBool (!XlsCodec.decodeBool b) := by
   simpa only [XlsCodec.encode_decodeBool] using
-    (XlsCodec.encode_not (XlsCodec.decodeBool b)).symm
+    L.Eq.symm (XlsCodec.encode_not (XlsCodec.decodeBool b))
 
-private theorem raw_and (a b : BitVec 1) :
-    a &&& b = XlsCodec.encodeBool (XlsCodec.decodeBool a && XlsCodec.decodeBool b) := by
+private theorem raw_and (a b : L.BitVec 1) :
+    L.BitVec.and a b = XlsCodec.encodeBool (XlsCodec.decodeBool a && XlsCodec.decodeBool b) := by
   simpa only [XlsCodec.encode_decodeBool] using
-    (XlsCodec.encode_and (XlsCodec.decodeBool a) (XlsCodec.decodeBool b)).symm
+    L.Eq.symm (XlsCodec.encode_and (XlsCodec.decodeBool a) (XlsCodec.decodeBool b))
 
-private theorem raw_or (a b : BitVec 1) :
-    a ||| b = XlsCodec.encodeBool (XlsCodec.decodeBool a || XlsCodec.decodeBool b) := by
+private theorem raw_or (a b : L.BitVec 1) :
+    L.BitVec.or a b = XlsCodec.encodeBool (XlsCodec.decodeBool a || XlsCodec.decodeBool b) := by
   simpa only [XlsCodec.encode_decodeBool] using
-    (XlsCodec.encode_or (XlsCodec.decodeBool a) (XlsCodec.decodeBool b)).symm
+    L.Eq.symm (XlsCodec.encode_or (XlsCodec.decodeBool a) (XlsCodec.decodeBool b))
 
-private theorem raw_flag (b : BitVec 1) :
-    (b == BitVec.ofNat 1 1) = XlsCodec.decodeBool b := by
+private theorem raw_flag (b : L.BitVec 1) :
+    (b == L.BitVec.ofNat 1 1) = XlsCodec.decodeBool b := by
   rfl
 
-private theorem raw_flag_zero (b : BitVec 1) :
-    (b == BitVec.ofNat 1 0) = !XlsCodec.decodeBool b := by
+private theorem raw_flag_zero (b : L.BitVec 1) :
+    (b == L.BitVec.ofNat 1 0) = !XlsCodec.decodeBool b := by
   rcases XlsCodec.one_bit_cases b with rfl | rfl <;> rfl
 
-private theorem decode_ofBool (b : Bool) :
-    XlsCodec.decodeBool (BitVec.ofBool b) = b := by
+private theorem decode_ofBool (b : L.Bool) :
+    XlsCodec.decodeBool (L.BitVec.ofBool b) = b := by
   exact XlsCodec.decode_encodeBool b
 
-private theorem prod_fst_ite {α β : Type} (p : Prop) [Decidable p] (x y : α × β) :
+private theorem prod_fst_ite {α β : Type} (p : Prop) [L.Decidable p] (x y : α × β) :
     (if p then x else y).1 = (if p then x.1 else y.1) := by split <;> rfl
-private theorem prod_snd_ite {α β : Type} (p : Prop) [Decidable p] (x y : α × β) :
+private theorem prod_snd_ite {α β : Type} (p : Prop) [L.Decidable p] (x y : α × β) :
     (if p then x else y).2 = (if p then x.2 else y.2) := by split <;> rfl
-private theorem ite_prod_mk {α β : Type} (p : Prop) [Decidable p] (a c : α) (b d : β) :
+private theorem ite_prod_mk {α β : Type} (p : Prop) [L.Decidable p] (a c : α) (b d : β) :
     (if p then (a, b) else (c, d)) = ((if p then a else c), (if p then b else d)) := by
   split <;> rfl
 
-private theorem vector_map_ite {α β : Type} {n : Nat} (f : α → β)
-    (p : Prop) [Decidable p] (x y : Vector α n) :
-    (if p then x else y).map f = (if p then x.map f else y.map f) :=
-  apply_ite (Vector.map f) p x y
+private theorem vector_map_ite {α β : Type} {n : L.Nat} (f : α → β)
+    (p : Prop) [L.Decidable p] (x y : L.Vector α n) :
+    L.Vector.map f (if p then x else y) = (if p then L.Vector.map f x else L.Vector.map f y) :=
+  L.apply_ite (L.Vector.map f) p x y
 
 -- The size-safe literal renderer calls Vector.append with explicit lengths.
 -- Match that head directly; Vector.map_append is stated using ++.
-private theorem vector_map_append {α β : Type} {n m : Nat} (f : α → β)
-    (xs : Vector α n) (ys : Vector α m) :
-    (Vector.append xs ys).map f = Vector.append (xs.map f) (ys.map f) :=
-  Vector.map_append
+private theorem vector_map_append {α β : Type} {n m : L.Nat} (f : α → β)
+    (xs : L.Vector α n) (ys : L.Vector α m) :
+    L.Vector.map f (L.Vector.append xs ys) = L.Vector.append (L.Vector.map f xs) (L.Vector.map f ys) :=
+  L.Vector.map_append
 
-private theorem vector_getD_back_map {α β : Type} {n : Nat} [NeZero n]
-    (f : α → β) (xs : Vector α n) (i : Nat) :
-    (xs.map f).getD i (xs.map f).back = f (xs.getD i xs.back) := by
-  by_cases h : i < n <;> simp [Vector.getD, Array.getD, Vector.back_eq_getElem, h]
+private theorem vector_getD_back_map {α β : Type} {n : L.Nat} [L.NeZero n]
+    (f : α → β) (xs : L.Vector α n) (i : L.Nat) :
+    L.Vector.getD (L.Vector.map f xs) i (L.Vector.back (L.Vector.map f xs)) =
+      f (L.Vector.getD xs i (L.Vector.back xs)) := by
+  by_cases h : i < n <;> simp [(L.Vector.getD ·), (L.Array.getD ·), L.Vector.back_eq_getElem, h]
 
 "#;
 
@@ -2017,29 +2018,29 @@ private theorem vector_getD_back_map {α β : Type} {n : Nat} [NeZero n]
 /// theorem.
 const CORRESPONDENCE: &str = r#"theorem decoded_eval (q : XlsBlock.State) (x : XlsBlock.Input) :
     decodeEvaluation (XlsBlock.eval q x) = eval (decodeState q) (decodeInput x) := by
-  have h := congrArg decodeEvaluation (encoded_eval (decodeState q) (decodeInput x))
-  simpa using h.symm
+  have h := L.congrArg decodeEvaluation (encoded_eval (decodeState q) (decodeInput x))
+  simpa using L.Eq.symm h
 
 theorem encoded_step (q : State) (x : Input) :
     encodeState (step q x) = XlsBlock.step (encodeState q) (encodeInput x) := by
-  exact congrArg XlsBlock.Evaluation.next (encoded_eval q x)
+  exact L.congrArg XlsBlock.Evaluation.next (encoded_eval q x)
 theorem decoded_step (q : XlsBlock.State) (x : XlsBlock.Input) :
     decodeState (XlsBlock.step q x) = step (decodeState q) (decodeInput x) := by
-  exact congrArg Evaluation.next (decoded_eval q x)
+  exact L.congrArg Evaluation.next (decoded_eval q x)
 theorem encoded_observe (q : State) (x : Input) :
     encodeOutput (observe q x) = XlsBlock.observe (encodeState q) (encodeInput x) := by
   simpa only [encodeEvaluation, observe, XlsBlock.observe] using
-    congrArg XlsBlock.Evaluation.output (encoded_eval q x)
+    L.congrArg XlsBlock.Evaluation.output (encoded_eval q x)
 theorem decoded_observe (q : XlsBlock.State) (x : XlsBlock.Input) :
     decodeOutput (XlsBlock.observe q x) = observe (decodeState q) (decodeInput x) := by
   simpa only [decodeEvaluation, observe, XlsBlock.observe] using
-    congrArg Evaluation.output (decoded_eval q x)
+    L.congrArg Evaluation.output (decoded_eval q x)
 theorem encoded_assertions (q : State) (x : Input) :
     encodeAssertions (assertions q x) = XlsBlock.assertions (encodeState q) (encodeInput x) := by
-  exact congrArg XlsBlock.Evaluation.assertions (encoded_eval q x)
+  exact L.congrArg XlsBlock.Evaluation.assertions (encoded_eval q x)
 theorem decoded_assertions (q : XlsBlock.State) (x : XlsBlock.Input) :
     decodeAssertions (XlsBlock.assertions q x) = assertions (decodeState q) (decodeInput x) := by
-  exact congrArg Evaluation.assertions (decoded_eval q x)
+  exact L.congrArg Evaluation.assertions (decoded_eval q x)
 theorem encoded_assertionsHold (q : State) (x : Input) :
     assertionsHold q x ↔ XlsBlock.assertionsHold (encodeState q) (encodeInput x) := by
   unfold assertionsHold XlsBlock.assertionsHold
@@ -2053,49 +2054,49 @@ theorem encoded_reset (q : State) (x : Input) :
   exact encoded_eval q _
 theorem decoded_reset (q : XlsBlock.State) (x : XlsBlock.Input) :
     decodeEvaluation (XlsBlock.reset q x) = reset (decodeState q) (decodeInput x) := by
-  have h := congrArg decodeEvaluation (encoded_reset (decodeState q) (decodeInput x))
-  simpa using h.symm
+  have h := L.congrArg decodeEvaluation (encoded_reset (decodeState q) (decodeInput x))
+  simpa using L.Eq.symm h
 
-def trace (initial : State) (input : Nat → Input) : Nat → State
+def trace (initial : State) (input : L.Nat → Input) : L.Nat → State
   | 0 => initial
   | t + 1 => step (trace initial input t) (input t)
-def rawTrace (initial : XlsBlock.State) (input : Nat → XlsBlock.Input) : Nat → XlsBlock.State
+def rawTrace (initial : XlsBlock.State) (input : L.Nat → XlsBlock.Input) : L.Nat → XlsBlock.State
   | 0 => initial
   | t + 1 => XlsBlock.step (rawTrace initial input t) (input t)
 
 /-- The initial physical state is arbitrary, including every undeclared enum encoding. -/
-theorem encoded_trace (initial : State) (input : Nat → Input) (t : Nat) :
+theorem encoded_trace (initial : State) (input : L.Nat → Input) (t : L.Nat) :
     encodeState (trace initial input t) =
       rawTrace (encodeState initial) (fun n => encodeInput (input n)) t := by
   induction t with
   | zero => rfl
   | succ t ih =>
-    exact (encoded_step _ _).trans (congrArg (fun q => XlsBlock.step q (encodeInput (input t))) ih)
-theorem decoded_trace (initial : XlsBlock.State) (input : Nat → XlsBlock.Input) (t : Nat) :
+    exact L.Eq.trans (encoded_step _ _) (L.congrArg (fun q => XlsBlock.step q (encodeInput (input t))) ih)
+theorem decoded_trace (initial : XlsBlock.State) (input : L.Nat → XlsBlock.Input) (t : L.Nat) :
     decodeState (rawTrace initial input t) =
       trace (decodeState initial) (fun n => decodeInput (input n)) t := by
   induction t with
   | zero => rfl
   | succ t ih =>
-    exact (decoded_step _ _).trans (congrArg (fun q => step q (decodeInput (input t))) ih)
-theorem trace_output (initial : State) (input : Nat → Input) (t : Nat) :
+    exact L.Eq.trans (decoded_step _ _) (L.congrArg (fun q => step q (decodeInput (input t))) ih)
+theorem trace_output (initial : State) (input : L.Nat → Input) (t : L.Nat) :
     encodeOutput (observe (trace initial input t) (input t)) =
       XlsBlock.observe (rawTrace (encodeState initial) (fun n => encodeInput (input n)) t)
         (encodeInput (input t)) := by
   rw [encoded_observe, encoded_trace]
-theorem trace_assertions (initial : State) (input : Nat → Input) (t : Nat) :
+theorem trace_assertions (initial : State) (input : L.Nat → Input) (t : L.Nat) :
     encodeAssertions (assertions (trace initial input t) (input t)) =
       XlsBlock.assertions (rawTrace (encodeState initial) (fun n => encodeInput (input n)) t)
         (encodeInput (input t)) := by
   rw [encoded_assertions, encoded_trace]
 
-theorem clock_relation_iff (q : Nat → State) (x : Nat → Input) :
+theorem clock_relation_iff (q : L.Nat → State) (x : L.Nat → Input) :
     (∀ t, q (t + 1) = step (q t) (x t)) ↔
       (∀ t, encodeState (q (t + 1)) = XlsBlock.step (encodeState (q t)) (encodeInput (x t))) := by
   constructor
   · intro run t
     rw [run t, encoded_step]
   · intro run t
-    have h := congrArg decodeState (run t)
+    have h := L.congrArg decodeState (run t)
     simpa [decoded_step] using h
 "#;

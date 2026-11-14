@@ -39,18 +39,18 @@ impl Dispatch<'_> {
             .iter()
             .rev()
             .map(|test| match test {
-                Comparison::LiteralFirst(n) => format!("(BitVec.ofBool (({n}#2) == bits))"),
-                Comparison::LiteralLast(n) => format!("(BitVec.ofBool (bits == ({n}#2)))"),
+                Comparison::LiteralFirst(n) => format!("(L.BitVec.ofBool (({n}#2) == bits))"),
+                Comparison::LiteralLast(n) => format!("(L.BitVec.ofBool (bits == ({n}#2)))"),
             })
             .collect::<Vec<_>>();
-        crate::local_expr::balanced_infix(&comparisons, " ++ ")
+        crate::local_expr::balanced(&comparisons, "L.BitVec.append ", " ")
     }
 
     fn physical_selection(&self) -> String {
         let priorities = (0..self.comparisons.len())
             .rev()
             .fold("fallback".to_owned(), |rest, i| {
-                format!("(if flags.getLsbD {i} then arm{i} else {rest})")
+                format!("(if L.BitVec.getLsbD flags {i} then arm{i} else {rest})")
             });
         format!("let flags := {}\n       {priorities}", self.flags())
     }
@@ -124,7 +124,7 @@ impl Presentation<'_> {
                 .join(", ");
             writeln!(
                 out,
-                "private theorem {rule}_raw {{α : Type}} (bits : BitVec 2) ({args} : α) :\n    _root_.XlsynthLean.IR.prioritySel {} #[{arms}] fallback =\n      ({}) := by\n  rcases XlsCodec.two_bit_cases bits with rfl | rfl | rfl | rfl <;> rfl\n",
+                "private theorem {rule}_raw {{α : Type}} (bits : L.BitVec 2) ({args} : α) :\n    _root_.XlsynthLean.IR.prioritySel {} #[{arms}] fallback =\n      ({}) := by\n  rcases XlsCodec.two_bit_cases bits with rfl | rfl | rfl | rfl <;> rfl\n",
                 dispatch.flags(),
                 dispatch.physical_selection()
             )?;
