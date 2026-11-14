@@ -472,8 +472,10 @@ xlsynth-driver block2sv mul_inc.ir > mul_inc.sv
 - `--warnings-as-errors[=true|false]` defaults to `true`. Warnings from the
   input file or its BX imports stop compilation. Use
   `--warnings-as-errors=false` to print the warnings to stderr and continue.
-  An intentional combinational block can opt out of its warning with
-  `#[allow(combinational_block)]` immediately before the declaration.
+  Omit `clk` to declare a combinational module, as in
+  `block add(a: u8, b: u8) -> u8 { a + b }`. When the block only computes
+  a value, put `#[allow(combinational_block)]` before its declaration to opt in
+  to a module interface.
 - `--reset-active-low[=true|false]` selects active-low reset for the block
   hierarchy. Defaults to `false` (active-high). The bare flag enables it.
 - `--reset-asynchronous[=true|false]` selects asynchronous reset for the

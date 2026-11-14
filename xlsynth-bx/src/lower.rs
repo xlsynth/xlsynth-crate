@@ -359,10 +359,18 @@ fn check_extern_blocks(
         let block = package
             .get_block(name)
             .ok_or_else(|| format!("extern block '{name}': no linked IR block of that name"))?;
-        if block.clock_port_name().is_none() {
-            return Err(format!(
-                "extern block '{name}' requires a clock but the linked block has none"
-            ));
+        match (declaration.clock.as_deref(), block.clock_port_name()) {
+            (Some(_), None) => {
+                return Err(format!(
+                    "extern block '{name}' requires a clock but the linked block has none"
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(format!(
+                    "extern block '{name}' omits the linked block's clock"
+                ));
+            }
+            _ => { /* The presence of a clock matches the declared role. */ }
         }
         let reset_port = match (&declaration.reset, &block.reset) {
             (Some(_), Some(actual)) => {
@@ -611,8 +619,7 @@ impl Destination<'_> {
     }
 }
 
-/// Builds checked value expressions in either a pure function or a clocked
-/// block.
+/// Builds checked value expressions in a pure function or a block.
 struct LowerBody<'a, 'defs, 'p, S: BuilderState> {
     builder: Builder<S>,
     destination: &'a mut Destination<'p>,
@@ -816,7 +823,9 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
         reset_behavior: ResetBehavior,
     ) -> Result<(BlockBuilder, CycleSources), BuilderError> {
         let mut resources = BlockResources::default();
-        self.builder.clock_port(&block.clock)?;
+        if let Some(clock) = &block.clock {
+            self.builder.clock_port(clock)?;
+        }
         let reset = if let Some(name) = &block.reset {
             let physical = self.builder.input_port(name, ir::Type::Bits(1))?;
             self.builder.set_reset(physical, reset_behavior)?;

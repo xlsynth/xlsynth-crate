@@ -556,7 +556,7 @@ impl<'m> BlockSpecializations<'m> {
             MAX_ELABORATION_DEPTH,
         )?;
         let interface = BlockInterface::new(
-            &block.clock,
+            block.clock.as_deref(),
             block.reset.as_deref(),
             params,
             result,
@@ -667,7 +667,9 @@ struct Declarations<'a> {
     /// At least one callee was instantiated while evaluating an erased
     /// assertion.
     assertion_instantiated_callee: Cell<bool>,
-    block_names: BTreeSet<&'a str>,
+    /// Clock requirements of all defined and external blocks, including
+    /// templates.
+    block_clocks: BTreeMap<&'a str, bool>,
     zero_uses: Option<&'a BTreeMap<String, String>>,
     positions: BTreeMap<&'a str, usize>,
     /// Canonical types evaluated in each alias's declaration scope.
@@ -702,7 +704,7 @@ impl Declarations<'_> {
     }
 
     fn is_block(&self, name: &str) -> bool {
-        self.block_names.contains(name)
+        self.block_clocks.contains_key(name)
             || self.blocks.contains_key(name)
             || self.templates.contains_key(name)
     }
@@ -1389,7 +1391,7 @@ impl<'a> Declarations<'a> {
     fn add_block(
         &mut self,
         name: &'a str,
-        clock: &str,
+        clock: Option<&str>,
         reset: Option<&str>,
         params: Vec<Param>,
         result: Type,
@@ -1404,7 +1406,7 @@ impl<'a> Declarations<'a> {
 impl BlockInterface {
     /// Validate the concrete physical port ABI for a block definition.
     fn new(
-        clock: &str,
+        clock: Option<&str>,
         reset: Option<&str>,
         params: Vec<Param>,
         result: Type,
@@ -1431,7 +1433,7 @@ impl BlockInterface {
     /// Check physical port names and layout bounds. A bare type parameter can
     /// introduce struct fields or tuple outputs once its binding is known.
     fn check_ports(
-        clock: &str,
+        clock: Option<&str>,
         reset: Option<&str>,
         params: &[Param],
         result: &Type,
@@ -1440,9 +1442,8 @@ impl BlockInterface {
         private_outputs: Option<&BTreeSet<String>>,
     ) -> Result<BlockPortLayout, String> {
         let mut ports = BTreeSet::new();
-        declare(&mut ports, clock)?;
-        if let Some(reset) = reset {
-            declare(&mut ports, reset)?;
+        for name in clock.into_iter().chain(reset) {
+            declare(&mut ports, name)?;
         }
         let mut type_nodes = 0usize;
         for p in params {
@@ -1902,11 +1903,16 @@ pub(crate) fn check_sources_with_tests(
                 .tests
                 .iter()
                 .any(|t| t.kind == crate::ast::TestKind::Function),
-        block_names: module
+        block_clocks: module
             .blocks
             .iter()
-            .map(|b| b.name.as_str())
-            .chain(module.extern_blocks.iter().map(|b| b.name.as_str()))
+            .map(|b| (b.name.as_str(), b.clock.is_some()))
+            .chain(
+                module
+                    .extern_blocks
+                    .iter()
+                    .map(|b| (b.name.as_str(), b.clock.is_some())),
+            )
             .collect(),
         zero_uses: linked.map(|l| &l.zero_uses),
         positions: module
@@ -1947,13 +1953,21 @@ pub(crate) fn check_sources_with_tests(
             ));
         }
     }
-    for name in module
+    for (name, clock, reset) in module
         .blocks
         .iter()
-        .map(|b| &b.name)
-        .chain(module.extern_blocks.iter().map(|b| &b.name))
+        .map(|b| (&b.name, &b.clock, &b.reset))
+        .chain(
+            module
+                .extern_blocks
+                .iter()
+                .map(|b| (&b.name, &b.clock, &b.reset)),
+        )
     {
         declare(&mut names, name)?;
+        if clock.is_none() && reset.is_some() {
+            return Err(format!("block '{name}': a reset port requires a clock"));
+        }
     }
     let mut harness_names = Vec::new();
     let mut invariant_harnesses = Vec::new();
@@ -2025,7 +2039,9 @@ pub(crate) fn check_sources_with_tests(
                 ));
             }
         }
-        let reserved_ports = std::iter::once(&b.clock)
+        let reserved_ports = b
+            .clock
+            .iter()
             .chain(&b.reset)
             .chain(b.callback_params.iter().map(|p| &p.name))
             .chain(b.value_parametrics.iter().map(|p| &p.name));
@@ -2061,7 +2077,7 @@ pub(crate) fn check_sources_with_tests(
         declarations
             .add_block(
                 &b.name,
-                &b.clock,
+                b.clock.as_deref(),
                 b.reset.as_deref(),
                 params,
                 result,
@@ -2071,7 +2087,7 @@ pub(crate) fn check_sources_with_tests(
     }
     let mut extern_blocks = Vec::with_capacity(module.extern_blocks.len());
     for b in &module.extern_blocks {
-        let timing_ports = std::iter::once(&b.clock).chain(&b.reset);
+        let timing_ports = b.clock.iter().chain(&b.reset);
         let (params, result) = resolve_signature(
             &b.params,
             &b.result,
@@ -2090,7 +2106,7 @@ pub(crate) fn check_sources_with_tests(
         declarations
             .add_block(
                 &b.name,
-                &b.clock,
+                b.clock.as_deref(),
                 None,
                 params.clone(),
                 result.clone(),
@@ -2150,10 +2166,13 @@ pub(crate) fn check_sources_with_tests(
         }
         for (property, harness) in module.invariants.iter().zip(invariant_harnesses) {
             let block = &property.block;
+            if block.clock.is_none() {
+                return Err(format!("invariant '{}' requires a clock", block.name));
+            }
             let (params, result) = resolve_signature(
                 &block.params,
                 &block.result,
-                std::iter::once(&block.clock).chain(&block.reset),
+                block.clock.iter().chain(&block.reset),
                 None,
                 declarations.module_dimensions(&block.name),
                 &mut TypeResolver {
@@ -2172,7 +2191,7 @@ pub(crate) fn check_sources_with_tests(
             fields.resize(property.lemmas.len() + 1, Type::Bool);
             structs.update_imports(&resolver)?;
             let interface = BlockInterface::new(
-                &block.clock,
+                block.clock.as_deref(),
                 block.reset.as_deref(),
                 params,
                 Type::Tuple(fields),
@@ -2370,7 +2389,10 @@ fn infer_block_resets(
 /// Keep source port, register, and instance names when introducing a reset
 /// into a block whose author could use `rst` as an ordinary name.
 fn inferred_reset_port(block: &CheckedBlock) -> String {
-    let names = std::iter::once(block.clock.as_str())
+    let names = block
+        .clock
+        .as_deref()
+        .into_iter()
         .chain(
             block
                 .params
@@ -2399,7 +2421,9 @@ fn inferred_reset_port(block: &CheckedBlock) -> String {
 /// Reserve source bindings before allocating instance or observation port
 /// names.
 fn block_binding_names(block: &Block) -> BTreeSet<String> {
-    let mut names: BTreeSet<_> = std::iter::once(&block.clock)
+    let mut names: BTreeSet<_> = block
+        .clock
+        .iter()
         .chain(&block.reset)
         .chain(block.params.iter().map(|p| &p.name))
         .cloned()
@@ -2452,6 +2476,9 @@ struct BodyChecker<'a, 'm> {
     enclosing_type_locals: Option<&'a dyn Fn(&str) -> bool>,
     kind: BodyKind,
     uses_child: Cell<bool>,
+    /// A clockless source block requires every hardware operation to be
+    /// combinational.
+    clockless_block: Option<&'m Block>,
     /// The source body owns the expansion budget even while checking a lambda
     /// with function-local rules.
     source_kind: BodyKind,
@@ -2773,6 +2800,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             enclosing_type_locals: None,
             kind,
             uses_child: Cell::new(false),
+            clockless_block: None,
             source_kind: kind,
             specializations: None,
             specialization: None,
@@ -2942,7 +2970,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 c.bind_parametric_value(&formal.name, value);
             }
         }
-        c.hardware_name(&block.clock)?;
+        if let Some(clock) = &block.clock {
+            c.hardware_name(clock)?;
+        } else {
+            c.clockless_block = Some(block);
+        }
         if let Some(rst) = &block.reset {
             c.hardware_name(rst)?;
             c.values.insert(rst.clone(), Type::Bool);
@@ -3212,9 +3244,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
     }
 
-    /// Check the explicit parametric count even in a skipped structural loop,
-    /// where no concrete data types or hardware instance are needed.
-    fn check_block_parametric_count(
+    /// Validate the child's clock and parametric arguments, including when a
+    /// skipped structural loop only checks names.
+    fn check_block_call_signature(
         &self,
         target: &str,
         count: usize,
@@ -3225,6 +3257,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return Err(format!("'{name}' names a local value here"));
         }
         self.reject_type_parameter_value(target)?;
+        if let Some(parent) = self.clockless_block
+            && self.decls.block_clocks.get(target) == Some(&true)
+        {
+            return Err(self.clock_error(
+                parent,
+                format!("clockless block cannot call clocked block '{target}'; add `clk` to the parent signature"),
+            ));
+        }
         let (values, callbacks) = self.decls.templates.get(target).map_or((0, 0), |template| {
             (
                 template.block.value_parametrics.len(),
@@ -3243,6 +3283,22 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             ));
         }
         Ok(())
+    }
+
+    /// Point to the BX statement that needs a clock when source spans are
+    /// available.
+    fn clock_error(&self, block: &Block, message: String) -> String {
+        if let Some(source) = &block.source
+            && let Some(span) = self.statement_span
+            && source.file.text.is_char_boundary(span.start)
+        {
+            let diagnostic = crate::parser::diagnostic(&source.file.text, span.start, &message);
+            if let Some(path) = &source.file.path {
+                return format!("{}:{diagnostic}", path.display());
+            }
+            return diagnostic;
+        }
+        message
     }
 
     /// A type binder shadows a module member or import in callee position.
@@ -3281,6 +3337,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     continue;
                 }
                 Stmt::Reg { name, ty, reset } => {
+                    if block.clock.is_none() {
+                        return Err(self.clock_error(block, format!(
+                            "clockless block cannot declare register '{name}'; add `clk` to the block signature"
+                        )));
+                    }
                     if conditional {
                         return Err(format!("conditional declaration of register '{name}'"));
                     }
@@ -3371,7 +3432,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     let init = self.pattern_initializer(binding, !conditional)?;
                     let mut collision = None;
                     binding.pattern.visit_names(&mut |name| {
-                        if name == block.clock
+                        if block.clock.as_deref() == Some(name)
                             || block.reset.as_deref() == Some(name)
                             || self.regs.contains_key(name)
                             || self.wires.contains_key(name)
@@ -3632,7 +3693,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 args,
             } => {
                 if self.decls.is_block(name) && self.callback_index(name).is_none() {
-                    self.check_block_parametric_count(
+                    self.check_block_call_signature(
                         name,
                         parametrics.len(),
                         self.has_local_name(name),
@@ -6526,6 +6587,23 @@ block wrap(clk, x: u8) -> u8 {
         check_module(&parse_module(source).unwrap()).unwrap();
         let undeclared = source.replace("let before = pending;", "let before = lane;");
         assert!(check_module(&parse_module(&undeclared).unwrap()).is_err());
+    }
+
+    #[test]
+    fn clockless_unroll_checks_clocked_calls_even_in_skipped_iterations() -> Result<(), String> {
+        let source = r#"block wrap<T>(x: T) -> T {
+    unroll_for! (_, a) in u8:0..u8:0 {
+        let y = child(a);
+        y
+    }(x)
+}
+block top(x: u8) -> u8 { let y = wrap(x); y }
+block child<T>(clk, x: T) -> T { reg q: T; q := x; q }"#;
+        assert_eq!(
+            check_module(&parse_module(source)?).unwrap_err(),
+            "block 'wrap' (wrap__0): result: 2:5: clockless block cannot call clocked block 'child'; add `clk` to the parent signature"
+        );
+        Ok(())
     }
 
     #[test]

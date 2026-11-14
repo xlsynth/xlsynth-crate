@@ -69,6 +69,39 @@ pub block top(clk, x: u8) -> u8 { let y = stage(x); y }"#;
 }
 
 #[test]
+fn clockless_leaves_warn_once_and_can_opt_in_to_a_module_interface() -> Result<(), String> {
+    let source = r#"block id<T>(x: T) -> T { x }
+pub block wrapper(x: u8) -> u8 { let a = id(x); a }
+block add(a: u8, b: u8) -> u8 { a + b }
+"#;
+    let module = check_module(&parse_module(source)?)?;
+    let warnings: Vec<_> = module
+        .warnings()
+        .iter()
+        .map(|w| (w.declaration.as_str(), w.kind))
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            ("id", BxWarningKind::CombinationalBlock),
+            ("add", BxWarningKind::CombinationalBlock)
+        ]
+    );
+    assert_eq!(
+        compile(source, empty_package("design"), ResetBehavior::default()).unwrap_err(),
+        "<input>:1:7: warning[combinational_block]: block 'id' has no registers or child instances. Consider defining it as a function.\n\
+         <input>:3:7: warning[combinational_block]: block 'add' has no registers or child instances. Consider defining it as a function.\n\
+         BX warnings treated as errors"
+    );
+    let allowed = source
+        .replace("block id", "#[allow(combinational_block)]\nblock id")
+        .replace("block add", "#[allow(combinational_block)]\nblock add");
+    let package = compile(&allowed, empty_package("design"), ResetBehavior::default())?;
+    assert_eq!(package.get_top_block().unwrap().clock_port_name(), None);
+    Ok(())
+}
+
+#[test]
 fn rust_compile_helpers_deny_collected_warnings_by_default() -> Result<(), Box<dyn Error>> {
     let source = "block increment(clk, x: u8) -> u8 { x + u8:1 }\n\
                   pub block invert(clk, x: u8) -> u8 { !x }";

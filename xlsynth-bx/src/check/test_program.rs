@@ -166,7 +166,7 @@ impl<'m> BodyChecker<'_, 'm> {
                 source_name: test.name.clone(),
                 source: None,
                 public: false,
-                clock: "clk".into(),
+                clock: Some("clk".into()),
                 reset: Some("rst".into()),
                 params: ports.inputs,
                 input_cycles: BTreeMap::new(),

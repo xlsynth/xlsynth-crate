@@ -1779,11 +1779,9 @@ impl<'s> Parser<'s> {
         mut data_param: impl FnMut(&mut Self) -> Result<Param, String>,
     ) -> Result<ExternBlock, String> {
         self.expect("(")?;
-        self.expect("clk")?;
-        let clock = "clk".to_owned();
+        let clock = self.eat("clk").then(|| "clk".to_owned());
         let mut reset = None;
-        let mut params = Vec::new();
-        if !self.eat(")") {
+        if clock.is_some() && self.peek(0) != ")" {
             self.expect(",")?;
             if self.eat("rst") {
                 reset = Some("rst".to_owned());
@@ -1791,13 +1789,13 @@ impl<'s> Parser<'s> {
                     self.expect(",")?;
                 }
             }
-            params = self.list(")", |parser| {
-                if matches!(parser.peek(0), "clk" | "rst") {
-                    return Err(parser.error("clock and reset roles cannot be data ports"));
-                }
-                data_param(parser)
-            })?;
         }
+        let params = self.list(")", |parser| {
+            if matches!(parser.peek(0), "clk" | "rst") {
+                return Err(parser.error("clock and reset roles cannot be data ports"));
+            }
+            data_param(parser)
+        })?;
         self.expect("->")?;
         let result = self.ty()?;
         Ok(ExternBlock {
@@ -1934,6 +1932,12 @@ impl<'s> Parser<'s> {
             }
             Ok(param)
         })?;
+        if lemmas.is_some() && signature.clock.is_none() {
+            return Err(format!(
+                "{}:{}: BX invariant blocks require a leading `clk`",
+                name_position.line, name_position.column
+            ));
+        }
         if lemmas.is_some()
             && crate::typed::bits(&signature.result) != Some((false, 1))
             && !matches!(
@@ -1965,9 +1969,8 @@ impl<'s> Parser<'s> {
         for formal in &params.value_parametrics {
             self.shadow_callable(&formal.name);
         }
-        self.shadow_callable(&signature.clock);
-        if let Some(reset) = &signature.reset {
-            self.shadow_callable(reset);
+        for name in signature.clock.iter().chain(&signature.reset) {
+            self.shadow_callable(name);
         }
         for port in &signature.params {
             self.shadow_callable(&port.name);
@@ -1980,21 +1983,22 @@ impl<'s> Parser<'s> {
         let (output, output_span) = body
             .output
             .ok_or_else(|| self.error("block requires an output expression"))?;
-        let source = body
-            .statements
-            .iter()
-            .any(|stmt| matches!(stmt, Stmt::Wire { .. }))
-            .then(|| BlockSource {
-                file: SourceFile {
-                    text: self
-                        .diagnostic_source
-                        .get_or_insert_with(|| Arc::from(self.source))
-                        .clone(),
-                    path: None,
-                },
-                statements: body.statement_spans,
-                output: output_span,
-            });
+        let source = (signature.clock.is_none()
+            || body
+                .statements
+                .iter()
+                .any(|stmt| matches!(stmt, Stmt::Wire { .. })))
+        .then(|| BlockSource {
+            file: SourceFile {
+                text: self
+                    .diagnostic_source
+                    .get_or_insert_with(|| Arc::from(self.source))
+                    .clone(),
+                path: None,
+            },
+            statements: body.statement_spans,
+            output: output_span,
+        });
         Ok(Block {
             name: signature.name,
             name_position: Some(name_position),
@@ -6888,24 +6892,37 @@ block product(clk, x: u8, y: u8) -> u16 { local(arithmetic::mul_wide(x, y)) }
     }
 
     #[test]
-    fn extern_blocks_share_the_clocked_interface_grammar_with_defined_blocks() {
+    fn extern_blocks_share_the_port_grammar_with_defined_blocks() {
         let source = r#"
 extern block lane(clk, rst, x: u8) -> (u8, bool);
 extern block pulse(clk) -> bool;
+extern block nonzero(x: u8,) -> bool;
 block wrap(clk, rst, x: u8) -> (u8, bool) {
     let stage = lane(x);
     stage
 }
+block is_zero(x: u8) -> bool { x == u8:0 }
+block always() -> bool { true }
 "#;
         let module = parse_module(source).unwrap();
         let lane = &module.extern_blocks[0];
         let wrap = &module.blocks[0];
         assert_eq!(lane.name, "lane");
+        assert_eq!(lane.clock.as_deref(), Some("clk"));
         assert_eq!(lane.clock, wrap.clock);
         assert_eq!(lane.reset, wrap.reset);
         assert_eq!(lane.params, wrap.params);
         assert_eq!(lane.result, wrap.result);
         assert_eq!(module.extern_blocks[1].reset, None);
+        let nonzero = &module.extern_blocks[2];
+        let is_zero = &module.blocks[1];
+        assert_eq!(nonzero.clock, None);
+        assert_eq!(nonzero.reset, None);
+        assert_eq!(is_zero.clock, None);
+        assert_eq!(is_zero.reset, None);
+        assert_eq!(nonzero.params, is_zero.params);
+        assert_eq!(nonzero.result, is_zero.result);
+        assert!(module.blocks[2].params.is_empty());
         assert!(
             matches!(&wrap.statements[..], [Stmt::Let { value: Expr::Call { name, .. }, .. }] if name == "lane")
         );
@@ -6913,13 +6930,23 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
             "extern block module::lane(clk) -> bool;",
             "extern block lane(clk) -> bool = \"impl\";",
             "extern block lane(clk) -> bool { true }",
-            "extern block lane(x: u8) -> bool;",
+            "extern block lane(clk: bool) -> bool;",
+            "extern block lane(rst) -> bool;",
+            "extern block lane(x: u8, clk) -> bool;",
+            "extern block lane(x: u8, clk: bool) -> bool;",
+            "extern block lane(x: u8, rst: bool) -> bool;",
             "extern block lane(clk, rst: bool) -> bool;",
             "extern block lane(clk, x: u8 @1) -> bool;",
             "extern block lane(clk) -> bool",
         ] {
             assert!(parse_module(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn invariant_block_requires_a_clock() {
+        let err = parse_module("#[invariant] block prop(x: bool) -> bool { x }").unwrap_err();
+        assert_eq!(err, "1:20: BX invariant blocks require a leading `clk`");
     }
 
     #[test]

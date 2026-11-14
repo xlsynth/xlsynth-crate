@@ -1,6 +1,6 @@
 # xlsynth-bx
 
-BX describes clocked hardware using blocks, registers, and explicit wiring. Its value language aims to implement a subset of DSLX with the same syntax, type inference, and evaluation rules. For the shared language, see the [DSLX reference manual](https://google.github.io/xls/dslx_reference/).
+BX describes clocked and combinational hardware using blocks, registers, and explicit wiring. Its value language aims to implement a subset of DSLX with the same syntax, type inference, and evaluation rules. For the shared language, see the [DSLX reference manual](https://google.github.io/xls/dslx_reference/).
 
 The Rust frontend parses BX, type-checks it, and adds verified functions and blocks to an XLS IR package. Define a combinational function in the same `.bx` file as its caller, import a DSLX function with `use`, or link an existing IR function with `extern fn`.
 
@@ -493,7 +493,7 @@ The named builtin callbacks are `clz`, `ctz`, `and_reduce`, `or_reduce`, `xor_re
 
 ```text
 #[allow(combinational_block)]
-block offsets(clk, base: u32) -> u32[4] {
+block offsets(base: u32) -> u32[4] {
     map(u32:0..u32:4, |i| base + i)
 }
 ```
@@ -538,7 +538,7 @@ fn sum_words(words: u16[4], bias: u32) -> u32 {
 }
 
 #[allow(combinational_block)]
-block checksum(clk, words: u16[4], bias: u32) -> u32 {
+block checksum(words: u16[4], bias: u32) -> u32 {
     sum_words(words, bias)
 }
 ```
@@ -830,17 +830,21 @@ errors by default. The `combinational_block` warning points to a block that
 only computes a value. Prefer a `fn` for this kind of helper. A block with a
 register or a child instance already serves a hardware role. A helper that
 only reads the `rst` declared in its signature can take the normalized reset as an explicit
-`bool` function argument. Type-generic blocks can express signatures
-unavailable on BX functions.
+`bool` function argument. Clocked type-generic blocks retain their exemption.
 
-For an intentional combinational RTL interface, allow the warning on that
-declaration. Other declarations in the same file or an imported BX library
-still receive their own diagnostics.
+For an intentional combinational RTL leaf, omit `clk` and add
+`#[allow(combinational_block)]`. A function call computes
+a value within an expression. A block call creates a child instance with
+named ports. The block can reuse a function for the calculation.
 
 ```text
+fn increment(x: u8) -> u8 { x + u8:1 }
 #[allow(combinational_block)]
-pub block increment_port(clk, x: u8) -> u8 { x + u8:1 }
+pub block increment_port(x: u8) -> u8 { increment(x) }
 ```
+
+The same allowance works when an existing combinational RTL leaf needs to
+keep its clock port.
 
 Use `#[allow(useless_struct_splat)]` on the declaration containing the update.
 This applies to blocks, functions, constants, enums, structs, and extern
@@ -1032,7 +1036,8 @@ Lowering emits an ordinary IR `invoke` and includes the specialized function and
 
 ## Clocked blocks
 
-- The first port is `clk`, followed by typed data inputs. Pipelines conventionally put `valid_in` first among the data inputs. The final expression drives the outputs continuously. A struct result exposes its fields as output ports in declaration order, so those field names must be valid XLS IR port names. A tuple exposes `out_0`, `out_1`, and so on. Unit exposes zero outputs, and a scalar or array exposes one port named `out`. Nest a tuple or struct inside a named field to expose it as one aggregate port.
+- Put `clk` first when the block declares registers or instantiates a clocked child. A combinational block takes just its typed data inputs, as in `block add(a: u8, b: u8) -> u8 { a + b }`. Use `()` for a combinational block with no inputs. Its Block IR and generated RTL omit the clock port.
+- Pipelines conventionally put `valid_in` first among the data inputs. The final expression drives the outputs continuously. A struct result exposes its fields as output ports in declaration order, so those field names must be valid XLS IR port names. A tuple exposes `out_0`, `out_1`, and so on. Unit exposes zero outputs, and a scalar or array exposes one port named `out`. Nest a tuple or struct inside a named field to expose it as one aggregate port.
 - A `reg` name in an expression reads its current value. Each register has exactly one `:=` update site. A surrounding `if` supplies the load enable. An ordinary value expression such as `q := if en { x } else { q };` supplies a mux on the data input. All registers update together at the active edge.
 - A register initializer gives its constant reset value. For example, `reg valid: bool = false;` clears on reset even when its load enable is false. A register without an initializer has an unspecified power-up value and follows its ordinary update on a reset edge.
 - BX infers a physical reset port when a register has an initializer or an instantiated child needs reset. `ResetBehavior` configures polarity and timing for the hierarchy, defaulting to active-high synchronous reset.
@@ -1158,7 +1163,7 @@ stages 1 and 0, and BX reports the mismatch at the adder.
 
 ### Calling a block
 
-An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. BX connects the child's clock and any required reset automatically. Each call binding has its own registers. Reading the binding multiple times reads the same child's outputs.
+An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. Either kind of parent can instantiate a clockless child. A clocked child requires a clocked parent, and BX connects the child's clock and any required reset automatically. Reading the binding multiple times reads the same instance's outputs.
 
 Block lets accept DSLX tuple patterns. For example, `let (valid, (first, .., last)) = packet;` binds the valid bit and the first and last members of the nested tuple. Use `_` to discard one member and `..` to skip zero or more members at that tuple level. An optional annotation after the pattern gives the type of the entire initializer. Each nested pattern must match a tuple of the corresponding shape. A pattern may rebind a data value. In `let (x, previous) = (x + u8:1, x);`, both uses on the right read the previous `x`.
 
@@ -1175,7 +1180,7 @@ block pair(clk, x: u8, y: u8) -> (LaneOut, LaneOut) {
 }
 ```
 
-Use the same call syntax for a BX block. By default, the child may be declared later in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. Include `rst` in that declaration if the linked block has a reset port. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
+Use the same call syntax for a BX block. By default, the child may be declared later in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. Include `clk` if the linked block has a clock port and `rst` if it has a reset port. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
 
 ### Deferred wire bindings
 

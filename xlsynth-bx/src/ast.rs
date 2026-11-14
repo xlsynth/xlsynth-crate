@@ -442,12 +442,12 @@ pub struct CallbackParam {
     pub result: Type,
 }
 
-/// The BX signature of a clocked block supplied by the linked IR package.
+/// The BX signature of a block supplied by the linked IR package.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternBlock {
     /// Exact block name in the linked package.
     pub name: String,
-    pub clock: String,
+    pub clock: Option<String>,
     pub reset: Option<String>,
     pub params: Vec<Param>,
     pub result: Type,
@@ -946,14 +946,14 @@ pub(crate) struct BlockStages<T> {
     pub output: Option<OutputCycles<T>>,
 }
 
-/// A block definition, including its implicit timing domain and output
-/// expression.
+/// A block definition, including its ports, hardware declarations, and output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Block {
     pub name: String,
     /// Location of the declared name, when parsed from a source file.
     pub name_position: Option<SourcePosition>,
-    /// Source text and ranges for blocks that declare deferred bindings.
+    /// Source text and ranges for clockless blocks and blocks with deferred
+    /// bindings.
     pub source: Option<BlockSource>,
     /// Warning kinds suppressed for this definition by `#[allow(...)]`.
     pub allowed_warnings: BTreeSet<BxWarningKind>,
@@ -964,7 +964,9 @@ pub struct Block {
     pub callback_params: Vec<CallbackParam>,
     /// Explicit compile-time values in declaration order.
     pub value_parametrics: Vec<ParametricBinding>,
-    pub clock: String,
+    /// A leading `clk` declares a clocked block. A clockless block is
+    /// combinational.
+    pub clock: Option<String>,
     pub reset: Option<String>,
     pub params: Vec<Param>,
     /// Explicit cycle offsets by data input name.
@@ -990,7 +992,10 @@ impl Block {
         if self.input_cycles.is_empty() && self.output_cycles.is_none() {
             return Ok(stages);
         }
-        let mut locals: BTreeSet<&str> = std::iter::once(self.clock.as_str())
+        let mut locals: BTreeSet<&str> = self
+            .clock
+            .as_deref()
+            .into_iter()
             .chain(self.reset.as_deref())
             .chain(self.type_params.iter().map(String::as_str))
             .chain(self.value_parametrics.iter().map(|p| p.name.as_str()))

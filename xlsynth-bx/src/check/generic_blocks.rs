@@ -70,7 +70,9 @@ pub(super) fn validate_declaration(block: &Block) -> Result<(), String> {
         }
         previous_index = Some(parametric.index);
     }
-    for name in std::iter::once(&block.clock)
+    for name in block
+        .clock
+        .iter()
         .chain(&block.reset)
         .chain(block.params.iter().map(|param| &param.name))
     {
@@ -221,7 +223,7 @@ impl<'m> BlockTemplate<'m> {
             }
         }
         BlockInterface::check_ports(
-            &block.clock,
+            block.clock.as_deref(),
             block.reset.as_deref(),
             &params,
             &result,
