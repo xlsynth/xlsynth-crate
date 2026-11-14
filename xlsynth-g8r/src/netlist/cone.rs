@@ -15,7 +15,7 @@
 //! deterministic order.
 
 use crate::liberty::IndexedLibrary;
-use crate::liberty_model::PinDirection;
+use crate::liberty_model::{PinDirection, SequentialKind};
 use crate::netlist::connectivity::NetlistConnectivity;
 use crate::netlist::normalized::BitIndex;
 use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
@@ -36,8 +36,8 @@ pub enum StopCondition {
     /// Stop once instances beyond this graph distance (in edges) would be
     /// reached. Level 0 is the starting instance.
     Levels(u32),
-    /// Stop at DFF cell instances; do not traverse beyond them, but include
-    /// them in the visit stream.
+    /// Include DFF cell instances reached from the start in the visit stream
+    /// and stop at them.
     AtDff,
     /// Stop at module ports (primary inputs/outputs); do not traverse beyond
     /// the block boundary, but include instances that connect to the port.
@@ -161,7 +161,14 @@ impl<'a> ModuleConeContext<'a> {
             let type_name = resolve_to_string(interner, type_sym);
 
             if let Some(cell) = lib.get_cell(type_name.as_str()) {
-                if dff_cell_names.contains(&cell.name) {
+                let is_dff = if dff_cell_names.is_empty() {
+                    cell.sequential
+                        .iter()
+                        .any(|state| state.kind == SequentialKind::Ff as i32)
+                } else {
+                    dff_cell_names.contains(&cell.name)
+                };
+                if is_dff {
                     dff_types.insert(type_sym);
                 }
                 continue;
@@ -265,6 +272,8 @@ fn reachable_bits_for_traversal(
 /// This is the core traversal routine; callers that need file I/O should first
 /// parse a netlist and load a Liberty library in outer layers and then invoke
 /// this function.
+/// For `StopCondition::AtDff`, an empty `dff_cell_names` set uses the Liberty
+/// flip-flop metadata. A nonempty set specifies the exact boundary cell types.
 pub fn visit_module_cone<OnVisitFn>(
     module: &NetlistModule,
     nets: &[Net],

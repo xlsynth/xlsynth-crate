@@ -1,0 +1,5 @@
+instance_type,instance_name,traversal_pin,levels
+BUF,start,Y,0
+LATCH,latch0,D,1
+REG,ff0,D,2
+BUF,after_ff,A,3

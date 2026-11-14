@@ -1448,14 +1448,14 @@ Key flags:
 - `--traverse <fanin|fanout>`: Traversal direction from the center instance. Required.
 - One of (exactly one is required):
   - `--stop-at-levels <N>`: Stop traversal once instances beyond graph distance `N` from the start instance would be reached.
-  - `--stop-at-dff`: Stop traversal at DFF-like cells inferred from the Liberty library; do not traverse beyond them.
+  - `--stop-at-dff` includes flip-flops reached from the starting instance in the output and stops traversal at them. By default, it uses the Liberty protobuf's flip-flop metadata.
   - `--stop-at-block-port`: Stop traversal at module ports; do not traverse beyond the module boundary.
 
 Additional flags:
 
 - `--module_name <MODULE>`: Optional module name to restrict the search; required when the netlist contains multiple modules.
 - `--start-pins <CSV>`: Optional comma-separated list of starting pins on the instance; defaults to all input pins for `--traverse=fanin` and all output pins for `--traverse=fanout`.
-- `--dff_cells <CSV>`: Comma-separated list of DFF cell names that should be treated as stop boundaries when using `--stop-at-dff` (required if `--stop-at-dff` is selected).
+- `--dff-cells <CSV>` optionally supplies the exact list of one or more cell names to stop at when using `--stop-at-dff`. The existing spelling `--dff_cells` is also accepted.
 - `gv-dump-cone` operates on normalized bit-level connectivity, including preserved continuous `assign` dependencies that can be normalized by the frontend.
 
 Output format:

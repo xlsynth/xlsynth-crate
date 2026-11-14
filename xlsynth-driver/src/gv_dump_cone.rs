@@ -128,8 +128,8 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
         }
     };
 
-    let dff_cells: HashSet<String> = matches
-        .get_one::<String>("dff_cells")
+    let dff_cell_override = matches.get_one::<String>("dff_cells");
+    let dff_cells: HashSet<String> = dff_cell_override
         .map(|s| {
             s.split(',')
                 .filter(|p| !p.is_empty())
@@ -138,9 +138,9 @@ pub fn handle_gv_dump_cone(matches: &ArgMatches) {
         })
         .unwrap_or_default();
 
-    if matches!(stop, StopCondition::AtDff) && dff_cells.is_empty() {
+    if matches!(stop, StopCondition::AtDff) && dff_cell_override.is_some() && dff_cells.is_empty() {
         report_cli_error_and_exit(
-            "when using --stop-at-dff you must also provide --dff_cells with one or more DFF cell names",
+            "--dff-cells must contain one or more cell names when supplied with --stop-at-dff",
             None,
             vec![],
         );
