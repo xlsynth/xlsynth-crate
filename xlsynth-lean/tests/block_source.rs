@@ -88,3 +88,35 @@ fn readable_emission_requires_a_selected_bx_declaration() {
         "{diagnostic}"
     );
 }
+
+#[test]
+fn checked_helpers_accept_defaulted_struct_arguments() {
+    let source = r#"
+struct Packet<N: u32, M: u32 = {N * u32:2}> { x: bits[N], y: bits[M] }
+struct Tagged<N: u32 = {u32:9}> { value: u8 }
+fn copy(packet: Packet<3>, tag: Tagged) -> (Packet<3>, Tagged<9>) { (packet, tag) }
+fn advance(current: u6, value: u8) -> u6 {
+    let pair = copy(Packet<3> { x: u3:0, y: current }, Tagged<9> { value: value });
+    pair.0.y + (pair.1.value as u6)
+}
+"#;
+    let bx = r#"
+extern fn machine::advance(current: u6, value: u8) -> u6;
+block accumulate(clk, value: u8) -> u6 {
+    reg current: u6 = 0;
+    current := machine::advance(current, value);
+    current
+}
+"#;
+    let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+    let module =
+        xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports).unwrap();
+    let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+        bx,
+        module,
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    compiled.emit_readable(None).unwrap();
+}
