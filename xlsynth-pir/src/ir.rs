@@ -316,6 +316,13 @@ pub enum NodePayload {
         start: NodeRef,
         update_value: NodeRef,
     },
+    /// Declares a public bidirectional port, optionally joined to a local net.
+    ExtInoutPort {
+        name: String,
+        port_type: Type,
+        net: Option<String>,
+        sv_type: Option<String>,
+    },
     /// Samples the resolved value of a declared electrical net.
     ExtInoutRead {
         net: String,
@@ -489,7 +496,8 @@ impl NodePayload {
     pub fn is_extension_op(&self) -> bool {
         matches!(
             self,
-            NodePayload::ExtInoutRead { .. }
+            NodePayload::ExtInoutPort { .. }
+                | NodePayload::ExtInoutRead { .. }
                 | NodePayload::ExtInoutDrive { .. }
                 | NodePayload::ExtInstantiationInout { .. }
                 | NodePayload::ExtCarryOut { .. }
@@ -505,6 +513,7 @@ impl NodePayload {
         match self {
             NodePayload::Nil => "nil",
             NodePayload::Param => "param",
+            NodePayload::ExtInoutPort { .. } => "ext_inout_port",
             NodePayload::ExtInoutRead { .. } => "ext_inout_read",
             NodePayload::ExtInoutDrive { .. } => "ext_inout_drive",
             NodePayload::ExtInstantiationInout { .. } => "ext_instantiation_inout",
@@ -639,8 +648,12 @@ impl NodePayload {
                 .collect()
         };
         let result = match self {
-            NodePayload::InputPort { name, sv_type } => {
+            NodePayload::InputPort { name, sv_type }
+            | NodePayload::ExtInoutPort { name, sv_type, .. } => {
                 let mut parts = vec![format!("name={name}")];
+                if let NodePayload::ExtInoutPort { net: Some(net), .. } = self {
+                    parts.push(format!("net={net}"));
+                }
                 if let Some(sv_type) = sv_type {
                     parts.push(format!("sv_type=\"{}\"", escape_xls_ir_string(sv_type)));
                 }
@@ -1221,6 +1234,7 @@ impl NodeGraph {
     pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
         for node in &self.nodes {
             let pin = match &node.payload {
+                NodePayload::ExtInoutPort { name, .. } => name,
                 NodePayload::ExtInoutRead { net }
                 | NodePayload::ExtInoutDrive { net, .. }
                 | NodePayload::ExtInstantiationInout { net, .. } => net,

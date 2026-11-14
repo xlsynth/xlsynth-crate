@@ -29,9 +29,6 @@ pub struct BInoutNet {
     index: usize,
 }
 
-/// Compatibility handle for a net exposed through a bidirectional port.
-pub type BInoutPort = BInoutNet;
-
 /// An instance belonging to exactly one block builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BInstantiation {
@@ -90,19 +87,6 @@ enum InstanceSignature {
     Extern(ExternalSignature),
 }
 
-/// Accesses emitted for a single privately connected child pin.
-#[derive(Clone, Copy)]
-struct PrivateInout {
-    net: BInoutNet,
-    read: Option<BValue>,
-}
-
-/// A child pin can share a parent port or have its own private wire.
-enum InoutConnection {
-    Bound,
-    Private(PrivateInout),
-}
-
 /// Signature and connections accumulated for a single instance.
 struct InstanceState {
     definition: Instantiation,
@@ -110,7 +94,7 @@ struct InstanceState {
     input_types: BTreeMap<String, Type>,
     output_types: BTreeMap<String, Type>,
     inout_types: BTreeMap<String, Type>,
-    inout_connections: BTreeMap<String, InoutConnection>,
+    inout_connections: BTreeSet<String>,
     inputs: BTreeSet<String>,
     outputs: BTreeMap<String, BValue>,
 }
@@ -121,10 +105,7 @@ struct InstanceState {
 pub struct BlockState {
     ports: Vec<BlockPort>,
     inout_nets: Vec<ir::InoutNet>,
-    inout_indices: BTreeMap<String, usize>,
-    // Private nets created by legacy instance accessors receive printable names
-    // at finalization.
-    private_net_names: Vec<(usize, String)>,
+    inout_names: BTreeSet<String>,
     inout_drives: BTreeSet<usize>,
     port_names: BTreeMap<String, Option<NodeRef>>,
     reset: Option<BlockReset>,
@@ -226,54 +207,65 @@ impl Builder<BlockState> {
         Ok(value)
     }
 
-    /// Declares a net with zero or more public aliases, in port declaration
-    /// order.
-    pub fn declare_inout_net(
-        &mut self,
-        name: &str,
-        ty: Type,
-        ports: &[&str],
-    ) -> Result<BInoutNet, BuilderError> {
+    /// Declares a block-local resolved wire.
+    pub fn declare_inout_net(&mut self, name: &str, ty: Type) -> Result<BInoutNet, BuilderError> {
         check_name(name)?;
-        if self.state.inout_indices.contains_key(name) {
-            return Err(invalid(format!("duplicate inout net '{name}'")));
-        }
         if checked_flat_width(&ty)? == 0 || ty.contains_token() {
             return Err(invalid("inout nets require a nonempty, token-free type"));
         }
-        let mut seen = BTreeSet::new();
-        for &port in ports {
-            self.check_node_name(port, None)?;
-            if !seen.insert(port) {
-                return Err(BuilderError::DuplicateName(port.to_owned()));
-            }
+        if !self.state.inout_names.insert(name.to_owned()) {
+            return Err(invalid(format!("duplicate inout net '{name}'")));
         }
-        for &port in ports {
-            self.state.ports.push(BlockPort::Inout(port.to_owned()));
-            self.state.port_names.insert(port.to_owned(), None);
-        }
-        Ok(self.push_inout_net(name, ty, ports.iter().map(|p| (*p).to_owned()).collect()))
-    }
-
-    /// Records an already-checked net and returns its builder-scoped handle.
-    fn push_inout_net(&mut self, name: &str, ty: Type, ports: Vec<String>) -> BInoutNet {
         let index = self.state.inout_nets.len();
         self.state.inout_nets.push(ir::InoutNet {
             name: name.to_owned(),
             ty,
-            ports,
-            sv_type: None,
         });
-        self.state.inout_indices.insert(name.to_owned(), index);
-        BInoutNet {
+        Ok(BInoutNet {
             builder_id: self.id,
             index,
-        }
+        })
     }
 
-    /// Declares a net exposed through one public pin with the same name.
-    pub fn declare_inout_port(&mut self, name: &str, ty: Type) -> Result<BInoutPort, BuilderError> {
-        self.declare_inout_net(name, ty, &[name])
+    /// Adds a public inout pin, optionally connected to a local net.
+    pub fn ext_inout_port(
+        &mut self,
+        name: &str,
+        port_type: Type,
+        net: Option<BInoutNet>,
+    ) -> Result<BValue, BuilderError> {
+        self.check_node_name(name, None)?;
+        if checked_flat_width(&port_type)? == 0 || port_type.contains_token() {
+            return Err(invalid("inout ports require a nonempty, token-free type"));
+        }
+        let net_name = if let Some(net) = net {
+            let def = self.net_definition(net)?;
+            if def.ty != port_type {
+                return Err(invalid(format!(
+                    "inout port '{name}' has type {port_type}, net '{}' has type {}",
+                    def.name, def.ty
+                )));
+            }
+            Some(def.name.clone())
+        } else {
+            None
+        };
+        let port = self.add_node(
+            NodePayload::ExtInoutPort {
+                name: name.to_owned(),
+                port_type,
+                net: net_name,
+                sv_type: None,
+            },
+            Some(Type::nil()),
+        )?;
+        self.graph.get_node_mut(port.node).name = Some(name.to_owned());
+        self.names.insert(name.to_owned(), port.node);
+        self.state
+            .port_names
+            .insert(name.to_owned(), Some(port.node));
+        self.state.ports.push(BlockPort::Inout(port.node));
+        Ok(port)
     }
 
     /// Rejects handles from another builder before accessing a declaration.
@@ -329,66 +321,6 @@ impl Builder<BlockState> {
         Ok(sink)
     }
 
-    /// Compatibility shorthand for reading an exposed net.
-    pub fn ext_inout_port_input(&mut self, port: BInoutPort) -> Result<BValue, BuilderError> {
-        self.ext_inout_read(port)
-    }
-
-    /// Compatibility shorthand for driving an exposed net.
-    pub fn ext_inout_port_output(
-        &mut self,
-        port: BInoutPort,
-        drive: BValue,
-        output_enable: BValue,
-    ) -> Result<BValue, BuilderError> {
-        self.ext_inout_drive(port, drive, output_enable)
-    }
-
-    /// Compatibility shorthand for a declaration, a read, and an enabled
-    /// driver.
-    pub fn ext_inout_port(
-        &mut self,
-        name: &str,
-        drive: BValue,
-        output_enable: BValue,
-    ) -> Result<BValue, BuilderError> {
-        let ty = self.graph.get_node_ty(self.node(drive)?).clone();
-        if self.graph.get_node_ty(self.node(output_enable)?) != &Type::Bits(1) {
-            return Err(invalid("ext_inout_port output enable must be bits[1]"));
-        }
-        let port = self.declare_inout_port(name, ty)?;
-        let read = self.ext_inout_port_input(port)?;
-        self.graph.get_node_mut(read.node).name = Some(name.to_owned());
-        self.names.insert(name.to_owned(), read.node);
-        self.state
-            .port_names
-            .insert(name.to_owned(), Some(read.node));
-        self.ext_inout_port_output(port, drive, output_enable)?;
-        Ok(read)
-    }
-
-    /// Returns the declared pin handle represented by an existing local read.
-    fn pin_for_read(&self, node: NodeRef) -> Result<BInoutPort, BuilderError> {
-        let NodePayload::ExtInoutRead { net } = &self.graph.get_node(node).payload else {
-            return Err(invalid("expected a local inout port read"));
-        };
-        Ok(BInoutPort {
-            builder_id: self.id,
-            index: self.state.inout_indices[net],
-        })
-    }
-
-    /// Binds a child inout using a read of a local pin (compatibility API).
-    pub fn ext_instantiation_inout(
-        &mut self,
-        instance: BInstantiation,
-        port_name: &str,
-        parent: BValue,
-    ) -> Result<BValue, BuilderError> {
-        let port = self.pin_for_read(self.node(parent)?)?;
-        self.bind_inout_port(instance, port_name, port)
-    }
-
     /// Connects a child pin directly to a declared private or public net.
     pub fn bind_inout_net(
         &mut self,
@@ -404,7 +336,7 @@ impl Builder<BlockState> {
                 "missing or incompatible child inout {port_name}"
             )));
         }
-        if state.inout_connections.contains_key(port_name) {
+        if state.inout_connections.contains(port_name) {
             return Err(invalid(format!(
                 "child inout {port_name} is already connected"
             )));
@@ -419,113 +351,8 @@ impl Builder<BlockState> {
         )?;
         self.state.instances[index]
             .inout_connections
-            .insert(port_name.to_owned(), InoutConnection::Bound);
+            .insert(port_name.to_owned());
         Ok(link)
-    }
-
-    /// Compatibility shorthand for binding a child pin to an exposed net.
-    pub fn bind_inout_port(
-        &mut self,
-        instance: BInstantiation,
-        port_name: &str,
-        net: BInoutPort,
-    ) -> Result<BValue, BuilderError> {
-        self.bind_inout_net(instance, port_name, net)
-    }
-
-    /// Gets or creates the private net used by a legacy instance accessor.
-    fn private_inout(
-        &mut self,
-        index: usize,
-        port_name: &str,
-    ) -> Result<PrivateInout, BuilderError> {
-        let state = &self.state.instances[index];
-        let ty = state
-            .inout_types
-            .get(port_name)
-            .ok_or_else(|| invalid(format!("unknown child inout {port_name}")))?
-            .clone();
-        match state.inout_connections.get(port_name) {
-            Some(InoutConnection::Bound) => {
-                return Err(invalid(format!("child inout {port_name} is already bound")));
-            }
-            Some(InoutConnection::Private(access)) => return Ok(*access),
-            None => { /* First access creates the wire and the child connection. */ }
-        }
-        let instantiation = state.definition.name.clone();
-        let base = format!("{instantiation}_{port_name}");
-        // The temporary key cannot be a user identifier. Allocate its final
-        // name after later declarations and named SSA values are known.
-        let key = format!("#{}", self.state.inout_nets.len());
-        self.add_node(
-            NodePayload::ExtInstantiationInout {
-                instantiation,
-                port_name: port_name.to_owned(),
-                net: key.clone(),
-            },
-            None,
-        )?;
-        let net = self.push_inout_net(&key, ty, Vec::new());
-        self.state.private_net_names.push((net.index, base));
-        let access = PrivateInout { net, read: None };
-        self.state.instances[index]
-            .inout_connections
-            .insert(port_name.to_owned(), InoutConnection::Private(access));
-        Ok(access)
-    }
-
-    /// Samples a private child pin, sharing the same net for repeated accesses.
-    pub fn ext_instantiation_inout_output(
-        &mut self,
-        instance: BInstantiation,
-        port_name: &str,
-    ) -> Result<BValue, BuilderError> {
-        let index = self.instance_index(instance)?;
-        let mut access = self.private_inout(index, port_name)?;
-        if let Some(value) = access.read {
-            return Ok(value);
-        }
-        let value = self.ext_inout_read(access.net)?;
-        access.read = Some(value);
-        self.state.instances[index]
-            .inout_connections
-            .insert(port_name.to_owned(), InoutConnection::Private(access));
-        Ok(value)
-    }
-
-    /// Drives a private child net using the legacy instance-oriented shorthand.
-    pub fn ext_instantiation_inout_input(
-        &mut self,
-        instance: BInstantiation,
-        port_name: &str,
-        drive: BValue,
-        output_enable: BValue,
-    ) -> Result<BValue, BuilderError> {
-        let index = self.instance_index(instance)?;
-        let data = self.node(drive)?;
-        self.control_node(output_enable)?;
-        let ty = self.state.instances[index]
-            .inout_types
-            .get(port_name)
-            .ok_or_else(|| invalid(format!("unknown child inout {port_name}")))?;
-        if ty != self.graph.get_node_ty(data) {
-            return Err(invalid(format!(
-                "child inout {port_name} requires drive type {ty}"
-            )));
-        }
-        let access = self.private_inout(index, port_name)?;
-        self.ext_inout_drive(access.net, drive, output_enable)
-    }
-
-    /// Sets the declared SystemVerilog type of a net and its public aliases.
-    pub fn set_inout_sv_type(
-        &mut self,
-        net: BInoutNet,
-        sv_type: Option<&str>,
-    ) -> Result<(), BuilderError> {
-        self.net_definition(net)?;
-        self.state.inout_nets[net.index].sv_type = sv_type.map(str::to_owned);
-        Ok(())
     }
 
     /// Adds an output port and returns its unit-valued sink node.
@@ -592,17 +419,14 @@ impl Builder<BlockState> {
         sv_type: Option<&str>,
     ) -> Result<(), BuilderError> {
         let node = self.node(port)?;
-        if matches!(
-            self.graph.get_node(node).payload,
-            NodePayload::ExtInoutRead { .. }
-        ) {
-            return self.set_inout_sv_type(self.pin_for_read(node)?, sv_type);
-        }
         match &mut self.graph.get_node_mut(node).payload {
             NodePayload::InputPort {
                 sv_type: target, ..
             }
             | NodePayload::OutputPort {
+                sv_type: target, ..
+            }
+            | NodePayload::ExtInoutPort {
                 sv_type: target, ..
             } => {
                 *target = sv_type.map(str::to_string);
@@ -875,7 +699,7 @@ impl Builder<BlockState> {
             input_types,
             output_types,
             inout_types,
-            inout_connections: BTreeMap::new(),
+            inout_connections: BTreeSet::new(),
             inputs: BTreeSet::new(),
             outputs: BTreeMap::new(),
         });
@@ -960,7 +784,7 @@ impl Builder<BlockState> {
 
     /// Moves graph and resource ownership into a block without cloning nodes.
     fn into_block(self) -> Block {
-        let mut block = Block {
+        Block {
             graph: self.graph,
             ports: self.state.ports,
             inout_nets: self.state.inout_nets,
@@ -977,26 +801,7 @@ impl Builder<BlockState> {
                 .into_iter()
                 .map(|state| state.definition)
                 .collect(),
-        };
-        if !self.state.private_net_names.is_empty() {
-            let mut names = crate::ir_block::InoutNetNames::new(&block);
-            let mut renamed = BTreeMap::new();
-            for (index, base) in self.state.private_net_names {
-                let name = names.allocate(&base);
-                let temporary = std::mem::replace(&mut block.inout_nets[index].name, name.clone());
-                renamed.insert(temporary, name);
-            }
-            for node in &mut block.nodes {
-                if let NodePayload::ExtInoutRead { net }
-                | NodePayload::ExtInoutDrive { net, .. }
-                | NodePayload::ExtInstantiationInout { net, .. } = &mut node.payload
-                    && let Some(name) = renamed.get(net)
-                {
-                    net.clone_from(name);
-                }
-            }
         }
-        block
     }
 
     /// Resolves wire ordering and verifies the completed block in its package.
@@ -1015,7 +820,11 @@ impl Builder<BlockState> {
         }
         verify_block_structure_in_package(&block, package, package.members.len())
             .map_err(|error| invalid(error.to_string()))?;
-        if !has_wires && (!block.instantiations.is_empty() || !block.inout_nets.is_empty()) {
+        if !has_wires
+            && (!block.instantiations.is_empty()
+                || !block.inout_nets.is_empty()
+                || block.inout_ports().next().is_some())
+        {
             super::block_cycles::verify_block_combinational_cycles(&block, package)?;
         }
         Ok(block)
@@ -1117,17 +926,8 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
     let mut names = BTreeSet::new();
     let mut input_names = BTreeMap::new();
     let mut clock_seen = false;
-    // Two interfaces with the same public names can short different ports.
-    let mut public_nets = BTreeMap::new();
-    for net in &block.inout_nets {
-        if let Some(first) = net.ports.iter().min() {
-            for alias in &net.ports {
-                if public_nets.insert(alias, (&net.ty, first)).is_some() {
-                    return Err(invalid(format!("duplicate public inout {alias}")));
-                }
-            }
-        }
-    }
+    // Compare which public pins are tied, independently of internal net names.
+    let mut net_representatives = BTreeMap::new();
     for port in &block.ports {
         let signature =
             match port {
@@ -1138,14 +938,32 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
                     clock_seen = true;
                     PortSignature::Clock(name.clone())
                 }
-                BlockPort::Inout(pin) => {
-                    let (ty, alias) = public_nets
-                        .remove(pin)
-                        .ok_or_else(|| invalid(format!("inout port '{pin}' has no net")))?;
-                    if checked_flat_width(ty)? == 0 || ty.contains_token() {
+                BlockPort::Inout(port) => {
+                    let node = block.nodes.get(port.index).ok_or_else(|| {
+                        invalid("instance target inout references a missing node")
+                    })?;
+                    let NodePayload::ExtInoutPort {
+                        name,
+                        port_type,
+                        net,
+                        ..
+                    } = &node.payload
+                    else {
+                        return Err(invalid(
+                            "instance target inout is not an ext_inout_port node",
+                        ));
+                    };
+                    if node.ty != Type::nil()
+                        || checked_flat_width(port_type)? == 0
+                        || port_type.contains_token()
+                    {
                         return Err(invalid("invalid instance inout port type"));
                     }
-                    PortSignature::Inout(pin.clone(), ty.clone(), alias.clone())
+                    let representative = match net {
+                        Some(net) => *net_representatives.entry(net).or_insert(name),
+                        None => name,
+                    };
+                    PortSignature::Inout(name.clone(), port_type.clone(), representative.clone())
                 }
                 BlockPort::Input(port) => {
                     let node = block.nodes.get(port.index).ok_or_else(|| {
@@ -1186,9 +1004,6 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
             return Err(BuilderError::DuplicateName(name.clone()));
         }
         ports.push(signature);
-    }
-    if !public_nets.is_empty() {
-        return Err(invalid("inout net names a missing public port"));
     }
     let reset = block
         .reset

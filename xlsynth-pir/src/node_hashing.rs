@@ -182,6 +182,21 @@ fn hash_payload_attributes(
             update_hash_string_attribute(hasher, "format", format);
             update_hash_i64(hasher, *verbosity);
         }
+        NodePayload::ExtInoutPort {
+            name,
+            port_type,
+            net,
+            sv_type,
+        } => {
+            update_hash_string_attribute(hasher, "port_name", name);
+            update_hash_type(hasher, port_type);
+            if let Some(net) = net {
+                update_hash_string_attribute(hasher, "net", net);
+            }
+            if let Some(sv_type) = sv_type {
+                update_hash_string_attribute(hasher, "sv_type", sv_type);
+            }
+        }
         NodePayload::ExtInoutRead { net } | NodePayload::ExtInoutDrive { net, .. } => {
             update_hash_string_attribute(hasher, "net", net);
         }
@@ -366,6 +381,21 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
         NodePayload::Invoke { to_apply, operands } => {
             attrs.push(format!("to_apply={to_apply}"));
             attrs.push(format!("len={}", operands.len()));
+        }
+        NodePayload::ExtInoutPort {
+            name,
+            port_type,
+            net,
+            sv_type,
+        } => {
+            attrs.push(format!("name={name}"));
+            attrs.push(format!("port_type={port_type}"));
+            if let Some(net) = net {
+                attrs.push(format!("net={net}"));
+            }
+            if let Some(sv_type) = sv_type {
+                attrs.push(format!("sv_type={sv_type:?}"));
+            }
         }
         NodePayload::ExtInoutRead { net } | NodePayload::ExtInoutDrive { net, .. } => {
             attrs.push(format!("net={net}"))

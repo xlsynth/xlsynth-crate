@@ -1,14 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 package private_modes
 
-block contact(io: bits[2][2]) {
-  ext_inout_net io(bits[2][2], ports=[io])
+block contact(io: bits[2][2], probe: bits[2][2]) {
+  ext_inout_net io(bits[2][2])
+  port_io: () = ext_inout_port(name=io, net=io, id=10)
+  port_probe: () = ext_inout_port(name=probe, net=io, id=11)
 }
 
 block forward(io: bits[2][2]) {
-  ext_inout_net io(bits[2][2], ports=[io])
+  ext_inout_net io(bits[2][2])
+  ext_inout_net test_point(bits[2][2])
   instantiation leaf(block=contact, kind=block)
+  port_io: () = ext_inout_port(name=io, net=io, id=12)
   bind: () = ext_instantiation_inout(instantiation=leaf, port_name=io, net=io, id=1)
+  test_link: () = ext_instantiation_inout(instantiation=leaf, port_name=probe, net=test_point, id=9)
+}
+
+block insulated(a: bits[2][2], b: bits[2][2]) {
+  left_pin: () = ext_inout_port(name=a, id=19)
+  right_pin: () = ext_inout_port(name=b, id=20)
 }
 
 top block host(tx: bits[2][2], oe: bits[1], rx: bits[2][2]) {
@@ -16,6 +26,9 @@ top block host(tx: bits[2][2], oe: bits[1], rx: bits[2][2]) {
   ext_inout_net writer_io(bits[2][2])
   instantiation reader(block=forward, kind=block)
   instantiation writer(block=forward, kind=block)
+  instantiation isolator(block=insulated, kind=block)
+  left_open: () = ext_instantiation_inout(instantiation=isolator, port_name=a, net=reader_io, id=21)
+  right_open: () = ext_instantiation_inout(instantiation=isolator, port_name=b, net=writer_io, id=22)
   tx: bits[2][2] = input_port(name=tx, id=2)
   oe: bits[1] = input_port(name=oe, id=3)
   read_link: () = ext_instantiation_inout(instantiation=reader, port_name=io, net=reader_io, id=7)
@@ -26,16 +39,25 @@ top block host(tx: bits[2][2], oe: bits[1], rx: bits[2][2]) {
 }
 
 // EXPECT-SV: module contact(
-// EXPECT-SV:   inout wire [1:0][1:0] io
+// EXPECT-SV:   inout wire [1:0][1:0] io,
+// EXPECT-SV:   inout wire [1:0][1:0] probe
 // EXPECT-SV: );
-// EXPECT-SV:
+// EXPECT-SV:   tran probe_tie[3:0](io, probe);
 // EXPECT-SV: endmodule
 // EXPECT-SV: module forward(
 // EXPECT-SV:   inout wire [1:0][1:0] io
 // EXPECT-SV: );
+// EXPECT-SV:   wire [1:0][1:0] test_point;
 // EXPECT-SV:   contact leaf (
-// EXPECT-SV:     .io(io)
+// EXPECT-SV:     .io(io),
+// EXPECT-SV:     .probe(test_point)
 // EXPECT-SV:   );
+// EXPECT-SV: endmodule
+// EXPECT-SV: module insulated(
+// EXPECT-SV:   inout wire [1:0][1:0] a,
+// EXPECT-SV:   inout wire [1:0][1:0] b
+// EXPECT-SV: );
+// EXPECT-SV:
 // EXPECT-SV: endmodule
 // EXPECT-SV: module host(
 // EXPECT-SV:   input logic [1:0][1:0] tx,
@@ -51,5 +73,9 @@ top block host(tx: bits[2][2], oe: bits[1], rx: bits[2][2]) {
 // EXPECT-SV:   );
 // EXPECT-SV:   forward writer (
 // EXPECT-SV:     .io(writer_io)
+// EXPECT-SV:   );
+// EXPECT-SV:   insulated isolator (
+// EXPECT-SV:     .a(reader_io),
+// EXPECT-SV:     .b(writer_io)
 // EXPECT-SV:   );
 // EXPECT-SV: endmodule

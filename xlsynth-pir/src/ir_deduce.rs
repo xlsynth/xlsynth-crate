@@ -163,6 +163,7 @@ where
         NodePayload::ExtInoutRead { .. } => Ok(None),
         NodePayload::OutputPort { .. }
         | NodePayload::ExtInstantiationInout { .. }
+        | NodePayload::ExtInoutPort { .. }
         | NodePayload::ExtInoutDrive { .. } => Ok(Some(Type::nil())),
 
         NodePayload::Tuple(_) => {

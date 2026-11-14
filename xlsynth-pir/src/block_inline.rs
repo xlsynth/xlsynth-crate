@@ -515,14 +515,14 @@ top fn main(x: bits[1] id=1) -> bits[1] {
   ret result: bits[1] = identity(x, id=2)
 }
 block ordinary() {}
-block cell(io: bits[1]) {
-  ext_inout_net pad(bits[1], ports=[io])
+block cell(pad: bits[1]) {
+  pad: () = ext_inout_port(name=pad, id=3)
 }
 "#;
         let mut package = Parser::new(source).parse_and_validate_package().unwrap();
         let before = package.to_string();
         let error = inline_all_blocks_in_package(&mut package).unwrap_err();
-        assert!(error.contains("ext_inout_net 'pad' in 'cell'"), "{error}");
+        assert!(error.contains("ext_inout_port"), "{error}");
         assert_eq!(package.to_string(), before);
     }
 

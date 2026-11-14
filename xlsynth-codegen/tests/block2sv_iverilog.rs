@@ -756,15 +756,16 @@ module tb;
   reg oe = 0;
   wire [3:0] rx;
   host dut(.*);
-  assign dut.reader.leaf.io = external_data;
+  assign dut.reader.test_point = external_data;
   initial begin
-    #1; if (rx !== 4'bzzzz || dut.writer.leaf.io !== 4'bzzzz) $fatal;
+    #1; if (rx !== 4'bzzzz || dut.writer.test_point !== 4'bzzzz) $fatal;
     oe = 1;
-    #1; if (rx !== 4'bzzzz || dut.writer.leaf.io !== tx) $fatal;
+    #1; if (rx !== 4'bzzzz || dut.writer.test_point !== tx) $fatal;
     external_data = 4'b0101;
-    #1; if (rx !== external_data || dut.writer.leaf.io !== tx) $fatal;
+    #1; if (rx !== external_data || dut.writer.test_point !== tx ||
+            dut.isolator.a !== external_data || dut.isolator.b !== tx) $fatal;
     oe = 0;
-    #1; if (rx !== external_data || dut.writer.leaf.io !== 4'bzzzz) $fatal;
+    #1; if (rx !== external_data || dut.writer.test_point !== 4'bzzzz) $fatal;
     $finish;
   end
 endmodule

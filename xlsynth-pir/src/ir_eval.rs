@@ -59,6 +59,7 @@ fn append_operand_values<'a>(
     match payload {
         Nil
         | Param
+        | ExtInoutPort { .. }
         | ExtInoutRead { .. }
         | ExtInstantiationInout { .. }
         | InputPort { .. }
@@ -1177,6 +1178,7 @@ pub(crate) fn eval_pure_if_supported(n: &ir::Node, operand_values: &[&IrValue]) 
         | ir::NodePayload::Assert { .. }
         | ir::NodePayload::Trace { .. }
         | ir::NodePayload::ExtInstantiationInout { .. }
+        | ir::NodePayload::ExtInoutPort { .. }
         | ir::NodePayload::ExtInoutRead { .. }
         | ir::NodePayload::ExtInoutDrive { .. }
         | ir::NodePayload::InstantiationInput { .. }

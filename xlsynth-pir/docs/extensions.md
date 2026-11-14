@@ -352,43 +352,51 @@ Also add tests in the same style as the existing extension tests:
 
 ## Bidirectional block nets
 
-A block declares each resolved wire as an `ext_inout_net` resource. The optional
-`ports` list exposes a net through any number of public inout pins. Each listed
-name must appear exactly once in the block header with the net's exact type.
-The declaration may also carry an `sv_type` annotation. Omitting `ports`
-makes the wire private to the block and its connected children.
+A block declares each resolved wire with `ext_inout_net`. An
+`ext_inout_port` node declares a public pin and optionally connects it to
+a local net with `net=`. Omit `net` to leave the pin open inside the block.
+The port node takes no operands and returns `()`. Its public `name` identifies
+the block header entry that supplies its pin type. The node retains that
+type and can carry a port-specific `sv_type` annotation.
 
 ```text
 package pads
 
-block device(io: bits[8]) {
-  ext_inout_net pin(bits[8], ports=[io])
+block receiver(io: bits[8], data: bits[8]) {
+  ext_inout_net pin(bits[8])
+  io: () = ext_inout_port(name=io, net=pin, id=9)
+  sample: bits[8] = ext_inout_read(net=pin, id=1)
+  data: () = output_port(sample, name=data, id=2)
 }
 
-top block parent(tx: bits[8], oe: bits[1], rx: bits[8]) {
+top block parent(tx: bits[8], oe: bits[1], rx: bits[8], spare: bits[8]) {
   ext_inout_net bus(bits[8])
-  instantiation a(block=device, kind=block)
-  instantiation b(block=device, kind=block)
-  tx: bits[8] = input_port(name=tx, id=1)
-  oe: bits[1] = input_port(name=oe, id=2)
-  link_a: () = ext_instantiation_inout(instantiation=a, port_name=io, net=bus, id=3)
-  link_b: () = ext_instantiation_inout(instantiation=b, port_name=io, net=bus, id=4)
-  send: () = ext_inout_drive(tx, oe, net=bus, id=5)
-  sample: bits[8] = ext_inout_read(net=bus, id=6)
-  rx: () = output_port(sample, name=rx, id=7)
+  spare: () = ext_inout_port(name=spare, id=10)
+  instantiation u(block=receiver, kind=block)
+  tx: bits[8] = input_port(name=tx, id=3)
+  oe: bits[1] = input_port(name=oe, id=4)
+  link: () = ext_instantiation_inout(instantiation=u, port_name=io, net=bus, id=5)
+  send: () = ext_inout_drive(tx, oe, net=bus, id=6)
+  received: bits[8] = instantiation_output(instantiation=u, port_name=data, id=7)
+  rx: () = output_port(received, name=rx, id=8)
 }
 ```
 
-Both child pins connect to one internal `wire [7:0] bus`. The parent drives
-it with `assign bus = oe ? tx : 'z;` and reads the resolved value. Each net
+The parent drives the internal `wire [7:0] bus` with `assign bus = oe ? tx : 'z;`.
+The child samples it through `io` and returns the resolved value on `data`. Each net
 can have any number of reads and at most one local drive operation. The data
 must match the net type exactly. The active-high `bits[1]` enable controls
 the whole wire. Each child inout requires exactly one binding. A parent that
 only connects children needs no read, drive, or enable.
 
+The verifier rejects a net with no connections or with just one public pin
+and no other use in the declaring block. A private net bound only to one
+child inout is valid. A net tied only to two public pins is also valid.
+
 To expose the example's wire, add `pad: bits[8]` to the parent header and
-`ports=[pad]` to its net declaration. To expose two names, declare both
-in the header and use `ports=[pad_a, pad_b]`. Flat codegen ties public
+`pad: () = ext_inout_port(name=pad, net=bus, id=11)` to its body. Additional
+public pins on the same net each have their own port node. The open `spare`
+pin in the example is independent of every other pin. Flat codegen ties public
 aliases with bidirectional `tran` primitives. Four-state RTL simulation
 resolves undriven wires to Z and conflicting equal-strength drives to X on
 the affected bits. Synthesis support for public aliases depends on the tool.
@@ -399,5 +407,5 @@ Hierarchy verification follows electrical aliases across instances. Feedback
 from a read to a driver on the same resolved net through either data or enable
 is invalid. Registers break combinational feedback. Use `block2sv --layout=none`
 (the default) for RTL. Evaluation, formal and gate projection, desugared/FFI
-extension emission, and pipeline layout reject inout nets, including unused
-private declarations.
+extension emission, and pipeline layout reject blocks with inout ports or
+nets, including blocks whose only inout is an open public pin.

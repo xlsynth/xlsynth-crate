@@ -947,7 +947,8 @@ fn translate_nodes<'ir, S: Solver>(
                     bitvec: BitVec::ZeroWidth,
                 }
             }
-            NodePayload::ExtInoutRead { .. }
+            NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInoutRead { .. }
             | NodePayload::ExtInoutDrive { .. }
             | NodePayload::ExtInstantiationInout { .. }
             | NodePayload::InputPort { .. }

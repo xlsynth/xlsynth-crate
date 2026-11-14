@@ -870,6 +870,7 @@ pub fn validate_block(
 /// ports.
 fn hierarchy_contains_inouts(block: &Block, prior: &HashSet<&str>) -> bool {
     !block.inout_nets.is_empty()
+        || block.inout_ports().next().is_some()
         || block.instantiations.iter().any(|inst| {
             inst.kind == InstantiationKind::Block && prior.contains(inst.block.as_str())
         })
@@ -951,6 +952,18 @@ fn validate_block_inout_hierarchy(
         })
 }
 
+/// The local connections to a net that matter for the dangling-net check.
+#[derive(Clone, Copy)]
+enum InoutConnections<'a> {
+    None,
+    OnePublicPort(&'a str),
+    Connected,
+}
+
+fn is_valid_inout_type(ty: &Type) -> bool {
+    !ty.contains_token() && ty.checked_bit_count().is_some_and(|width| width != 0)
+}
+
 /// Checks declared net types, local drivers, and bindings of all child inouts.
 fn validate_inout_bindings(
     block: &Block,
@@ -960,62 +973,69 @@ fn validate_inout_bindings(
         block: block.name.clone(),
         reason,
     };
-    let mut nets = HashMap::new();
-    let mut aliases = HashSet::new();
-    for net in &block.inout_nets {
-        if net.name.is_empty() || nets.insert(net.name.as_str(), &net.ty).is_some() {
+    let mut net_indices = HashMap::new();
+    for (index, net) in block.inout_nets.iter().enumerate() {
+        if net.name.is_empty() || net_indices.insert(net.name.as_str(), index).is_some() {
             return Err(error(format!(
                 "empty or duplicate inout net name '{}'",
                 net.name
             )));
         }
-        if net.ty.contains_token() || net.ty.checked_bit_count().is_none_or(|width| width == 0) {
+        if !is_valid_inout_type(&net.ty) {
             return Err(error(format!(
                 "inout net '{}' requires a nonempty, token-free type",
                 net.name
             )));
         }
-        for name in &net.ports {
-            if !aliases.insert(name.as_str()) {
-                return Err(error(format!("duplicate inout port alias '{name}'")));
-            }
-        }
-    }
-    for name in block.inout_ports() {
-        if !aliases.remove(name) {
-            return Err(error(format!(
-                "inout port '{name}' belongs to no declared net"
-            )));
-        }
-    }
-    if let Some(name) = aliases.iter().min() {
-        return Err(error(format!(
-            "inout net alias '{name}' is missing from the block's inout ports"
-        )));
     }
 
-    let mut drivers = HashSet::new();
     let mut expected = BTreeMap::new();
     for inst in &block.instantiations {
         if inst.kind == InstantiationKind::Block {
-            for net in &prior[&inst.block].inout_nets {
-                for alias in &net.ports {
-                    expected.insert((inst.name.as_str(), alias.as_str()), &net.ty);
-                }
+            let child = prior[&inst.block];
+            for port in child.inout_ports() {
+                let Some(NodePayload::ExtInoutPort {
+                    name, port_type, ..
+                }) = child.nodes.get(port.index).map(|node| &node.payload)
+                else {
+                    return Err(error(format!(
+                        "child block '{}' has an invalid inout port reference at index {}",
+                        child.name, port.index
+                    )));
+                };
+                expected.insert((inst.name.as_str(), name.as_str()), port_type);
             }
         }
     }
     // Keep the expected endpoints available after a binding, so a duplicate
     // can be distinguished from binding an ordinary port or unknown instance.
     let mut bound = HashSet::new();
+    let mut drivers = HashSet::new();
+    let mut connections = vec![InoutConnections::None; block.inout_nets.len()];
     for node in &block.nodes {
-        let (name, actual_type) = match &node.payload {
-            NodePayload::ExtInoutRead { net } => (net, &node.ty),
+        let (name, actual_type, public_port) = match &node.payload {
+            NodePayload::ExtInoutPort {
+                name,
+                net,
+                port_type,
+                ..
+            } => {
+                if !is_valid_inout_type(port_type) {
+                    return Err(error(format!(
+                        "inout port '{name}' requires a nonempty, token-free type"
+                    )));
+                }
+                let Some(net) = net else {
+                    continue; // An open public pin belongs to no local net.
+                };
+                (net, port_type, Some(name.as_str()))
+            }
+            NodePayload::ExtInoutRead { net } => (net, &node.ty, None),
             NodePayload::ExtInoutDrive { net, drive, .. } => {
                 if !drivers.insert(net) {
                     return Err(error(format!("duplicate driver for inout net '{net}'")));
                 }
-                (net, block.get_node_ty(*drive))
+                (net, block.get_node_ty(*drive), None)
             }
             NodePayload::ExtInstantiationInout {
                 instantiation,
@@ -1033,23 +1053,45 @@ fn validate_inout_bindings(
                         "duplicate inout binding {instantiation}.{port_name}"
                     )));
                 }
-                (net, *ty)
+                (net, *ty, None)
             }
             _ => continue,
         };
-        let ty = nets
+        let &index = net_indices
             .get(name.as_str())
             .ok_or_else(|| error(format!("undeclared inout net '{name}'")))?;
-        if actual_type != *ty {
+        let ty = &block.inout_nets[index].ty;
+        if actual_type != ty {
             return Err(error(format!(
                 "{} node {} references net '{name}' of type {ty}, got {actual_type}",
                 node.payload.get_operator(),
                 node.text_id
             )));
         }
+        connections[index] = match (connections[index], public_port) {
+            (InoutConnections::None, Some(port)) => InoutConnections::OnePublicPort(port),
+            _ => InoutConnections::Connected,
+        };
     }
     if let Some((inst, pin)) = expected.keys().find(|endpoint| !bound.contains(*endpoint)) {
         return Err(error(format!("missing inout binding {inst}.{pin}")));
+    }
+    for (net, connected) in block.inout_nets.iter().zip(connections) {
+        match connected {
+            InoutConnections::None => {
+                return Err(error(format!(
+                    "inout net '{}' has no connections",
+                    net.name
+                )));
+            }
+            InoutConnections::OnePublicPort(port) => {
+                return Err(error(format!(
+                    "inout net '{}' is connected only to public port '{port}'. To leave the port open, omit its net attribute and remove the net declaration",
+                    net.name
+                )));
+            }
+            InoutConnections::Connected => { /* Locally connected. */ }
+        }
     }
     Ok(())
 }
@@ -1129,8 +1171,9 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
                 clock_seen = true;
                 (name.as_str(), 0)
             }
-            BlockPort::Inout(name) => (name.as_str(), 0),
-            BlockPort::Input(reference) | BlockPort::Output(reference) => {
+            BlockPort::Input(reference)
+            | BlockPort::Output(reference)
+            | BlockPort::Inout(reference) => {
                 let node = block.nodes.get(reference.index).ok_or_else(|| {
                     violation(
                         reference.index,
@@ -1139,7 +1182,8 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
                 })?;
                 let name = match (port, &node.payload) {
                     (BlockPort::Input(_), NodePayload::InputPort { name, .. })
-                    | (BlockPort::Output(_), NodePayload::OutputPort { name, .. }) => name,
+                    | (BlockPort::Output(_), NodePayload::OutputPort { name, .. })
+                    | (BlockPort::Inout(_), NodePayload::ExtInoutPort { name, .. }) => name,
                     _ => {
                         return Err(violation(
                             reference.index,
@@ -1165,7 +1209,9 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
     }
     for (index, node) in block.nodes.iter().enumerate() {
         match node.payload {
-            NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } => {
+            NodePayload::InputPort { .. }
+            | NodePayload::OutputPort { .. }
+            | NodePayload::ExtInoutPort { .. } => {
                 if !port_nodes.contains(&NodeRef { index }) {
                     return Err(violation(
                         index,
@@ -1460,6 +1506,7 @@ where
         match &node.payload {
             NodePayload::InputPort { .. }
             | NodePayload::OutputPort { .. }
+            | NodePayload::ExtInoutPort { .. }
             | NodePayload::ExtInoutRead { .. }
             | NodePayload::ExtInoutDrive { .. }
             | NodePayload::ExtInstantiationInout { .. }
@@ -2122,6 +2169,100 @@ mod tests {
     use super::*;
     use crate::ir;
     use crate::ir_parser::Parser;
+
+    #[test]
+    fn inout_net_permitted_connections() {
+        let read = "sample: bits[1] = ext_inout_read(net=bus, id=3)";
+        let drive = "drive: () = ext_inout_drive(one, one, net=bus, id=3)";
+        let child = r#"instantiation u(block=device, kind=block)
+  link: () = ext_instantiation_inout(instantiation=u, port_name=io, net=bus, id=3)"#;
+        let no_ports: &[&str] = &[];
+        let single_port: &[&str] = &["pad"];
+        for (ports, connection, error) in [
+            (no_ports, "", Some("inout net 'bus' has no connections")),
+            (
+                single_port,
+                "",
+                Some(
+                    "inout net 'bus' is connected only to public port 'pad'. To leave the port open, omit its net attribute and remove the net declaration",
+                ),
+            ),
+            (&["a", "b"][..], "", None),
+            (no_ports, read, None),
+            (no_ports, drive, None),
+            (no_ports, child, None),
+            (single_port, read, None),
+            (single_port, drive, None),
+            (single_port, child, None),
+        ] {
+            let header = ports
+                .iter()
+                .map(|p| format!("{p}: bits[1]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let public = ports
+                .iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    format!(
+                        "{name}: () = ext_inout_port(name={name}, net=bus, id={})",
+                        index + 6
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            let source = format!(
+                r#"package connections
+block device(io: bits[1]) {{
+  ext_inout_net pin(bits[1])
+  io: () = ext_inout_port(name=io, net=pin, id=5)
+  sense: bits[1] = ext_inout_read(net=pin, id=1)
+}}
+top block test({header}) {{
+  ext_inout_net bus(bits[1])
+  ext_inout_net observed(bits[1])
+  {public}
+  one: bits[1] = literal(value=1, id=2)
+  {connection}
+  other_read: bits[1] = ext_inout_read(net=observed, id=4)
+}}"#
+            );
+            let package = Parser::new(&source).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&package),
+                error.map_or(Ok(()), |reason| Err(
+                    ValidationError::BlockInvariantViolation {
+                        block: "test".into(),
+                        reason: reason.into(),
+                    }
+                )),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn inout_net_parent_binding_does_not_count_as_a_child_connection() {
+        let source = r#"package bound_child
+block child(pad: bits[1]) {
+  ext_inout_net pin(bits[1])
+  pad: () = ext_inout_port(name=pad, net=pin, id=2)
+}
+top block parent(io: bits[1]) {
+  ext_inout_net bus(bits[1])
+  io: () = ext_inout_port(name=io, net=bus, id=3)
+  instantiation u(block=child, kind=block)
+  link: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=1)
+}"#;
+        let package = Parser::new(source).parse_package().unwrap();
+        assert_eq!(
+            validate_package(&package),
+            Err(ValidationError::BlockInvariantViolation {
+                block: "child".into(),
+                reason: "inout net 'pin' is connected only to public port 'pad'. To leave the port open, omit its net attribute and remove the net declaration".into(),
+            })
+        );
+    }
 
     const VALID_REGISTER_BLOCK: &str = r#"package public_register_validation
 

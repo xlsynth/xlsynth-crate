@@ -365,11 +365,11 @@ fn block_names(block: &Block) -> HashSet<String> {
             .iter()
             .map(|instance| instance.name.clone()),
     );
-    names.extend(block.inout_ports().map(str::to_owned));
     names.extend(block.inout_nets.iter().map(|net| net.name.clone()));
     for node in &block.nodes {
         match &node.payload {
             NodePayload::InputPort { name, .. }
+            | NodePayload::ExtInoutPort { name, .. }
             | NodePayload::OutputPort { name, .. }
             | NodePayload::Assert { label: name, .. }
             | NodePayload::Cover { label: name, .. } => {
@@ -521,15 +521,17 @@ fn drive(sensed: bits[1] id=1) -> bits[1] {
   ret zero: bits[1] = literal(value=0, id=2)
 }
 block child(data: bits[1], io: bits[1]) {
-  ext_inout_net pad(bits[1], ports=[io])
+  ext_inout_net pad(bits[1])
+  io: () = ext_inout_port(name=io, net=pad, id=10)
   data: bits[1] = input_port(name=data, id=3)
   on: bits[1] = literal(value=1, id=4)
   driven: bits[1] = invoke(data, to_apply=drive, id=5)
   drive_pad: () = ext_inout_drive(driven, on, net=pad, id=6)
 }
 top block parent(pin: bits[1]) {
-  ext_inout_net bus(bits[1], ports=[pin])
+  ext_inout_net bus(bits[1])
   instantiation cell(block=child, kind=block)
+  pin: () = ext_inout_port(name=pin, net=bus, id=11)
   bind_pin: () = ext_instantiation_inout(instantiation=cell, port_name=io, net=bus, id=7)
   sample: bits[1] = ext_inout_read(net=bus, id=8)
   sense: () = instantiation_input(sample, instantiation=cell, port_name=data, id=9)

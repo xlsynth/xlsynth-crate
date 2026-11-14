@@ -17,10 +17,10 @@ fn lower(block_ir: &str) -> xlsynth_g8r::aig::SequentialGateFn {
 }
 
 #[test]
-fn gate_lowering_rejects_declaration_only_and_unobserved_private_pins() {
+fn gate_lowering_rejects_open_ports_and_single_child_connections() {
     let source = r#"package pads
 block cell(io: bits[1]) {
-  ext_inout_net pin(bits[1], ports=[io])
+  contact: () = ext_inout_port(name=io, id=2)
 }
 block wrapper() {
   ext_inout_net bus(bits[1])
@@ -29,7 +29,10 @@ block wrapper() {
 }
 "#;
     let mut package = Parser::new(source).parse_and_validate_package().unwrap();
-    for (name, net) in [("cell", "pin"), ("wrapper", "bus")] {
+    for (name, resource) in [
+        ("cell", "ext_inout_port 'io'"),
+        ("wrapper", "ext_inout_net 'bus'"),
+    ] {
         package.set_top_block(name).unwrap();
         let error =
             block_package_to_sequential_gate_fn(&package, GatifyOptions::all_opts_disabled())
@@ -37,7 +40,7 @@ block wrapper() {
         assert_eq!(
             error,
             format!(
-                "block2sequential: block inlining failed: block inlining: ext_inout_net '{net}' in '{name}' requires block-to-Verilog codegen"
+                "block2sequential: block inlining failed: block inlining: {resource} in '{name}' requires block-to-Verilog codegen"
             )
         );
     }

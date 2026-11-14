@@ -61,7 +61,8 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
         match &node.payload {
             NodePayload::Nil => {}
             NodePayload::Param => {}
-            NodePayload::ExtInoutRead { .. }
+            NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInoutRead { .. }
             | NodePayload::ExtInstantiationInout { .. }
             | NodePayload::InputPort { .. } => { /* No graph operands. */ }
             NodePayload::Tuple(elems)

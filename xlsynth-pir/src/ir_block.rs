@@ -6,14 +6,12 @@ use std::ops::{Deref, DerefMut};
 
 use crate::ir::{Fn, Instantiation, Node, NodeGraph, NodePayload, NodeRef, Register, Type};
 
-/// A block-local electrical net shared by its public aliases and bound child
-/// ports.
+/// A block-local electrical net referenced by port nodes, child bindings, and
+/// local accesses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InoutNet {
     pub name: String,
     pub ty: Type,
-    pub ports: Vec<String>,
-    pub sv_type: Option<String>,
 }
 
 /// One interface port in declaration order.
@@ -21,7 +19,7 @@ pub struct InoutNet {
 pub enum BlockPort {
     Input(NodeRef),
     Output(NodeRef),
-    Inout(String),
+    Inout(NodeRef),
     Clock(String),
 }
 
@@ -81,6 +79,7 @@ impl Block {
                 node.payload,
                 NodePayload::InputPort { .. }
                     | NodePayload::OutputPort { .. }
+                    | NodePayload::ExtInoutPort { .. }
                     | NodePayload::ExtInoutRead { .. }
                     | NodePayload::ExtInoutDrive { .. }
                     | NodePayload::ExtInstantiationInout { .. }
@@ -233,9 +232,9 @@ impl Block {
     }
 
     /// Iterates bidirectional pins in declaration order, including unused pins.
-    pub fn inout_ports(&self) -> impl Iterator<Item = &str> {
+    pub fn inout_ports(&self) -> impl Iterator<Item = NodeRef> + '_ {
         self.ports.iter().filter_map(|port| match port {
-            BlockPort::Inout(name) => Some(name.as_str()),
+            BlockPort::Inout(node) => Some(*node),
             _ => None,
         })
     }
@@ -259,20 +258,24 @@ impl Block {
         })
     }
 
-    /// Returns the semantic name of an input or output node.
+    /// Returns the semantic name of an input, output, or inout node.
     pub fn port_name(&self, port: NodeRef) -> &str {
         match &self.get_node(port).payload {
-            NodePayload::InputPort { name, .. } | NodePayload::OutputPort { name, .. } => name,
+            NodePayload::InputPort { name, .. }
+            | NodePayload::OutputPort { name, .. }
+            | NodePayload::ExtInoutPort { name, .. } => name,
             _ => panic!("node {} is not a data port", port.index),
         }
     }
 
-    /// Returns the external data type; an output node itself has type `()`.
+    /// Returns the external data type, including for unit-valued output and
+    /// inout nodes.
     pub fn port_type(&self, port: NodeRef) -> &Type {
         let node = self.get_node(port);
         match node.payload {
             NodePayload::InputPort { .. } => &node.ty,
             NodePayload::OutputPort { arg, .. } => self.get_node_ty(arg),
+            NodePayload::ExtInoutPort { ref port_type, .. } => port_type,
             _ => panic!("node {} is not a data port", port.index),
         }
     }
@@ -292,10 +295,9 @@ impl Block {
     }
 
     /// Finds a bidirectional pin by its semantic port name.
-    pub fn get_inout_port(&self, name: &str) -> Option<&InoutNet> {
-        self.inout_nets
-            .iter()
-            .find(|net| net.ports.iter().any(|port| port == name))
+    pub fn get_inout_port(&self, name: &str) -> Option<NodeRef> {
+        self.inout_ports()
+            .find(|port| self.port_name(*port) == name)
     }
 
     /// Finds a block-local net by its resource name.
@@ -406,8 +408,10 @@ impl Block {
     /// success, ordered ports and reset references follow the reordered nodes.
     pub fn compact_and_toposort(&mut self) -> Result<(), String> {
         let port_nodes = self.ports.iter().filter_map(|port| match port {
-            BlockPort::Input(node) | BlockPort::Output(node) => Some(*node),
-            BlockPort::Clock(_) | BlockPort::Inout(_) => None,
+            BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
+                Some(*node)
+            }
+            BlockPort::Clock(_) => None,
         });
         for node in port_nodes.chain(self.reset.iter().map(|reset| reset.port)) {
             if self
@@ -445,7 +449,7 @@ impl Block {
             .iter()
             .map(|port| match port {
                 BlockPort::Input(node) => remap(*node).map(BlockPort::Input),
-                BlockPort::Inout(pin) => Ok(BlockPort::Inout(pin.clone())),
+                BlockPort::Inout(node) => remap(*node).map(BlockPort::Inout),
                 BlockPort::Output(node) => remap(*node).map(BlockPort::Output),
                 BlockPort::Clock(name) => Ok(BlockPort::Clock(name.clone())),
             })
@@ -470,58 +474,6 @@ impl Block {
 impl std::fmt::Display for Block {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&crate::ir_parser::emit_block(self, false))
-    }
-}
-
-/// Allocates names for builder-created private nets without shadowing user
-/// names.
-pub(crate) struct InoutNetNames {
-    taken: std::collections::HashSet<String>,
-    next_suffix: std::collections::HashMap<String, usize>,
-}
-
-impl InoutNetNames {
-    pub(crate) fn new(block: &Block) -> Self {
-        let mut taken = std::collections::HashSet::new();
-        for net in &block.inout_nets {
-            taken.insert(net.name.clone());
-            taken.extend(net.ports.iter().cloned());
-        }
-        for port in &block.ports {
-            if let BlockPort::Clock(name) | BlockPort::Inout(name) = port {
-                taken.insert(name.clone());
-            }
-        }
-        taken.extend(block.registers.iter().map(|reg| reg.name.clone()));
-        taken.extend(block.instantiations.iter().map(|inst| inst.name.clone()));
-        for node in &block.nodes {
-            taken.extend(node.name.iter().cloned());
-            let name = match &node.payload {
-                NodePayload::InputPort { name, .. } | NodePayload::OutputPort { name, .. } => name,
-                NodePayload::Assert { label, .. } | NodePayload::Cover { label, .. } => label,
-                _ => continue,
-            };
-            taken.insert(name.clone());
-        }
-        Self {
-            taken,
-            next_suffix: Default::default(),
-        }
-    }
-
-    /// Claims the stem when available and otherwise advances its suffix cursor.
-    pub(crate) fn allocate(&mut self, stem: &str) -> String {
-        if self.taken.insert(stem.to_owned()) {
-            return stem.to_owned();
-        }
-        let suffix = self.next_suffix.entry(stem.to_owned()).or_insert(1);
-        loop {
-            let candidate = format!("{stem}__{suffix}");
-            *suffix += 1;
-            if self.taken.insert(candidate.clone()) {
-                return candidate;
-            }
-        }
     }
 }
 
@@ -643,6 +595,27 @@ mod tests {
             });
             assert!(Block::from_function(invalid, None).is_err());
         }
+    }
+
+    #[test]
+    fn compaction_preserves_an_open_inout_and_rejects_its_removal() {
+        let mut block = Parser::new(
+            r#"block pads(pin: bits[8]) {
+  unused: bits[1] = literal(value=0, id=1)
+  node: () = ext_inout_port(name=pin, id=2)
+}"#,
+        )
+        .parse_block()
+        .unwrap();
+        let before = block.get_inout_port("pin").unwrap();
+        block.get_node_mut(NodeRef { index: 1 }).payload = NodePayload::Nil;
+        block.compact_and_toposort().unwrap();
+        let after = block.get_inout_port("pin").unwrap();
+        assert_ne!(before, after);
+        assert_eq!(block.get_node(after).text_id, 2);
+        assert_eq!(block.port_type(after), &Type::Bits(8));
+        block.get_node_mut(after).payload = NodePayload::Nil;
+        assert!(block.compact_and_toposort().is_err());
     }
 
     #[test]

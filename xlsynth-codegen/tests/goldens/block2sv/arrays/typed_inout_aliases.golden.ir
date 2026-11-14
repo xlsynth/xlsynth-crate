@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+package typed_inout_aliases
+
+top block bus(a: bits[4][2], index: bits[1], b: bits[4][2], floating: bits[4][2], out: bits[4]) {
+  ext_inout_net pins(bits[4][2])
+  second_pin: () = ext_inout_port(name=b, net=pins, sv_type="types::output_t", id=1)
+  select_index: bits[1] = input_port(name=index, id=2)
+  first_pin: () = ext_inout_port(name=a, net=pins, sv_type="types::input_t", id=3)
+  open_pin: () = ext_inout_port(name=floating, sv_type="types::input_t", id=4)
+  sample: bits[4][2] = ext_inout_read(net=pins, id=5)
+  element: bits[4] = array_index(sample, indices=[select_index], id=6)
+  observed: () = output_port(element, name=out, id=7)
+}
+
+// EXPECT-SV: module bus(
+// EXPECT-SV:   inout wire types::input_t a,
+// EXPECT-SV:   input logic index,
+// EXPECT-SV:   inout wire types::output_t b,
+// EXPECT-SV:   inout wire types::input_t floating,
+// EXPECT-SV:   output logic [3:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   tran b_tie[7:0](a, b);
+// EXPECT-SV:   logic [1:0][3:0] sample;
+// EXPECT-SV:   logic [3:0] element;
+// EXPECT-SV:   assign sample = a;
+// EXPECT-SV:   assign element = sample[index];
+// EXPECT-SV:   assign out = element;
+// EXPECT-SV: endmodule

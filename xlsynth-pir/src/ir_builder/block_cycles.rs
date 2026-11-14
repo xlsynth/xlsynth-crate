@@ -21,7 +21,7 @@ struct BlockSummary {
     port_classes: BTreeMap<String, String>,
 }
 
-/// A connected set of local net declarations, joined through child aliases.
+/// An open public pin or a set of locally declared nets joined by child ports.
 #[derive(Default)]
 struct NetClass<'a> {
     public_name: Option<&'a str>,
@@ -119,19 +119,37 @@ impl<'a> DependencyGraph<'a> {
                 }
             }
         }
-        let mut local_nets = BTreeMap::new();
+        let local_nets: BTreeMap<_, _> = block
+            .inout_nets
+            .iter()
+            .zip(vertices)
+            .map(|(net, vertex)| {
+                (
+                    net.name.as_str(),
+                    vertex.expect("visited each net component"),
+                )
+            })
+            .collect();
         let mut public_nets = BTreeMap::new();
-        for (net, vertex) in block.inout_nets.iter().zip(vertices) {
-            let vertex = vertex.expect("visited each net component");
-            local_nets.insert(net.name.as_str(), vertex);
-            for name in &net.ports {
-                public_nets.insert(name.as_str(), vertex);
-            }
-        }
-        for name in block.inout_ports() {
-            let vertex = public_nets
-                .get(name)
-                .ok_or_else(|| invalid(format!("inout port '{name}' has no declared net")))?;
+        for port in block.inout_ports() {
+            let Some(NodePayload::ExtInoutPort { name, net, .. }) =
+                block.nodes.get(port.index).map(|node| &node.payload)
+            else {
+                return Err(invalid("block inout port references an invalid node"));
+            };
+            let vertex = if let Some(net) = net {
+                *local_nets
+                    .get(net.as_str())
+                    .ok_or_else(|| invalid(format!("undeclared inout net '{net}'")))?
+            } else {
+                // An open pin is its own electrical class. Binding two such
+                // pins on a child must never short their parent nets together.
+                let vertex = NodeRef { index: edges.len() };
+                edges.push(Vec::new());
+                classes.push(NetClass::default());
+                vertex
+            };
+            public_nets.insert(name.as_str(), vertex);
             classes[vertex.index - block.nodes.len()]
                 .public_name
                 .get_or_insert(name);
@@ -440,16 +458,17 @@ fn graph_output_dependencies(
                 else {
                     return Err(invalid("block output references an invalid node"));
                 };
-                (name, *reference)
+                (name.as_str(), *reference)
             }
-            BlockPort::Inout(name) => {
-                let root = graph.public_nets[name.as_str()];
+            BlockPort::Inout(reference) => {
+                let name = block.port_name(*reference);
+                let root = graph.public_nets[name];
                 let representative = graph.classes[root.index - block.nodes.len()]
                     .public_name
                     .expect("public net has a representative");
                 summary
                     .port_classes
-                    .insert(name.clone(), representative.to_string());
+                    .insert(name.to_string(), representative.to_string());
                 if representative != name {
                     continue;
                 }
@@ -457,7 +476,7 @@ fn graph_output_dependencies(
             }
             BlockPort::Clock(_) | BlockPort::Input(_) => continue,
         };
-        let inputs = summary.outputs.entry(name.clone()).or_default();
+        let inputs = summary.outputs.entry(name.to_string()).or_default();
         visited[root.index] = Some(root);
         pending.push(root);
         while let Some(vertex) = pending.pop() {
@@ -503,7 +522,9 @@ mod tests {
     fn builder_cycle_precheck_handles_unverified_inout_bindings() {
         let source = r#"package precheck
 block child(a: bits[1], b: bits[1], sensed: bits[1]) {
-  ext_inout_net wire(bits[1], ports=[a, b])
+  ext_inout_net wire(bits[1])
+  a: () = ext_inout_port(name=a, net=wire, id=6)
+  b: () = ext_inout_port(name=b, net=wire, id=7)
   read: bits[1] = ext_inout_read(net=wire, id=1)
   sensed: () = output_port(read, name=sensed, id=2)
 }

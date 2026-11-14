@@ -81,6 +81,7 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
             | NodePayload::Param
             | NodePayload::Literal(_)
             | NodePayload::InputPort { .. }
+            | NodePayload::ExtInoutPort { .. }
             | NodePayload::ExtInoutRead { .. } => {
                 // Leaf nodes do not reference operands.
             }
@@ -433,6 +434,9 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
         NodePayload::Param | NodePayload::InputPort { .. } => {
             // The owning function or block validates the input declaration.
             Ok(())
+        }
+        NodePayload::ExtInoutPort { .. } => {
+            expect_type(&node.ty, &Type::nil(), "ext_inout_port result")
         }
         NodePayload::ExtInstantiationInout { .. } => {
             expect_type(&node.ty, &Type::nil(), "ext_instantiation_inout result")

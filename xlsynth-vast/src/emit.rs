@@ -375,7 +375,9 @@ fn emit_module(file: &VastFile, module: &ModuleData) -> String {
                 ModulePortDirection::Output => "output",
                 ModulePortDirection::InOut => "inout",
             };
-            let kind = if is_user_defined(file, port.data_type) {
+            let kind = if port.direction != ModulePortDirection::InOut
+                && is_user_defined(file, port.data_type)
+            {
                 DataKind::User
             } else {
                 port.kind

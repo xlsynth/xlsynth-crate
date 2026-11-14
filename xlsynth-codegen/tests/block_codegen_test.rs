@@ -99,7 +99,7 @@ fn register_breaks_an_inout_feedback_path() {
 }
 
 #[test]
-fn pipeline_layout_rejects_an_unaccessed_pin_in_a_private_child() {
+fn pipeline_layout_rejects_a_wiring_only_child() {
     let ir = include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir");
     let package = Parser::new(ir).parse_and_validate_package().unwrap();
     let error = emit_system_verilog(
@@ -120,9 +120,9 @@ fn pipeline_layout_rejects_an_unaccessed_pin_in_a_private_child() {
 }
 
 #[test]
-fn an_unused_private_net_requires_flat_layout() {
-    let ir = "package p
-top block unused() { ext_inout_net floating(bits[3]) }";
+fn an_open_pin_requires_flat_layout() {
+    let ir =
+        "package pins\ntop block probe(io: bits[1]) { pin: () = ext_inout_port(name=io, id=1) }";
     let package = Parser::new(ir).parse_and_validate_package().unwrap();
     let options = BlockCodegenOptions {
         layout: Layout::Pipeline,
@@ -131,23 +131,43 @@ top block unused() { ext_inout_net floating(bits[3]) }";
     assert_eq!(
         emit_system_verilog(&package, &options).unwrap_err(),
         BlockCodegenError::NotPipeline(
-            "block `unused` cannot use layout=pipeline with inout net `floating`; use layout=none"
-                .into()
-        )
+            "block `probe` cannot use layout=pipeline with inout port `io`; use layout=none".into()
+        ),
     );
-    let flat = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
-    assert_eq!(
-        flat.system_verilog,
-        "module unused;\n  wire [2:0] floating;\nendmodule\n"
-    );
-    assert!(xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "unused").is_err());
+}
+
+#[test]
+fn flat_codegen_rejects_an_unused_net_or_a_lone_public_pin() {
+    for (header, declaration, reason) in [
+        ("", "ext_inout_net floating(bits[3])", "has no connections"),
+        (
+            "floating: bits[3]",
+            "ext_inout_net floating(bits[3]) p: () = ext_inout_port(name=floating, id=1)",
+            "has no connections",
+        ),
+        (
+            "pad: bits[3]",
+            "ext_inout_net floating(bits[3]) p: () = ext_inout_port(name=pad, net=floating, id=1)",
+            "is connected only to public port 'pad'. To leave the port open, omit its net attribute and remove the net declaration",
+        ),
+    ] {
+        let ir = format!("package p\ntop block unused({header}) {{ {declaration} }}");
+        let package = Parser::new(&ir).parse_package().unwrap();
+        assert_eq!(
+            emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap_err(),
+            BlockCodegenError::InvalidBlock(format!(
+                "block 'unused' violates a resource invariant: inout net 'floating' {reason}"
+            )),
+        );
+    }
 }
 
 #[test]
 fn inout_data_types_and_enables_are_checked() {
     let single = r#"package pads
 top block cell_io(data: bits[4], oe: bits[1], io: bits[4]) {
-  ext_inout_net pin(bits[4], ports=[io])
+  ext_inout_net pin(bits[4])
+  pad: () = ext_inout_port(name=io, net=pin, id=4)
   data: bits[4] = input_port(name=data, id=1)
   oe: bits[1] = input_port(name=oe, id=2)
   drive: () = ext_inout_drive(data, oe, net=pin, id=3)
@@ -170,7 +190,11 @@ top block cell_io(data: bits[4], oe: bits[1], io: bits[4]) {
     }
     // Equal flattened widths are insufficient when binding physical ports.
     let ir = include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir");
-    let child_scalar = ir.replacen("bits[2][2]", "bits[4]", 2);
+    let (contact, rest) = ir.split_once("\nblock forward").unwrap();
+    let child_scalar = format!(
+        "{}\nblock forward{rest}",
+        contact.replace("bits[2][2]", "bits[4]")
+    );
     let error = Parser::new(&child_scalar)
         .parse_and_validate_package()
         .unwrap_err();

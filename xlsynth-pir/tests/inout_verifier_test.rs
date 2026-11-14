@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_pir::ir::{BlockPort, InoutNet, Type};
+use xlsynth_pir::ir::{BlockPort, InoutNet, NodePayload, NodeRef, Type};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_verify::{VerifyError, verify_package};
 
@@ -41,11 +41,15 @@ top block grandparent(x: bits[1]) {
 fn child_public_aliases_join_distinct_parent_nets_transitively() {
     let source = r#"package aliases
 block tie(x: bits[1], y: bits[1]) {
-  ext_inout_net shorted(bits[1], ports=[y, x])
+  ext_inout_net shorted(bits[1])
+  y: () = ext_inout_port(name=y, net=shorted, id=11)
+  x: () = ext_inout_port(name=x, net=shorted, id=12)
 }
 block relay(a: bits[1], b: bits[1]) {
-  ext_inout_net left(bits[1], ports=[a])
-  ext_inout_net right(bits[1], ports=[b])
+  ext_inout_net left(bits[1])
+  ext_inout_net right(bits[1])
+  a: () = ext_inout_port(name=a, net=left, id=13)
+  b: () = ext_inout_port(name=b, net=right, id=14)
   instantiation wire(block=tie, kind=block)
   x: () = ext_instantiation_inout(instantiation=wire, port_name=x, net=left, id=1)
   y: () = ext_instantiation_inout(instantiation=wire, port_name=y, net=right, id=2)
@@ -78,10 +82,11 @@ top block top(clk: clock, data: bits[1]) {
             Err(VerifyError::BlockInvariantViolation { block, reason })
                 if block == "top" && reason.contains("combinational cycle")
         ));
-        let independent = cyclic.replace(
-            "shorted(bits[1], ports=[y, x])",
-            "x_net(bits[1], ports=[x])\n  ext_inout_net y_net(bits[1], ports=[y])",
-        );
+        // An open child pin does not alias another open pin, even when
+        // both are bound in the parent and exposed again by the relay.
+        let independent = cyclic
+            .replace("ext_inout_net shorted(bits[1])", "")
+            .replace(", net=shorted", "");
         verify(&independent).unwrap();
     }
 }
@@ -90,7 +95,8 @@ top block top(clk: clock, data: bits[1]) {
 fn shared_private_nets_collect_dependencies_from_each_instance() {
     let source = r#"package sibling_drivers
 block cell(io: bits[1], data: bits[1], sense: bits[1]) {
-  ext_inout_net pad(bits[1], ports=[io])
+  ext_inout_net pad(bits[1])
+  io: () = ext_inout_port(name=io, net=pad, id=13)
   data: bits[1] = input_port(name=data, id=1)
   one: bits[1] = literal(value=1, id=2)
   drive: () = ext_inout_drive(data, one, net=pad, id=3)
@@ -99,7 +105,6 @@ block cell(io: bits[1], data: bits[1], sense: bits[1]) {
 }
 top block container(x: bits[1]) {
   ext_inout_net shared(bits[1])
-  ext_inout_net isolated(bits[1])
   instantiation a(block=cell, kind=block)
   instantiation b(block=cell, kind=block)
   x: bits[1] = input_port(name=x, id=6)
@@ -121,15 +126,23 @@ top block container(x: bits[1]) {
         Err(VerifyError::BlockInvariantViolation { block, reason })
             if block == "container" && reason.contains("combinational cycle")
     ));
-    verify(&cyclic.replace("net=shared, id=8", "net=isolated, id=8")).unwrap();
+    let isolated = cyclic
+        .replace(
+            "ext_inout_net shared(bits[1])",
+            "ext_inout_net shared(bits[1])\n  ext_inout_net isolated(bits[1])",
+        )
+        .replace("net=shared, id=8", "net=isolated, id=8");
+    verify(&isolated).unwrap();
 }
 
 #[test]
 fn binding_independent_child_ports_to_the_same_net_can_close_a_cycle() {
     let source = r#"package local_short
 block bridge(a: bits[1], b: bits[1]) {
-  ext_inout_net input_wire(bits[1], ports=[a])
-  ext_inout_net output_wire(bits[1], ports=[b])
+  ext_inout_net input_wire(bits[1])
+  ext_inout_net output_wire(bits[1])
+  a: () = ext_inout_port(name=a, net=input_wire, id=6)
+  b: () = ext_inout_port(name=b, net=output_wire, id=7)
   read_a: bits[1] = ext_inout_read(net=input_wire, id=1)
   one: bits[1] = literal(value=1, id=2)
   drive_b: () = ext_inout_drive(one, read_a, net=output_wire, id=3)
@@ -143,8 +156,11 @@ top block parent() {
 }
 "#;
     verify(source).unwrap();
+    let shorted = source
+        .replace("net=q, id=5", "net=p, id=5")
+        .replace("ext_inout_net q(bits[1])", "");
     assert!(matches!(
-        verify(&source.replace("net=q, id=5", "net=p, id=5")),
+        verify(&shorted),
         Err(VerifyError::BlockInvariantViolation { block, reason })
             if block == "parent" && reason.contains("combinational cycle")
     ));
@@ -154,7 +170,9 @@ top block parent() {
 fn bindings_require_each_child_alias_once_with_exact_aggregate_type() {
     let source = r#"package types
 block cell(io: bits[2][2], other: bits[2][2]) {
-  ext_inout_net tied(bits[2][2], ports=[io, other])
+  ext_inout_net tied(bits[2][2])
+  io: () = ext_inout_port(name=io, net=tied, id=3)
+  other: () = ext_inout_port(name=other, net=tied, id=4)
 }
 top block parent() {
   ext_inout_net bus(bits[2][2])
@@ -189,23 +207,150 @@ top block parent() {
 }
 
 #[test]
-fn malformed_net_declarations_are_rejected_even_without_accesses() {
-    let source = r#"package declarations
-top block top(io: bits[4]) {
-  ext_inout_net bus(bits[4], ports=[io])
+fn open_child_inout_requires_one_binding_with_the_public_port_type() {
+    let source = r#"package open_child
+block child(pad: bits[4]) {
+  terminal: () = ext_inout_port(name=pad, id=1)
+}
+top block parent() {
+  ext_inout_net bus(bits[4])
+  instantiation u(block=child, kind=block)
+  pin: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=2)
+}
+"#;
+    verify(source).unwrap();
+    for (from, to, expected) in [
+        ("bus(bits[4])", "bus(bits[1])", "type bits[1], got bits[4]"),
+        (
+            "  pin: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=2)",
+            "",
+            "missing inout binding u.pad",
+        ),
+        (
+            "id=2)",
+            "id=2)\n  again: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=3)",
+            "duplicate inout binding u.pad",
+        ),
+    ] {
+        let error = verify(&source.replace(from, to)).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn an_extern_parameter_cannot_be_bound_as_an_inout() {
+    let source = r#"package foreign_port
+fn foreign(pad: bits[1] id=1) -> bits[1] {
+  ret pad: bits[1] = param(name=pad, id=1)
+}
+top block parent() {
+  ext_inout_net bus(bits[1])
+  instantiation u(foreign_function=foreign, kind=extern)
+  pin: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=2)
+}
+"#;
+    assert_eq!(
+        verify(source),
+        Err(VerifyError::BlockInvariantViolation {
+            block: "parent".into(),
+            reason: "no block instance inout named u.pad".into()
+        })
+    );
+}
+
+#[test]
+fn public_inout_node_shape_and_header_membership_are_verified() {
+    let source = r#"package open
+top block boundary(io: bits[3]) {
+  terminal: () = ext_inout_port(name=io, id=1)
 }
 "#;
     let original = Parser::new(source).parse_and_verify_package().unwrap();
-    for (name, ty, ports) in [
-        ("duplicate_alias", Type::Bits(4), vec!["io".to_string()]),
-        ("missing_port", Type::Bits(4), vec!["unknown".to_string()]),
-        ("bus", Type::Bits(4), vec![]),
-        ("", Type::Bits(4), vec![]),
-        ("empty", Type::Bits(0), vec![]),
+    let pin = original
+        .get_block("boundary")
+        .unwrap()
+        .get_inout_port("io")
+        .unwrap();
+    for (ports, expected) in [
+        (vec![], "port node is missing from the block interface"),
+        (
+            vec![BlockPort::Inout(pin), BlockPort::Inout(pin)],
+            "block port is listed more than once",
+        ),
+        (
+            vec![BlockPort::Input(pin)],
+            "block port direction does not match its node",
+        ),
+    ] {
+        let mut package = original.clone();
+        package.get_block_mut("boundary").unwrap().ports = ports;
+        let error = verify_package(&package).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    let mut package = original.clone();
+    package
+        .get_block_mut("boundary")
+        .unwrap()
+        .get_node_mut(pin)
+        .ty = Type::Bits(3);
+    let error = verify_package(&package).unwrap_err();
+    assert!(
+        error.to_string().contains("ext_inout_port result"),
+        "{error}"
+    );
+    for ty in [Type::Bits(0), Type::Token] {
+        let mut package = original.clone();
+        let NodePayload::ExtInoutPort { port_type, .. } = &mut package
+            .get_block_mut("boundary")
+            .unwrap()
+            .get_node_mut(pin)
+            .payload
+        else {
+            unreachable!()
+        };
+        *port_type = ty;
+        let error = verify_package(&package).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("inout port 'io' requires a nonempty, token-free type"),
+            "{error}"
+        );
+    }
+    let foreign_net = source.replace("name=io,", "name=io, net=remote,").replace(
+        "top block",
+        r#"block other() {
+  ext_inout_net remote(bits[3])
+  read: bits[3] = ext_inout_read(net=remote, id=2)
+}
+top block"#,
+    );
+    assert_eq!(
+        verify(&foreign_net),
+        Err(VerifyError::BlockInvariantViolation {
+            block: "boundary".into(),
+            reason: "undeclared inout net 'remote'".into(),
+        })
+    );
+}
+
+#[test]
+fn malformed_net_declarations_are_rejected_even_without_accesses() {
+    let source = r#"package declarations
+top block top(io: bits[4], pad: bits[4]) {
+  ext_inout_net bus(bits[4])
+  io: () = ext_inout_port(name=io, net=bus, id=1)
+  pad: () = ext_inout_port(name=pad, net=bus, id=2)
+}
+"#;
+    let original = Parser::new(source).parse_and_verify_package().unwrap();
+    for (name, ty) in [
+        ("bus", Type::Bits(4)),
+        ("", Type::Bits(4)),
+        ("empty", Type::Bits(0)),
         (
             "tokens",
             Type::Tuple(vec![Box::new(Type::Bits(4)), Box::new(Type::Token)]),
-            vec![],
         ),
     ] {
         let mut package = original.clone();
@@ -216,17 +361,36 @@ top block top(io: bits[4]) {
             .push(InoutNet {
                 name: name.into(),
                 ty,
-                ports,
-                sv_type: None,
             });
         assert!(verify_package(&package).is_err(), "{name:?}");
     }
+    // Header and net types have the same flat width, but different shapes.
+    let mismatched_port = source.replace("io: bits[4]", "io: bits[2][2]");
+    let error = verify(&mismatched_port).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("references net 'bus' of type bits[4], got bits[2][2]"),
+        "{error}"
+    );
+    let mut package = original.clone();
+    let block = package.get_block_mut("top").unwrap();
+    let pad = block.get_inout_port("pad").unwrap();
+    let NodePayload::ExtInoutPort { name, .. } = &mut block.get_node_mut(pad).payload else {
+        unreachable!()
+    };
+    *name = "io".into();
+    let error = verify_package(&package).unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate block port name 'io'"),
+        "{error}"
+    );
     let mut package = original;
     package
         .get_block_mut("top")
         .unwrap()
         .ports
-        .push(BlockPort::Inout("orphan".into()));
+        .push(BlockPort::Inout(NodeRef { index: usize::MAX }));
     assert!(verify_package(&package).is_err());
 }
 
@@ -234,7 +398,8 @@ top block top(io: bits[4]) {
 fn local_reads_and_driver_match_the_declared_net_type() {
     let source = r#"package local
 top block pads(io: bits[4], data: bits[4], oe: bits[1]) {
-  ext_inout_net bus(bits[4], ports=[io])
+  ext_inout_net bus(bits[4])
+  io: () = ext_inout_port(name=io, net=bus, id=6)
   data: bits[4] = input_port(name=data, id=1)
   oe: bits[1] = input_port(name=oe, id=2)
   read_a: bits[4] = ext_inout_read(net=bus, id=3)

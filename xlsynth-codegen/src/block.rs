@@ -211,6 +211,12 @@ fn validate_supported_nodes(block: &Block, layout: Layout) -> Result<(), BlockCo
     }
     for node in &block.nodes {
         let (operation, lowering) = match &node.payload {
+            NodePayload::ExtInoutPort { name, .. } if layout == Layout::Pipeline => {
+                return Err(BlockCodegenError::NotPipeline(format!(
+                    "block `{}` cannot use layout=pipeline with inout port `{name}`; use layout=none",
+                    block.name,
+                )));
+            }
             NodePayload::Invoke { to_apply, .. } => {
                 return Err(unsupported_invoke(block, to_apply));
             }
@@ -430,13 +436,15 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         if let Some(clock) = self.block.clock_port_name() {
             reserve(clock, "port")?;
         }
-        for port in self.block.input_ports().chain(self.block.output_ports()) {
+        for port in self
+            .block
+            .input_ports()
+            .chain(self.block.output_ports())
+            .chain(self.block.inout_ports())
+        {
             if self.block.port_type(port).bit_count() != 0 {
                 reserve(self.block.port_name(port), "port")?;
             }
-        }
-        for pin in self.block.inout_ports() {
-            reserve(pin, "port")?;
         }
         for instance in &self.block.instantiations {
             reserve(&instance.name, "instance")?;
@@ -461,24 +469,20 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Emits representable ports in the source block's original header order.
     fn emit_ports(&mut self) -> Result<(), BlockCodegenError> {
-        let mut alias_signals = BTreeMap::<&str, Vec<LogicRef>>::new();
-        let public_nets = self
-            .block
-            .inout_nets
-            .iter()
-            .flat_map(|net| net.ports.iter().map(move |port| (port.as_str(), net)))
-            .collect::<BTreeMap<_, _>>();
+        let mut aliases = BTreeMap::<&str, Vec<NodeRef>>::new();
         for port in &self.block.ports {
             let (name, ir_type, sv_type) = match port {
                 BlockPort::Clock(name) => (name.as_str(), &Type::Bits(1), None),
-                BlockPort::Inout(alias) => {
-                    let net = public_nets[alias.as_str()];
-                    (alias.as_str(), &net.ty, net.sv_type.as_deref())
-                }
-                BlockPort::Input(node) | BlockPort::Output(node) => {
+                BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
                     let sv_type = match &self.block.get_node(*node).payload {
                         NodePayload::InputPort { sv_type, .. }
                         | NodePayload::OutputPort { sv_type, .. } => sv_type.as_deref(),
+                        NodePayload::ExtInoutPort { net, sv_type, .. } => {
+                            if let Some(net) = net {
+                                aliases.entry(net).or_default().push(*node);
+                            }
+                            sv_type.as_deref()
+                        }
                         _ => unreachable!("verified block data port"),
                     };
                     (
@@ -498,14 +502,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             validate_external_identifier(name, "port")?;
             let data_type = self.declared_data_type(ir_type, sv_type);
             let signal = match port {
-                BlockPort::Inout(_) => {
-                    let signal = self.file.add_inout(self.module, name, &data_type);
-                    alias_signals
-                        .entry(&public_nets[name].name)
-                        .or_default()
-                        .push(signal);
-                    signal
-                }
+                BlockPort::Inout(_) => self.file.add_inout(self.module, name, &data_type),
                 BlockPort::Output(_) => self.file.add_logic_output(self.module, name, &data_type),
                 BlockPort::Input(_) | BlockPort::Clock(_) => {
                     self.file.add_logic_input(self.module, name, &data_type)
@@ -514,7 +511,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             self.ports.insert(name.to_owned(), signal);
         }
 
-        self.emit_inout_nets(&alias_signals)?;
+        self.emit_inout_nets(&aliases)?;
         for (index, node) in self.block.nodes.iter().enumerate() {
             match &node.payload {
                 NodePayload::InputPort { name, sv_type } => {
@@ -543,37 +540,46 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     /// order.
     fn emit_inout_nets(
         &mut self,
-        alias_signals: &BTreeMap<&str, Vec<LogicRef>>,
+        aliases: &BTreeMap<&str, Vec<NodeRef>>,
     ) -> Result<(), BlockCodegenError> {
         for net in &self.block.inout_nets {
-            let width = net.ty.bit_count();
-            let signal = match alias_signals
+            let value = if let Some((&first, others)) = aliases
                 .get(net.name.as_str())
-                .and_then(|aliases| aliases.split_first())
+                .and_then(|ports| ports.split_first())
             {
-                Some((&first, aliases)) => {
-                    for &alias in aliases {
-                        let tie =
-                            self.unique_name(&format!("{}_tie", self.file.logic_ref_name(alias)));
-                        self.file.add_tran(self.module, &tie, width, first, alias)?;
-                    }
-                    first
+                let signal = self.ports[self.block.port_name(first)];
+                for &other in others {
+                    let name = self.block.port_name(other);
+                    let tie = self.unique_name(&format!("{name}_tie"));
+                    self.file.add_tran(
+                        self.module,
+                        &tie,
+                        net.ty.bit_count(),
+                        signal,
+                        self.ports[name],
+                    )?;
                 }
-                None => {
-                    let name = self.unique_name(&net.name);
-                    let ty = self.declared_data_type(&net.ty, net.sv_type.as_deref());
-                    self.file.add_wire(self.module, &name, &ty)
+                let value = Value::signal(signal);
+                if self.options.emit_sv_types
+                    && matches!(
+                        &self.block.get_node(first).payload,
+                        NodePayload::ExtInoutPort {
+                            sv_type: Some(_),
+                            ..
+                        }
+                    )
+                {
+                    value.with_width(net.ty.bit_count())
+                } else {
+                    value.with_type(&net.ty)
                 }
-            };
-            let value = Value::signal(signal);
-            let value = if self.options.emit_sv_types && net.sv_type.is_some() {
-                value.with_width(width)
             } else {
-                value.with_type(&net.ty)
+                let name = self.unique_name(&net.name);
+                let ty = self.value_type(&net.ty);
+                Value::signal(self.file.add_wire(self.module, &name, &ty)).with_type(&net.ty)
             };
             self.inout_nets.insert(&net.name, value);
         }
-
         Ok(())
     }
 
@@ -606,6 +612,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 NodePayload::Nil
                 | NodePayload::InputPort { .. }
                 | NodePayload::ExtInoutRead { .. }
+                | NodePayload::ExtInoutPort { .. }
                 | NodePayload::OutputPort { .. } => {
                     // Reserved nodes and parameters are represented by module
                     // ports.
@@ -956,8 +963,9 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                     .iter()
                     .map(|port| match port {
                         BlockPort::Clock(name) => name.as_str(),
-                        BlockPort::Input(node) | BlockPort::Output(node) => child.port_name(*node),
-                        BlockPort::Inout(alias) => alias.as_str(),
+                        BlockPort::Input(node)
+                        | BlockPort::Output(node)
+                        | BlockPort::Inout(node) => child.port_name(*node),
                     })
                     .collect::<Vec<_>>();
                 connections.sort_by_key(|(name, _)| {
