@@ -8,7 +8,7 @@ use xlsynth_pir::ir::{Block, Package, Type};
 use xlsynth_pir::ir_value_utils::ir_value_from_lsb0_bits_with_layout;
 
 use super::{LeanEvaluator, run_lean_process};
-use crate::block::{emit, identifier, record_value};
+use crate::block::{emit, identifier, source_record_value};
 use crate::local_expr::{LocalRenderer, bit_width, write_elaboration_limits};
 
 /// The outputs observed before the clock edge and register values after it.
@@ -158,5 +158,5 @@ fn input_record(fields: &[(String, &Type)], values: &[IrValue]) -> Result<String
             Ok((name.clone(), LocalRenderer::Function.literal(value)))
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(record_value(&literals))
+    Ok(source_record_value(&literals))
 }

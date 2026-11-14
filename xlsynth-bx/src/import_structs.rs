@@ -71,6 +71,7 @@ impl ImportNames {
 pub(crate) struct CapturedSources {
     pub(crate) types: WrittenTypes,
     pub(crate) names: Option<ImportNames>,
+    pub(crate) modules: BTreeSet<String>,
 }
 
 pub(crate) type WrittenTypes = BTreeMap<String, Rc<crate::LinkedStruct>>;
@@ -574,6 +575,7 @@ impl ImportedStructs {
         CapturedSources {
             types: self.written_types.take().unwrap_or_default(),
             names: self.files.clone().map(ImportNames),
+            modules: self.graph.sources().map(|s| s.subject.clone()).collect(),
         }
     }
 

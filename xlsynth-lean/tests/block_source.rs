@@ -7,6 +7,7 @@ use xlsynth_pir::ir_parser::Parser;
 
 fn compile(source: &str) -> CompiledBx {
     compile_bx(
+        "design",
         source,
         xlsynth_bx::empty_package("example"),
         Default::default(),
@@ -50,23 +51,41 @@ fn readable_interface_uses_linked_bx_library_structs() {
         "struct Word { value: u8 } pub struct Packet { payload: Word }",
     )
     .unwrap();
-    let compiled = compile_bx(
-        "use lib; struct Packet { tag: bool }
+    let emit = |module_name| {
+        compile_bx(
+            module_name,
+            "use lib; struct Packet { tag: bool }
          block demo(clk, p: lib::Packet, q: Packet) -> lib::Packet { p }",
-        xlsynth_bx::empty_package("example"),
-        Default::default(),
-        &xlsynth_bx::ImportOptions {
-            additional_search_paths: vec![library.path()],
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let bundle = compiled.emit_readable(Some("demo")).unwrap();
+            xlsynth_bx::empty_package("example"),
+            Default::default(),
+            &xlsynth_bx::ImportOptions {
+                additional_search_paths: vec![library.path()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .emit_readable(Some("demo"))
+    };
+    let bundle = emit("design").unwrap();
     let types = &bundle.files[1].1;
-    assert!(types.contains("structure «lib::Packet»"), "{types}");
-    assert!(types.contains("structure «Packet»"), "{types}");
-    assert!(types.contains("«value» : _root_.BitVec 8"), "{types}");
+    assert!(
+        types.contains("-- Source struct lib::Packet { payload }"),
+        "{types}"
+    );
+    assert!(
+        types.contains("-- Source struct design::Packet { tag }"),
+        "{types}"
+    );
+    assert!(
+        types.contains("-- Source struct lib::Word { value }"),
+        "{types}"
+    );
+    assert!(!types.contains("$bx$"), "{types}");
     assert!(types.contains("«payload» :"), "{types}");
+    assert_eq!(
+        emit("lib").err().unwrap().to_string(),
+        "duplicate BX source declaration 'lib::Packet' in the root and an imported library"
+    );
 }
 
 #[test]
@@ -80,16 +99,22 @@ fn signed_public_output_reports_the_bx_port() {
 }
 
 #[test]
-fn unsupported_lean_field_reports_the_bx_declaration() {
-    let compiled =
-        compile("struct Packet { recOn: u8 } block machine(clk, x: Packet) -> u8 { x.recOn }");
-    let diagnostic = format!("{:#}", compiled.emit_readable(None).err().unwrap());
-    assert!(
-        diagnostic.contains("Packet")
-            && diagnostic.contains("recOn")
-            && diagnostic.contains("Lean generates"),
-        "{diagnostic}"
-    );
+fn source_struct_fields_can_use_lean_generated_member_names() {
+    for field in [
+        "rec",
+        "recOn",
+        "casesOn",
+        "noConfusion",
+        "noConfusionType",
+        "ctorIdx",
+        "_sizeOf_1",
+        "_sizeOf_inst",
+    ] {
+        let compiled = compile(&format!(
+            "struct Packet {{ {field}: u8 }} block machine(clk, x: Packet) -> u8 {{ x.{field} }}"
+        ));
+        compiled.emit_readable(None).unwrap();
+    }
 }
 
 #[test]
@@ -98,6 +123,7 @@ fn readable_emission_requires_a_selected_bx_declaration() {
         .parse_and_validate_package()
         .unwrap();
     let compiled = compile_bx(
+        "design",
         "block a(clk) -> u8 { u8:1 } block b(clk) -> u8 { u8:2 }",
         package,
         Default::default(),
@@ -139,6 +165,7 @@ block accumulate(clk, value: u8) -> u6 {
     let module =
         xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports).unwrap();
     let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+        "design",
         bx,
         module,
         Default::default(),
@@ -217,6 +244,7 @@ block storage(clk, {bx_inputs}, index: u8) -> u8 {{
             xlsynth::dslx::parse_and_typecheck(&source, "machine.x", "machine", &mut imports)
                 .unwrap();
         let model = xlsynth_lean::block::compile_bx_with_dslx(
+            "design",
             &bx,
             module,
             Default::default(),
@@ -241,8 +269,8 @@ block storage(clk, {bx_inputs}, index: u8) -> u8 {{
             .collect();
         let expected = if named {
             [
-                "let «slot» : _root_.XlsSource.«machine::Slot» := (let «indexed array» := «slots»; (_root_.Vector.getD «indexed array» («index»).toNat (_root_.Vector.back «indexed array»)))",
-                "let «slot_write» : _root_.XlsSource.«machine::Write» := («slot»).«write»",
+                "let «slot» : XLS.«machine».«Slot» := (let «indexed array» := «slots»; (_root_.Vector.getD «indexed array» («index»).toNat (_root_.Vector.back «indexed array»)))",
+                "let «slot_write» : XLS.«machine».«Write» := («slot»).«write»",
                 "let «slot_write_data» : _root_.BitVec 8 := («slot_write»).«data»",
             ]
         } else {

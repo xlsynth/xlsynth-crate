@@ -17,6 +17,11 @@ use std::{borrow::Cow, collections::BTreeSet, fmt::Write};
 
 mod enum_dispatch;
 mod loop_correspondence;
+mod source_names;
+
+use source_names::{
+    declaring_name, module_identifier, nominal_reference, source_type_in, write_struct,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use xlsynth_pir::{
@@ -26,8 +31,10 @@ use xlsynth_pir::{
 
 use crate::block::{
     BlockContext,
-    raw::{self as lean, LeanBlockBundle, identifier, lean_type, record_value},
-    source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
+    raw::{self as lean, LeanBlockBundle, identifier, lean_type},
+    source_types::{
+        HelperSignature, SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape,
+    },
 };
 use crate::local_expr::{LeanOperand, LocalRenderer};
 
@@ -41,6 +48,22 @@ fn tuple_value(elements: impl DoubleEndedIterator<Item = String>) -> String {
     })
 }
 
+/// Use the same absolute name in definitions, calls and proofs. Compiler
+/// functions such as lowered loop bodies have no DSLX declaration to name.
+fn helper_path(signature: &HelperSignature, symbol: &str) -> Result<String> {
+    match &signature.source_name {
+        Some((module, local)) => Ok(format!(
+            "_root_.{}.{}",
+            module_identifier(module)?,
+            identifier(local)?
+        )),
+        None => Ok(format!(
+            "_root_.XlsReadable.Helpers.{}",
+            identifier(symbol)?
+        )),
+    }
+}
+
 /// Source type annotations and collision-free names for one verified block.
 ///
 /// All vectors use the checked graph's node or register order. Annotation
@@ -51,11 +74,13 @@ struct Presentation<'a> {
     helper_index: Option<usize>,
     block: &'a BlockContext<'a>,
     declarations: &'a [TypeDecl],
+    bx_namespace: String,
     interface: &'a StatefulInterface,
     node_types: Vec<Option<SourceType>>,
     /// A shared graph node is traversed once for each distinct nominal context.
     annotation_contexts: Vec<Vec<SourceType>>,
     names: Vec<String>,
+    local_names: BTreeSet<String>,
     register_fields: Vec<String>,
 }
 
@@ -79,6 +104,7 @@ pub(super) fn emit(
     declarations: &[TypeDecl],
     interface: &StatefulInterface,
 ) -> Result<LeanBlockBundle> {
+    source_names::check_type_namespaces(declarations, interface)?;
     let raw = lean::emit_with_context(block, "XlsBlock")?;
     let presentation = Presentation::new(block, declarations, interface, None)?;
     Ok(LeanBlockBundle {
@@ -141,7 +167,6 @@ impl<'a> Presentation<'a> {
             "Nat",
             "Unit",
             "Prod",
-            "XlsSource",
             "XlsCodec",
             "XlsBlock",
             "XlsReadable",
@@ -178,11 +203,18 @@ impl<'a> Presentation<'a> {
             .iter()
             .map(|r| identifier(&r.name))
             .collect::<Result<_>>()?;
+        let bx_module = &interface.bx_module;
+        let bx_namespace = if bx_module.contains(':') {
+            format!("file:{bx_module}")
+        } else {
+            bx_module.clone()
+        };
         let mut result = Self {
             graph,
             helper_index,
             block,
             declarations,
+            bx_namespace,
             interface,
             node_types: graph
                 .nodes
@@ -191,6 +223,7 @@ impl<'a> Presentation<'a> {
                 .collect(),
             annotation_contexts: vec![Vec::new(); graph.nodes.len()],
             names,
+            local_names: used,
             register_fields,
         };
         if let Some((function, signature)) = helper.zip(signature) {
@@ -473,28 +506,12 @@ impl<'a> Presentation<'a> {
         }
     }
 
-    /// Render a source type with qualified names that cannot capture built-ins.
+    /// These annotations occur in a generated namespace, sometimes after an
+    /// evaluator local has bound a name that also names a source module.
     fn source_type(&self, ty: &SourceType) -> Result<String> {
-        match ty {
-            SourceType::Bool => Ok("_root_.Bool".into()),
-            SourceType::Bits { width } => Ok(format!("_root_.BitVec {width}")),
-            SourceType::Array { element, size } => Ok(format!(
-                "_root_.Vector ({}) {size}",
-                self.source_type(element)?
-            )),
-            SourceType::Tuple { members } => Ok(product_type(
-                &members
-                    .iter()
-                    .map(|ty| self.source_type(ty))
-                    .collect::<Result<Vec<_>>>()?,
-                true,
-            )),
-            SourceType::Enum { name }
-            | SourceType::Struct { name }
-            | SourceType::Alias { name } => {
-                Ok(format!("_root_.XlsSource.{}", type_identifier(name)?))
-            }
-        }
+        source_type_in(&self.bx_namespace, ty, None, &|n| {
+            self.local_names.contains(n)
+        })
     }
 
     /// Encode toward physical values or decode toward the requested source
@@ -606,17 +623,18 @@ impl<'a> Presentation<'a> {
     /// Emit source declarations, total codecs, and codec round-trip proof
     /// source.
     fn types_module(&self) -> Result<String> {
-        let mut out = String::from("import Std\n\nnamespace XlsSource\n\n");
+        let mut out = String::from("import Std\n\n");
+        // Deriving beside Packet would occupy its module's source name
+        // instReprPacket. Generate instances in XlsCodec in dependency order.
+        let mut instances = String::new();
         // Source members and generated codecs have disjoint namespaces. A
         // source field named `encode` must remain an ordinary record field.
-        let mut public_names = BTreeSet::new();
         for declaration in self.declarations {
-            let name = type_identifier(declaration.name())?;
-            ensure!(
-                public_names.insert(name.clone()),
-                "distinct source declarations share the Lean type name {name}"
-            );
-            match declaration {
+            let (module, local) = declaring_name(&self.bx_namespace, declaration.name());
+            let namespace = module_identifier(module)?;
+            let name = identifier(local)?;
+            writeln!(out, "namespace {namespace}\n")?;
+            let derived = match declaration {
                 TypeDecl::Enum { name: original, .. } => {
                     writeln!(out, "inductive {name} where")?;
                     for (member, _) in self.enum_cases(original)? {
@@ -630,36 +648,52 @@ impl<'a> Presentation<'a> {
                         );
                         writeln!(out, "  | {}", identifier(&member)?)?;
                     }
-                    writeln!(out, "  deriving _root_.Repr, _root_.DecidableEq\n")?;
+                    out.push('\n');
+                    Some(("Repr, DecidableEq", name))
                 }
                 TypeDecl::Struct { fields, .. } => {
-                    out.push_str(&lean::checked_structure_header(
-                        &name,
-                        fields.iter().map(|field| field.name.as_str()),
-                    )?);
-                    let mut scope = lean::RecordFields::default();
-                    for field in fields {
-                        scope.write(
-                            &mut out,
-                            &identifier(&field.name)?,
-                            &self.source_type(&field.source_type)?,
-                        )?;
-                    }
-                    writeln!(out, "  deriving _root_.Repr\n")?;
+                    let backing = write_struct(
+                        &mut out,
+                        &self.bx_namespace,
+                        module,
+                        local,
+                        fields,
+                        self.declarations,
+                    )?;
+                    Some(("Repr", backing))
                 }
                 TypeDecl::Alias { target, .. } => {
-                    writeln!(out, "abbrev {name} := {}\n", self.source_type(target)?)?;
+                    writeln!(
+                        out,
+                        "abbrev {name} := {}\n",
+                        source_type_in(
+                            &self.bx_namespace,
+                            target,
+                            Some((module, self.declarations)),
+                            &|_| false
+                        )?
+                    )?;
+                    None
                 }
+            };
+            if let Some((classes, target)) = derived {
+                writeln!(
+                    instances,
+                    "deriving instance {classes} for _root_.{namespace}.{target}"
+                )?;
             }
+            writeln!(out, "end {namespace}\n")?;
         }
-        out.push_str(
-            "end XlsSource\n\nnamespace XlsCodec\n\nattribute [local simp] Function.comp_def\n\n",
-        );
+        out.push_str("namespace XlsCodec\n\nattribute [local simp] Function.comp_def\n\n");
+        out.push_str(&instances);
+        out.push('\n');
         out.push_str(BOOL_REPRESENTATION);
         for declaration in self.declarations {
             let name = type_identifier(declaration.name())?;
             let nominal = self.named_type(declaration.name())?;
-            let source_type = self.source_type(&nominal)?;
+            // Codec namespaces and their arguments have their own scope,
+            // independent of the readable evaluator's locals.
+            let source_type = source_type_in(&self.bx_namespace, &nominal, None, &|_| true)?;
             let physical = source_shape(&nominal, self.declarations)?;
             writeln!(out, "namespace {name}\n")?;
             match declaration {
@@ -723,7 +757,7 @@ impl<'a> Presentation<'a> {
                         out,
                         "def decode (x : {}) : {source_type} :=\n  {}\n",
                         lean_type(&physical)?,
-                        record_value(&decoded)
+                        lean::source_record_value(&decoded)
                     )?;
                     writeln!(
                         out,
@@ -882,10 +916,7 @@ impl<'a> Presentation<'a> {
                 body,
                 invariant_args,
             } if let Some(signature) = self.interface.helpers.get(body) => {
-                let mut step = format!(
-                    "_root_.XlsReadable.Helpers.{}",
-                    identifier(&signature.name)?
-                );
+                let mut step = helper_path(signature, body)?;
                 if !invariant_args.is_empty() {
                     step.push_str(" · ·");
                     for (arg, (_, ty)) in invariant_args.iter().zip(&signature.params[2..]) {
@@ -901,10 +932,7 @@ impl<'a> Presentation<'a> {
                 if self.interface.helpers.contains_key(to_apply) =>
             {
                 let signature = &self.interface.helpers[to_apply];
-                let mut call = format!(
-                    "_root_.XlsReadable.Helpers.{}",
-                    identifier(&signature.name)?
-                );
+                let mut call = helper_path(signature, to_apply)?;
                 for (arg, (_, ty)) in operands.iter().zip(&signature.params) {
                     write!(call, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
                 }
@@ -1008,7 +1036,7 @@ impl<'a> Presentation<'a> {
                             ))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    Ok(record_value(&values))
+                    Ok(lean::source_record_value(&values))
                 } else if let SourceType::Tuple { members } = self.unalias(target.unwrap())? {
                     let values = args
                         .iter()
@@ -1031,8 +1059,8 @@ impl<'a> Presentation<'a> {
                         .find(|(_, encoding)| *encoding == value)
                         .context("physical enum encoding")?;
                     Ok(format!(
-                        "XlsSource.{}.{}",
-                        identifier(name)?,
+                        "{}.{}",
+                        self.source_type(&SourceType::Enum { name: name.clone() })?,
                         identifier(member)?
                     ))
                 } else {
@@ -1125,7 +1153,7 @@ impl<'a> Presentation<'a> {
                     Some((index, function)),
                 )?;
                 out.push_str(&model.enum_dispatch_definitions()?);
-                write!(out, "def Helpers.{}", identifier(&signature.name)?)?;
+                write!(out, "def {}", helper_path(signature, &function.name)?)?;
                 for (param, (_, ty)) in function.params.iter().zip(&signature.params) {
                     write!(
                         out,
@@ -1162,41 +1190,32 @@ impl<'a> Presentation<'a> {
                 )?;
             }
         }
-        // These field identifiers have already been quoted by identifier().
-        out.push_str(&lean::checked_structure_header(
-            "State",
-            self.register_fields
-                .iter()
-                .map(|field| field.trim_matches(['«', '»'])),
-        )?);
-        let mut scope = lean::RecordFields::default();
-        for (index, register) in block.graph.registers.iter().enumerate() {
+        let mut fields = Vec::new();
+        let mut preceding = BTreeSet::new();
+        for (field, register) in self.register_fields.iter().zip(&block.graph.registers) {
             let ty = if let Some(ty) = self.register_type(&register.name)? {
-                self.source_type(&ty)?
+                source_type_in(&self.bx_namespace, &ty, None, &|name| {
+                    preceding.contains(name)
+                })?
             } else {
                 lean_type(&register.ty)?
             };
-            scope.write(&mut out, &self.register_fields[index], &ty)?;
+            preceding.insert(field.trim_matches(['«', '»']));
+            fields.push((field.clone(), ty));
         }
-        out.push_str("  deriving Repr\n\n");
+        out.push_str(&lean::source_record("State", &fields)?);
         let interface = self.interface;
-        out.push_str(&lean::checked_structure_header(
-            "Input",
-            block
-                .graph
-                .input_ports()
-                .map(|port| block.graph.port_name(port)),
-        )?);
-        let mut scope = lean::RecordFields::default();
+        fields.clear();
+        preceding.clear();
         for port in block.graph.input_ports() {
             let name = block.graph.port_name(port);
-            scope.write(
-                &mut out,
-                &identifier(name)?,
-                &self.source_type(&interface.inputs[name])?,
-            )?;
+            let ty = source_type_in(&self.bx_namespace, &interface.inputs[name], None, &|n| {
+                preceding.contains(n)
+            })?;
+            fields.push((identifier(name)?, ty));
+            preceding.insert(name);
         }
-        out.push_str("  deriving Repr\n\n");
+        out.push_str(&lean::source_record("Input", &fields)?);
         let types = interface
             .outputs
             .iter()
@@ -1287,7 +1306,7 @@ def eval (q : State) (x : Input) : Evaluation :=
         writeln!(
             out,
             "  {{ next := {},\n    output := {},\n    assertions := {} }}\n",
-            record_value(&next),
+            lean::source_record_value(&next),
             product_value(
                 &output
                     .into_iter()
@@ -1295,7 +1314,7 @@ def eval (q : State) (x : Input) : Evaluation :=
                     .collect::<Vec<_>>(),
                 false
             ),
-            record_value(&assertions)
+            lean::source_record_value(&assertions)
         )?;
         out.push_str("def step (q : State) (x : Input) : State := (eval q x).next\ndef observe (q : State) (x : Input) : Output := (eval q x).output\ndef assertions (q : State) (x : Input) : Assertions := (eval q x).assertions\n\n");
         let holds = assertions
@@ -1313,13 +1332,19 @@ def eval (q : State) (x : Input) : Evaluation :=
             writeln!(
                 out,
                 "  eval q {{ x with {} := {} }}",
-                identifier(block.graph.port_name(reset.port))?,
+                lean::storage_field(&identifier(block.graph.port_name(reset.port))?),
                 !reset.active_low
             )?;
         } else {
             out.push_str("  eval q x\n");
         }
         out.push_str("\nend XlsReadable\n");
+        writeln!(
+            out,
+            "\nabbrev {}.{} := _root_.XlsReadable.eval",
+            module_identifier(&self.bx_namespace)?,
+            identifier(&block.graph.name)?
+        )?;
         Ok(out)
     }
 
@@ -1367,12 +1392,12 @@ def eval (q : State) (x : Input) : Evaluation :=
         writeln!(
             out,
             "def encodeState (q : State) : XlsBlock.State :=\n  {}\n",
-            record_value(&encoded)
+            lean::source_record_value(&encoded)
         )?;
         writeln!(
             out,
             "def decodeState (q : XlsBlock.State) : State :=\n  {}\n",
-            record_value(&decoded)
+            lean::source_record_value(&decoded)
         )?;
         let interface = self.interface;
         for encode in [true, false] {
@@ -1381,10 +1406,13 @@ def eval (q : State) (x : Input) : Evaluation :=
             } else {
                 ("decode", "XlsBlock.", "")
             };
-            let inputs = interface
-                .inputs
-                .iter()
-                .map(|(name, ty)| {
+            let inputs = self
+                .block()
+                .graph
+                .input_ports()
+                .map(|port| {
+                    let name = self.block().graph.port_name(port);
+                    let ty = &interface.inputs[name];
                     let field = identifier(name)?;
                     Ok((
                         field.clone(),
@@ -1395,7 +1423,7 @@ def eval (q : State) (x : Input) : Evaluation :=
             writeln!(
                 out,
                 "def {operation}Input (x : {from}Input) : {to}Input :=\n  {}\n",
-                record_value(&inputs)
+                lean::source_record_value(&inputs)
             )?;
             let outputs = interface
                 .outputs
@@ -1413,7 +1441,7 @@ def eval (q : State) (x : Input) : Evaluation :=
                 })
                 .collect::<Result<Vec<_>>>()?;
             let expression = if encode {
-                record_value(&outputs)
+                lean::source_record_value(&outputs)
             } else {
                 product_value(
                     &outputs.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
@@ -1509,7 +1537,11 @@ end XlsReadable
         ]);
         for declaration in self.declarations {
             let name = type_identifier(declaration.name())?;
-            functions.extend(declaration_functions(declaration, &name)?);
+            functions.extend(declaration_functions(
+                &self.bx_namespace,
+                declaration,
+                &name,
+            )?);
         }
         for graph in self.proof_graphs() {
             for node in &graph.nodes {
@@ -1571,7 +1603,9 @@ end XlsReadable
                     .map(|(index, field)| {
                         Ok(format!(
                             "(field{index} : {})",
-                            self.source_type(&field.source_type)?
+                            source_type_in(&self.bx_namespace, &field.source_type, None, &|_| {
+                                true
+                            })?
                         ))
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -1660,8 +1694,8 @@ end XlsReadable
             if let Some(signature) = self.interface.helpers.get(&function.name) {
                 write!(
                     helper_rules,
-                    ", _root_.XlsReadable.Helpers.{}, {}",
-                    identifier(&signature.name)?,
+                    ", {}, {}",
+                    helper_path(signature, &function.name)?,
                     lean::helper_path("XlsBlock", &function.name)?
                 )?;
             }
@@ -1763,14 +1797,22 @@ fn codec_round_trip_rules(name: &str) -> [String; 2] {
 
 /// Codecs and field projections used to distribute conditionals and vector
 /// reads.
-fn declaration_functions(declaration: &TypeDecl, name: &str) -> Result<Vec<String>> {
+fn declaration_functions(
+    bx_namespace: &str,
+    declaration: &TypeDecl,
+    name: &str,
+) -> Result<Vec<String>> {
     let mut functions = vec![
         format!("XlsCodec.{name}.encode"),
         format!("XlsCodec.{name}.decode"),
     ];
     if let TypeDecl::Struct { fields, .. } = declaration {
         for field in fields {
-            functions.push(format!("XlsSource.{name}.{}", identifier(&field.name)?));
+            functions.push(format!(
+                "{}.{}",
+                nominal_reference(bx_namespace, declaration.name(), None, &|_| true)?,
+                identifier(&field.name)?
+            ));
         }
     }
     Ok(functions)

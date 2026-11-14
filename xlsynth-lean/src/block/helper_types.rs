@@ -24,7 +24,7 @@ use xlsynth_pir::{ir, ir_parser::Parser};
 /// BX adds its blocks and imports to the supplied package without renaming
 /// these functions.
 pub(super) struct DslxLink {
-    module: dslx::TypecheckedModule,
+    pub(super) module: dslx::TypecheckedModule,
     module_names: Option<ImportNames>,
     symbols: BTreeMap<String, String>,
 }
@@ -71,6 +71,7 @@ impl DslxLink {
         block: &BlockContext<'_>,
         declarations: &mut Vec<TypeDecl>,
         interface: &mut StatefulInterface,
+        mut observe_owner: impl FnMut(&str) -> Result<()>,
     ) -> Result<()> {
         let linked: BTreeSet<_> = block.helpers.iter().map(|f| f.name.as_str()).collect();
         let reachable = self
@@ -84,6 +85,22 @@ impl DslxLink {
         }
         let mut catalogue = Catalogue::new(&self.module, self.module_names.as_ref(), reachable);
         catalogue.collect_helpers()?;
+        // These are the checked declarations behind reachable references,
+        // including references brought into scope by DSLX use trees.
+        for owner in catalogue
+            .declarations
+            .iter()
+            .map(TypeDecl::name)
+            .filter_map(|name| name.split_once("::").map(|(owner, _)| owner))
+            .chain(
+                catalogue
+                    .helpers
+                    .values()
+                    .filter_map(|sig| sig.source_name.as_ref().map(|(owner, _)| owner.as_str())),
+            )
+        {
+            observe_owner(owner)?;
+        }
         catalogue.helpers = catalogue
             .helpers
             .into_iter()
@@ -261,6 +278,7 @@ fn linked_struct_alias_rejects_reordered_equal_width_fields() {
         },
     ];
     let mut interface = StatefulInterface {
+        bx_module: "machine".into(),
         inputs: Default::default(),
         outputs: Default::default(),
         registers: Default::default(),
@@ -961,7 +979,7 @@ impl Catalogue<'_> {
                 self.helpers.insert(
                     function.name.clone(),
                     HelperSignature {
-                        name: function.name.clone(),
+                        source_name: None,
                         result: params[1].1.clone(),
                         params,
                     },
@@ -1022,7 +1040,7 @@ impl Catalogue<'_> {
             },
         };
         Ok(HelperSignature {
-            name: self.qualified_name(name),
+            source_name: Some((self.source_qualifier().to_owned(), name.to_owned())),
             params,
             result,
         })
