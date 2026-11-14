@@ -26,7 +26,7 @@ pub(super) struct Sink {
 
 /// A driver and its load split into movable sinks and connections that must
 /// stay.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct Root {
     pub instance: usize,
     pub connection: usize,
@@ -233,7 +233,7 @@ pub(super) fn collect_roots(
                             "multiple combinational drivers for one electrical net"
                         );
                     }
-                    if (*state && internal_threshold.is_none_or(|_| tap_counts[g] >= 2))
+                    if (*state && internal_threshold.is_none_or(|min| tap_counts[g] >= min.min(2)))
                         || (*internal_data
                             && internal_threshold.is_some_and(|min| tap_counts[g] >= min))
                     {

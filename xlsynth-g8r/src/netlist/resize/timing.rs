@@ -71,7 +71,6 @@ impl TimingTieBreak {
 
 /// Resizing policy adapter; the timing engine owns all mutations and rollback.
 pub(super) trait ResizeTimingPolicy {
-    fn objective(&self) -> usize;
     fn secondary(&self, objective: usize) -> TimingTieBreak;
     fn critical_instances(
         &self,
@@ -81,6 +80,7 @@ pub(super) trait ResizeTimingPolicy {
     ) -> Vec<usize>;
     fn fanin_priorities(&self, i: usize, mode: usize, deficit: f64) -> SmallVec<[RankedIndex; 4]>;
     fn recovery_headroom(&self, limits: BoundaryDelays) -> Vec<f64>;
+    #[cfg(test)]
     fn trial(
         &mut self,
         instance: usize,
@@ -88,13 +88,32 @@ pub(super) trait ResizeTimingPolicy {
         work_limit: usize,
         limits: Option<BoundaryDelays>,
         accept: impl FnOnce(&Self) -> bool,
+    ) -> Result<TrialOutcome> {
+        self.guarded_trial(
+            instance,
+            cell,
+            work_limit,
+            limits,
+            ElectricalGuard::Absolute,
+            accept,
+        )
+    }
+
+    fn guarded_trial(
+        &mut self,
+        instance: usize,
+        cell: usize,
+        work_limit: usize,
+        limits: Option<BoundaryDelays>,
+        guard: ElectricalGuard,
+        accept: impl FnOnce(&Self) -> bool,
     ) -> Result<TrialOutcome>;
 }
 
-impl ResizeTimingPolicy for IncrementalSta<'_> {
+impl IncrementalSta<'_> {
     /// Selects register-to-register timing when reachable. Otherwise the
     /// longest currently reachable path determines the boundary.
-    fn objective(&self) -> usize {
+    pub(crate) fn objective(&self) -> usize {
         if self.endpoint_maximum_count(3) > 0 {
             3
         } else {
@@ -105,7 +124,9 @@ impl ResizeTimingPolicy for IncrementalSta<'_> {
                 .unwrap_or(0)
         }
     }
+}
 
+impl ResizeTimingPolicy for IncrementalSta<'_> {
     /// Breaks delay ties without losing progress on large critical plateaus.
     fn secondary(&self, objective: usize) -> TimingTieBreak {
         // Without a register path, ties can span boundary classes. A trial
@@ -238,14 +259,19 @@ impl ResizeTimingPolicy for IncrementalSta<'_> {
     }
 
     /// Preserves phase-wide budgets and rejects worsened electrical violations.
-    fn trial(
+    fn guarded_trial(
         &mut self,
         instance: usize,
         cell: usize,
         work_limit: usize,
         limits: Option<BoundaryDelays>,
+        guard: ElectricalGuard,
         accept: impl FnOnce(&Self) -> bool,
     ) -> Result<TrialOutcome> {
+        let old_cell = *self
+            .cell_indices()
+            .get(instance)
+            .ok_or_else(|| anyhow!("unknown resize instance {instance}"))?;
         let edit = TimingEdit {
             new_bits: 0,
             mutations: vec![TimingMutation::Resize { instance, cell }],
@@ -255,12 +281,17 @@ impl ResizeTimingPolicy for IncrementalSta<'_> {
             limits,
         };
         self.trial_edit(&edit, options, |timing, affected| {
-            for &instance in affected {
-                let current = timing.electrical_violations(instance);
-                let previous = timing.cached_electrical_violations(instance);
+            for &site in affected {
+                let new_cell = timing.cell_indices()[site];
+                let preceding_cell = if site == instance { old_cell } else { new_cell };
+                let current = timing.electrical_violations(site);
+                let previous = timing.cached_electrical_violations(site);
                 for (index, new) in current.iter().enumerate() {
                     let old = previous.get(index).copied().unwrap_or_default();
-                    if electrical_worsens(*new, old) {
+                    if guard.worsens(
+                        guard.excess(timing, new_cell, index, *new),
+                        guard.excess(timing, preceding_cell, index, old),
+                    ) {
                         return Ok(false);
                     }
                 }
@@ -271,9 +302,56 @@ impl ResizeTimingPolicy for IncrementalSta<'_> {
     }
 }
 
-/// Electrical constraints cannot be traded for a timing or area improvement.
-pub(super) fn electrical_worsens(new: ElectricalViolations, old: ElectricalViolations) -> bool {
-    new.capacitance > old.capacitance + ELECTRICAL_COMPARISON_TOLERANCE
-        || new.transition > old.transition + ELECTRICAL_COMPARISON_TOLERANCE
-        || new.fanout > old.fanout + ELECTRICAL_COMPARISON_TOLERANCE
+/// Ordinary sizing uses the native-unit allowance. Registered refinement
+/// measures each pin against the limits of the selected library cell.
+#[derive(Clone, Copy)]
+pub(crate) enum ElectricalGuard {
+    Absolute,
+    Relative,
+}
+
+/// Comparable excesses for capacitance, transition and fanout at one pin.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct GuardedViolations {
+    amounts: [f64; 3],
+    violated_zero: [bool; 3],
+}
+
+impl ElectricalGuard {
+    pub(crate) fn excess(
+        self,
+        sta: &IncrementalSta<'_>,
+        cell: usize,
+        pin: usize,
+        raw: ElectricalViolations,
+    ) -> GuardedViolations {
+        let mut excess = GuardedViolations {
+            amounts: [raw.capacitance, raw.transition, raw.fanout],
+            violated_zero: [false; 3],
+        };
+        if matches!(self, Self::Relative) && raw != ElectricalViolations::default() {
+            for (i, limit) in sta.electrical_limits(cell, pin).into_iter().enumerate() {
+                let amount = &mut excess.amounts[i];
+                match limit {
+                    Some(0.0) => excess.violated_zero[i] = *amount > 0.0,
+                    Some(limit) if *amount > limit * 1e-9 => *amount /= limit,
+                    _ => *amount = 0.0,
+                }
+            }
+        }
+        excess
+    }
+
+    pub(crate) fn worsens(self, new: GuardedViolations, old: GuardedViolations) -> bool {
+        let allowance = match self {
+            Self::Absolute => ELECTRICAL_COMPARISON_TOLERANCE,
+            Self::Relative => 0.0,
+        };
+        // Violating a zero limit is worse than any fractional excess.
+        // When both limits are zero, compare their native-unit amounts.
+        (0..3).any(|i| {
+            (new.violated_zero[i], new.amounts[i])
+                > (old.violated_zero[i], old.amounts[i] + allowance)
+        })
+    }
 }

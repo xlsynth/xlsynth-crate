@@ -203,6 +203,25 @@ fn inserted(name: &str, lib: &Library, a: BitSource, y: usize) -> Result<TimingM
     }))
 }
 
+// Two sinks share an arrival but have different paths to the endpoint.
+// A single slack per wire would hide which branch is urgent.
+#[test]
+fn tree_sink_urgency_distinguishes_paths_from_the_same_net() -> Result<()> {
+    let lib = library()?;
+    let p = read_gv_from_str(&network(1))?;
+    let sta = IncrementalSta::new(&p.modules[0], &p.nets, &p.interner, &lib, options())?;
+    let urgency = sta.pin_timing_urgency(0)?;
+    // drive/A and sibling/A see the very same net arrival. The former goes
+    // through a further inverter and buffer; the latter goes straight to z.
+    let slow = urgency.sink_slack(1, 0).unwrap();
+    let fast = urgency.sink_slack(3, 0).unwrap();
+    assert!(slow.abs() < 1e-9 && fast > slow);
+    assert!(urgency.required_arrival(1, 0) < urgency.required_arrival(3, 0));
+    assert_eq!(urgency.sink_slack(4, 0), None); // Unused buffer output.
+    assert!(sta.pin_timing_urgency(3)?.sink_slack(1, 0).is_none());
+    Ok(())
+}
+
 #[test]
 fn generic_insert_rewire_preview_commit_and_following_resize_match_full_sta() -> Result<()> {
     let lib = library()?;
