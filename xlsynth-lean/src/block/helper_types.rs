@@ -74,6 +74,7 @@ impl DslxLink {
             declarations: Vec::new(),
             helpers: BTreeMap::new(),
             unsupported: BTreeMap::new(),
+            entry: root,
         };
         catalogue.collect_helpers()?;
         for function in &block.helpers {
@@ -104,6 +105,7 @@ impl DslxLink {
 }
 /// Declarations collected in source order from the native DSLX type checker.
 struct Catalogue<'a> {
+    entry: ModuleContext,
     declarations: Vec<TypeDecl>,
     reachable: BTreeSet<&'a str>,
     helpers: BTreeMap<String, HelperSignature>,
@@ -118,6 +120,26 @@ struct ModuleContext {
     module: dslx::Module,
     type_info: dslx::TypeInfo,
     qualifier: String,
+}
+
+impl ModuleContext {
+    /// A captured declaration may belong to a transitive import of the top.
+    fn declaration_owner(&self, module: dslx::Module) -> Result<Self> {
+        let qualifier = module.get_name();
+        if self.module.get_name() == qualifier {
+            Ok(self.clone())
+        } else {
+            let type_info = self
+                .type_info
+                .get_imported_type_info(&module)
+                .with_context(|| format!("missing type information for module {qualifier}"))?;
+            Ok(Self {
+                module,
+                type_info,
+                qualifier,
+            })
+        }
+    }
 }
 
 impl Catalogue<'_> {
@@ -263,13 +285,7 @@ impl Catalogue<'_> {
                 .collect::<Result<_>>()?;
             Ok(SourceType::Tuple { members })
         } else if ty.is_enum() || ty.is_struct() {
-            if let Some(record) = record {
-                self.concrete_record(&record, ty)
-            } else if ty.is_struct() {
-                self.nominal_reference(&ty.get_struct_def()?.get_identifier())
-            } else {
-                self.nominal_reference(&ty.get_enum_def()?.get_identifier())
-            }
+            self.checked_nominal_type(ty)
         } else if let Some((signed, width)) = ty.is_bits_like() {
             ensure!(
                 !signed,
@@ -647,6 +663,42 @@ impl Catalogue<'_> {
         }
         Ok(())
     }
+    fn with_declaration_owner<T>(
+        &mut self,
+        module: dslx::Module,
+        resolve: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        if module.get_name() == self.context.module.get_name() {
+            resolve(self)
+        } else {
+            let owner = self.entry.declaration_owner(module)?;
+            let previous = std::mem::replace(&mut self.context, owner);
+            let result = resolve(self);
+            self.context = previous;
+            result
+        }
+    }
+
+    fn checked_nominal_type(&mut self, ty: &dslx::Type) -> Result<SourceType> {
+        if ty.is_struct() {
+            let record = ty.get_struct_def()?;
+            self.with_declaration_owner(record.get_owner_module(), |catalogue| {
+                if record.is_parametric() {
+                    catalogue.concrete_record(&record, ty)
+                } else {
+                    catalogue.nominal_reference(&record.get_identifier())
+                }
+            })
+        } else {
+            let enumeration = ty.get_enum_def()?;
+            ensure!(enumeration.get_member_count() != 0, "empty enum");
+            let module = enumeration.get_member(0).get_value().get_owner_module();
+            self.with_declaration_owner(module, |catalogue| {
+                catalogue.nominal_reference(&enumeration.get_identifier())
+            })
+        }
+    }
+
     fn helper_signature<'a>(
         &mut self,
         name: &str,
