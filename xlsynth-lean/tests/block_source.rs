@@ -118,6 +118,49 @@ fn source_struct_fields_can_use_lean_generated_member_names() {
 }
 
 #[test]
+fn root_qualifier_is_rejected_for_explicit_lean_declarations() {
+    for (source, owner) in [
+        ("block _root_(clk) -> u8 { u8:0 }", "block 'design::_root_'"),
+        (
+            "struct _root_ { x: u8 } block run(clk, p: _root_) -> u8 { p.x }",
+            "type 'design::_root_'",
+        ),
+        (
+            "struct Packet { _root_: u8, recOn: u8 } block run(clk, p: Packet) -> u8 { p.recOn }",
+            "«Packet» field '_root_'",
+        ),
+    ] {
+        let err = compile(source).emit_readable(None).err().unwrap();
+        assert!(err.to_string().contains(owner), "{err:#}");
+    }
+}
+
+#[test]
+fn checked_dslx_function_cannot_use_the_root_qualifier_as_its_name() {
+    let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+    let module = xlsynth::dslx::parse_and_typecheck(
+        "pub fn _root_(x: u8) -> u8 { x + u8:1 }",
+        "ops.x",
+        "ops",
+        &mut imports,
+    )
+    .unwrap();
+    let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+        "design",
+        "extern fn ops::_root_(x: u8) -> u8; block run(clk, x: u8) -> u8 { ops::_root_(x) }",
+        module,
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    let err = compiled.emit_readable(None).err().unwrap();
+    assert!(
+        err.to_string().contains("function 'ops::_root_'"),
+        "{err:#}"
+    );
+}
+
+#[test]
 fn readable_emission_requires_a_selected_bx_declaration() {
     let package = Parser::new("package example\nblock preexisting() {}")
         .parse_and_validate_package()

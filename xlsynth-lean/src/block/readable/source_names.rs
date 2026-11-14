@@ -2,7 +2,7 @@
 
 //! Translate nominal catalogue identities into Lean namespace components.
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use std::{collections::BTreeSet, fmt::Write};
 
 use super::{SourceType, identifier, lean, product_type};
@@ -55,6 +55,15 @@ pub(super) fn module_identifier(module: &str) -> Result<String> {
         write!(namespace, ".{}", identifier(component)?)?;
     }
     Ok(namespace)
+}
+
+/// Explicit Lean declarations cannot end in `_root_`, even when quoted.
+pub(super) fn declaration_identifier(module: &str, name: &str, role: &str) -> Result<String> {
+    ensure!(
+        name != "_root_",
+        "cannot emit {role} '{module}::{name}': Lean reserves '_root_' as a declaration name"
+    );
+    identifier(name)
 }
 
 pub(super) fn nominal_reference(
@@ -142,6 +151,12 @@ pub(super) fn write_struct(
         })
         .collect::<Result<Vec<_>>>()?;
     let name = identifier(local)?;
-    out.push_str(&lean::record_declaration(&name, &rendered, None, &[])?);
+    out.push_str(&lean::record_declaration(
+        &module_identifier(module)?,
+        &name,
+        &rendered,
+        None,
+        &[],
+    )?);
     Ok(lean::record_backing_name(&name, &rendered))
 }
