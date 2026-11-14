@@ -143,12 +143,14 @@ private theorem countedFor_succ {w : L.Nat} {α : Type} (n stride : L.Nat) (f : 
         let eval_close = close(self.graph);
         let deps = if let Some(segments) = segments {
             // Leaf inputs are arbitrary physical wires. Apply the helper and
-            // loop laws here, while the calls in each leaf are visible.
+            // loop laws here, while the calls in each leaf are visible. Limit
+            // the initial equality check so it can yield to those laws on a
+            // deep arithmetic chain with distinct readable and raw calls.
             writeln!(
                 out,
                 r#"local macro "xls_segment_eq" : tactic => `(tactic|
   first
-  | rfl
+  | with_reducible rfl
   | (simp only [{BOOLEAN_GATE_ENCODERS}] <;> done)
   | (
     xls_normalize [{deps}]
