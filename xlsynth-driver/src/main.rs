@@ -2690,9 +2690,10 @@ fn main() {
                 )
                 .arg(
                     clap::Arg::new("dff_cells")
-                        .long("dff_cells")
+                        .long("dff-cells")
+                        .alias("dff_cells")
                         .value_name("CSV")
-                        .help("Comma-separated list of DFF cell names that should act as stop boundaries when using --stop-at-dff")
+                        .help("Override the Liberty flip-flop boundaries for --stop-at-dff with a comma-separated list of cell names")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2704,7 +2705,7 @@ fn main() {
                 .arg(
                     clap::Arg::new("stop-at-dff")
                         .long("stop-at-dff")
-                        .help("Stop traversal at DFF-like cells inferred from the Liberty library; do not traverse beyond them")
+                        .help("Stop at flip-flops reached from the starting instance, using Liberty metadata by default")
                         .action(ArgAction::SetTrue),
                 )
                 .arg(
