@@ -1063,7 +1063,7 @@ block b(clk, x: u8) -> u8 { x + x }"#,
 }
 
 #[test]
-fn bx2lean_links_externs_from_a_checked_dslx_module() -> Result<()> {
+fn bx_to_lean_links_externs_from_a_checked_dslx_module() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
     fs::create_dir(root.join("modules"))?;
@@ -1085,7 +1085,7 @@ block delay(clk, x: u8, y: u8) -> u8 {
 }"#,
     )?;
     let args = [
-        "bx2lean",
+        "bx-to-lean",
         "design.bx",
         "--link-dslx=math.x",
         "--dslx-path=modules",
