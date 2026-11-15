@@ -1001,6 +1001,8 @@ block changed(clk, mask: u8) -> u3 {
     check_bundle(bundle, "encode changed mask bits");
 }
 
+// Verifies: Lean and XLS agree on outputs and next state in three u5 cases.
+// Catches: Signed comparison, faulty wraparound, or wrong division by zero.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn unsigned_arithmetic_matches_xls_at_width_boundaries() {
