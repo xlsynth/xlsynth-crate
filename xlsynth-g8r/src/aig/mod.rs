@@ -16,6 +16,7 @@ pub mod graph_logical_effort;
 pub(crate) mod import;
 pub mod logical_effort;
 pub mod match_and_rewrite;
+pub mod mffc;
 pub mod reassociation;
 mod register_controls;
 pub mod sequential_cleanup;
