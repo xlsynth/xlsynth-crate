@@ -2,14 +2,14 @@
 
 //! Explicit native checks for generated readable block correspondence proofs.
 
-#[path = "common/block_project.rs"]
-mod block_project;
-
 use std::{fmt::Write as _, fs, path::Path};
 
 use anyhow::{Context, Result};
 use xlsynth_lean::block::{LeanBlockBundle, compile_bx, emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
+
+#[path = "common/lean_bundle.rs"]
+mod lean_bundle;
 
 /// Build both models for a BX fixture using the default reset behavior.
 fn bx_bundle(source: &str) -> LeanBlockBundle {
@@ -1043,16 +1043,9 @@ private def clock (a b : BitVec 5) :=
     check_bundle(bundle, "unsigned fixed-width arithmetic");
 }
 
-/// Elaborate every generated file in dependency order with the requested Lean.
-fn check_bundle(bundle: LeanBlockBundle, _fixture: &str) {
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    let sources = bundle.files.into_iter().map(|(name, source)| {
-        let path = root.join(name);
-        fs::write(&path, source).unwrap();
-        path
-    });
-    block_project::compile_project(root, sources);
+/// Checks the complete bundle and names the fixture in any compilation failure.
+fn check_bundle(bundle: LeanBlockBundle, fixture: &str) {
+    lean_bundle::check_bundle(&bundle).unwrap_or_else(|error| panic!("{fixture}: {error:#}"));
 }
 
 #[path = "block_native/checked_extern.rs"]
