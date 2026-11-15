@@ -2,8 +2,9 @@
 
 //! Source-shaped Lean values and executable expressions over a checked block.
 //!
-//! The checked BX declarations supply names and types. Equations come from
-//! the block graph and the IR functions it invokes. Codecs include undeclared
+//! Checked BX declarations supply names and types for the block interface.
+//! Linked DSLX declarations supply them for helpers with supported signatures.
+//! The IR supplies every equation and physical port. Codecs include undeclared
 //! enum encodings so arbitrary physical state remains representable. This
 //! module emits correspondence proof source but does not check it with Lean.
 //!
@@ -89,12 +90,12 @@ pub(super) fn emit(
 }
 
 impl<'a> Presentation<'a> {
-    /// Allocate local names and propagate source types within the selected
+    /// Allocate noncapturing names and propagate source types through the
     /// graph.
     ///
-    /// One-bit nodes default to `Bool`. Ports, registers, projections, and
-    /// available helper signatures supply nominal types. Use the helper's index
-    /// in the block's helper list when naming its enum dispatch definitions.
+    /// A recovered helper signature supplies preferred parameter names and
+    /// nominal types by position. Call sites use the same signature for
+    /// argument and result types. Equally wide types can have different fields.
     fn new(
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
@@ -106,19 +107,26 @@ impl<'a> Presentation<'a> {
             Some(f) => f,
             None => &block.graph,
         };
-        let node_name = |index| {
-            let reference = NodeRef { index };
-            ir::node_textual_id(
-                helper.map_or_else(|| block.source_graph(reference), |f| &f.graph),
-                reference,
-            )
-        };
-        let reserved: BTreeSet<_> = graph
+        let signature = helper.and_then(|f| interface.helpers.get(&f.name));
+        let mut preferred: Vec<_> = graph
             .nodes
             .iter()
             .enumerate()
-            .map(|(index, _)| node_name(index))
+            .map(|(index, n)| match helper {
+                Some(_) => n.name.as_deref(),
+                None => block
+                    .source_graph(NodeRef { index })
+                    .get_node(NodeRef { index })
+                    .name
+                    .as_deref(),
+            })
             .collect();
+        if let Some((function, signature)) = helper.zip(signature) {
+            for (param, (name, _)) in function.params.iter().zip(&signature.params) {
+                preferred[param.index] = Some(name.as_str());
+            }
+        }
+        let reserved: BTreeSet<_> = preferred.iter().flatten().copied().collect();
         let mut used: BTreeSet<String> = [
             "Bool",
             "BitVec",
@@ -139,20 +147,18 @@ impl<'a> Presentation<'a> {
         if helper.is_none() {
             used.extend(["q".to_owned(), "x".to_owned()]);
         }
-        let names = graph
-            .nodes
-            .iter()
+        let names = preferred
+            .into_iter()
             .enumerate()
-            .map(|(index, node)| {
-                let source = node_name(index);
-                let name = if node.name.is_none() || used.contains(&source) {
+            .map(|(index, source)| {
+                let name = if let Some(source) = source.filter(|s| !used.contains(*s)) {
+                    source.to_owned()
+                } else {
                     let mut fallback = format!("xls_node_{index}");
-                    while reserved.contains(&fallback) || used.contains(&fallback) {
+                    while reserved.contains(fallback.as_str()) || used.contains(&fallback) {
                         fallback.push('_');
                     }
                     fallback
-                } else {
-                    source
                 };
                 used.insert(name.clone());
                 identifier(&name)
@@ -179,9 +185,8 @@ impl<'a> Presentation<'a> {
             names,
             register_fields,
         };
-        let signature = helper.and_then(|f| interface.helpers.get(&f.name));
         if let Some((function, signature)) = helper.zip(signature) {
-            for (param, ty) in function.params.iter().zip(&signature.params) {
+            for (param, (_, ty)) in function.params.iter().zip(&signature.params) {
                 result.node_types[param.index] = Some(ty.clone());
             }
         }
@@ -190,7 +195,7 @@ impl<'a> Presentation<'a> {
                 NodePayload::Invoke { to_apply, operands } => {
                     if let Some(signature) = interface.helpers.get(to_apply) {
                         result.node_types[reference.index] = Some(signature.result.clone());
-                        for (arg, ty) in operands.iter().zip(&signature.params) {
+                        for (arg, (_, ty)) in operands.iter().zip(&signature.params) {
                             result.annotate(*arg, ty)?;
                         }
                     }
@@ -692,10 +697,11 @@ impl<'a> Presentation<'a> {
     /// Render source-shaped equations where type context supports that
     /// spelling.
     ///
-    /// Calls with a source signature use the readable helper and convert
-    /// arguments to its declared types. Other calls use the raw helper with
-    /// encoded arguments. In both cases the result is converted at its use.
-    /// The readable evaluator computes the block equations itself.
+    /// A call with a recovered signature converts each argument to its
+    /// declared parameter type and converts the result to the node's type.
+    /// Other operations reuse the raw operator translation with explicit
+    /// codecs; the generated readable evaluator never delegates to the raw
+    /// evaluator.
     fn expression(&self, reference: NodeRef, depth: usize) -> Result<String> {
         let node = self.graph.get_node(reference);
         let target = self.node_types[reference.index].as_ref();
@@ -710,7 +716,7 @@ impl<'a> Presentation<'a> {
                     "_root_.XlsReadable.Helpers.{}",
                     identifier(&signature.name)?
                 );
-                for (arg, ty) in operands.iter().zip(&signature.params) {
+                for (arg, (_, ty)) in operands.iter().zip(&signature.params) {
                     write!(call, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
                 }
                 self.coerce(Some(&signature.result), target, &format!("({call})"))
@@ -875,9 +881,9 @@ impl<'a> Presentation<'a> {
     /// Emit readable clock-step equations with physical ports and assertion
     /// results.
     ///
+    /// Helpers with source signatures get definitions with named, typed
+    /// parameters before the block equations that call them.
     /// Raw emission has already established single writes and supported resets.
-    /// Helpers with source signatures are defined before block equations, in
-    /// the same callee-before-caller order used by the raw emitter.
     /// All equations read old state, and reset takes precedence over load
     /// enable.
     fn executable(&self) -> Result<String> {
@@ -896,7 +902,7 @@ impl<'a> Presentation<'a> {
                 )?;
                 out.push_str(&model.enum_dispatch_definitions()?);
                 write!(out, "def Helpers.{}", identifier(&signature.name)?)?;
-                for (param, ty) in function.params.iter().zip(&signature.params) {
+                for (param, (_, ty)) in function.params.iter().zip(&signature.params) {
                     write!(
                         out,
                         " ({} : {})",
@@ -1393,6 +1399,10 @@ end XlsReadable
                 rules.push(format!("XlsCodec.{name}.decode_encode"));
                 if let TypeDecl::Struct { name, .. } = declaration {
                     rules.push(identifier(&format!("encode_{name}_mk"))?);
+                    // A BX record and a DSLX parameter may share only their
+                    // physical layout. Expose fields of the decoded argument
+                    // while its nested codec round-trip rules are still active.
+                    rules.push(format!("XlsCodec.{}.decode", identifier(name)?));
                 }
             }
             rules.push("XlsCodec.decode_encodeBool".into());

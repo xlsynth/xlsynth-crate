@@ -21,14 +21,14 @@ use super::{BlockContext, LeanBlockBundle, readable, select_block};
 pub struct CompiledBx {
     pub(super) checked: CheckedModule,
     pub(super) package: ir::Package,
+    dslx: Option<super::helper_types::DslxLink>,
 }
 
-/// Check BX source and lower its blocks into the supplied IR package.
+/// Check BX source and lower it into the supplied IR package.
 ///
-/// Supply the import locations in `options`, the reset behavior to use during
-/// lowering, and any package members needed by BX externs. An unresolved
-/// import, BX type error, or lowering failure returns an error. A successful
-/// compilation may still contain operations the Lean emitter cannot render.
+/// The package may already contain functions or blocks used by BX externs.
+/// Linked functions have IR signatures here. Use [`compile_bx_with_dslx`] to
+/// preserve source names and nominal types for supported helpers.
 pub fn compile_bx(
     source: &str,
     package: ir::Package,
@@ -38,7 +38,36 @@ pub fn compile_bx(
     let checked =
         xlsynth_bx::check_source_with_options(source, options).map_err(anyhow::Error::msg)?;
     let package = xlsynth_bx::lower_module(&checked, package, reset).map_err(anyhow::Error::msg)?;
-    Ok(CompiledBx { checked, package })
+    Ok(CompiledBx {
+        checked,
+        package,
+        dslx: None,
+    })
+}
+
+/// Lower BX against the IR produced from a checked DSLX module.
+///
+/// The checked module supplies both the implementations for extern functions
+/// and their declarations for readable Lean. Helpers with supported signatures
+/// retain their declared types. Helpers with unsupported signatures use their
+/// IR types.
+///
+/// # Errors
+///
+/// Returns an error if DSLX lowering, IR validation, BX checking, or linking
+/// fails. BX extern declarations must match the linked functions' IR shapes.
+pub fn compile_bx_with_dslx(
+    source: &str,
+    module: xlsynth::dslx::TypecheckedModule,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+) -> Result<CompiledBx> {
+    let (package, link) = super::helper_types::DslxLink::compile(module)?;
+    let compiled = compile_bx(source, package, reset, options)?;
+    Ok(CompiledBx {
+        dslx: Some(link),
+        ..compiled
+    })
 }
 
 impl CompiledBx {
@@ -56,18 +85,19 @@ impl CompiledBx {
         &self.package
     }
 
-    /// Generate raw and readable Lean models and their correspondence proofs
-    /// for one BX block.
+    /// Emit the selected BX block, defaulting to the package's top or sole
+    /// block.
     ///
-    /// With no explicit name, use the package's block top or, if there is no
-    /// top, its sole block. The selected block must have a checked declaration
-    /// in this BX source. Selecting a block supplied by the input package alone
-    /// returns an error, as do unsupported interface types or block operations.
-    /// Compile the returned files in dependency order to check the proofs.
+    /// When the compilation retains checked DSLX, validate recovered helper
+    /// signatures against their linked IR functions before emitting any
+    /// modules.
     pub fn emit_readable(&self, block_name: Option<&str>) -> Result<LeanBlockBundle> {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
-        let (declarations, interface) = self.readable_interface(&block)?;
+        let (mut declarations, mut interface) = self.readable_interface(&block)?;
+        if let Some(link) = &self.dslx {
+            link.add_signatures(&block, &mut declarations, &mut interface)?;
+        }
         readable::emit(&block, &declarations, &interface)
     }
 

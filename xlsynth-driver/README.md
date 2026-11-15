@@ -626,8 +626,15 @@ xlsynth-driver bx-to-lean counter.bx --output-dir lean
 - `--top <BLOCK>` selects a BX-defined block. The default is the sole block or
   the unique public block. If several blocks qualify, specify the name.
 - `--link-ir`, `--dslx-path`, and `--dslx-stdlib-path` resolve externs and
-  DSLX imports as in [`bx2ir`](#bx2ir-bx-to-block-ir). Emission fails if
-  the selected block uses an unsupported operation.
+  DSLX imports as in [`bx2ir`](#bx2ir-bx-to-block-ir). The selected block
+  and the functions it calls must use operations supported by the Lean emitter.
+- `--link-dslx <MODULE.x>` takes a DSLX source file in place of `--link-ir`.
+  It compiles the module to implement BX extern functions. When a helper's
+  declared signature is supported, readable Lean uses its DSLX parameter
+  names and types, including types declared in imports. Other helpers use
+  their IR types. For example, a block declaring
+  `extern fn arithmetic::twice(x: u8) -> u8;` can link the implementation
+  with `--link-dslx arithmetic.x`.
 - BX warnings stop generation by default. Use `--warnings-as-errors=false`
   to print them to stderr and continue.
 - Reset defaults to synchronous and active-high. Use `--reset-active-low` to

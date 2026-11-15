@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Run the BX frontend with the driver's import paths, link package, and
-//! warning policy.
-//!
-//! Lean generation keeps the checked BX declarations alongside the lowered IR
-//! so the readable model can use the source types and field names.
+//! Run BX driver commands with their configured import paths and linked
+//! package.
 
 use std::fs;
 use std::num::NonZeroUsize;
@@ -12,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use xlsynth::dslx;
 use xlsynth_bx::invariant_prover::{
     InvariantMode, InvariantQueryResult, InvariantResult, check_invariant,
 };
@@ -22,6 +20,7 @@ use xlsynth_bx::{
 };
 use xlsynth_g8r::block2sequential::optimize_and_lower_bx_block;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
+use xlsynth_lean::block;
 use xlsynth_pir::ir::{MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::parse_xls_ir_package;
 use xlsynth_pir::ir_utils::is_valid_package_name;
@@ -186,10 +185,17 @@ pub fn bx_prove_invariant_command() -> Command {
     .arg(time_limit_arg())
 }
 
-/// Configure `bx-to-lean` with the shared compilation options and a required
-/// output directory.
+/// Define the Lean exporter CLI, with mutually exclusive DSLX and IR link
+/// inputs.
 pub fn bx_to_lean_command() -> Command {
     add_bx_args(Command::new("bx-to-lean").about("Generates raw and readable Lean for a BX block"))
+        .arg(
+            Arg::new("link-dslx")
+                .long("link-dslx")
+                .value_name("MODULE.x")
+                .conflicts_with("link-ir")
+                .help("Compile a DSLX module to implement BX extern functions and retain their declared types"),
+        )
         .arg(
             Arg::new("output-dir")
                 .long("output-dir")
@@ -632,22 +638,32 @@ pub fn bx_prove_invariant(matches: &ArgMatches, config: &Option<ToolchainConfig>
     })
 }
 
-/// Emit the selected BX block's raw model, readable model, and correspondence
-/// proof.
+/// Generate the Lean modules before creating their output directory.
 ///
-/// Warnings treated as errors and model-generation failures leave the output
-/// directory untouched. The directory must be new. An I/O error while writing
-/// the modules can leave a partial bundle there. Checking the proof requires
-/// Lean.
+/// With `--link-dslx`, check the module using the BX command's import paths
+/// so the readable model can use declarations from the same compilation as
+/// the linked IR. Model generation leaves proof checking to Lean.
 pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
     let compiled = with_bx_input(matches, config, |input| {
         let reset = ResetBehavior {
             active_low: input.active_low,
             asynchronous: matches.get_flag("reset-asynchronous"),
         };
-        let compiled =
-            xlsynth_lean::block::compile_bx(&input.source, input.package, reset, &input.imports)
-                .with_context(|| input.path.display().to_string())?;
+        let compiled = if let Some(path) = matches.get_one::<String>("link-dslx") {
+            let dslx_source = fs::read_to_string(path)
+                .with_context(|| format!("reading linked DSLX module '{path}'"))?;
+            let name = xlsynth::dslx_path_to_module_name(Path::new(path))?;
+            let mut import_data = dslx::ImportData::new(
+                input.imports.dslx_stdlib_path,
+                &input.imports.additional_search_paths,
+            );
+            let module = dslx::parse_and_typecheck(&dslx_source, path, name, &mut import_data)
+                .with_context(|| format!("checking linked DSLX module '{path}'"))?;
+            block::compile_bx_with_dslx(&input.source, module, reset, &input.imports)
+        } else {
+            block::compile_bx(&input.source, input.package, reset, &input.imports)
+        }
+        .with_context(|| input.path.display().to_string())?;
         report_warnings(input.path, input.warnings_as_errors, compiled.warnings())?;
         Ok(compiled)
     })?;

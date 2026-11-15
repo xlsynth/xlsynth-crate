@@ -836,6 +836,10 @@ impl TryFrom<&Quickcheck> for ModuleMember {
     }
 }
 
+/// A handle to a DSLX module in a typechecked compilation.
+///
+/// Clones refer to the same native module and keep the compilation alive.
+#[derive(Clone)]
 pub struct Module {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxModule,
