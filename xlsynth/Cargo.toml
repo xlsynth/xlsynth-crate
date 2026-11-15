@@ -16,6 +16,8 @@ workspace = true
 
 [features]
 default = []
+# Exposes checked DSLX names and types alongside the emitted IR.
+dslx-loop-bindings = ["xlsynth-sys/dslx-loop-bindings"]
 
 [dependencies]
 xlsynth-sys = {path = "../xlsynth-sys", version = "0.85.0"}

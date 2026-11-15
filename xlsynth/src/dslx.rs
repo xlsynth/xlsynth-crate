@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! APIs that wrap the "DSL X" (DSL) facilities inside of XLS.
+//! Rust handles for parsing, typechecking, and inspecting DSLX modules with
+//! XLS.
+//!
+//! A checked module retains the import data used to resolve its types. With the
+//! `dslx-loop-bindings` feature, IR conversion can report the DSLX types and
+//! names associated with values in counted loops.
 
 #![allow(unused)]
 
@@ -390,6 +395,23 @@ pub struct InvocationRewriteRule<'a> {
     pub to_callee_env: Option<ParametricEnv>,
 }
 
+/// Associates a value in a counted loop with its checked DSLX type and optional
+/// name.
+#[cfg(feature = "dslx-loop-bindings")]
+pub struct LoopBinding {
+    /// Name of the IR function containing the node.
+    pub ir_function: String,
+    /// ID of the node in the IR text returned by the same conversion.
+    pub ir_node_id: i64,
+    /// DSLX identifier for a named binding or named iterable.
+    ///
+    /// A computed iterable and the aggregate of a destructured accumulator both
+    /// yield `None`.
+    pub source_name: Option<String>,
+    /// Checked source type, which keeps the module and its import data alive.
+    pub concrete_type: Type,
+}
+
 impl TypecheckedModule {
     /// Visit the logical subjects of explicit DSLX `import` statements,
     /// including transitive imports, in the original checked graph.
@@ -433,6 +455,81 @@ impl TypecheckedModule {
             } else {
                 Err(XlsynthError(c_str_to_rust(error)))
             }
+        }
+    }
+
+    /// Converts this checked module to unoptimized IR and returns its
+    /// counted-loop bindings.
+    ///
+    /// Use each binding's function name and node ID to locate the value in the
+    /// returned text. Optimizing or regenerating the package can change those
+    /// IDs. The checked types remain usable after the caller drops the
+    /// module.
+    ///
+    /// # Errors
+    ///
+    /// Returns XLS's conversion error and discards any bindings collected
+    /// before failure.
+    #[cfg(feature = "dslx-loop-bindings")]
+    pub fn convert_to_ir_text_with_loop_bindings(
+        &self,
+    ) -> Result<(String, Vec<LoopBinding>), XlsynthError> {
+        /// Holds results during the conversion and the owner of the borrowed
+        /// XLS types.
+        struct Bindings<'a> {
+            parent: &'a Rc<TypecheckedModulePtr>,
+            items: Vec<LoopBinding>,
+        }
+
+        /// Copies the callback's temporary names and retains the owner of each
+        /// checked type.
+        unsafe extern "C" fn collect(
+            context: *mut std::ffi::c_void,
+            ir_function: *const std::ffi::c_char,
+            ir_node_id: i64,
+            source_name: *const std::ffi::c_char,
+            concrete_type: *const sys::CDslxType,
+            _source_expr: *const std::ffi::c_char,
+        ) {
+            // The synchronous conversion borrows our stack-local Bindings as
+            // its context.
+            let bindings = unsafe { &mut *context.cast::<Bindings<'_>>() };
+            let copy_name = |ptr| {
+                unsafe { std::ffi::CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            bindings.items.push(LoopBinding {
+                ir_function: copy_name(ir_function),
+                ir_node_id,
+                source_name: (!source_name.is_null()).then(|| copy_name(source_name)),
+                concrete_type: Type {
+                    parent: Rc::clone(bindings.parent),
+                    ptr: concrete_type.cast_mut(),
+                },
+            });
+        }
+
+        let mut bindings = Bindings {
+            parent: &self.ptr,
+            items: Vec::new(),
+        };
+        let mut error_out = std::ptr::null_mut();
+        let mut ir_out = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_dslx_typechecked_module_convert_to_ir_with_loop_bindings(
+                self.ptr.ptr,
+                self.ptr.parent.ptr,
+                Some(collect),
+                std::ptr::from_mut(&mut bindings).cast(),
+                &mut error_out,
+                &mut ir_out,
+            )
+        };
+        if success {
+            Ok((unsafe { c_str_to_rust(ir_out) }, bindings.items))
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
         }
     }
 
@@ -3399,6 +3496,28 @@ fn explicit(x: u32) -> u32 { x }
             explicit_fn.get_return_type().is_some(),
             "explicit return should provide a return annotation"
         );
+    }
+
+    // Verifies: An unused index preserves lowered IR and the carry's u8 type.
+    // Catches: Changed loop IR or a carry type lost when the module is dropped.
+    #[cfg(feature = "dslx-loop-bindings")]
+    #[test]
+    fn collecting_loop_bindings_preserves_ir_with_an_unused_index() {
+        let mut imports = ImportData::default();
+        let source = "fn step(seed: u8) -> u8 {
+            for (_index, carry): (u32, u8) in u32:1..u32:3 { carry + u8:1 }(seed)
+        }";
+        let checked = parse_and_typecheck(source, "loop.x", "loop_example", &mut imports).unwrap();
+        let expected = checked.to_ir_text().unwrap();
+        let (actual, bindings) = checked.convert_to_ir_text_with_loop_bindings().unwrap();
+        assert_eq!(actual, expected);
+        drop(checked);
+        drop(imports);
+        let carry = bindings
+            .iter()
+            .find(|b| b.source_name.as_deref() == Some("carry"))
+            .unwrap();
+        assert_eq!(carry.concrete_type.is_bits_like(), Some((false, 8)));
     }
 
     #[test]
