@@ -914,6 +914,8 @@ fn large_constructed_bool_array_elaborates() {
     check_bundle(bx_bundle(&bx), "large constructed Bool array");
 }
 
+// Verifies: Lean and XLS agree on slice reads and writes at four indices.
+// Catches: Wrapping wide indices or mishandling slices past the high bit.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn dynamic_slices_match_xls_at_and_beyond_the_boundary() {

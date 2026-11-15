@@ -101,10 +101,8 @@ pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Re
 ///
 /// Every register must have exactly one write; outputs use the data operand of
 /// each output port, whose graph node itself has the empty tuple type.
-/// If the block or any reachable helper contains a counted loop, emit a shared
-/// fold before the helpers. Each iteration passes the current carry and an
-/// index equal to the iteration number (starting at zero) times the stride,
-/// truncated to the body's index width.
+/// The generated namespace exposes the shared Lean `bitSliceUpdate` operation
+/// when a slice update appears in the block or in one of its helper functions.
 fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     ensure!(
         block.graph.instantiations.is_empty(),
