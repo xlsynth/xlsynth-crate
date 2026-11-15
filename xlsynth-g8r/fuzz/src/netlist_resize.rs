@@ -325,6 +325,7 @@ pub fn check(data: &[u8]) -> ResizeReport {
         timing_evaluation_budget: rng.gen_bool(0.5).then(|| rng.gen_range(0..=4096)),
         recovery_evaluation_budget: rng.gen_bool(0.5).then(|| rng.gen_range(0..=4096)),
         resize_registers: rng.gen_bool(0.5),
+        ..Default::default()
     };
     let report = resize_netlist(
         &mut mapped.module,

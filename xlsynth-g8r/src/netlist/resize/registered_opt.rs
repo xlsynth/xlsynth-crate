@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use super::timing::{ElectricalGuard, ResizeTimingPolicy, TimingTieBreak};
 use super::{
-    BoundaryDelays, CellFamilies, ResizeOptions, ResizeSearch, SearchPhase, verify_timing,
+    BoundaryDelays, CellFamilies, RecoveryWindowCheckpoint, ResizeOptions, ResizeSearch,
+    SearchPhase, verify_timing,
 };
 use crate::liberty_model::Library;
 use crate::netlist::fanout_opt::FanoutOptimizationOptions;
@@ -208,7 +209,9 @@ pub(crate) fn optimize_registered_stage(
     let automatic = sizing.recovery_evaluation_budget.is_none();
     let mut limits = sizing.registered_limits(sta.instance_count());
     ensure!(
-        limits.timing_candidate_sites > 0 && sizing.max_cell_candidates > 0,
+        limits.timing_candidate_sites > 0
+            && sizing.max_cell_candidates > 0
+            && sizing.recovery_cell_limit != Some(0),
         "candidate limits must be positive"
     );
     let families = options.resize.as_ref().map(|_| CellFamilies::new(library));
@@ -396,6 +399,7 @@ pub(crate) fn optimize_registered_stage(
                 &mut sta,
                 1,
                 (automatic && stable).then_some(base_window),
+                RecoveryWindowCheckpoint::Latest,
             );
             round.renewed_recovery_windows = stats.renewed_windows;
             limits.recovery_evaluations -= stats.propagated_instances;

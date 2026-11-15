@@ -36,27 +36,49 @@ fn resizes_with_proto_load_default_and_writes_verified_report() -> anyhow::Resul
         "module m(input a, output y); BUF1 b(.A(a), .Y(y)); endmodule",
     )?;
     let report = dir.path().join("report.json");
-    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
-        .arg("gv-resize")
-        .arg("--netlist")
-        .arg(&input)
-        .arg("--liberty_proto")
-        .arg(&proto)
-        .args(["--max-area-growth", "1", "--report-json"])
-        .arg(&report)
-        .output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    compare_golden_text(
-        &String::from_utf8(output.stdout)?,
-        "tests/gv_resize.golden.v",
-    );
-    compare_golden_text(
-        &std::fs::read_to_string(&report)?,
-        "tests/gv_resize_report.golden.txt",
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .env_remove("RUST_LOG")
+            .arg("gv-resize")
+            .arg("--netlist")
+            .arg(&input)
+            .arg("--liberty_proto")
+            .arg(&proto)
+            .args(["--max-area-growth", "1", "--report-json"])
+            .arg(&report)
+            .args(args)
+            .output()
+    };
+    // This combinational fixture never renews a recovery window. The
+    // registered finisher's explicit controls must reproduce both goldens.
+    for flags in [
+        &[][..],
+        &[
+            "--recovery-cell-menu=electrical-min-area",
+            "--recovery-cell-limit=8",
+            "--monotone-recovery-checkpoint",
+        ],
+    ] {
+        let output = run(flags)?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        compare_golden_text(
+            &String::from_utf8(output.stdout)?,
+            "tests/gv_resize.golden.v",
+        );
+        compare_golden_text(
+            &std::fs::read_to_string(&report)?,
+            "tests/gv_resize_report.golden.txt",
+        );
+    }
+    let invalid = run(&["--recovery-cell-limit=0"])?;
+    assert_eq!(invalid.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(invalid.stderr)?,
+        "xlsynth-driver: gv-resize: candidate limits must be positive\n"
     );
     Ok(())
 }

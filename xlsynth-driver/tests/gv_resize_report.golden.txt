@@ -25,6 +25,7 @@
     "accepted": 1,
     "register_changes": 0,
     "renewed_windows": 0,
+    "accepted_beyond_area_prefix": 0,
     "propagated_instances": 2,
     "stop_reason": "no_improvement"
   },
@@ -33,6 +34,7 @@
     "accepted": 0,
     "register_changes": 0,
     "renewed_windows": 0,
+    "accepted_beyond_area_prefix": 0,
     "propagated_instances": 1,
     "stop_reason": "no_improvement"
   },
