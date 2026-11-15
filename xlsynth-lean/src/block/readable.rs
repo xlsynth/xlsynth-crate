@@ -645,9 +645,12 @@ impl<'a> Presentation<'a> {
         Ok(cases)
     }
 
-    /// When Lean needs a source constructor's name for an eliminator or
-    /// derived instance, give the constructor a pattern-matchable public
-    /// abbreviation. Lean's `export` aliases cannot be referenced via `_root_`.
+    /// Emit the enum and return the inductive type name for deriving instances.
+    ///
+    /// One collision with a Lean-generated member moves all constructors under
+    /// `Constructors` on a separate inductive type. Public abbreviations keep
+    /// each source spelling usable in terms and patterns. Unlike Lean's
+    /// `export` aliases, these abbreviations also support absolute references.
     fn write_enum(
         &self,
         out: &mut String,
@@ -696,11 +699,11 @@ impl<'a> Presentation<'a> {
         Ok(backing)
     }
 
-    /// Emit source declarations, total codecs, and codec round-trip proof
-    /// source.
+    /// Emit source declarations, total codecs, and proofs of both codec round
+    /// trips.
     ///
-    /// Each type keeps its name in its declaring module. A source type named
-    /// `_root_` is rejected before its declaration is emitted.
+    /// Derive instances for the underlying inductive types and structures in
+    /// the `XlsCodec` namespace to keep instance names out of DSLX namespaces.
     fn types_module(&self) -> Result<String> {
         let mut out = String::from("import Std\n\n");
         // Deriving beside Packet would occupy its module's source name

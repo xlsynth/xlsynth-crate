@@ -1147,6 +1147,8 @@ private def initial : State := { count := 7 }
     check_bundle(bundle, "nested calls across a register update");
 }
 
+// Verifies: DSLX names like `recOn` work in Lean patterns and constructors.
+// Catches: Broken `cases` proofs or missing errors for reserved `_root_`.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn source_enum_constructors_keep_lean_generated_names() -> Result<()> {
