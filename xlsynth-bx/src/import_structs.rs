@@ -74,7 +74,7 @@ impl ImportNames {
     }
 }
 
-/// Source identities retained after checking BX against its DSLX imports.
+/// BX type spellings and DSLX module subjects retained after checking.
 #[derive(Default)]
 pub(crate) struct CapturedSources {
     pub(crate) types: WrittenTypes,
@@ -585,6 +585,10 @@ impl ImportedStructs {
         ))
     }
 
+    /// Share the frozen filename mappings with a batch checked against these
+    /// files.
+    ///
+    /// The batch's source snapshot must already exist.
     pub(crate) fn import_names(&self) -> ImportNames {
         ImportNames(
             self.files
@@ -594,8 +598,8 @@ impl ImportedStructs {
         )
     }
 
-    /// Move the written type annotations out and snapshot the logical subjects
-    /// of all imports.
+    /// Move the recorded type spellings and include every loaded module
+    /// subject.
     pub(crate) fn take_sources(&mut self) -> CapturedSources {
         CapturedSources {
             types: self.written_types.take().unwrap_or_default(),

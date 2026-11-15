@@ -2,8 +2,8 @@
 
 //! Emit Lean from XLS block IR or a checked BX block with a named interface.
 //!
-//! The raw and readable emitters share file-local Lean library spellings so
-//! source ports, fields and bindings can retain names such as `Vector`.
+//! With the `dslx-loop-bindings` feature, BX compilation can also retain
+//! checked DSLX names and types for the generated loop-body definitions.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::borrow::Cow;

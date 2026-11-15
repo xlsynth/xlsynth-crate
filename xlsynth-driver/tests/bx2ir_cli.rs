@@ -1220,6 +1220,8 @@ block delay(clk, x: u8, y: u8) -> u8 {
     Ok(())
 }
 
+// Verifies: Feature-enabled drivers emit loop names for imports and externs.
+// Catches: Advertising an unavailable flag or ignoring it on either path.
 #[test]
 fn bx_to_lean_offers_loop_names_only_with_compiler_support() -> Result<()> {
     let directory = tempfile::tempdir()?;

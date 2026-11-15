@@ -2,9 +2,9 @@
 
 //! Recover helper signatures from the checked DSLX compilation linked into BX.
 //!
-//! Lookup starts with the functions reachable from one block. Each import
-//! maps their destination symbols back to its own DSLX functions. Signatures
-//! then return to the destination names for checking against the block's IR.
+//! A source declaration identifies a type even when two types lower to the
+//! same IR shape. Loop bindings additionally identify the function and node
+//! to which a local's source name and type apply.
 use super::{
     BlockContext,
     source_types::{
@@ -24,10 +24,11 @@ use xlsynth::{
 use xlsynth_bx::ImportNames;
 use xlsynth_pir::{ir, ir_parser::Parser};
 
-/// Pairs a checked DSLX module with the destination names of its IR functions.
+/// Links checked DSLX declarations to the IR functions emitted from them.
 ///
-/// Externs compiled into the initial package keep their symbols. For a BX
-/// import, the linker records any renames needed to avoid a collision.
+/// An explicit DSLX module supplies the destination package and keeps its
+/// function names. BX imports can acquire new names and node IDs when linked.
+/// In both cases the stored bindings identify nodes in the destination.
 pub(super) struct DslxLink {
     pub(super) module: dslx::TypecheckedModule,
     module_names: Option<ImportNames>,
@@ -37,8 +38,7 @@ pub(super) struct DslxLink {
 }
 
 impl DslxLink {
-    /// Retain the import's checked declarations and the symbol map from the
-    /// same link.
+    /// Use the function names and binding IDs that BX assigned during linking.
     pub(super) fn from_import(import: xlsynth_bx::LinkedImport) -> Self {
         Self {
             module: import.module,
@@ -49,8 +49,7 @@ impl DslxLink {
         }
     }
 
-    /// Build the initial IR package for BX externs using the checked module's
-    /// own symbols.
+    /// Convert a checked extern module without requesting loop bindings.
     pub(super) fn compile(module: dslx::TypecheckedModule) -> Result<(ir::Package, Self)> {
         let text = module
             .to_ir_text()
@@ -58,6 +57,7 @@ impl DslxLink {
         Self::from_conversion(module, &text)
     }
 
+    /// Collect the extern module's IR and loop bindings in one conversion.
     #[cfg(feature = "dslx-loop-bindings")]
     pub(super) fn compile_with_bindings(
         module: dslx::TypecheckedModule,
@@ -70,6 +70,7 @@ impl DslxLink {
         Ok((package, link))
     }
 
+    /// Validate the module's IR and index its functions by their symbols.
     fn from_conversion(module: dslx::TypecheckedModule, text: &str) -> Result<(ir::Package, Self)> {
         let package = Parser::new(text)
             .parse_and_validate_package()
@@ -97,10 +98,11 @@ impl DslxLink {
         ))
     }
 
-    /// Attach reachable checked signatures to their final linked IR symbols.
+    /// Attach source signatures to the block's reachable DSLX helpers.
     ///
-    /// `observe_owner` sees each source module contributing a type or helper so
-    /// the caller can reject overlap with an independently checked graph.
+    /// Match source declarations before translating symbols to their linked
+    /// names. Then use destination node IDs for loop locals and verify the
+    /// recovered parameter and result shapes against the linked functions.
     pub(super) fn add_signatures(
         &self,
         block: &BlockContext<'_>,
@@ -190,13 +192,11 @@ impl DslxLink {
     }
 }
 
-/// Merge the checked DSLX declarations with types already collected for the
-/// block.
+/// Merge BX type declarations with their checked DSLX spellings.
 ///
-/// A reflected BX struct may match a DSLX alias to a struct. Their ordered
-/// field names and types must agree after resolving aliases, even when the
-/// raw IR could represent both with the same tuple. Update references inside
-/// existing declarations and interfaces to use the checked alias.
+/// Replacing a reflected struct with its alias requires matching field names,
+/// types, and order. Restore the alias throughout the interface, including
+/// local types already collected for other helpers.
 fn merge_declarations(
     prior: Vec<TypeDecl>,
     mut merged: Vec<TypeDecl>,
@@ -304,7 +304,7 @@ fn merge_declarations(
     Ok(merged)
 }
 
-// Negative test: Reordered fields in an alias target must report a conflict.
+// Negative test: Reordered equal-width fields must report a field conflict.
 #[cfg(test)]
 #[test]
 fn linked_struct_alias_rejects_reordered_equal_width_fields() {
@@ -1127,6 +1127,10 @@ impl Catalogue<'_> {
         }
     }
 
+    /// Recover a loop binding's type, including nominal types in aggregates.
+    ///
+    /// Unsupported types produce an error so the caller can fall back to a
+    /// declared operand type or omit the binding.
     #[cfg(feature = "dslx-loop-bindings")]
     fn loop_type(&mut self, ty: &dslx::Type) -> Result<SourceType> {
         if ty.is_enum() || ty.is_struct() {
@@ -1154,6 +1158,12 @@ impl Catalogue<'_> {
         }
     }
 
+    /// Refine loop-body signatures with the linked conversion's bindings.
+    ///
+    /// Every parameter must match its physical shape before the signature is
+    /// replaced. A named intermediate needs its own matching binding. In a
+    /// nonzero range the source index can therefore name the adjusted value
+    /// while the first IR parameter remains the zero-based iteration count.
     #[cfg(feature = "dslx-loop-bindings")]
     fn collect_loop_helpers(
         &mut self,
@@ -1241,8 +1251,7 @@ impl Catalogue<'_> {
         Ok(())
     }
 
-    /// Resolve parameters and result in the declaring module's current type
-    /// context.
+    /// Read an ordinary function's signature from its checked annotations.
     fn helper_signature<'a>(
         &mut self,
         name: &str,

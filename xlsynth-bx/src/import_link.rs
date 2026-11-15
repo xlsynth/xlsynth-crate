@@ -23,12 +23,10 @@ pub(crate) struct ImportLink {
     pub(crate) node_id_base: usize,
 }
 
-/// Append the imported functions and return their destination identities.
+/// Link a checked import and return its destination symbols and node ID offset.
 ///
-/// Root indices follow the order in `roots`, including repeats. The map covers
-/// every imported function, including private callees that were renamed to
-/// avoid collisions. Allocation and validation precede changes to the
-/// destination.
+/// The caller must first retain the functions reachable from `roots`. All
+/// allocation and validation take place before changing the destination.
 pub(crate) fn link_imported_functions(
     destination: &mut Package,
     mut imported: Package,
@@ -237,8 +235,8 @@ mod tests {
     use super::*;
     use xlsynth_pir::ir_parser::Parser;
 
-    // Verifies: Calls, roots, and positions survive name and file ID clashes.
-    // Catches: Renaming a function without fixing callers and source positions.
+    // Verifies: Linked calls, roots, and source positions survive collisions.
+    // Catches: Resolving a callee or file to an unrelated destination entry.
     #[test]
     fn reachable_functions_keep_their_calls_and_source_files_across_collisions() {
         let mut destination = Parser::new(

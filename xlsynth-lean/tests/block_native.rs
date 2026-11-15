@@ -2019,6 +2019,8 @@ fn checked_nonzero_range() -> xlsynth::dslx::TypecheckedModule {
     .unwrap()
 }
 
+// Verifies: An imported loop keeps its source index after BX renames its body.
+// Catches: Looking up bindings with pre-link function names or node IDs.
 #[cfg(feature = "dslx-loop-bindings")]
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
@@ -2115,8 +2117,8 @@ open XlsReadable
     Ok(())
 }
 
-// Verifies: The nonzero-range loop yields the expected count in each mode.
-// Catches: Updating the wrong loop carry when the model executes in Lean.
+// Verifies: A nonzero-range loop computes both mode results without bindings.
+// Catches: Making ordinary loop emission depend on optional binding records.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn nonzero_range_without_loop_records() {
@@ -2137,6 +2139,8 @@ fn nonzero_range_without_loop_records() {
     check_bundle(bundle, "nonzero range without loop records");
 }
 
+// Verifies: The adjusted index keeps its DSLX name and captures retain fields.
+// Catches: Naming the zero-based counter or erasing a captured record type.
 #[cfg(feature = "dslx-loop-bindings")]
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
@@ -2201,6 +2205,8 @@ private def pool : XLS.packets.«Pool<5>» := { status := (3, 4), slots := #v[
     check_bundle(bundle, "nonzero range with loop records");
 }
 
+// Verifies: Captures keep distinct instantiations of the same DSLX struct.
+// Catches: Accepting swapped named captures because their IR layouts match.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 #[cfg(feature = "dslx-loop-bindings")]
@@ -2251,6 +2257,8 @@ variable (first : XLS.machine.«Tagged<1>») (other : XLS.machine.«Tagged<2>»)
     check_bundle(bundle, "distinct equal-layout captures");
 }
 
+// Verifies: Indexed record fields elaborate in the block and its loop body.
+// Catches: Losing nested field projections or their correspondence proof.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn counted_loop_proves_indexed_record_fields_in_block_and_body() {

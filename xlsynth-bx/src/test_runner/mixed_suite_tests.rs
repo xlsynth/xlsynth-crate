@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Exercise suites that use the same BX helpers in pure and clocked tests.
+
 use std::num::NonZeroUsize;
 use std::path::Path;
 use xlsynth_pir::ir_parser::parse_xls_ir_package;
@@ -33,8 +35,8 @@ const NESTED_QUICKCHECK: &str = r#"
 }
 "#;
 
-// Verifies: Separate lowering tracks reachable helpers with test discards.
-// Catches: Missing nested calls or counting helpers in zero-trip loops.
+// Verifies: Clocked lowering depends on reachability of discarded expressions.
+// Catches: Missing a transitive call or counting one in a zero-trip loop.
 #[test]
 fn clocked_lowering_depends_on_reachable_functions_with_discards() -> Result<(), String> {
     for (clocked_test, needs_clocked_package) in [

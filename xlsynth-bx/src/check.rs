@@ -1823,9 +1823,9 @@ pub(crate) fn check_sources(
 /// Elaborate test-only harnesses before draining the shared specialization
 /// queues.
 ///
-/// The import callback receives one checked DSLX module per retained batch, in
-/// the order stored on the checked module. Supplying `captured_sources` also
-/// retains written struct annotations, even for imports used only as types.
+/// Each retained DSLX import batch goes through `convert` once. Its returned
+/// IR supplies the function bodies used by lowering, so callers that need loop
+/// bindings must collect them during that conversion.
 pub(crate) fn check_sources_with_tests(
     root: &Module,
     imports: crate::bx_import::SourceImports<'_>,

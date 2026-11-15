@@ -597,12 +597,10 @@ fn probe_{id}({}) {{ capture({}) }}
         self.finish_with_calls(None, |batch| batch.plain_ir())
     }
 
-    /// Compile the selected calls and pass each batch's checked module to the
-    /// caller.
+    /// Convert only the concrete DSLX calls used by retained BX definitions.
     ///
-    /// `None` selects all requested calls. The callback order matches the
-    /// returned batch order so lowering can pair declarations with linked
-    /// symbols.
+    /// Conversion order is also link order, so a caller can pair each checked
+    /// batch with its destination symbols after lowering.
     pub(crate) fn finish_with_calls(
         self,
         used: Option<&BTreeSet<usize>>,
@@ -969,8 +967,11 @@ struct BatchRoots<'a> {
     has_instances: bool,
 }
 
-/// Original checked declarations and the converter's matching rewritten
-/// snapshot. Bindings and IR must come from the same native conversion.
+/// Pairs a batch's original checked declarations with its conversion probe.
+///
+/// Read source declarations from `module` and recover their names with
+/// `module_names`. Generate both IR and any node bindings from `probe.checked`
+/// so a binding's ID identifies a node in that IR.
 pub(crate) struct ImportConversion<'a> {
     pub(crate) module: TypecheckedModule,
     pub(crate) module_names: crate::ImportNames,
@@ -978,6 +979,7 @@ pub(crate) struct ImportConversion<'a> {
 }
 
 impl ImportConversion<'_> {
+    /// Convert the probe to IR without collecting loop bindings.
     pub(crate) fn plain_ir(&self) -> Result<String, String> {
         self.probe
             .checked
@@ -988,8 +990,8 @@ impl ImportConversion<'_> {
 
 /// Recover each specialization's exact IR symbol from its generated probe.
 ///
-/// Return the checked probe alongside the reachable IR so consumers can look
-/// up the original DSLX declarations and concrete invocation bindings.
+/// Restore the source filenames and symbols in the converter's IR, then
+/// retain only the functions reachable from the requested calls.
 fn compile_batch(
     roots: BatchRoots<'_>,
     index: usize,

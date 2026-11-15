@@ -38,14 +38,10 @@ pub struct CompiledBx {
     imports: Vec<super::helper_types::DslxLink>,
 }
 
-/// Check BX source with its import paths and lower it into the supplied IR
-/// package.
+/// Check BX with its import paths and lower it into the supplied package.
 ///
 /// The package may already contain functions or blocks used by BX externs.
-///
-/// `module_name` is the logical BX module name used in Lean paths such as
-/// `XLS.design.Packet`. Passing an IR package name that differs from the
-/// source module puts root BX declarations under that package name.
+/// This entry point does not request DSLX loop bindings.
 pub fn compile_bx(
     module_name: &str,
     source: &str,
@@ -58,8 +54,15 @@ pub fn compile_bx(
     Ok(CompiledBx::from_bx(module_name, compiled, None))
 }
 
-/// Compile BX and retain checked loop bindings for the DSLX functions it
-/// imports.
+/// Compile BX and retain checked loop bindings for its DSLX imports.
+///
+/// Readable Lean can use source names and types from those imports. If a BX
+/// extern needs loop names from a separately compiled DSLX module, pass that
+/// checked module to [`compile_bx_with_dslx_loop_bindings`].
+///
+/// # Errors
+///
+/// Returns an error if BX checking, import conversion, or linking fails.
 #[cfg(feature = "dslx-loop-bindings")]
 pub fn compile_bx_with_loop_bindings(
     module_name: &str,
@@ -74,12 +77,10 @@ pub fn compile_bx_with_loop_bindings(
     Ok(CompiledBx::from_bx(module_name, compiled, None))
 }
 
-/// Link the IR produced from this checked DSLX module and retain its source
-/// types for calls from the BX block.
+/// Link a checked DSLX module and retain its declared types for calls from BX.
 ///
-/// `module_name` names the BX source. The checked DSLX module supplies its own
-/// logical name. When the two inputs independently import the same DSLX
-/// subject, [`CompiledBx::emit_readable`] reports the overlapping subject.
+/// Its IR supplies the implementations of BX extern functions. This entry
+/// point uses ordinary DSLX conversion for both the module and BX imports.
 pub fn compile_bx_with_dslx(
     module_name: &str,
     source: &str,
@@ -93,7 +94,16 @@ pub fn compile_bx_with_dslx(
     Ok(CompiledBx::from_bx(module_name, compiled, Some(link)))
 }
 
-/// Link checked DSLX while recording loop binding names and types.
+/// Compile BX with loop bindings from the supplied DSLX module and BX imports.
+///
+/// The checked module supplies IR for BX externs. Converting each loop body
+/// together with its bindings keeps the names and types on the IR nodes that
+/// compute the corresponding values.
+///
+/// # Errors
+///
+/// Returns an error if DSLX conversion, IR validation, BX checking, or
+/// linking fails.
 #[cfg(feature = "dslx-loop-bindings")]
 pub fn compile_bx_with_dslx_loop_bindings(
     module_name: &str,
@@ -140,6 +150,7 @@ impl CompiledBx {
         self.checked.warnings()
     }
 
+    /// Pair the explicit DSLX link and BX imports with their lowered package.
     fn from_bx(
         module_name: &str,
         compiled: xlsynth_bx::CompiledModule,

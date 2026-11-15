@@ -140,11 +140,10 @@ pub fn empty_package(name: impl Into<String>) -> Package {
     }
 }
 
-/// One batch of DSLX functions linked into a BX package.
+/// Retains the checked declarations for a batch of imported DSLX functions.
 ///
-/// The synthetic entry module calls the selected DSLX specializations. Its
-/// type information retains their declarations even if the files on disk
-/// change.
+/// The synthetic entry module calls the selected specializations. Its type
+/// information owns their original declarations, even if the files change.
 pub struct LinkedImport {
     /// Checked entry module for looking up the selected calls and their
     /// callees.
@@ -192,8 +191,8 @@ pub struct CompiledModule {
 
 /// Compile BX while retaining the source graph for each linked DSLX import.
 ///
-/// The result preserves written type names for ports and keeps the logical
-/// subjects of all imported DSLX modules, even those with no linked calls.
+/// Warnings are available on the checked module. This entry point uses plain
+/// DSLX-to-IR conversion even when loop-binding support is enabled.
 pub fn compile_with_source(
     source: &str,
     package: Package,
@@ -215,8 +214,16 @@ pub fn compile_with_source(
     })
 }
 
-/// Compile with source declarations and the checked DSLX loop bindings
-/// produced by the very same conversion that supplied each imported body.
+/// Compile BX with declarations and loop bindings for its DSLX imports.
+///
+/// Each binding refers to a function and node in the returned package after
+/// linking. Use those identifiers to recover a local's checked name and type.
+/// Preexisting functions in the supplied package have no import records.
+///
+/// # Errors
+///
+/// Returns a diagnostic if checking, conversion, or linking fails, including
+/// when a binding's node ID cannot be represented after linking.
 #[cfg(feature = "dslx-loop-bindings")]
 pub fn compile_with_source_and_loop_bindings(
     source: &str,
@@ -245,6 +252,10 @@ pub fn compile_with_source_and_loop_bindings(
     })
 }
 
+/// Pair each converter's source information with its batch in link order.
+///
+/// Linking can rename functions and offset node IDs. Apply both changes to
+/// the records of retained functions before exposing them to consumers.
 fn compile_with_imports(
     source: &str,
     package: Package,

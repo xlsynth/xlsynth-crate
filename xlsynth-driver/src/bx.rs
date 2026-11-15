@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parse BX command-line options and drive checking, lowering, and export.
+//! Connect BX command-line inputs and diagnostics to the compiler and backends.
 
 use std::fs;
 use std::num::NonZeroUsize;
@@ -184,8 +184,9 @@ pub fn bx_prove_invariant_command() -> Command {
     .arg(time_limit_arg())
 }
 
-/// Define the Lean exporter CLI, with mutually exclusive DSLX and IR link
-/// inputs.
+/// Define the BX-to-Lean inputs and output directory for this driver build.
+///
+/// Builds with `dslx-loop-bindings` also expose `--readable-loop-names`.
 pub fn bx_to_lean_command() -> Command {
     let command = add_bx_args(Command::new("bx-to-lean").about("Generates raw and readable Lean for a BX block"))
         .arg(
@@ -645,13 +646,11 @@ pub fn bx_prove_invariant(matches: &ArgMatches, config: &Option<ToolchainConfig>
     })
 }
 
-/// Emit the selected BX block's raw model, readable model, and correspondence
-/// proof source.
+/// Generate the selected block's Lean model before creating its directory.
 ///
-/// The UTF-8 stem of the BX input path supplies its public module name.
-/// For example, a block `stepper` in `chip.bx` is callable as
-/// `XLS.chip.stepper`. Emission must succeed before the command creates the
-/// output directory.
+/// With `--readable-loop-names`, the DSLX converter supplies loop bindings
+/// for BX imports and any explicitly linked DSLX module. The generated
+/// correspondence proofs can be checked separately with Lean.
 pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
     let compiled = with_bx_input(matches, config, |input| {
         let bx_name = input

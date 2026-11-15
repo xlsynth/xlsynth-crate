@@ -154,13 +154,14 @@ impl<'a> Presentation<'a> {
             Some((index, function)),
         )
     }
-    /// Allocate noncapturing names and infer types from checked register
-    /// bindings.
+
+    /// Choose distinct Lean names and infer source types for this graph's
+    /// nodes.
     ///
-    /// One-bit nodes default to `Bool`. Nominal types come from declarations
-    /// and their uses, such as reads, projections and write destinations.
-    /// A counted loop's signature ties the initial value and each iteration's
-    /// result to one accumulator type and supplies the types of its captures.
+    /// Checked helper bindings seed names and types by linked IR node ID.
+    /// Thus a source loop index can name an addition inside the body even
+    /// when the physical iteration parameter is a different value. Register
+    /// reads, projections, and write destinations also supply type information.
     fn new(
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
