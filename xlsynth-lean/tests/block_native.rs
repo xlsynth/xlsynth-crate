@@ -520,28 +520,29 @@ block tags(clk, a: u2, b: u2, c: u2, d: u2, e: u2, f: u2, g: u2, h: u2, i: u2, j
     check_bundle(bundle, "ten independent enum inputs");
 }
 
-/// Build the readable BX model and an XLS interpreter reference from the same
-/// DSLX source.
-///
-/// The fixture must define `machine` in `machine.x` to supply the reference
-/// function.
+/// Compile the block and its DSLX reference function for comparing Lean with
+/// the XLS interpreter.
 fn compile_lean_and_xls_machine(
     bx: &str,
     source: &str,
 ) -> Result<(LeanBlockBundle, xlsynth::IrFunction)> {
-    let path = Path::new("machine.x");
     let bundle = checked_helper_bundle(bx, source, &[]).context("compile BX and emit Lean")?;
-    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default())
-        .context("convert DSLX to XLS IR")?;
-    let machine = package
-        .ir
-        .get_function("__machine__machine")
-        .context("look up __machine__machine in XLS IR")?;
-    Ok((bundle, machine))
+    Ok((bundle, xls_machine(source)?))
 }
 
-// Verifies: Lean matches the XLS next count for three seed/mask/offset cases.
-// Catches: Starting at the wrong index or swapping loop captures.
+/// Compile a fixture as `machine.x` and look up its `machine` entry point for
+/// XLS interpretation.
+fn xls_machine(source: &str) -> Result<xlsynth::IrFunction> {
+    let package = xlsynth::convert_dslx_to_ir(source, Path::new("machine.x"), &Default::default())
+        .context("convert DSLX to XLS IR")?;
+    package
+        .ir
+        .get_function("__machine__machine")
+        .context("look up __machine__machine in XLS IR")
+}
+
+// Verifies: Both models output old count and choose reset or the XLS fold.
+// Catches: Reversing reset polarity or misusing loop indices or captures.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn counted_loop_matches_xls() {
@@ -558,30 +559,66 @@ fn machine(mask: u8, offset: u8, current_count: u8) -> (u8, u8) {
     let bx = r#"
 extern fn machine::fold(seed: u8, mask: u8, offset: u8) -> u8;
 block counter(clk, mask: u8, offset: u8) -> u8 {
-    reg count: u8 = 0;
+    reg count: u8 = 3;
     count := machine::fold(count, mask, offset);
     count
 }
 "#;
-    let (mut bundle, machine) =
-        compile_lean_and_xls_machine(bx, source).expect("counted loop fixture (machine.x)");
-    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
-    for (seed, mask, offset) in [(1, 3, 2), (255, 1, 0), (128, 255, 5)] {
-        let args = [mask, offset, seed].map(|n| xlsynth::XlsIrValue::make_ubits(8, n).unwrap());
-        let expected = machine
-            .interpret(&args)
-            .unwrap()
-            .get_element(1)
-            .unwrap()
-            .to_u64()
-            .unwrap();
-        writeln!(checks, "#guard (step {{ count := {seed} }} {{ rst := false, mask := {mask}, offset := {offset} }}).count == {expected}").unwrap();
+    let machine = xls_machine(source).unwrap();
+    for active_low in [false, true] {
+        let reset = xlsynth_bx::ResetBehavior {
+            active_low,
+            ..Default::default()
+        };
+        let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+        let module =
+            xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports)
+                .unwrap();
+        let mut bundle =
+            xlsynth_lean::block::compile_bx_with_dslx(bx, module, reset, &Default::default())
+                .unwrap()
+                .emit_readable(None)
+                .unwrap();
+        let mut checks = String::from(
+            r#"import ReadableCorrespondence
+open XlsReadable
+private def readableClock (seed mask offset : BitVec 8) (rst : Bool) :=
+  let e := eval { count := seed } { rst, mask, offset }
+  (e.output, e.next.count)
+private def rawClock (seed mask offset : BitVec 8) (rst : BitVec 1) :=
+  let e := XlsBlock.eval { count := seed } { rst, mask, offset }
+  (e.output.out, e.next.count)
+"#,
+        );
+        for (seed, mask, offset) in [(1, 3, 2), (255, 1, 0), (128, 255, 5)] {
+            let args = [mask, offset, seed].map(|n| xlsynth::XlsIrValue::make_ubits(8, n).unwrap());
+            let folded = machine
+                .interpret(&args)
+                .unwrap()
+                .get_element(1)
+                .unwrap()
+                .to_u64()
+                .unwrap();
+            for (rst, next) in [(!active_low, 3), (active_low, folded)] {
+                writeln!(
+                    checks,
+                    "#guard readableClock {seed} {mask} {offset} {rst} == ({seed}, {next})"
+                )
+                .unwrap();
+                writeln!(
+                    checks,
+                    "#guard rawClock {seed} {mask} {offset} {} == ({seed}, {next})",
+                    u8::from(rst)
+                )
+                .unwrap();
+            }
+        }
+        bundle.files.push(("CheckLoop.lean".into(), checks));
+        check_bundle(
+            bundle,
+            &format!("counted loop with active_low={active_low}"),
+        );
     }
-    bundle.files.push(("CheckLoop.lean".into(), checks));
-    check_bundle(
-        bundle,
-        "counted loop over a register and two captured inputs",
-    );
 }
 
 // Verifies: Lean checks enum dispatch after a loop, inline and in a callee.
@@ -1042,6 +1079,40 @@ private def clock (a b : BitVec 5) :=
     }
     bundle.files.push(("CheckArith.lean".into(), checks));
     check_bundle(bundle, "unsigned fixed-width arithmetic");
+}
+
+/// Typecheck the loop fixture with its sibling DSLX modules on the import path.
+fn checked_nonzero_range() -> xlsynth::dslx::TypecheckedModule {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bx_loop_bindings");
+    let mut imports = xlsynth::dslx::ImportData::new(None, &[&root]);
+    xlsynth::dslx::parse_and_typecheck(
+        include_str!("fixtures/bx_loop_bindings/machine.x"),
+        "machine.x",
+        "machine",
+        &mut imports,
+    )
+    .unwrap()
+}
+
+// Verifies: Run sums enabled slot data from a nonzero start and Idle holds.
+// Catches: Including slot 0 or losing a nested write field or enum capture.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn nonzero_range_without_loop_records() {
+    let mut bundle = xlsynth_lean::block::compile_bx_with_dslx(
+        include_str!("fixtures/bx_loop_bindings/counter.bx"),
+        checked_nonzero_range(),
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap()
+    .emit_readable(None)
+    .unwrap();
+    bundle.files.push((
+        "CheckLoop.lean".into(),
+        include_str!("fixtures/bx_loop_bindings/CheckLoop.lean").into(),
+    ));
+    check_bundle(bundle, "nonzero range without loop records");
 }
 
 /// Checks the complete bundle and names the fixture in any compilation failure.

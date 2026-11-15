@@ -2,9 +2,9 @@
 
 //! Recover helper signatures from the checked DSLX compilation linked into BX.
 //!
-//! An imported helper can take a type argument declared by its caller. The
-//! checked type identifies which module supplies the declaration and field
-//! names.
+//! Lowering a DSLX loop creates an IR function with no corresponding DSLX
+//! declaration. Its callers supply type information for the accumulator and
+//! captures.
 use super::{
     BlockContext,
     source_types::{
@@ -54,12 +54,11 @@ impl DslxLink {
         Ok((package, Self { module, symbols }))
     }
 
-    /// Attach recoverable DSLX signatures for linked block helpers after
-    /// checking their IR shapes.
+    /// Attach source signatures to reachable linked helpers and their
+    /// counted-loop bodies.
     ///
-    /// Supply the block linked against this compilation. A recovered signature
-    /// with a different arity, parameter shape, or result shape is an error.
-    /// Helpers without a recovered signature keep their IR types.
+    /// Check each recovered parameter and result against its IR shape before
+    /// publishing the declarations and signatures together.
     pub(super) fn add_signatures(
         &self,
         block: &BlockContext<'_>,
@@ -90,6 +89,7 @@ impl DslxLink {
             entry: root,
         };
         catalogue.collect_helpers()?;
+        catalogue.add_loop_bodies(block, interface);
         for function in &block.helpers {
             if let Some(sig) = catalogue.helpers.get(&function.name) {
                 ensure!(
@@ -709,6 +709,102 @@ impl Catalogue<'_> {
         }
         Ok(())
     }
+    /// Collect the declared type shared by all calls at each loop-body
+    /// parameter.
+    ///
+    /// Only input ports, register reads and parameters of known helpers carry
+    /// declarations here. A computed operand or a disagreement between callers
+    /// leaves that parameter without a declared type.
+    fn declared_loop_operands<'a>(
+        &self,
+        block: &'a BlockContext<'_>,
+        inputs: &BTreeMap<String, SourceType>,
+        registers: &BTreeMap<String, SourceType>,
+    ) -> BTreeMap<(&'a str, usize), Option<SourceType>> {
+        let mut operands = BTreeMap::new();
+        let callers = std::iter::once((&block.graph.graph, None))
+            .chain(block.helpers.iter().map(|&f| (&f.graph, Some(f))));
+        for (graph, caller) in callers {
+            for node in &graph.nodes {
+                let ir::NodePayload::CountedFor {
+                    body,
+                    init,
+                    invariant_args,
+                    ..
+                } = &node.payload
+                else {
+                    continue;
+                };
+                // Position zero is the iteration counter. The remaining
+                // parameters receive the initial accumulator and the captures.
+                for (index, arg) in std::iter::once(init).chain(invariant_args).enumerate() {
+                    let ty = match &graph.get_node(*arg).payload {
+                        ir::NodePayload::InputPort { name, .. } => inputs.get(name),
+                        ir::NodePayload::RegisterRead { register } => registers.get(register),
+                        ir::NodePayload::Param => caller.and_then(|f| {
+                            let signature = self.helpers.get(&f.name)?;
+                            Some(&signature.params.get(f.param_index(*arg)?)?.1)
+                        }),
+                        _ => None,
+                    };
+                    operands
+                        .entry((body.as_str(), index + 1))
+                        .and_modify(|prior: &mut Option<SourceType>| {
+                            if prior.as_ref() != ty {
+                                *prior = None;
+                            }
+                        })
+                        .or_insert_with(|| ty.cloned());
+                }
+            }
+        }
+        operands
+    }
+
+    /// Build readable signatures for reachable loop bodies from their callers
+    /// and IR.
+    ///
+    /// The iteration counter keeps its bit width. The accumulator sets the
+    /// return type because one iteration's result feeds the next iteration.
+    /// Parameters without an agreed declaration use their structural IR type.
+    fn add_loop_bodies(&mut self, block: &BlockContext<'_>, interface: &StatefulInterface) {
+        let operands = self.declared_loop_operands(block, &interface.inputs, &interface.registers);
+        for function in &block.helpers {
+            if !self.reachable.contains(function.name.as_str())
+                || !operands.contains_key(&(function.name.as_str(), 1))
+            {
+                continue;
+            }
+            let params = function
+                .param_nodes()
+                .enumerate()
+                .map(|(index, node)| {
+                    let ty = if index == 0 {
+                        let ir::Type::Bits(width) = node.ty else {
+                            return None;
+                        };
+                        SourceType::Bits { width }
+                    } else {
+                        operands
+                            .get(&(function.name.as_str(), index))
+                            .and_then(Clone::clone)
+                            .or_else(|| structural_type(&node.ty))?
+                    };
+                    Some((node.param_name().to_owned(), ty))
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(params) = params {
+                self.helpers.insert(
+                    function.name.clone(),
+                    HelperSignature {
+                        name: function.name.clone(),
+                        result: params[1].1.clone(),
+                        params,
+                    },
+                );
+            }
+        }
+    }
 
     /// Resolve a declaration in its module and restore the caller's context on
     /// success or error.
@@ -779,5 +875,28 @@ impl Catalogue<'_> {
             params,
             result,
         })
+    }
+}
+
+/// Recover a readable type from the IR shape when no caller supplies a
+/// declaration.
+///
+/// A single bit becomes a boolean, including inside tuples and arrays. A
+/// token anywhere in the shape prevents constructing a readable value type.
+fn structural_type(ty: &ir::Type) -> Option<SourceType> {
+    match ty {
+        ir::Type::Bits(1) => Some(SourceType::Bool),
+        ir::Type::Bits(width) => Some(SourceType::Bits { width: *width }),
+        ir::Type::Tuple(items) => Some(SourceType::Tuple {
+            members: items
+                .iter()
+                .map(|item| structural_type(item))
+                .collect::<Option<_>>()?,
+        }),
+        ir::Type::Array(array) => Some(SourceType::Array {
+            element: Box::new(structural_type(&array.element_type)?),
+            size: array.element_count,
+        }),
+        ir::Type::Token => None,
     }
 }
