@@ -62,10 +62,13 @@ pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
     emit_with_context(&BlockContext::new(package, block)?, "XlsBlock")
 }
 
-/// Write the generated block under `root`. The project supplies its
-/// `XlsynthLean.IR` import. The module name determines both the file path and
-/// the namespace, so blocks with different module names can be imported
-/// together.
+/// Write the selected block as a named Lean module under `root`.
+///
+/// Pass a verified block from `package`, as for [`emit`]. The module name
+/// determines its file path and namespace. A second write under the same
+/// root and module name replaces the first model. The project must supply the
+/// `XlsynthLean.IR` import before compiling the returned path. Model emission
+/// and file-write errors are returned to the caller.
 pub fn write_to(
     package: &ir::Package,
     block: &ir::Block,
@@ -81,6 +84,8 @@ pub fn write_to(
     Ok(root.join(path))
 }
 
+/// Generate the raw model from the same normalized graph used for readable
+/// emission.
 pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     emit_block(block, namespace).with_context(|| {
         format!(
@@ -346,12 +351,14 @@ pub(super) fn validate_lean_member(owner: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
-/// Keep the constructor in a separate namespace so every source field keeps its
-/// name.
+/// Place the constructor in a separate namespace so a source field can keep the
+/// name `mk`.
 pub(super) fn structure_header(name: &str) -> String {
     format!("structure {name} where\n  Constructors.mk ::\n")
 }
 
+/// Check unquoted field names for Lean-generated members before starting a
+/// record.
 pub(super) fn checked_structure_header<'a>(
     name: &str,
     fields: impl Iterator<Item = &'a str>,
@@ -369,9 +376,11 @@ pub(super) struct RecordFields {
 }
 
 impl RecordFields {
-    /// Lean elaborates a field type in the scope of preceding fields. Even the
-    /// root qualifier can be captured if a field itself is named `_root_`.
-    /// All hardware field types are independent of earlier field values.
+    /// Write one quoted field and its root-qualified type in declaration order.
+    ///
+    /// Lean elaborates types in the scope of preceding fields. After a field
+    /// named `_root_`, clear that local binding when resolving later types.
+    /// Hardware field types are independent of earlier field values.
     pub(super) fn write(
         &mut self,
         out: &mut String,

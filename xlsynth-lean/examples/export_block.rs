@@ -8,6 +8,8 @@ use std::{env, fs, path::Path};
 use anyhow::{Context, Result, ensure};
 use xlsynth_lean::block;
 
+/// Verify saved IR with XLS and PIR before writing its top or sole block to a
+/// new directory.
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     ensure!(

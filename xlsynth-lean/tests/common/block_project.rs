@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Elaborate block models and proof clients against the repository's Lean
+//! support module.
+
 use std::path::{Path, PathBuf};
 
+/// Run the requested Lean toolchain with only the supplied project import
+/// paths.
 fn compile_lean(root: &Path, imports: &[&Path], source: &Path, object: &Path) {
     let lean = std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable");
     let output = std::process::Command::new(lean)
@@ -22,6 +27,11 @@ fn compile_lean(root: &Path, imports: &[&Path], source: &Path, object: &Path) {
     );
 }
 
+/// Build the support module, then compile sources in their caller-supplied
+/// dependency order.
+///
+/// Each compiled module is available to later clients. A missing executable,
+/// failed import, or rejected proof fails the calling test with a panic.
 pub fn compile_project(root: &Path, sources: impl IntoIterator<Item = PathBuf>) {
     // Compile the repository module once, outside the model output directory.
     let support = tempfile::tempdir().unwrap();

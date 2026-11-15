@@ -134,10 +134,18 @@ block. Internal bindings can be renamed without changing these public fields.
 1. `ReadableRepresentation.lean` - state and result conversions.
 1. `ReadableCorrespondence.lean` - proofs relating both models and their traces.
 
-Callers choose where to write the files and must compile the generated Lean
-sources to check their proofs. The readable evaluator executes its own graph
-equations; it does not call the raw evaluator. This library does not run block
-simulations or orchestrate application-specific property proofs.
+Callers choose where to write the files and compile them in the listed order
+to check the correspondence proofs. The readable evaluator executes its own
+graph equations. Application-specific properties need their own proofs.
+Both evaluators translate the same IR. If they make the same translation
+error, their results can still agree. Comparing either model with XLS
+execution is a separate check.
+
+To trace an unexpected result, find the IR node ID in the comments on the
+equations in `Generated.lean` and `ReadableGenerated.lean`. If the two values
+have different representations, `ReadableTypes.lean` defines the Boolean and
+named-type conversions. `ReadableRepresentation.lean` shows how each block
+input, output and register maps between the two models.
 
 ## GateFn interface and graph contract
 

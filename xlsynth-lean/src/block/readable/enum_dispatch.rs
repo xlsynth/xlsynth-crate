@@ -19,6 +19,7 @@ pub(super) struct Dispatch<'a> {
 }
 
 impl Dispatch<'_> {
+    /// List arm binders in priority order, followed by the default binder.
     fn arguments(&self) -> String {
         (0..self.comparisons.len())
             .map(|i| format!("arm{i}"))
@@ -27,6 +28,7 @@ impl Dispatch<'_> {
             .join(" ")
     }
 
+    /// Concatenate comparisons high bit first so arm zero occupies the low bit.
     fn flags(&self) -> String {
         let comparisons = self
             .comparisons
@@ -40,6 +42,8 @@ impl Dispatch<'_> {
         crate::local_expr::balanced_infix(&comparisons, " ++ ")
     }
 
+    /// Expand the priority selector into low-bit-first tests shared by both
+    /// proofs.
     fn physical_selection(&self) -> String {
         let priorities = (0..self.comparisons.len())
             .rev()
@@ -51,6 +55,7 @@ impl Dispatch<'_> {
 }
 
 impl Presentation<'_> {
+    /// Associate each recognized enum priority selection with its IR text ID.
     fn enum_dispatches(&self) -> Result<Vec<(usize, Dispatch<'_>)>> {
         let mut dispatches = Vec::new();
         for node in &self.block().graph.nodes {
@@ -67,6 +72,8 @@ impl Presentation<'_> {
         Ok(dispatches)
     }
 
+    /// Emit a Lean match choosing the first matching arm or the default for
+    /// each encoding.
     pub(super) fn enum_dispatch_definitions(&self) -> Result<String> {
         let mut out = String::new();
         for (id, dispatch) in self.enum_dispatches()? {

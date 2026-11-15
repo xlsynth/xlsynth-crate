@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Keep BX declarations paired with the package produced by lowering them.
+//!
+//! Lowering erases the distinction between a struct and a tuple with the same
+//! fields. Before assigning BX types to Lean values, compare each checked
+//! port and register with the corresponding physical name, position and shape.
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use xlsynth_bx::{
@@ -19,9 +23,12 @@ pub struct CompiledBx {
     pub(super) package: ir::Package,
 }
 
-/// Check BX source with its import paths and lower it into the supplied
-/// package. The package may already contain functions or blocks used by BX
-/// externs.
+/// Check BX source and lower its blocks into the supplied IR package.
+///
+/// Supply the import locations in `options`, the reset behavior to use during
+/// lowering, and any package members needed by BX externs. An unresolved
+/// import, BX type error, or lowering failure returns an error. A successful
+/// compilation may still contain operations the Lean emitter cannot render.
 pub fn compile_bx(
     source: &str,
     package: ir::Package,
@@ -40,8 +47,14 @@ impl CompiledBx {
         &self.package
     }
 
-    /// Emit the selected BX block, defaulting to the package's top or sole
-    /// block.
+    /// Generate raw and readable Lean models and their correspondence proofs
+    /// for one BX block.
+    ///
+    /// With no explicit name, use the package's block top or, if there is no
+    /// top, its sole block. The selected block must have a checked declaration
+    /// in this BX source. Selecting a block supplied by the input package alone
+    /// returns an error, as do unsupported interface types or block operations.
+    /// Compile the returned files in dependency order to check the proofs.
     pub fn emit_readable(&self, block_name: Option<&str>) -> Result<LeanBlockBundle> {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
@@ -49,6 +62,11 @@ impl CompiledBx {
         readable::emit(&block, &declarations, &interface)
     }
 
+    /// Match checked declarations to physical ports and registers in lowering
+    /// order.
+    ///
+    /// A matching width cannot distinguish two equal-width fields. Check each
+    /// name before assigning its type and retain the matched order for outputs.
     pub(super) fn readable_interface(
         &self,
         block: &BlockContext<'_>,
@@ -213,6 +231,7 @@ fn bx_type(
 mod tests {
     use super::*;
 
+    // Negative test: Swapped equal-width outputs must report mismatched names.
     #[test]
     fn equal_width_output_reordering_is_rejected() {
         let mut compiled = compile_bx(

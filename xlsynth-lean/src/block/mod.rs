@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Emit Lean from XLS block IR or a checked BX block with a named interface.
+//!
+//! Use [`emit`] for physical port and register types. For fields and types
+//! from BX declarations, [`compile_bx`] retains those declarations alongside
+//! their lowered package. [`CompiledBx::emit_readable`] uses that pair to
+//! generate both models and the Lean source relating their clock steps.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::borrow::Cow;

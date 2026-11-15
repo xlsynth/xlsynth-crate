@@ -30,10 +30,13 @@ use crate::block::{
 };
 use crate::local_expr::{LeanOperand, LocalRenderer};
 
+/// Project an element from a physical XLS tuple, whose final pair ends in unit.
 fn tuple_element(tuple: &str, index: usize) -> String {
     format!("({tuple}){}.1", ".2".repeat(index))
 }
 
+/// Build the nested pairs and final unit used by the raw model for every XLS
+/// tuple.
 fn tuple_value(elements: impl DoubleEndedIterator<Item = String>) -> String {
     elements.rev().fold("()".to_string(), |tail, element| {
         format!("({element}, {tail})")
@@ -83,11 +86,12 @@ pub(super) fn emit(
 }
 
 impl<'a> Presentation<'a> {
-    /// Allocate noncapturing names and infer types from checked register
-    /// bindings.
+    /// Allocate local Lean names and attach source types to graph nodes.
     ///
-    /// One-bit nodes use `Bool`; nominal types come from register reads,
-    /// projections, and write destinations rather than matching widths alone.
+    /// Start with one-bit Booleans and checked input and register types.
+    /// Propagate types forward through projections, then back from register
+    /// writes and output ports through tuples and selections. Two aggregates
+    /// can have the same physical shape and different BX names.
     fn new(
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
@@ -368,11 +372,13 @@ impl<'a> Presentation<'a> {
     /// Add collision-free constructors for every unnamed physical enum
     /// encoding.
     ///
+    /// Giving every bit pattern a case lets both codec round trips hold for
+    /// arbitrary initial register values. An unnamed case carries its physical
+    /// encoding without attributing a source constructor to it.
+    ///
     /// Keeping unnamed encodings in the readable proof domain is provisional.
-    /// This choice has not yet had a thorough design review. Revisit whether
-    /// proofs should range only over declared enum values, with explicit
-    /// obligations for legal initialization and transitions that preserve
-    /// those values.
+    /// Restricting proofs to declared enum values would also require proving
+    /// that initialization and transitions preserve those values.
     fn enum_cases(&self, name: &str) -> Result<Vec<(String, u64)>> {
         let TypeDecl::Enum { width, members, .. } = self.declaration(name)? else {
             bail!("{name} is not an enum")
@@ -1324,8 +1330,10 @@ end XlsReadable
     }
 }
 
-/// Lean products have no trailing Unit. Only an explicit singleton DSLX
-/// tuple needs one to distinguish it from the individual element.
+/// Render the readable product type of tuple members or output ports.
+///
+/// A single output has its own type. An explicit one-element source tuple
+/// pairs that type with unit so that the tuple keeps its shape.
 fn product_type(types: &[String], singleton_tuple: bool) -> String {
     match types {
         [] => "_root_.Unit".into(),
@@ -1335,6 +1343,8 @@ fn product_type(types: &[String], singleton_tuple: bool) -> String {
     }
 }
 
+/// Construct a readable value with the same singleton convention as
+/// `product_type`.
 fn product_value(elements: &[String], singleton_tuple: bool) -> String {
     match elements {
         [] => "()".into(),
@@ -1344,6 +1354,8 @@ fn product_value(elements: &[String], singleton_tuple: bool) -> String {
     }
 }
 
+/// Project an in-range element, taking the final tail directly unless it ends
+/// in unit.
 fn product_element(value: &str, index: usize, len: usize, singleton_tuple: bool) -> String {
     if index + 1 < len || (len == 1 && singleton_tuple) {
         tuple_element(value, index)

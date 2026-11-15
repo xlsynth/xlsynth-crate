@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Nominal source types and their physical block shapes.
+//!
+//! BX interface validation uses [`source_shape`] to check widths and tuple
+//! positions against block IR. The readable emitter keeps the declarations
+//! themselves so it can turn the same positions back into named fields.
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use xlsynth_pir::ir;
@@ -94,7 +98,11 @@ fn declaration<'a>(declarations: &'a [TypeDecl], name: &str) -> Result<&'a TypeD
         .with_context(|| format!("unknown supported source type {name}"))
 }
 
-/// Erase nominal types to the physical shapes used by block IR.
+/// Erase source names to bit widths and ordered tuple fields for comparison
+/// with IR.
+///
+/// Use the same acyclic declarations that produced the type. A missing name
+/// or a reference to the wrong declaration kind returns an error.
 pub(super) fn source_shape(
     source_type: &SourceType,
     declarations: &[TypeDecl],

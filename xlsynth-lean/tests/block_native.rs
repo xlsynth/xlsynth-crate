@@ -10,6 +10,7 @@ use std::{fs, path::Path};
 use xlsynth_lean::block::{LeanBlockBundle, compile_bx, emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
 
+/// Build both models for a BX fixture using the default reset behavior.
 fn bx_bundle(source: &str) -> LeanBlockBundle {
     compile_bx(
         source,
@@ -22,8 +23,8 @@ fn bx_bundle(source: &str) -> LeanBlockBundle {
     .unwrap()
 }
 
-// Inline the external DSLX function with XLS so the straight-line raw
-// exporter sees its field projection in the same graph as the BX constructor.
+// Verifies: The inlined DSLX projection selects the intended BX field.
+// Catches: Swapped equal-width fields across the BX and DSLX boundary.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_field_order_across_linked_dslx() {
@@ -64,8 +65,8 @@ fn bx_field_order_across_linked_dslx() {
     );
 }
 
-// Declaration order differs from both constructor and alphabetical order.
-// The two fields have identical widths, so a shape-only check misses a swap.
+// Verifies: Both models retain field order and values under a BX local rename.
+// Catches: Reordering equal-width fields by constructor order or spelling.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_fields_keep_declaration_order_after_local_rename() {
@@ -96,6 +97,8 @@ example (q : XlsBlock.State) (x : XlsBlock.Input) :
     }
 }
 
+// Verifies: Both reset polarities reload the counter and expose the old count.
+// Catches: Inverted reset polarity or an output that exposes the next count.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_counter_reset_polarities() {
@@ -140,6 +143,8 @@ open XlsReadable
     }
 }
 
+// Verifies: Outputs follow port order and both registers swap old values.
+// Catches: Reordered outputs or sequential evaluation of register writes.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_positional_outputs_and_simultaneous_registers() {
@@ -169,6 +174,8 @@ example (q : State) (x : Input) : (reset q x).next = ⟨0, 3⟩ := by rfl
     check_bundle(bundle, "swap registers");
 }
 
+// Verifies: Empty output is unit and a singleton register stays a tuple.
+// Catches: Flattening the singleton or emitting an invalid empty interface.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_unit_output_and_singleton_tuple_register() {
@@ -195,6 +202,8 @@ example (q : State) (x : Input) : (step q { x with rst := false }).one.1 = x.x.1
     check_bundle(bx_bundle("block empty(clk) -> () { () }"), "empty block");
 }
 
+// Verifies: Lean can resolve mk, _root_ and the qualified constructor.
+// Catches: Fields shadowing type names or colliding with constructors.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_fields_keep_lean_names() {
@@ -223,7 +232,8 @@ example (q : State) (x : Input) : (step q x).mk.«_root_» = x.packet.«_root_»
     check_bundle(bundle, "qualified constructors and fields");
 }
 
-// Assertions are named from IR nodes and always have Lean type Bool.
+// Verifies: Later fields compile after raw fields named Bool and BitVec.
+// Catches: A preceding field capturing the type of another output or assertion.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn raw_assertion_field_named_bool_compiles() {

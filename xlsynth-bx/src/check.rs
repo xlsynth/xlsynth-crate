@@ -175,6 +175,13 @@ fn unknown_declaration(kind: &str, name: &str) -> String {
 }
 
 /// Choose the physical output ports from the source result's outermost type.
+///
+/// A named struct contributes its fields in declaration order. A tuple
+/// contributes `out_0`, `out_1`, and so on, with no ports for the empty tuple.
+/// Every other type contributes one `out` port. Nested aggregates stay intact.
+/// Use the declarations from the module that owns the result type. An unknown
+/// struct name returns an error, and sorting the fields would change the port
+/// positions even when their types are identical.
 pub fn output_ports(result: &Type, structs: &[StructDef]) -> Result<Vec<Param>, String> {
     match result {
         Type::Named(name) => structs

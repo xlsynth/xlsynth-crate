@@ -5,6 +5,7 @@
 use xlsynth_lean::block::{CompiledBx, compile_bx, emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
 
+/// Compile one self-contained BX fixture in an empty package.
 fn compile(source: &str) -> CompiledBx {
     compile_bx(
         source,
@@ -15,6 +16,8 @@ fn compile(source: &str) -> CompiledBx {
     .unwrap()
 }
 
+// Verifies: The BX bundle and reparsed counter IR emit identical raw Lean.
+// Catches: Raw equations that depend on BX metadata absent from saved IR.
 #[test]
 fn checked_bx_and_saved_ir_emit_identical_raw_equations() {
     let compiled = compile("block counter(clk) -> u8 { reg n: u8 = 1; n := n + u8:1; n }");
@@ -26,6 +29,8 @@ fn checked_bx_and_saved_ir_emit_identical_raw_equations() {
     assert_eq!(bundle.files[0], ("Generated.lean".into(), raw));
 }
 
+// Verifies: Only used structs appear, in dependency order.
+// Catches: Copying BX declaration order or emitting unreachable types.
 #[test]
 fn only_interface_structs_are_emitted_in_dependency_order() {
     let compiled = compile(
@@ -42,6 +47,7 @@ block show(clk, value: Packet) -> (Packet,) { (value,) }
     assert!(!types.contains("Unused"));
 }
 
+// Negative test: A signed BX output must report its port and unsupported type.
 #[test]
 fn signed_public_output_reports_the_bx_port() {
     let compiled = compile("block machine(clk, data: u8) -> s8 { data as s8 }");
@@ -52,6 +58,7 @@ fn signed_public_output_reports_the_bx_port() {
     );
 }
 
+// Negative test: A recOn field collision must name the owning struct.
 #[test]
 fn unsupported_lean_field_reports_the_bx_declaration() {
     let compiled =
@@ -65,6 +72,7 @@ fn unsupported_lean_field_reports_the_bx_declaration() {
     );
 }
 
+// Negative test: Reject ambiguous selections and blocks with no BX declaration.
 #[test]
 fn readable_emission_requires_a_selected_bx_declaration() {
     let package = Parser::new("package example\nblock preexisting() {}")
