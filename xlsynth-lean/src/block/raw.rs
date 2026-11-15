@@ -445,16 +445,6 @@ pub(super) fn generated_member(field: &str) -> bool {
     )
 }
 
-/// Reject a member that would occupy the same Lean name as a generated
-/// eliminator or helper.
-pub(super) fn validate_lean_member(owner: &str, field: &str) -> Result<()> {
-    ensure!(
-        !generated_member(field),
-        "cannot emit {owner}.{field}: Lean generates a declaration with this name"
-    );
-    Ok(())
-}
-
 /// Place the constructor in a separate namespace so a source field can keep the
 /// name `mk`.
 pub(super) fn structure_header(name: &str) -> String {

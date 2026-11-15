@@ -149,6 +149,14 @@ source field. For a struct with such a collision, use positional construction
 and pattern matching, for example `(⟨41, true⟩ : XLS.bus.Packet)` for two fields
 declared in that order.
 
+For a two-bit DSLX enum with a constructor such as `recOn`, use the source
+spelling to construct a value (`XLS.bus.Tag.recOn`) or match it
+(`| .recOn => ...`). Lean's `cases t` tactic also works. When naming its
+tactic branches explicitly, use `| Constructors.recOn => ...` for enums
+whose constructor names overlap Lean-generated declarations.
+Lean reserves `_root_` for absolute names, so an enum that needs these
+constructor abbreviations cannot also declare a constructor named `_root_`.
+
 A register declared as `Slot[2]` becomes a Lean vector of two `Slot` values.
 Reading index 2 returns the last slot. Writing index 2 leaves both slots
 unchanged. For a locally constructed array, the readable model uses named
