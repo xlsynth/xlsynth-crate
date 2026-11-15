@@ -108,8 +108,8 @@ pub(super) fn nominal_reference(
     Ok(format!("{root}{}.{local_name}", module_identifier(owner)?))
 }
 
-/// Render a checked type in the scope where Lean will resolve its component
-/// names.
+/// Render primitive types through the file's library aliases and resolve
+/// nominal types in the caller's source namespace.
 pub(super) fn source_type_in(
     bx_namespace: &str,
     ty: &SourceType,
@@ -117,10 +117,10 @@ pub(super) fn source_type_in(
     shadowed: &impl Fn(&str) -> bool,
 ) -> Result<String> {
     match ty {
-        SourceType::Bool => Ok("_root_.Bool".into()),
-        SourceType::Bits { width } => Ok(format!("_root_.BitVec {width}")),
+        SourceType::Bool => Ok("L.Bool".into()),
+        SourceType::Bits { width } => Ok(format!("L.BitVec {width}")),
         SourceType::Array { element, size } => Ok(format!(
-            "_root_.Vector ({}) {size}",
+            "L.Vector ({}) {size}",
             source_type_in(bx_namespace, element, current, shadowed)?
         )),
         SourceType::Tuple { members } => Ok(product_type(
