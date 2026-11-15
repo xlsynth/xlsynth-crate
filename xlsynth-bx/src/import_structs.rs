@@ -50,11 +50,46 @@ struct AggregateProjection {
     suffix: String,
 }
 
+/// Maps names from a frozen native DSLX import graph back to the source.
+///
+/// Clones share its source snapshot, including filename mappings for
+/// generated functions.
+#[derive(Clone)]
+pub struct ImportNames(Rc<NativeSourceFiles>);
+
+impl ImportNames {
+    /// Return the module's original dotted name, or `native` if it has no
+    /// mapping.
+    pub fn source_module_name<'a>(&'a self, native: &'a str) -> &'a str {
+        self.0.original_subject(native).unwrap_or(native)
+    }
+
+    /// The IR spelling before BX allocates symbols in the destination package.
+    ///
+    /// Look up this spelling in the corresponding [`crate::LinkedImport`]'s
+    /// `symbols` map to obtain a callable name in the linked package.
+    pub fn restore_ir_name(&self, native: &str) -> String {
+        self.0.restore_ir_names(native)
+    }
+}
+
+/// Written annotations and source-name mappings retained for source-aware
+/// lowering.
+#[derive(Default)]
+pub(crate) struct CapturedSources {
+    pub(crate) types: WrittenTypes,
+    pub(crate) names: Option<ImportNames>,
+}
+
+/// Checked DSLX struct annotations indexed by the type expression as written in
+/// BX.
+pub(crate) type WrittenTypes = BTreeMap<String, Rc<crate::LinkedStruct>>;
+
 /// A frozen module graph and its concrete struct types. Ordinary DSLX imports
 /// check dependencies with the same rules as native DSLX callers.
 pub(crate) struct ImportedStructs {
     graph: Rc<OutlineGraph>,
-    files: Option<NativeSourceFiles>,
+    files: Option<Rc<NativeSourceFiles>>,
     bindings: HashMap<dslx::StructDef, StructBinding>,
     declarations: BTreeMap<DeclId, dslx::StructDef>,
     explicit_types: BTreeMap<String, dslx::Type>,
@@ -70,6 +105,7 @@ pub(crate) struct ImportedStructs {
     /// The canonical BX type, including declaration identities, selects the
     /// spelling.
     aggregate_candidates: HashMap<String, Vec<DeclId>>,
+    pub(crate) written_types: Option<WrittenTypes>,
     named_layouts: BTreeMap<String, usize>,
     parametric_instances: BTreeMap<usize, ImportedStructInstance>,
     /// Reflected layouts that contain a concrete parametric struct, including
@@ -97,15 +133,20 @@ impl ImportedStructs {
         Self::from_sources(uses, DslxSourceLoader::new(stdlib, paths))
     }
 
+    /// Freeze the reachable files and validate each BX use against that
+    /// snapshot.
+    ///
+    /// The registry retains the same files that back the returned native import
+    /// context. With no DSLX uses, no native context or files are needed.
     pub(crate) fn from_sources(
         uses: &[UsePath],
         loader: DslxSourceLoader<'_>,
     ) -> Result<(Self, Option<ImportData>), String> {
         let graph = loader.finish(uses)?;
         let files = (!uses.is_empty())
-            .then(|| graph.native_source_files())
+            .then(|| graph.native_source_files().map(Rc::new))
             .transpose()?;
-        let mut data = files.as_ref().map(NativeSourceFiles::import_data);
+        let mut data = files.as_deref().map(NativeSourceFiles::import_data);
         let registry = Self::for_snapshot(Rc::new(graph), files);
         if let Some(data) = data.as_mut() {
             for (index, path) in uses.iter().enumerate() {
@@ -131,13 +172,14 @@ impl ImportedStructs {
 
     /// Pair the frozen declaration graph with the native handles of one
     /// snapshot.
-    fn for_snapshot(graph: Rc<OutlineGraph>, files: Option<NativeSourceFiles>) -> Self {
+    fn for_snapshot(graph: Rc<OutlineGraph>, files: Option<Rc<NativeSourceFiles>>) -> Self {
         Self {
             graph,
             files,
             bindings: HashMap::new(),
             declarations: BTreeMap::new(),
             explicit_types: BTreeMap::new(),
+            written_types: None,
             reflected_aliases: BTreeMap::new(),
             aggregate_spellings: HashMap::new(),
             value_spellings: HashMap::new(),
@@ -541,6 +583,58 @@ impl ImportedStructs {
         Err(format!(
             "unsupported nominal type '{name}' in imported function signature"
         ))
+    }
+
+    /// Drain written annotations and share the source-name map with the caller.
+    pub(crate) fn take_sources(&mut self) -> CapturedSources {
+        CapturedSources {
+            types: self.written_types.take().unwrap_or_default(),
+            names: self.files.clone().map(ImportNames),
+        }
+    }
+
+    /// Capture the written annotation before BX erases transparent aliases.
+    /// The witness shares the same frozen files and native import context.
+    pub(crate) fn record_written_type(
+        &mut self,
+        written: &Type,
+        subject: &str,
+        member: &str,
+        data: &mut ImportData,
+    ) -> Result<(), String> {
+        let key = written.to_string();
+        if self
+            .written_types
+            .as_ref()
+            .is_some_and(|types| types.contains_key(&key))
+        {
+            return Ok(());
+        }
+        let spelling = match written {
+            Type::Applied { args, .. } => instance_spelling(member, args),
+            _ => member.to_owned(),
+        };
+        let source = format!(
+            "import {subject} as bx_module;\nfn inspect(value: bx_module::{spelling}) {{}}"
+        );
+        let name = format!("0bx_written_{}", self.probe_index);
+        self.probe_index += 1;
+        let module = self.check_probe(&source, &name, data)?;
+        let annotation = probe_function(&module)?.get_param(0).get_type_annotation();
+        self.written_types
+            .as_mut()
+            .expect("capture enabled")
+            .insert(
+                key,
+                Rc::new(crate::LinkedStruct {
+                    module,
+                    annotation,
+                    module_names: ImportNames(
+                        self.files.as_ref().expect("DSLX source snapshot").clone(),
+                    ),
+                }),
+            );
+        Ok(())
     }
 
     pub(crate) fn resolve_exported_type(

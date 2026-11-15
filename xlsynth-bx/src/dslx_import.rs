@@ -350,6 +350,35 @@ impl ImportResolver {
         result
     }
 
+    /// Enable or disable annotation capture before checking the BX
+    /// declarations.
+    pub(crate) fn capture_written_types(&mut self, capture: bool) {
+        self.structs.written_types = capture.then(Default::default);
+    }
+
+    /// Move the recorded annotations out before consuming the resolver to build
+    /// IR.
+    pub(crate) fn take_sources(&mut self) -> crate::import_structs::CapturedSources {
+        self.structs.take_sources()
+    }
+
+    /// Retain the written DSLX annotation when the resolved BX type names a
+    /// struct.
+    pub(crate) fn record_written_type(
+        &mut self,
+        written: &Type,
+        subject: &str,
+        member: &str,
+        resolved: &Type,
+    ) -> Result<(), String> {
+        if self.structs.written_types.is_none() || !matches!(resolved, Type::Named(_)) {
+            return Ok(());
+        }
+        self.with_imports(|structs, data| {
+            structs.record_written_type(written, subject, member, data)
+        })
+    }
+
     /// Resolve a source-level type reference using the declared import graph.
     pub(crate) fn resolve_named(&mut self, subject: &str, member: &str) -> Result<Type, String> {
         if !self.subjects.contains(subject) || !is_dslx_member_name(member) {
@@ -563,14 +592,21 @@ fn probe_{id}({}) {{ capture({}) }}
     /// Compile each imported module's requested specializations together.
     /// Separate packages keep DSLX names such as `a.b` and `a_b` distinct
     /// until BX links their generated IR symbols into the destination.
+    #[cfg(test)]
     pub(crate) fn finish(self) -> Result<ResolvedImports, String> {
-        self.finish_with_calls(None)
+        self.finish_with_calls(None, |_| {})
     }
 
-    /// Convert only the concrete DSLX calls used by retained BX definitions.
+    /// Compile the selected calls and pass each batch's checked module to the
+    /// caller.
+    ///
+    /// `None` selects all requested calls. The callback order matches the
+    /// returned batch order so lowering can pair declarations with linked
+    /// symbols.
     pub(crate) fn finish_with_calls(
         self,
         used: Option<&BTreeSet<usize>>,
+        mut on_import: impl FnMut(TypecheckedModule),
     ) -> Result<ResolvedImports, String> {
         let mut batches = Vec::new();
         if let Some(mut data) = self.imports? {
@@ -591,7 +627,7 @@ fn probe_{id}({}) {{ capture({}) }}
                 // Keep invocation metadata for the supported concrete instances
                 // independent of earlier type probes and ordinary imports.
                 let mut isolated = concrete.then(|| self.structs.fresh_import_data());
-                let batch = compile_batch(
+                let (batch, checked) = compile_batch(
                     BatchRoots {
                         subject,
                         call_ids: ids,
@@ -610,6 +646,7 @@ fn probe_{id}({}) {{ capture({}) }}
                     )
                 })?;
                 batches.push(batch);
+                on_import(checked);
             }
         }
         Ok(ResolvedImports {
@@ -933,6 +970,9 @@ struct BatchRoots<'a> {
 }
 
 /// Recover each specialization's exact IR symbol from its generated probe.
+///
+/// Return the checked probe alongside the reachable IR so consumers can look
+/// up the original DSLX declarations and concrete invocation bindings.
 fn compile_batch(
     roots: BatchRoots<'_>,
     index: usize,
@@ -940,7 +980,7 @@ fn compile_batch(
     imports: &mut ImportData,
     stdlib_path: &Path,
     structs: &ImportedStructs,
-) -> Result<ImportBatch, String> {
+) -> Result<(ImportBatch, TypecheckedModule), String> {
     let BatchRoots {
         subject,
         call_ids,
@@ -1066,11 +1106,14 @@ fn compile_batch(
         roots.push(symbol.clone());
     }
     crate::import_link::retain_reachable_functions(&mut package, &roots)?;
-    Ok(ImportBatch {
-        package,
-        roots,
-        call_ids,
-    })
+    Ok((
+        ImportBatch {
+            package,
+            roots,
+            call_ids,
+        },
+        checked,
+    ))
 }
 
 #[cfg(test)]
