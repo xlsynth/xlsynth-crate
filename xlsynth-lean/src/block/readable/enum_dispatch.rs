@@ -87,13 +87,13 @@ impl Presentation<'_> {
         Ok(dispatches)
     }
 
-    /// Emit a match on each recovered source enum, choosing arms by their
-    /// physical encodings.
+    /// Emit each recovered selector as a match using its first matching arm
+    /// or its fallback.
     pub(super) fn enum_dispatch_definitions(&self) -> Result<String> {
         let mut out = String::new();
         for (id, dispatch) in self.enum_dispatches()? {
             let name = self.enum_dispatch_name(id);
-            let ty = nominal_reference(&self.bx_namespace, dispatch.name, None, &|_| false)?;
+            let ty = nominal_reference(self.bx_namespace, dispatch.name, None, &|_| false)?;
             writeln!(
                 out,
                 "def EnumDispatch.{name} {{α : Type}} (s : {ty}) ({} : α) : α :=\n  match s with",
@@ -117,7 +117,7 @@ impl Presentation<'_> {
     pub(super) fn enum_dispatch_laws(&self, out: &mut String) -> Result<Vec<String>> {
         let mut rules = Vec::new();
         for (id, dispatch) in self.enum_dispatches()? {
-            let ty = nominal_reference(&self.bx_namespace, dispatch.name, None, &|_| false)?;
+            let ty = nominal_reference(self.bx_namespace, dispatch.name, None, &|_| false)?;
             let codec = identifier(dispatch.name)?;
             let args = dispatch.arguments();
             let name = self.enum_dispatch_name(id);

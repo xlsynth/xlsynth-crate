@@ -13,8 +13,10 @@ use std::collections::BTreeMap;
 use super::*;
 
 impl Presentation<'_> {
-    /// Generate the proof that helper calls and counted loops agree across the
-    /// two representations.
+    /// Emit the helper and loop lemmas used in the block evaluation proof.
+    ///
+    /// Each helper lemma unfolds the same readable declaration used at call
+    /// sites, including when the source spelling is an exported alias.
     pub(super) fn loop_correspondence(&self) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
@@ -60,7 +62,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
                 continue;
             };
             let raw = lean::helper_path("XlsBlock", &function.name)?;
-            let readable = helper_path(sig, &function.name)?;
+            let readable = &self.callables.helpers[function.name.as_str()];
             let mut binders = Vec::new();
             let mut params = Vec::new();
             let mut decoded = Vec::new();
@@ -72,12 +74,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
             }
             let call = format!("({readable} {})", decoded.join(" "));
             let encoded = self.convert(Some(&sig.result), &call, true)?;
-            let model = Self::new(
-                self.block,
-                self.declarations,
-                self.interface,
-                Some((index, function)),
-            )?;
+            let model = self.helper_model(index, function)?;
             let mut helper_rules = model.enum_dispatch_laws(&mut out)?;
             let called = call_rules(&function.graph, &rules);
             if !called.is_empty() {
@@ -101,7 +98,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
             writeln!(out, "attribute [local irreducible] {raw} {readable}\n")?;
             if loop_bodies.contains(function.name.as_str()) {
                 let raw_body = loop_body(&raw, &params[2..]);
-                let readable_body = loop_body(&readable, &decoded[2..]);
+                let readable_body = loop_body(readable, &decoded[2..]);
                 let fold = format!(
                     "(XlsBlock.countedFor count stride ({readable_body}) {})",
                     decoded[1]
@@ -177,7 +174,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
             let codec = format!("XlsCodec.{name}");
             rules.extend(codec_round_trip_rules(&name));
             rules.extend(
-                declaration_functions(&self.bx_namespace, decl, &name)?
+                declaration_functions(self.bx_namespace, decl, &name)?
                     .into_iter()
                     .map(|f| format!("apply_ite {f}")),
             );
