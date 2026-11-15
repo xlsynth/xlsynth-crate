@@ -33,6 +33,8 @@ const NESTED_QUICKCHECK: &str = r#"
 }
 "#;
 
+// Verifies: Separate lowering tracks reachable helpers with test discards.
+// Catches: Missing nested calls or counting helpers in zero-trip loops.
 #[test]
 fn clocked_lowering_depends_on_reachable_functions_with_discards() -> Result<(), String> {
     for (clocked_test, needs_clocked_package) in [

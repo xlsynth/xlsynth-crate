@@ -458,6 +458,8 @@ pub fn width<K:u32,N:u32>(x:uN[N])->u32 { N + K }
     Ok(())
 }
 
+// Verifies: one import batch points to both the 4-bit and 8-bit versions of id.
+// Catches: Merging instances or losing the DSLX parameter name.
 #[test]
 fn imported_declarations_bind_to_their_linked_specializations() -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;

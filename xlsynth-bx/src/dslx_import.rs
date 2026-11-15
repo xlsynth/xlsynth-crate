@@ -350,14 +350,20 @@ impl ImportResolver {
         result
     }
 
+    /// Enable or disable annotation capture before checking the BX
+    /// declarations.
     pub(crate) fn capture_written_types(&mut self, capture: bool) {
         self.structs.written_types = capture.then(Default::default);
     }
 
+    /// Move the recorded annotations out before consuming the resolver to build
+    /// IR.
     pub(crate) fn take_sources(&mut self) -> crate::import_structs::CapturedSources {
         self.structs.take_sources()
     }
 
+    /// Retain the written DSLX annotation when the resolved BX type names a
+    /// struct.
     pub(crate) fn record_written_type(
         &mut self,
         written: &Type,
@@ -591,7 +597,12 @@ fn probe_{id}({}) {{ capture({}) }}
         self.finish_with_calls(None, |_| {})
     }
 
-    /// Convert only the concrete DSLX calls used by retained BX definitions.
+    /// Compile the selected calls and pass each batch's checked module to the
+    /// caller.
+    ///
+    /// `None` selects all requested calls. The callback order matches the
+    /// returned batch order so lowering can pair declarations with linked
+    /// symbols.
     pub(crate) fn finish_with_calls(
         self,
         used: Option<&BTreeSet<usize>>,
@@ -959,6 +970,9 @@ struct BatchRoots<'a> {
 }
 
 /// Recover each specialization's exact IR symbol from its generated probe.
+///
+/// Return the checked probe alongside the reachable IR so consumers can look
+/// up the original DSLX declarations and concrete invocation bindings.
 fn compile_batch(
     roots: BatchRoots<'_>,
     index: usize,

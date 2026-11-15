@@ -2,9 +2,9 @@
 
 //! Recover helper signatures from the checked DSLX compilation linked into BX.
 //!
-//! Lowering a DSLX loop creates an IR function with no corresponding DSLX
-//! declaration. Its callers supply type information for the accumulator and
-//! captures.
+//! Lookup starts with the functions reachable from one block. Each import
+//! maps their destination symbols back to its own DSLX functions. Signatures
+//! then return to the destination names for checking against the block's IR.
 use super::{
     BlockContext,
     source_types::{
@@ -24,10 +24,10 @@ use xlsynth::{
 use xlsynth_bx::ImportNames;
 use xlsynth_pir::{ir, ir_parser::Parser};
 
-/// The checked DSLX module and the IR function names emitted from it.
+/// Pairs a checked DSLX module with the destination names of its IR functions.
 ///
-/// BX adds blocks and imports to the linked package, so membership in this
-/// original set identifies callees eligible for a DSLX signature.
+/// Externs compiled into the initial package keep their symbols. For a BX
+/// import, the linker records any renames needed to avoid a collision.
 pub(super) struct DslxLink {
     module: dslx::TypecheckedModule,
     module_names: Option<ImportNames>,
@@ -35,6 +35,8 @@ pub(super) struct DslxLink {
 }
 
 impl DslxLink {
+    /// Retain the import's checked declarations and the symbol map from the
+    /// same link.
     pub(super) fn from_import(import: xlsynth_bx::LinkedImport) -> Self {
         Self {
             module: import.module,
@@ -42,8 +44,9 @@ impl DslxLink {
             symbols: import.symbols,
         }
     }
-    /// Lower the module once and record its function names before BX adds
-    /// members.
+
+    /// Build the initial IR package for BX externs using the checked module's
+    /// own symbols.
     pub(super) fn compile(module: dslx::TypecheckedModule) -> Result<(ir::Package, Self)> {
         let text = module
             .to_ir_text()
@@ -72,11 +75,8 @@ impl DslxLink {
         ))
     }
 
-    /// Attach source signatures to reachable linked helpers and their
-    /// counted-loop bodies.
-    ///
-    /// Check each recovered parameter and result against its IR shape before
-    /// publishing the declarations and signatures together.
+    /// Attach representable source signatures to reachable helpers after
+    /// checking their IR shapes.
     pub(super) fn add_signatures(
         &self,
         block: &BlockContext<'_>,
@@ -140,8 +140,13 @@ impl DslxLink {
     }
 }
 
-/// BX reflects imported structs into concrete port types and erases aliases.
-/// Keep the checked DSLX spelling, with its dependencies before its users.
+/// Merge the checked DSLX declarations with types already collected for the
+/// block.
+///
+/// A reflected BX struct may match a DSLX alias to a struct. Their ordered
+/// field names and types must agree after resolving aliases, even when the
+/// raw IR could represent both with the same tuple. Update references inside
+/// existing declarations and interfaces to use the checked alias.
 fn merge_declarations(
     prior: &mut Vec<TypeDecl>,
     incoming: Vec<TypeDecl>,
@@ -248,6 +253,7 @@ fn merge_declarations(
     Ok(())
 }
 
+// Negative test: Reordered equal-width alias fields must report a conflict.
 #[cfg(test)]
 #[test]
 fn linked_struct_alias_rejects_reordered_equal_width_fields() {
@@ -344,6 +350,8 @@ pub(super) fn imported_struct(
 }
 
 impl<'a> Catalogue<'a> {
+    /// Start in the checked entry module with the original IR symbols selected
+    /// for this block.
     fn new(
         module: &dslx::TypecheckedModule,
         module_names: Option<&'a ImportNames>,
@@ -365,20 +373,24 @@ impl<'a> Catalogue<'a> {
         }
     }
 
+    /// Recover the declaring module's source name for use in Lean type and
+    /// helper names.
     fn source_qualifier(&self) -> &str {
         let native = self.context.qualifier.as_str();
         self.module_names
             .map_or(native, |names| names.source_module_name(native))
     }
 
+    /// Recover the original IR symbol used as a key in the BX import's rename
+    /// map.
     fn linked_symbol(&self, native: String) -> String {
         match self.module_names {
             Some(names) => names.restore_ir_name(&native),
             None => native,
         }
     }
-    /// Qualify a declaration with its owning module, even when the import has
-    /// an alias.
+
+    /// Qualify a declaration in its own module, including transitive imports.
     fn qualified_name(&self, local: &str) -> String {
         format!("{}::{local}", self.source_qualifier())
     }
@@ -736,8 +748,8 @@ impl BridgeBuilder for Catalogue<'_> {
         Ok(())
     }
 
-    /// Record a representable non-parametric signature under its module's IR
-    /// symbol.
+    /// Index a representable declaration by its original IR symbol for the
+    /// linker's rename map.
     fn add_function_signature_typed(
         &mut self,
         name: &str,
@@ -760,11 +772,8 @@ impl BridgeBuilder for Catalogue<'_> {
 }
 
 impl Catalogue<'_> {
-    /// Walk calls from the linked module to find signatures for the block's
-    /// reachable IR functions.
-    ///
-    /// Visit each function body once, but collect parametric instances from
-    /// every calling module that has checked invocations of that function.
+    /// Walk checked calls across modules and collect signatures for the
+    /// selected original IR symbols.
     fn collect_helpers(&mut self) -> Result<()> {
         let root = self.context.clone();
         let root_name = root.module.get_name();

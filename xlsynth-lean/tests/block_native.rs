@@ -24,6 +24,8 @@ fn bx_bundle(source: &str) -> LeanBlockBundle {
     .unwrap()
 }
 
+// Verifies: Lean projects a private nested field and runs the imported helper.
+// Catches: omitting a private type needed by a public port.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_packet_keeps_private_field_type() -> Result<()> {
@@ -61,6 +63,8 @@ example (p : «ops::Packet») : Helpers.«ops::pick» p = p.inner.value := rfl
     Ok(())
 }
 
+// Verifies: Direct outputs flatten in field order and tuples retain records.
+// Catches: Conflating 4-bit and 8-bit packets carried by ports or registers.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_parametric_structs_preserve_bx_interface_types() -> Result<()> {
@@ -111,6 +115,8 @@ example (q : State) (x : Input) : observe q x = (q.stored, x.src.narrow) := rfl
     Ok(())
 }
 
+// Verifies: Lean resolves both aliases and evaluates the BX update and outputs.
+// Catches: Losing an alias or selecting the wrong field in an equation.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_struct_alias_survives_bx_register_and_nested_ports() -> Result<()> {
@@ -161,6 +167,8 @@ example (q : State) (x : Input) : observe q x = (q.stored, x.src.item.zebra) := 
     Ok(())
 }
 
+// Verifies: Renamed callees and both id instances keep their DSLX parameters.
+// Catches: Reopening replaced source or using the occupied function's type.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_imports_keep_source_fields_through_linker_renames() -> Result<()> {

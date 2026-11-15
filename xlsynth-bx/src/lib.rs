@@ -136,11 +136,17 @@ pub fn empty_package(name: impl Into<String>) -> Package {
     }
 }
 
-/// One DSLX compilation used for BX imports. The synthetic entry module calls
-/// the selected DSLX specializations. Its type information owns their original
-/// declarations, even if the source files change after BX compilation.
+/// One batch of DSLX functions linked into a BX package.
+///
+/// The synthetic entry module calls the selected DSLX specializations. Its
+/// type information retains their declarations even if the files on disk
+/// change.
 pub struct LinkedImport {
+    /// Checked entry module for looking up the selected calls and their
+    /// callees.
     pub module: dslx::TypecheckedModule,
+    /// Restores the source spellings used as keys in `symbols` from native IR
+    /// names.
     pub module_names: ImportNames,
     /// Each original IR function symbol and its actual destination symbol.
     pub symbols: BTreeMap<String, String>,
@@ -148,8 +154,11 @@ pub struct LinkedImport {
 
 /// A written DSLX struct reference resolved by the same import graph as BX.
 pub struct LinkedStruct {
+    /// Checked probe containing the parameter whose type was written in BX.
     pub module: dslx::TypecheckedModule,
+    /// Maps modules referenced by the annotation back to their source names.
     pub module_names: ImportNames,
+    /// Parameter annotation, including any alias or concrete type arguments.
     pub annotation: dslx::TypeAnnotation,
 }
 
@@ -159,14 +168,24 @@ pub struct CompiledModule {
     /// Written annotations before type checking erases transparent aliases.
     /// BX library declarations and references use the linker's qualified names.
     pub source: ast::Module,
+    /// Checked BX declarations with concrete layouts and diagnostics.
     pub checked: CheckedModule,
+    /// Destination package containing the lowered hardware and its callees.
     pub package: Package,
+    /// Checked modules and destination symbols for imports that supplied
+    /// functions.
     pub imports: Vec<LinkedImport>,
     /// Indexed by the spelling used in BX, including unqualified use bindings.
     pub imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
 }
 
 /// Compile BX while retaining the source graph for each linked DSLX import.
+///
+/// Supply the IR package that implements any BX externs. Syntax, type,
+/// import, and lowering errors return a diagnostic. Successful compilation
+/// leaves warnings available through [`CheckedModule::warnings`].
+/// Use each batch's symbol map to locate its functions in the resulting
+/// package, since existing functions can occupy their original names.
 pub fn compile_with_source(
     source: &str,
     package: Package,

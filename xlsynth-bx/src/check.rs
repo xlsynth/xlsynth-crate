@@ -811,7 +811,11 @@ fn lookup_use(
 }
 
 /// Copy a source type into the checked module, resolving qualified names as
-/// we go. Bound the walk before cloning any recursive types from AST callers.
+/// we go.
+///
+/// Bound the walk before cloning recursive types from AST callers. When
+/// capture is enabled, save imported struct annotations under their written
+/// names before returning the resolved BX type.
 fn resolve_type<'m>(
     ty: &Type,
     is_local: &dyn Fn(&str) -> bool,
@@ -1818,6 +1822,10 @@ pub(crate) fn check_sources(
 
 /// Elaborate test-only harnesses before draining the shared specialization
 /// queues.
+///
+/// The import callback receives one checked DSLX module per retained batch, in
+/// the order stored on the checked module. Supplying `captured_sources` also
+/// retains written struct annotations, even for imports used only as types.
 pub(crate) fn check_sources_with_tests(
     root: &Module,
     imports: crate::bx_import::SourceImports<'_>,

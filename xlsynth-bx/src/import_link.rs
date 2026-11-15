@@ -11,8 +11,11 @@ use xlsynth_pir::ir_verify::verify_package;
 
 use crate::lower::check_function_purity;
 
-/// Appends a checked import snapshot and returns the destination indices of its
-/// roots. All allocation and validation take place before changing the
+/// Append the imported functions and return their destination identities.
+///
+/// Root indices follow the order in `roots`, including repeats. The map covers
+/// every imported function, including private callees that were renamed to
+/// avoid collisions. Allocation and validation precede changes to the
 /// destination.
 pub(crate) fn link_imported_functions(
     destination: &mut Package,
@@ -217,6 +220,8 @@ mod tests {
     use super::*;
     use xlsynth_pir::ir_parser::Parser;
 
+    // Verifies: Calls, roots, and positions survive name and file ID clashes.
+    // Catches: Renaming a function without fixing callers and source positions.
     #[test]
     fn reachable_functions_keep_their_calls_and_source_files_across_collisions() {
         let mut destination = Parser::new(

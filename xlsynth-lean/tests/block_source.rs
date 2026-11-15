@@ -47,6 +47,8 @@ block show(clk, value: Packet) -> (Packet,) { (value,) }
     assert!(!types.contains("Unused"));
 }
 
+// Verifies: Local and library Packet types expose fields under distinct names.
+// Catches: Losing a library qualifier or the private record used by a field.
 #[test]
 fn readable_interface_uses_linked_bx_library_structs() {
     let library = tempfile::tempdir().unwrap();

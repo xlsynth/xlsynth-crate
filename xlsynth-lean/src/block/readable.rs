@@ -73,6 +73,8 @@ fn type_name(key: &str) -> Cow<'_, str> {
     }
 }
 
+/// Quote a displayed type name consistently across its Lean declaration, codecs
+/// and proofs.
 fn type_identifier(key: &str) -> Result<String> {
     identifier(&type_name(key))
 }
@@ -623,6 +625,9 @@ impl<'a> Presentation<'a> {
 
     /// Emit source declarations, total codecs, and codec round-trip proof
     /// source.
+    ///
+    /// Check name uniqueness after translating BX library names, at the same
+    /// point that Lean identifiers are chosen for the declarations.
     fn types_module(&self) -> Result<String> {
         let mut out = String::from("import Std\n\nnamespace XlsSource\n\n");
         // Source members and generated codecs have disjoint namespaces. A

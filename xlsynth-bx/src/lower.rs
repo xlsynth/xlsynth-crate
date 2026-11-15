@@ -100,6 +100,8 @@ impl From<String> for LowerError {
     }
 }
 
+/// Lower BX and report each import batch's original-to-destination symbol map
+/// in check order.
 pub(crate) fn lower_with_imports(
     module: &CheckedModule,
     package: Package,
@@ -116,6 +118,12 @@ pub(crate) fn lower_with_imports(
     .map_err(|error| error.0)
 }
 
+/// Link imported calls before emitting local bodies under the empty-array
+/// expansion limit.
+///
+/// A callback reports one successfully linked batch. Later signature checks or
+/// BX lowering can still fail, so callers publish these maps with the final
+/// package.
 fn lower_checked_module(
     module: &CheckedModule,
     mut package: Package,
@@ -1718,6 +1726,8 @@ mod tests {
     use super::{EmptyArrayExpansion, lower_checked_module};
     use crate::{ResetBehavior, check_module, empty_package, lower_module, parse_module};
 
+    // Verifies: Empty arrays share one expansion budget per lowering scope.
+    // Catches: Resetting per expansion or charging separate scopes together.
     #[test]
     fn empty_array_expansion_follows_source_and_specialization_scopes() -> Result<(), String> {
         let constants = r#"

@@ -50,29 +50,39 @@ struct AggregateProjection {
     suffix: String,
 }
 
-/// The names used by the frozen native DSLX import graph. Clones share its
-/// source snapshot, including the filename mappings for generated functions.
+/// Maps names from a frozen native DSLX import graph back to the source.
+///
+/// Clones share its source snapshot, including filename mappings for
+/// generated functions.
 #[derive(Clone)]
 pub struct ImportNames(Rc<NativeSourceFiles>);
 
 impl ImportNames {
-    /// Original dotted source subject of a module in the checked graph.
+    /// Return the module's original dotted name, or `native` if it has no
+    /// mapping.
     pub fn source_module_name<'a>(&'a self, native: &'a str) -> &'a str {
         self.0.original_subject(native).unwrap_or(native)
     }
 
     /// The IR spelling before BX allocates symbols in the destination package.
+    ///
+    /// Look up this spelling in the corresponding [`crate::LinkedImport`]'s
+    /// `symbols` map to obtain a callable name in the linked package.
     pub fn restore_ir_name(&self, native: &str) -> String {
         self.0.restore_ir_names(native)
     }
 }
 
+/// Written annotations and source-name mappings retained for source-aware
+/// lowering.
 #[derive(Default)]
 pub(crate) struct CapturedSources {
     pub(crate) types: WrittenTypes,
     pub(crate) names: Option<ImportNames>,
 }
 
+/// Checked DSLX struct annotations indexed by the type expression as written in
+/// BX.
 pub(crate) type WrittenTypes = BTreeMap<String, Rc<crate::LinkedStruct>>;
 
 /// A frozen module graph and its concrete struct types. Ordinary DSLX imports
@@ -123,6 +133,11 @@ impl ImportedStructs {
         Self::from_sources(uses, DslxSourceLoader::new(stdlib, paths))
     }
 
+    /// Freeze the reachable files and validate each BX use against that
+    /// snapshot.
+    ///
+    /// The registry retains the same files that back the returned native import
+    /// context. With no DSLX uses, no native context or files are needed.
     pub(crate) fn from_sources(
         uses: &[UsePath],
         loader: DslxSourceLoader<'_>,
@@ -570,6 +585,7 @@ impl ImportedStructs {
         ))
     }
 
+    /// Drain written annotations and share the source-name map with the caller.
     pub(crate) fn take_sources(&mut self) -> CapturedSources {
         CapturedSources {
             types: self.written_types.take().unwrap_or_default(),

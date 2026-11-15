@@ -2,9 +2,9 @@
 
 //! Keep BX declarations paired with the package produced by lowering them.
 //!
-//! Lowering erases the distinction between a struct and a tuple with the same
-//! fields. Before assigning BX types to Lean values, compare each checked
-//! port and register with the corresponding physical name, position and shape.
+//! The written annotations distinguish aliases that share a physical layout.
+//! The checked BX module supplies concrete dimensions, and the linked graph
+//! fixes the port order and the equations used for both Lean models.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::{collections::BTreeMap, rc::Rc};
@@ -21,6 +21,9 @@ use super::source_types::{
 use super::{BlockContext, LeanBlockBundle, readable, select_block};
 
 /// A checked BX module and its linked block IR, from the same compilation.
+///
+/// Retains the written BX annotations and checked DSLX imports so readable
+/// emission can recover names without reopening the source files.
 pub struct CompiledBx {
     checked: CheckedModule,
     imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
@@ -30,11 +33,12 @@ pub struct CompiledBx {
     imports: Vec<super::helper_types::DslxLink>,
 }
 
-/// Check BX source and lower it into the supplied IR package.
+/// Check BX source and lower it into the supplied package.
 ///
-/// The package may already contain functions or blocks used by BX externs.
-/// Linked functions have IR signatures here. Use [`compile_bx_with_dslx`] to
-/// preserve source names and nominal types for supported helpers.
+/// The package supplies definitions for BX externs, and `options` controls
+/// source import lookup. Imported functions retain their checked declarations
+/// even if linking changes their IR names. Compilation errors carry a BX
+/// diagnostic. Inspect [`CompiledBx::warnings`] on success.
 pub fn compile_bx(
     source: &str,
     package: ir::Package,
@@ -127,9 +131,9 @@ impl CompiledBx {
     /// Emit the selected BX block, defaulting to the package's top or sole
     /// block.
     ///
-    /// When the compilation retains checked DSLX, validate recovered helper
-    /// signatures against their linked IR functions before emitting any
-    /// modules.
+    /// The block must have a matching BX declaration. An ambiguous selection
+    /// or a disagreement between the source interface and linked IR is an
+    /// error.
     pub fn emit_readable(&self, block_name: Option<&str>) -> Result<LeanBlockBundle> {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
@@ -148,11 +152,11 @@ impl CompiledBx {
         readable::emit(&block, &declarations, &interface)
     }
 
-    /// Pair the checked BX block's ordered ports and registers with their
-    /// lowered IR shapes.
+    /// Recover declared types and check their names, order and shapes against
+    /// the block IR.
     ///
-    /// Linked functions can be called at their physical IR types even when
-    /// the interface supplies no source signature for them.
+    /// A struct returned directly by BX contributes one physical output per
+    /// field. A struct inside a result tuple remains a single tuple member.
     pub(super) fn readable_interface(
         &self,
         block: &BlockContext<'_>,
@@ -326,6 +330,8 @@ impl CompiledBx {
         ))
     }
 
+    /// Find a BX struct's written fields in declaration order, including for
+    /// templates.
     fn written_fields(&self, ty: &Type) -> Option<&[Param]> {
         let name = match ty {
             Type::Named(name)
@@ -343,6 +349,7 @@ impl CompiledBx {
 }
 
 /// The checked type supplies concrete dimensions and specialized BX layouts.
+///
 /// Follow the written annotation alongside it to retain the DSLX declaration
 /// at each imported field, tuple member, or array element.
 fn bx_type(
@@ -437,6 +444,8 @@ fn bx_type(
 mod tests {
     use super::*;
 
+    // Verifies: Readable models accept aliases, constant widths and BX structs.
+    // Catches: Emitting a type parameter the BX checker already resolved.
     #[test]
     fn readable_interface_uses_concrete_bx_types() -> Result<()> {
         let compiled = compile_bx(
@@ -464,6 +473,8 @@ block nested(clk, x: Wrap<Byte>) -> (Byte, Wrap<Byte>) {
         Ok(())
     }
 
+    // Verifies: Tuple outputs and nested arrays keep both DSLX struct aliases.
+    // Catches: Choosing one alias for both members based on their layout.
     #[test]
     fn checked_bx_layout_preserves_each_written_dslx_alias() -> Result<()> {
         let dir = tempfile::tempdir()?;

@@ -395,6 +395,8 @@ struct CompiledTests {
     warnings: Vec<BxWarning>,
 }
 
+/// Lower the test harnesses and build a separate clocked package when a
+/// reachable helper evaluates discarded expressions for pure tests.
 fn compile_tests(
     source: &str,
     path: &Path,
