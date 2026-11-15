@@ -100,8 +100,8 @@ pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Re
 ///
 /// Every register must have exactly one write; outputs use the data operand of
 /// each output port, whose graph node itself has the empty tuple type.
-/// The generated namespace exposes the shared Lean `bitSliceUpdate` operation
-/// when a slice update appears in the block or in one of its helper functions.
+/// The supplied namespace owns the four physical records and their accessors,
+/// including when the caller chooses a dotted module name.
 fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     ensure!(
         block.graph.instantiations.is_empty(),
@@ -204,6 +204,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         write_helper(&mut source, namespace, helper)?;
     }
     source.push_str(&record_type(
+        namespace,
         "State",
         block
             .graph
@@ -212,12 +213,14 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
             .map(|r| (r.name.as_str(), &r.ty)),
     )?);
     source.push_str(&record_type(
+        namespace,
         "Input",
         graph
             .input_ports()
             .map(|port| (graph.port_name(port), graph.port_type(port))),
     )?);
     source.push_str(&record_type(
+        namespace,
         "Output",
         graph
             .output_ports()
@@ -241,6 +244,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         }
     }
     source.push_str(&record_declaration(
+        namespace,
         "Assertions",
         &fields,
         Some("Repr"),
@@ -353,22 +357,31 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     Ok(source)
 }
 
-/// Qualify the IR function name from the Lean root so local bindings cannot
-/// capture a call.
+/// Qualify a physical helper call with the block's absolute Lean namespace.
 pub(super) fn helper_path(namespace: &str, physical: &str) -> Result<String> {
     Ok(format!(
         "_root_.{namespace}.Helpers.{}",
-        identifier(physical)?
+        helper_identifier(physical)?
     ))
 }
 
-/// Emit one function over physical Lean types with its IR parameter order and
-/// return node.
+/// Choose the same Lean name for a physical helper's definition and uses.
 ///
-/// Callees must already be in scope. A helper returns only its value, so an
-/// assertion in its graph is rejected instead of being lost at the call site.
+/// Lean reserves `_root_`. Its replacement contains spaces, which
+/// [`identifier`] rejects in IR names, so another helper cannot collide with
+/// it.
+pub(super) fn helper_identifier(physical: &str) -> Result<String> {
+    if physical == "_root_" {
+        Ok("«xls helper _root_»".into())
+    } else {
+        identifier(physical)
+    }
+}
+
+/// Emit a helper under `Helpers` and resolve nested calls in the block
+/// namespace.
 fn write_helper(source: &mut String, namespace: &str, function: &ir::Fn) -> Result<()> {
-    write!(source, "def Helpers.{}", identifier(&function.name)?)?;
+    write!(source, "def Helpers.{}", helper_identifier(&function.name)?)?;
     for param in &function.params {
         write!(
             source,
@@ -448,13 +461,11 @@ pub(super) fn structure_header(name: &str) -> String {
     format!("structure {name} where\n  Constructors.mk ::\n")
 }
 
-/// Emit source fields under their public names. Lean puts its own eliminators
-/// next to the real structure, so only records with a competing field need a
-/// separate underlying type. Quoted names containing ':' cannot occur in BX
-/// or DSLX source.
+/// Declare a record in `XlsReadable` with source-named fields and
+/// root-qualified `Repr` deriving.
 pub(super) fn source_record(name: &str, fields: &[(String, String)]) -> Result<String> {
     // Source modules may declare their own type named Repr.
-    record_declaration(name, fields, Some("_root_.Repr"), &[])
+    record_declaration("XlsReadable", name, fields, Some("_root_.Repr"), &[])
 }
 
 /// Return the structure that owns the actual fields and constructor for this
@@ -467,13 +478,17 @@ pub(super) fn record_backing_name(name: &str, fields: &[(String, String)]) -> St
     }
 }
 
-/// Declare fields in source order and expose their original names as
-/// projections.
+/// Declare a Lean record and expose its fields in the supplied namespace.
 ///
-/// A colliding field requires a distinct backing structure and public
-/// accessors. Optional comments correspond by position to fields and must be
-/// safe on one Lean comment line.
+/// If a field conflicts with a Lean-generated member, the actual structure
+/// lives under a name containing a colon, which cannot occur in a BX or DSLX
+/// identifier. The public type is then an abbreviation with
+/// an explicit accessor for every field. Each accessor takes the fully
+/// qualified public type so an earlier accessor such as `Packet.Packet` cannot
+/// hide it. This form rejects `_root_` as a field because Lean reserves that
+/// declaration name.
 pub(super) fn record_declaration(
+    namespace: &str,
     name: &str,
     fields: &[(String, String)],
     derived_repr: Option<&str>,
@@ -495,9 +510,13 @@ pub(super) fn record_declaration(
     if backing != name {
         writeln!(out, "abbrev {name} := {backing}\n")?;
         for (field, _) in fields {
+            ensure!(
+                field != "«_root_»",
+                "cannot emit {namespace}.{name} field '_root_': Lean reserves this name for declarations, and this record needs a separate field accessor"
+            );
             writeln!(
                 out,
-                "@[simp] abbrev {name}.{field} (p : {name}) := {backing}.{} p",
+                "@[simp] abbrev {name}.{field} (p : _root_.{namespace}.{name}) := {backing}.{} p",
                 storage_field(field)
             )?;
         }
@@ -569,8 +588,10 @@ impl RecordFields {
     }
 }
 
-/// Declare fields in caller order, retaining names through Lean quotation.
+/// Emit a physical record in the block namespace, preserving IR field names and
+/// order.
 fn record_type<'a>(
+    namespace: &str,
     name: &str,
     fields: impl Iterator<Item = (&'a str, &'a Type)>,
 ) -> Result<String> {
@@ -582,7 +603,7 @@ fn record_type<'a>(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    record_declaration(name, &fields, Some("Repr"), &[])
+    record_declaration(namespace, name, &fields, Some("Repr"), &[])
 }
 
 /// Assemble a record from already rendered field identifiers and expressions.

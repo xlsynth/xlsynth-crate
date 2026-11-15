@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Translate nominal catalogue identities into Lean namespace components.
-//!
-//! BX types use the module that declared them. Checked DSLX types keep their
-//! full import subject, including dotted prefixes. Type references also account
-//! for the module and earlier binders in scope at the point of emission.
+//! Resolve source declarations and field types in their emitted Lean
+//! namespaces.
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use std::{collections::BTreeSet, fmt::Write};
 
 use super::{SourceType, identifier, lean, product_type};
@@ -65,6 +62,18 @@ pub(super) fn module_identifier(module: &str) -> Result<String> {
         write!(namespace, ".{}", identifier(component)?)?;
     }
     Ok(namespace)
+}
+
+/// Quote a source name for an explicit Lean declaration.
+///
+/// Lean reserves `_root_` even when quoted. Report the source module and
+/// declaration role so callers can identify the name that needs to change.
+pub(super) fn declaration_identifier(module: &str, name: &str, role: &str) -> Result<String> {
+    ensure!(
+        name != "_root_",
+        "cannot emit {role} '{module}::{name}': Lean reserves '_root_' as a declaration name"
+    );
+    identifier(name)
 }
 
 /// Choose a Lean type reference that resolves to the original source
@@ -127,11 +136,11 @@ pub(super) fn source_type_in(
     }
 }
 
-/// Write a struct in field order and return the name on which to derive
-/// instances.
+/// Emit a source struct and return the name used to derive its instances.
 ///
-/// Each earlier field is in scope in a later field's type, so a source field
-/// can force qualification of a type from the same module.
+/// Earlier fields can shadow names used in later field types. A field that
+/// conflicts with a Lean-generated member also requires a separate underlying
+/// structure, whose name is returned relative to the module.
 pub(super) fn write_struct(
     out: &mut String,
     bx_namespace: &str,
@@ -164,6 +173,12 @@ pub(super) fn write_struct(
         })
         .collect::<Result<Vec<_>>>()?;
     let name = identifier(local)?;
-    out.push_str(&lean::record_declaration(&name, &rendered, None, &[])?);
+    out.push_str(&lean::record_declaration(
+        &module_identifier(module)?,
+        &name,
+        &rendered,
+        None,
+        &[],
+    )?);
     Ok(lean::record_backing_name(&name, &rendered))
 }

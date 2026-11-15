@@ -272,8 +272,8 @@ example (q : State) (x : Input) : observe q x = (q.stored, x.src.item.zebra) := 
     Ok(())
 }
 
-// Verifies: Lean can execute BX and DSLX field projections named recOn.
-// Catches: A generated member hiding a field or a field hiding a type name.
+// Verifies: BX and imported field names select the declared positions.
+// Catches: A Packet field hiding its type in later accessors.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_and_imported_dslx_fields_keep_their_source_names() -> Result<()> {
@@ -281,7 +281,7 @@ fn bx_and_imported_dslx_fields_keep_their_source_names() -> Result<()> {
     fs::write(
         dir.path().join("field0.x"),
         r#"
-pub struct Packet { recOn: u8, valid: bool }
+pub struct Packet { Packet: u8, recOn: u8, valid: bool }
 pub fn read(p: Packet) -> u8 { p.recOn }
 "#,
     )?;
@@ -312,13 +312,16 @@ block monitor(clk, p: field0::Packet, other: Packet, report: Report) -> Result {
         r#"
 import ReadableCorrespondence
 open XlsReadable
-def packet : XLS.field0.Packet := ⟨41, true⟩
-#guard packet.recOn == 41 && packet.valid
-example (p : XLS.field0.Packet) : (match p with | ⟨n, _⟩ => n) = p.recOn := by cases p; rfl
+open XLS.field0 (Packet)
+def packet : Packet := ⟨13, 41, true⟩
+#guard packet.Packet == 13 && packet.recOn == 41 && packet.valid
+example (p : Packet) : (p.Packet, p.recOn) = (Packet.Packet p, Packet.recOn p) := rfl
+example : Packet.recOn ⟨13, 41, true⟩ = 41 := rfl
+example (p : Packet) : (match p with | ⟨_, n, _⟩ => n) = p.recOn := by cases p; rfl
 example (q : State) (x : Input) :
     observe q x = (x.p.recOn, x.other.result.seen, x.report.result.seen) := rfl
 example (q : XlsBlock.State) (x : XlsBlock.Input) :
-    (XlsBlock.observe q x).recOn = x.p.1 := rfl
+    (XlsBlock.observe q x).recOn = x.p.2.1 := rfl
 "#
         .into(),
     ));

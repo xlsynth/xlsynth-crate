@@ -52,18 +52,22 @@ fn tuple_value(elements: impl DoubleEndedIterator<Item = String>) -> String {
     })
 }
 
-/// Use the same absolute name in definitions, calls and proofs. Compiler
-/// functions such as lowered loop bodies have no DSLX declaration to name.
+/// Return the absolute Lean name shared by a helper's definition, calls and
+/// proofs.
+///
+/// A checked DSLX function keeps its source name, so a reserved declaration
+/// name is an error. Helpers without a source name, such as lowered loop
+/// bodies, use an emitter-chosen name in `XlsReadable.Helpers`.
 fn helper_path(signature: &HelperSignature, symbol: &str) -> Result<String> {
     match &signature.source_name {
         Some((module, local)) => Ok(format!(
             "_root_.{}.{}",
             module_identifier(module)?,
-            identifier(local)?
+            source_names::declaration_identifier(module, local, "function")?
         )),
         None => Ok(format!(
             "_root_.XlsReadable.Helpers.{}",
-            identifier(symbol)?
+            lean::helper_identifier(symbol)?
         )),
     }
 }
@@ -644,8 +648,8 @@ impl<'a> Presentation<'a> {
     /// Emit source declarations, total codecs, and codec round-trip proof
     /// source.
     ///
-    /// Check name uniqueness after translating BX library names, at the same
-    /// point that Lean identifiers are chosen for the declarations.
+    /// Each type keeps its name in its declaring module. A source type named
+    /// `_root_` is rejected before its declaration is emitted.
     fn types_module(&self) -> Result<String> {
         let mut out = String::from("import Std\n\n");
         // Deriving beside Packet would occupy its module's source name
@@ -656,7 +660,7 @@ impl<'a> Presentation<'a> {
         for declaration in self.declarations {
             let (module, local) = declaring_name(&self.bx_namespace, declaration.name());
             let namespace = module_identifier(module)?;
-            let name = identifier(local)?;
+            let name = source_names::declaration_identifier(module, local, "type")?;
             writeln!(out, "namespace {namespace}\n")?;
             let derived = match declaration {
                 TypeDecl::Enum { name: original, .. } => {
@@ -1166,10 +1170,8 @@ impl<'a> Presentation<'a> {
     ///
     /// Raw emission has already established single writes and supported resets.
     /// All equations read old state, and reset takes precedence over load
-    /// enable.
-    ///
-    /// The block's source-qualified name abbreviates the evaluator. Checked
-    /// DSLX helpers are also callable under their declaring module.
+    /// enable. The selected BX block's source name becomes an abbreviation
+    /// for `XlsReadable.eval` in its declaring module.
     fn executable(&self) -> Result<String> {
         let block = self.block;
         let mut out = format!(
@@ -1375,7 +1377,7 @@ def eval (q : State) (x : Input) : Evaluation :=
             out,
             "\nabbrev {}.{} := _root_.XlsReadable.eval",
             module_identifier(&self.bx_namespace)?,
-            identifier(&block.graph.name)?
+            source_names::declaration_identifier(&self.bx_namespace, &block.graph.name, "block")?
         )?;
         Ok(out)
     }
