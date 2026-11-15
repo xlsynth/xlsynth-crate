@@ -629,8 +629,8 @@ block router(clk, fresh: bool, incoming: u2, a: bool, b: bool, c: bool) -> bool 
     }
 }
 
-// Verifies: Imported parametric helpers typecheck and execute a step in Lean.
-// Catches: Helper instances sharing a name or accepting the wrong record.
+// Verifies: Specialized imports accept the caller's Packet type.
+// Catches: Resolving Packet in the helper module instead of the caller.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_parametric_helpers_preserve_instances() {
@@ -686,6 +686,7 @@ private def fallback : XlsSource.«packets::Fallback<5>» := {value := 17, enabl
 #guard (Helpers.«packets::choose<6>» (packet := large) (fallback := 41)).value == 37
 #guard (Helpers.«packets::bias<1>» (x := 0), Helpers.«packets::bias<2>» (x := 0)) == (1, 2)
 #guard Helpers.«packets::passthrough<(u8,bool)>» (x := (13, true)) == ((13 : BitVec 8), true)
+#guard (Helpers.«packets::passthrough<Packet>» (x := { current := 7 })).current == 7
 #guard (step { last := 7 } stimulus).last == 57
 "#
         .into(),
