@@ -122,8 +122,9 @@ The readable interface preserves unsigned bits, Boolean fields, positional
 tuples and named BX structs. A struct result exposes its fields as output
 ports in BX declaration order. One output becomes the value of `observe q x`;
 several outputs become a Lean product in port order. The register and port
-types come from checked declarations, and every equation comes from the linked
-block. Internal bindings can be renamed without changing these public fields.
+types come from checked declarations. The equations come from the linked
+block and the IR functions it calls. Internal bindings can be renamed without
+changing these public fields.
 
 `LeanBlockBundle::files` contains these five files in dependency order:
 
@@ -140,9 +141,10 @@ Both evaluators translate the same IR. If they make the same translation
 error, their results can still agree. Comparing either model with XLS
 execution is a separate check.
 
-To trace an unexpected result, find the IR node ID in the comments on the
-equations in `Generated.lean` and `ReadableGenerated.lean`. If the two values
-have different representations, `ReadableTypes.lean` defines the Boolean and
+For a block equation, look for its IR node ID in the comments in
+`Generated.lean` and `ReadableGenerated.lean`. For a helper equation, follow
+the call to the generated function definition. If the two values have
+different representations, `ReadableTypes.lean` defines the Boolean and
 named-type conversions. `ReadableRepresentation.lean` shows how each block
 input, output and register maps between the two models.
 

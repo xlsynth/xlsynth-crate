@@ -7,12 +7,11 @@
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
-use rand::{RngCore, SeedableRng, rngs::StdRng};
+use rand::{SeedableRng, rngs::StdRng};
 use xlsynth_ir_value::IrValue;
 use xlsynth_lean::LeanEvaluator;
-use xlsynth_lean_fuzz::lean_block_options;
+use xlsynth_lean_fuzz::generate_lean_block;
 use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
-use xlsynth_pir::ir_random::{DepletableBytes, StopPolicy, generate_block_package};
 use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 
 /// Shares the compiled Lean support modules across fuzz cases in this process.
@@ -25,24 +24,7 @@ static EVALUATOR: OnceLock<LeanEvaluator> = OnceLock::new();
 /// reads the register.
 fn check_case(data: &[u8]) {
     let mut rng = StdRng::from_seed(*blake3::hash(data).as_bytes());
-    // The generator consumes its wiring header before it builds any logic.
-    // Give short corpus entries a reproducible tail so an empty-corpus run
-    // can exercise different register layouts and operations immediately.
-    let mut padded = [0u8; 512];
-    let graph_bytes = if data.len() < padded.len() {
-        padded[..data.len()].copy_from_slice(data);
-        rng.fill_bytes(&mut padded[data.len()..]);
-        &padded[..]
-    } else {
-        data
-    };
-    let package = generate_block_package(
-        &mut DepletableBytes::new(graph_bytes),
-        &lean_block_options(),
-        StopPolicy::WhenEntropyDepleted,
-    )
-    .expect("bounded block generation")
-    .package;
+    let package = generate_lean_block(data, &mut rng);
     let block = package.get_top_block().expect("generated top block");
     let reset = block.reset.as_ref().expect("required register reset");
     let reset_index = block.input_ports().position(|p| p == reset.port).unwrap();

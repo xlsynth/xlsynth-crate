@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use xlsynth_pir::desugar_extensions::desugar_extensions_in_graph;
 use xlsynth_pir::ir::{self, MemberType, PackageMember};
 
@@ -27,9 +28,13 @@ pub(crate) struct BlockContext<'a> {
     pub(crate) file_table: &'a ir::FileTable,
     pub(crate) graph: Cow<'a, ir::Block>,
     source_block: &'a ir::Block,
+    /// Functions reached through `invoke`, each listed once after its callees.
+    pub(crate) helpers: Vec<&'a ir::Fn>,
 }
 
 impl<'a> BlockContext<'a> {
+    /// Lower block extensions and resolve calls in the package that owns the
+    /// block.
     pub(crate) fn new(package: &'a ir::Package, graph: &'a ir::Block) -> Result<Self> {
         ensure!(
             package
@@ -56,6 +61,7 @@ impl<'a> BlockContext<'a> {
             file_table: &package.file_table,
             graph: normalized,
             source_block: graph,
+            helpers: reachable_helpers(package, graph)?,
         })
     }
 
@@ -68,6 +74,52 @@ impl<'a> BlockContext<'a> {
             &self.graph.graph
         }
     }
+}
+
+/// Collect the functions invoked directly or transitively by the block in Lean
+/// declaration order.
+///
+/// Scan every node, including disconnected calls. A missing callee or a cycle
+/// prevents emission of a sequence of ordinary Lean definitions.
+fn reachable_helpers<'a>(package: &'a ir::Package, block: &ir::Block) -> Result<Vec<&'a ir::Fn>> {
+    /// Append a callee after visiting its own calls and skip already emitted
+    /// definitions.
+    fn visit<'a>(
+        package: &'a ir::Package,
+        graph: &ir::NodeGraph,
+        visiting: &mut BTreeSet<&'a str>,
+        emitted: &mut BTreeSet<&'a str>,
+        result: &mut Vec<&'a ir::Fn>,
+    ) -> Result<()> {
+        for node in &graph.nodes {
+            let ir::NodePayload::Invoke { to_apply, .. } = &node.payload else {
+                continue;
+            };
+            if !emitted.contains(to_apply.as_str()) {
+                let callee = package.get_fn(to_apply).with_context(|| {
+                    format!("unknown function {to_apply} invoked by {}", graph.name)
+                })?;
+                ensure!(
+                    visiting.insert(&callee.name),
+                    "recursive invoke of {to_apply}"
+                );
+                visit(package, callee, visiting, emitted, result)?;
+                visiting.remove(callee.name.as_str());
+                emitted.insert(&callee.name);
+                result.push(callee);
+            }
+        }
+        Ok(())
+    }
+    let mut result = Vec::new();
+    visit(
+        package,
+        block,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+        &mut result,
+    )?;
+    Ok(result)
 }
 
 /// Select a block from a typed package.
