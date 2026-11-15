@@ -767,6 +767,8 @@ example (p : XlsSource.«machine::Packet<3,6,8>») : Helpers.«machine::other» 
     );
 }
 
+// Verifies: Lean matches XLS for five-bit negation shifted by 0, 1, 5 or 2^60.
+// Catches: Wrong modular negation or truncating the shift count.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn neg_and_left_shift_match_xls() {
