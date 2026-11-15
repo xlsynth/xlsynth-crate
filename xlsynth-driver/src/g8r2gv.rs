@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod adaptive;
+
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -13,7 +15,9 @@ use xlsynth_g8r::aig::SequentialGateFn;
 use xlsynth_g8r::liberty::io_defaults::{
     default_output_load, default_output_load_ff, load_ff_in_library_units, resolve_reference_buffer,
 };
-use xlsynth_g8r::liberty::load::{load_library_from_path, load_library_with_timing_data_from_path};
+use xlsynth_g8r::liberty::load::{
+    TimingLibrarySnapshot, load_library_from_path, load_library_with_timing_data_from_path,
+};
 use xlsynth_g8r::liberty_model::Library;
 use xlsynth_g8r::netlist::abc::{
     AbcIoConstraints, AbcMappedDesign, AbcMappingContext, AbcMappingOptions, AbcRunDiagnostics,
@@ -23,6 +27,7 @@ use xlsynth_g8r::netlist::fanout_opt::FanoutOptimizationOptions;
 use xlsynth_g8r::netlist::io::ParsedNetlist;
 use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
 use xlsynth_g8r::netlist::registered_opt::RegisteredCandidateSelection;
+use xlsynth_g8r::netlist::resize::adaptive::AdaptiveResizeOptions;
 use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
 use xlsynth_g8r::netlist::sequential_mapping::{
     NativeMappingSchedule, SequentialMappingOptions, map_sequential_with_policy,
@@ -31,6 +36,7 @@ use xlsynth_g8r::netlist::sta::StaOptions;
 use xlsynth_g8r::techmap::delay::DelayMappingOptions;
 use xlsynth_g8r::techmap::postprocess::{CoverStrategy, PostMappingOptions};
 
+use crate::gv_resize::{recovery_cell_args, recovery_cell_options};
 #[cfg(unix)]
 use crate::mapped_netlist_output::same_unix_file;
 use crate::mapped_netlist_output::{
@@ -73,18 +79,25 @@ pub(crate) fn add_mapping_args(
             .help("Optimize native data fanout with the assembled register loads (default: on for delay, off for area)"))
         .arg(Arg::new("registered-candidates").long("registered-candidates")
             .value_parser(clap::value_parser!(RegisteredCandidates))
-            .help("Choose native registered topology proposals (registered delay default: timing-cones; otherwise legacy)"))
+            .help("Choose native registered topology proposals (adaptive default: timing-cones; otherwise legacy)"))
         .arg(Arg::new("refinement-report").long("refinement-report").value_name("PATH")
             .help("Write optimization and tree-refinement measurements for the selected native cover as JSON"))
+        .arg(Arg::new("resize-liberty-proto").long("resize-liberty-proto").value_name("PATH").value_parser(clap::value_parser!(PathBuf))
+            .help("Timing library for the adaptive sizing passes (default: --liberty-proto)"))
+        .arg(Arg::new("adaptive-resize-report").long("adaptive-resize-report").value_name("PATH")
+            .help("Write sizing checkpoints and stop reasons to JSON. Gate hashes cover Verilog at each epoch; output_sha256 covers the emitted Verilog or protobuf bytes"))
         .arg(Arg::new("area-recovery").long("area-recovery").value_parser(clap::value_parser!(bool))
             .help("Recover native mapped area using measured timing (default: on for delay, off for area)"))
+        .args(recovery_cell_args())
+        .mut_arg("timing-cell-menu", |arg| arg.help("Cell shortlist for timing search (default: nearest-area while mapping; delay-bands-fastest-first during adaptive sizing)"))
+        .mut_arg("recovery-cell-menu", |arg| arg.help("Cell shortlist for area recovery (default: electrical-min-area for the adaptive flow; otherwise area)"))
         .arg(Arg::new("g8r-resize").long("g8r-resize").value_parser(clap::value_parser!(bool))
             .default_value_if("mapper", "abc", abc_resize)
             .default_value_if("strategy", "delay", "true")
             .default_value("false").hide_default_value(true)
             .help(format!("Resize the assembled logic and compatible flops (default: true for delay, false for area, {abc_resize} for ABC)")))
         .arg(Arg::new("primary-input-transition").long("primary-input-transition").value_parser(clap::value_parser!(f64))
-            .help("Primary input slew in library time units for native mapping and resizing (default: 0.01)"))
+            .help("Primary input slew in --liberty-proto time units for native mapping and resizing (default: 0.01)"))
         .arg(Arg::new("liberty").long("liberty").value_name("PATH").required_if_eq("mapper", "abc").action(ArgAction::Append)
             .help("Raw uncompressed Liberty file for ABC; repeat in loading order. The first one or two files must provide the usable combinational library"))
         .arg(Arg::new("liberty-proto").long("liberty-proto").value_name("PATH").required(true)
@@ -251,7 +264,17 @@ fn check_sidecar_outputs(
     output_path: &Path,
     netlist: &NetlistOutput,
 ) -> anyhow::Result<()> {
+    if let (Some(refinement), Some(sizing)) = (
+        matches.get_one::<String>("refinement-report"),
+        matches.get_one::<String>("adaptive-resize-report"),
+    ) {
+        anyhow::ensure!(
+            !output_paths_alias(Path::new(refinement), Path::new(sizing))?,
+            "--refinement-report and --adaptive-resize-report must name different destinations"
+        );
+    }
     for flag in [
+        "adaptive-resize-report",
         "diagnostics-out",
         "abc-stdout-out",
         "abc-stderr-out",
@@ -348,6 +371,8 @@ pub(crate) fn map_design(
     if !native
         && let Some(flag) = [
             "strategy",
+            "adaptive-resize-report",
+            "resize-liberty-proto",
             "fanout-opt",
             "area-recovery",
             "registered-candidates",
@@ -381,23 +406,23 @@ pub(crate) fn map_design(
     );
     let design = crate::g8r_cli::apply_netlist_options(matches, load_design()?)
         .map_err(anyhow::Error::msg)?;
-    let registered_delay = delay
-        && resize
-        && (!design.registers.is_empty()
-            || matches.get_flag("flop-inputs")
-            || matches.get_flag("flop-outputs"));
-    let refine_trees = registered_delay && fanout;
-    anyhow::ensure!(
-        refine_trees || !matches.contains_id("refinement-report"),
-        "--refinement-report requires buffer-tree refinement"
-    );
-    let library_path = matches.get_one::<String>("liberty-proto").unwrap();
-    let library = if needs_timing {
-        load_library_with_timing_data_from_path(Path::new(library_path))
-            .context("mapping/resizing requires a timing-enabled --liberty-proto")?
+    let (adaptive, refine_trees) = adaptive::select(matches, &design, delay && resize, fanout)?;
+    let library_path = Path::new(matches.get_one::<String>("liberty-proto").unwrap());
+    let (owned_library, owned_digest) = if adaptive {
+        let snapshot = TimingLibrarySnapshot::from_path(library_path)
+            .context("mapping/resizing requires a timing-enabled --liberty-proto")?;
+        (snapshot.library, Some(snapshot.sha256))
+    } else if needs_timing {
+        (
+            load_library_with_timing_data_from_path(library_path)
+                .context("mapping/resizing requires a timing-enabled --liberty-proto")?,
+            None,
+        )
     } else {
-        load_library_from_path(Path::new(library_path))?
+        (load_library_from_path(library_path)?, None)
     };
+    let library = &owned_library;
+    let digest = owned_digest.as_deref();
     let timing = if needs_timing {
         let defaults = StaOptions::default();
         let transition = matches
@@ -409,8 +434,8 @@ pub(crate) fn map_design(
             "primary input transition must be finite and nonnegative"
         );
         let load = match matches.get_one::<f64>("output-load-ff") {
-            Some(ff) => load_ff_in_library_units(&library, *ff),
-            None => default_output_load(&library),
+            Some(ff) => load_ff_in_library_units(library, *ff),
+            None => default_output_load(library),
         }
         .map_err(anyhow::Error::msg)?;
         StaOptions {
@@ -439,10 +464,32 @@ pub(crate) fn map_design(
     if let Some(cell) = matches.get_one::<String>("register-cell") {
         sequential_options.register_selection = RegisterCellSelection::FixedCell(cell.clone());
     }
+    let mut menus = recovery_cell_options(matches);
+    if adaptive {
+        let defaults = AdaptiveResizeOptions::default();
+        if !matches.contains_id("recovery-cell-menu") {
+            menus.recovery_cell_menu = defaults.recovery_cell_menu;
+        }
+        menus
+            .recovery_cell_limit
+            .get_or_insert(defaults.recovery_cell_limit);
+    }
+    let finish = if adaptive {
+        Some(adaptive::Finish::load(
+            matches,
+            library,
+            library_path,
+            digest.expect("captured timing library digest"),
+            timing,
+            &menus,
+        )?)
+    } else {
+        None
+    };
     let sizing = resize.then(|| ResizeOptions {
         timing,
         resize_registers: matches.get_one::<String>("register-cell").is_none(),
-        ..Default::default()
+        ..menus.clone()
     });
     let abc_context;
     let (mut mapped, diagnostics, native_report, library) = if native {
@@ -473,7 +520,7 @@ pub(crate) fn map_design(
             .get_one::<RegisteredCandidates>("registered-candidates")
         {
             Some(RegisteredCandidates::TimingCones) => RegisteredCandidateSelection::TimingCones,
-            None if registered_delay => RegisteredCandidateSelection::TimingCones,
+            None if adaptive => RegisteredCandidateSelection::TimingCones,
             Some(RegisteredCandidates::Legacy) | None => RegisteredCandidateSelection::Legacy,
         };
         let schedule = NativeMappingSchedule {
@@ -482,18 +529,18 @@ pub(crate) fn map_design(
         };
         let result = map_sequential_with_policy(
             &design,
-            &library,
+            library,
             &sequential_options,
             strategy,
             &post,
             sizing.as_ref(),
             schedule,
         )?;
-        (result.netlist, None, result.refinement, &library)
+        (result.netlist, None, result.refinement, library)
     } else {
         let mapped;
         (mapped, abc_context) =
-            map_with_abc(matches, &design, library, &sequential_options, format)
+            map_with_abc(matches, &design, owned_library, &sequential_options, format)
                 .map_err(anyhow::Error::msg)?;
         (
             mapped.netlist,
@@ -515,7 +562,11 @@ pub(crate) fn map_design(
         resize_netlist(module, nets, interner, library, sizing)
             .context("resizing assembled netlist")?;
     }
-    let bytes = format.encode(&mapped)?;
+    let (bytes, adaptive_report) = if let Some(finish) = finish {
+        finish.run(&mapped, library, format)?
+    } else {
+        (format.encode(&mapped)?, None)
+    };
     let netlist = NetlistOutput::open(output_path, pb_stderr.as_ref())
         .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))?;
     check_sidecar_outputs(matches, output_path, &netlist)?;
@@ -529,6 +580,13 @@ pub(crate) fn map_design(
         json.push(b'\n');
         write_sidecar(Path::new(path), &json, "refinement-report", &netlist)
             .with_context(|| format!("writing native refinement report '{path}'"))?;
+    }
+    if let (Some(path), Some(json)) = (
+        matches.get_one::<String>("adaptive-resize-report"),
+        adaptive_report,
+    ) {
+        write_sidecar(Path::new(path), &json, "adaptive-resize-report", &netlist)
+            .with_context(|| format!("writing adaptive resize report '{path}'"))?;
     }
     if let Some(diagnostics) = diagnostics {
         write_abc_sidecars(matches, &netlist, &diagnostics)?;
@@ -589,6 +647,58 @@ fn map_with_abc(
 mod tests {
     use super::{NetlistOutput, output_paths_alias, write_sidecar};
     use std::fs;
+
+    use xlsynth_g8r::netlist::resize::{RecoveryCellMenu, TimingCellMenu};
+
+    #[test]
+    fn final_sizing_accepts_recovery_menu_for_native_and_abc() -> anyhow::Result<()> {
+        for mapper_args in [vec![], vec!["--mapper=abc", "--liberty=cells.lib"]] {
+            let mut args = vec!["g8r2gv", "input", "--liberty-proto=cells.proto"];
+            args.extend(mapper_args);
+            let parsed = super::command().try_get_matches_from(&args)?;
+            let options = super::recovery_cell_options(&parsed);
+            assert_eq!(options.recovery_cell_menu, RecoveryCellMenu::Area);
+            assert_eq!(options.timing_cell_menu, TimingCellMenu::NearestArea);
+            assert_eq!(options.recovery_cell_limit, None);
+            for (recovery, timing, expected_recovery, expected_timing) in [
+                (
+                    "electrical-min-area",
+                    "nearest-area",
+                    RecoveryCellMenu::ElectricalMinArea,
+                    TimingCellMenu::NearestArea,
+                ),
+                (
+                    "electrical-min-area",
+                    "delay-bands-fastest-first",
+                    RecoveryCellMenu::ElectricalMinArea,
+                    TimingCellMenu::DelayBandsFastestFirst,
+                ),
+            ] {
+                let recovery_flag = format!("--recovery-cell-menu={recovery}");
+                let timing_flag = format!("--timing-cell-menu={timing}");
+                let mut policy_args = args.clone();
+                policy_args.extend([
+                    recovery_flag.as_str(),
+                    timing_flag.as_str(),
+                    "--recovery-cell-limit=2",
+                ]);
+                let parsed = super::command().try_get_matches_from(policy_args)?;
+                let options = super::recovery_cell_options(&parsed);
+                assert_eq!(options.recovery_cell_menu, expected_recovery);
+                assert_eq!(options.timing_cell_menu, expected_timing);
+                assert_eq!(options.recovery_cell_limit, Some(2));
+            }
+            args.push("--monotone-recovery-checkpoint");
+            assert_eq!(
+                super::command()
+                    .try_get_matches_from(args)
+                    .unwrap_err()
+                    .kind(),
+                clap::error::ErrorKind::UnknownArgument
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn final_resize_follows_native_strategy_unless_overridden() -> anyhow::Result<()> {

@@ -74,9 +74,7 @@ impl SequentialMappingCatalog {
             None
         };
         validate_names(&design)?;
-        if library.cells.iter().any(|c| c.name == design.name) {
-            return Err("top module name conflicts with a Liberty cell name".into());
-        }
+        crate::netlist::mapped::validate_module_name(&design.name, library)?;
         let ports = RegisterBoundaryPorts::new(&design);
         let gates = self.plan_clock_gates(library, &design, sequential, &ports)?;
         let registers = self.registers.map_registers_with_data(
