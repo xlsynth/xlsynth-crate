@@ -1313,6 +1313,17 @@ impl Hash for StructDef {
 }
 
 impl StructDef {
+    /// Returns the module that declares this struct.
+    ///
+    /// Use this owner to qualify the struct name when resolving an imported
+    /// type. Another module can declare a struct with the same identifier.
+    pub fn get_owner_module(&self) -> Module {
+        Module {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_struct_def_get_module(self.ptr) },
+        }
+    }
+
     pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_struct_def_to_string(self.ptr)) }
     }
@@ -2672,6 +2683,24 @@ impl std::fmt::Display for Type {
 }
 
 impl Type {
+    /// Returns the checked element types in declaration order for a tuple.
+    ///
+    /// Returns `Some` with an empty vector for `()` and `None` for other
+    /// kinds of type. This also works when a type parameter resolves to a
+    /// tuple without an explicit tuple annotation.
+    pub fn get_tuple_members(&self) -> Option<Vec<Type>> {
+        unsafe {
+            sys::xls_dslx_type_is_tuple(self.ptr).then(|| {
+                (0..sys::xls_dslx_type_tuple_get_member_count(self.ptr))
+                    .map(|i| Type {
+                        parent: self.parent.clone(),
+                        ptr: sys::xls_dslx_type_tuple_get_member_type(self.ptr, i).cast_mut(),
+                    })
+                    .collect()
+            })
+        }
+    }
+
     pub fn to_string(&self) -> Result<String, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = std::ptr::null_mut();
@@ -2772,6 +2801,29 @@ impl Type {
             parent: self.parent.clone(),
             ptr,
         })
+    }
+
+    /// Returns the evaluated value bindings of a checked struct type.
+    ///
+    /// The environment includes defaults and bindings unused by the fields.
+    /// Such bindings can distinguish two struct types with identical fields.
+    /// A non-parametric struct has an empty environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-struct type or when a parametric struct
+    /// lacks a complete set of checked value bindings, including when it has
+    /// a type-valued parameter.
+    pub fn get_struct_parametric_env(&self) -> Result<ParametricEnv, XlsynthError> {
+        let mut error = std::ptr::null_mut();
+        let mut env = std::ptr::null_mut();
+        unsafe {
+            if sys::xls_dslx_type_get_struct_parametric_env(self.ptr, &mut error, &mut env) {
+                Ok(ParametricEnv { ptr: env })
+            } else {
+                Err(XlsynthError(c_str_to_rust(error)))
+            }
+        }
     }
 
     pub fn get_struct_member_count(&self) -> usize {
