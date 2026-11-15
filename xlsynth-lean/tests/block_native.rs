@@ -959,6 +959,8 @@ private def clock (index : BitVec 64) :=
     check_bundle(bundle, "dynamic bit slice and update");
 }
 
+// Verifies: Lean matches XLS encode for zero, one, or two changed mask bits.
+// Catches: selecting just one index when bits 2 and 4 change together.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn encode_changed_bits_matches_xls_for_multihot_masks() {
