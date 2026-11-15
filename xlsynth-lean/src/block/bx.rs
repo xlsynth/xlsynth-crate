@@ -42,6 +42,15 @@ pub fn compile_bx(
 }
 
 impl CompiledBx {
+    /// Borrow the warnings from checking the BX source that produced this
+    /// package.
+    ///
+    /// Callers that treat warnings as errors can inspect them before emitting
+    /// or writing the model.
+    pub fn warnings(&self) -> &[xlsynth_bx::BxWarning] {
+        self.checked.warnings()
+    }
+
     /// The exact lowered package used for both raw and readable equations.
     pub fn package(&self) -> &ir::Package {
         &self.package

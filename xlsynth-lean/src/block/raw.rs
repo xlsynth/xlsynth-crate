@@ -39,8 +39,8 @@ pub struct LeanBlockBundle {
 /// Return an error if the block uses an unsupported operation.
 ///
 /// Pass a verified block borrowed from `package`, whose file table supplies
-/// source locations in diagnostics and generated comments. For saved IR, run
-/// native XLS verification and typed PIR validation on the same input.
+/// source locations in diagnostics and generated comments. For saved IR, use
+/// [`xlsynth_pir::ir_parser::Parser::parse_and_validate_package`].
 /// Revalidate the package if you modify it before emission.
 ///
 /// `State`, `Input`, and `Output` fields keep source names and exact widths.
