@@ -91,12 +91,13 @@ pub(super) fn emit(
 }
 
 impl<'a> Presentation<'a> {
-    /// Allocate local names and recover source types for one block or helper
-    /// graph.
+    /// Allocate noncapturing names and infer types from checked register
+    /// bindings.
     ///
-    /// One-bit nodes default to `Bool`. Checked interfaces supply argument
-    /// and destination types first, so a later traversal in dependency order
-    /// can recover named fields through array indices and tuple projections.
+    /// One-bit nodes default to `Bool`. Nominal types come from declarations
+    /// and their uses, such as reads, projections and write destinations.
+    /// A counted loop's signature ties the initial value and each iteration's
+    /// result to one accumulator type and supplies the types of its captures.
     fn new(
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
@@ -550,14 +551,14 @@ impl<'a> Presentation<'a> {
     /// representation.
     ///
     /// Callers supply contexts for the same graph value, so their shapes agree.
+    /// Aliases of the same Lean type need no conversion, even inside tuples
+    /// and arrays. Distinct named records with the same shape still use codecs.
     fn coerce(
         &self,
         from: Option<&SourceType>,
         to: Option<&SourceType>,
         value: &str,
     ) -> Result<String> {
-        // A Lean abbreviation and its target already have the same type,
-        // including underneath Vector and Prod. Keep nominal types distinct.
         let same_type = match (from, to) {
             (Some(from), Some(to)) => {
                 from == to
@@ -863,8 +864,9 @@ impl<'a> Presentation<'a> {
     /// Render source-shaped equations where type context supports that
     /// spelling.
     ///
-    /// A typed index preserves the element's source fields and clamps an
-    /// out-of-range read to the last element of that dimension.
+    /// A counted loop with a readable body passes its captured arguments at
+    /// their declared types and leaves the counter and accumulator to the fold.
+    ///
     /// Other operations reuse the raw operator translation with explicit
     /// codecs; the generated readable evaluator never delegates to the raw
     /// evaluator.
@@ -1499,12 +1501,17 @@ end XlsReadable
         }
     }
 
+    /// Visit the evaluation graph and reachable helpers to collect proof rules
+    /// for both.
     fn proof_graphs(&self) -> impl Iterator<Item = &ir::NodeGraph> {
         std::iter::once(self.graph).chain(self.block.helpers.iter().map(|f| &f.graph))
     }
 
-    /// Distribute only codecs and projections. Arbitrary functions could move
-    /// nested conditionals or array reads through each other.
+    /// Collect the codecs and projections that proofs can move across
+    /// conditionals and reads.
+    ///
+    /// Restricting the rule to these functions avoids moving unrelated nested
+    /// conditionals and reads through one another.
     fn projection_functions(&self) -> Result<BTreeSet<String>> {
         let mut functions = BTreeSet::from([
             "XlsCodec.encodeBool".to_owned(),
@@ -1531,10 +1538,10 @@ end XlsReadable
     /// Emit proofs relating readable and raw evaluation for arbitrary physical
     /// state.
     ///
-    /// Structural rewrites keep codecs intact until round trips cancel, then
-    /// unfold enum encoders. Indexed graphs can also move a field projection
-    /// across a clamped read by mapping it over the vector. Lean must check
-    /// the emitted proofs to establish agreement between the two models.
+    /// When a counted loop has a readable body, emit a proof by induction on
+    /// the trip count. Otherwise normalize the two evaluations directly,
+    /// preserving codec calls until round trips cancel. Lean must check the
+    /// resulting proof. Agreement with XLS execution requires a separate check.
     fn correspondence(&self) -> Result<String> {
         if self
             .block
@@ -1724,6 +1731,7 @@ end XlsReadable
     }
 }
 
+/// Decide whether the proof for this graph may need to rewrite an indexed read.
 fn has_array_index(graph: &ir::NodeGraph) -> bool {
     graph
         .nodes
@@ -1731,6 +1739,8 @@ fn has_array_index(graph: &ir::NodeGraph) -> bool {
         .any(|node| matches!(node.payload, NodePayload::ArrayIndex { .. }))
 }
 
+/// Emit a tactic that maps each projection over the vector before comparing
+/// indexed fields.
 fn indexed_projection_simp(functions: &BTreeSet<String>) -> String {
     let rules = functions
         .iter()
@@ -1742,12 +1752,15 @@ fn indexed_projection_simp(functions: &BTreeSet<String>) -> String {
     )
 }
 
-// Both correspondence strategies use these laws, but apply them in different
-// orders.
+/// Push boolean encoding into the branches of a conditional.
 const BOOL_ENCODE_ITE: &str = "apply_ite XlsCodec.encodeBool";
+/// Cancel boolean codecs in either direction.
 const BOOL_ROUND_TRIP_RULES: [&str; 2] =
     ["XlsCodec.decode_encodeBool", "XlsCodec.encode_decodeBool"];
+/// Distribute product projections and vector maps over a conditional.
 const PROJECTION_ITE_RULES: [&str; 3] = ["prod_fst_ite", "prod_snd_ite", "vector_map_ite"];
+/// Normalize IR reads and updates to Lean vector operations, then simplify
+/// maps.
 const VECTOR_MAP_RULES: [&str; 7] = [
     "_root_.XlsynthLean.IR.arrayIndex_eq_getD_back",
     "_root_.XlsynthLean.IR.arrayModify_eq_setIfInBounds",
@@ -1758,6 +1771,7 @@ const VECTOR_MAP_RULES: [&str; 7] = [
     "Vector.map_id'",
 ];
 
+/// Name both inverse laws for the codec of a Lean source declaration.
 fn codec_round_trip_rules(name: &str) -> [String; 2] {
     [
         format!("XlsCodec.{name}.encode_decode"),

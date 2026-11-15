@@ -520,11 +520,8 @@ block tags(clk, a: u2, b: u2, c: u2, d: u2, e: u2, f: u2, g: u2, h: u2, i: u2, j
     check_bundle(bundle, "ten independent enum inputs");
 }
 
-/// Build the readable BX model and an XLS interpreter reference from the same
-/// DSLX source.
-///
-/// The fixture must define `machine` in `machine.x` to supply the reference
-/// function.
+/// Compile the block and its DSLX reference function for comparing Lean with
+/// the XLS interpreter.
 fn compile_lean_and_xls_machine(
     bx: &str,
     source: &str,
@@ -533,6 +530,8 @@ fn compile_lean_and_xls_machine(
     Ok((bundle, xls_machine(source)?))
 }
 
+/// Compile a fixture as `machine.x` and look up its `machine` entry point for
+/// XLS interpretation.
 fn xls_machine(source: &str) -> Result<xlsynth::IrFunction> {
     let package = xlsynth::convert_dslx_to_ir(source, Path::new("machine.x"), &Default::default())
         .context("convert DSLX to XLS IR")?;
@@ -542,8 +541,8 @@ fn xls_machine(source: &str) -> Result<xlsynth::IrFunction> {
         .context("look up __machine__machine in XLS IR")
 }
 
-// Verifies: Lean matches the XLS next count for three seed/mask/offset cases.
-// Catches: Starting at the wrong index or swapping loop captures.
+// Verifies: Both models output old count and choose reset or the XLS fold.
+// Catches: Reversing reset polarity or misusing loop indices or captures.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn counted_loop_matches_xls() {
@@ -1082,6 +1081,7 @@ private def clock (a b : BitVec 5) :=
     check_bundle(bundle, "unsigned fixed-width arithmetic");
 }
 
+/// Typecheck the loop fixture with its sibling DSLX modules on the import path.
 fn checked_nonzero_range() -> xlsynth::dslx::TypecheckedModule {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bx_loop_bindings");
     let mut imports = xlsynth::dslx::ImportData::new(None, &[&root]);
@@ -1094,6 +1094,8 @@ fn checked_nonzero_range() -> xlsynth::dslx::TypecheckedModule {
     .unwrap()
 }
 
+// Verifies: Run sums enabled slot data from a nonzero start and Idle holds.
+// Catches: Including slot 0 or losing a nested write field or enum capture.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn nonzero_range_without_loop_records() {

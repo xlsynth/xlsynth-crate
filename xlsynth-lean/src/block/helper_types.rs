@@ -2,9 +2,9 @@
 
 //! Recover helper signatures from the checked DSLX compilation linked into BX.
 //!
-//! An imported helper can take a type argument declared by its caller. The
-//! checked type identifies which module supplies the declaration and field
-//! names.
+//! Lowering a DSLX loop creates an IR function with no corresponding DSLX
+//! declaration. Its callers supply type information for the accumulator and
+//! captures.
 use super::{
     BlockContext,
     source_types::{
@@ -54,12 +54,11 @@ impl DslxLink {
         Ok((package, Self { module, symbols }))
     }
 
-    /// Attach recoverable DSLX signatures for linked block helpers after
-    /// checking their IR shapes.
+    /// Attach source signatures to reachable linked helpers and their
+    /// counted-loop bodies.
     ///
-    /// Supply the block linked against this compilation. A recovered signature
-    /// with a different arity, parameter shape, or result shape is an error.
-    /// Helpers without a recovered signature keep their IR types.
+    /// Check each recovered parameter and result against its IR shape before
+    /// publishing the declarations and signatures together.
     pub(super) fn add_signatures(
         &self,
         block: &BlockContext<'_>,
@@ -710,8 +709,12 @@ impl Catalogue<'_> {
         }
         Ok(())
     }
-    /// Read each loop operand's declared type at the caller. A shared loop
-    /// body can use a source type only when every call supplies the same type.
+    /// Collect the declared type shared by all calls at each loop-body
+    /// parameter.
+    ///
+    /// Only input ports, register reads and parameters of known helpers carry
+    /// declarations here. A computed operand or a disagreement between callers
+    /// leaves that parameter without a declared type.
     fn declared_loop_operands<'a>(
         &self,
         block: &'a BlockContext<'_>,
@@ -758,9 +761,12 @@ impl Catalogue<'_> {
         operands
     }
 
-    /// Give compiler-generated loop bodies ordinary readable definitions. An IR
-    /// argument can take its caller's declared type. Otherwise it keeps its
-    /// structural representation, with no invented record or enum names.
+    /// Build readable signatures for reachable loop bodies from their callers
+    /// and IR.
+    ///
+    /// The iteration counter keeps its bit width. The accumulator sets the
+    /// return type because one iteration's result feeds the next iteration.
+    /// Parameters without an agreed declaration use their structural IR type.
     fn add_loop_bodies(&mut self, block: &BlockContext<'_>, interface: &StatefulInterface) {
         let operands = self.declared_loop_operands(block, &interface.inputs, &interface.registers);
         for function in &block.helpers {
@@ -872,6 +878,11 @@ impl Catalogue<'_> {
     }
 }
 
+/// Recover a readable type from the IR shape when no caller supplies a
+/// declaration.
+///
+/// A single bit becomes a boolean, including inside tuples and arrays. A
+/// token anywhere in the shape prevents constructing a readable value type.
 fn structural_type(ty: &ir::Type) -> Option<SourceType> {
     match ty {
         ir::Type::Bits(1) => Some(SourceType::Bool),

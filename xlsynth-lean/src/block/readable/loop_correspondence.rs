@@ -1,14 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Prove the representation change once per helper, then reuse it at each call.
-//! Counted loops additionally need the same statement for an arbitrary trip
-//! count.
+//! Emit Lean proofs that readable helpers and counted loops agree with their
+//! raw IR models.
+//!
+//! Each helper theorem relates a raw call to the encoded result of a readable
+//! call on decoded arguments. For a loop body, induction lifts that single
+//! iteration to an arbitrary trip count and stride. Callers can then rewrite a
+//! whole fold without expanding its iterations.
 
 use std::collections::BTreeMap;
 
 use super::*;
 
 impl Presentation<'_> {
+    /// Emit helper theorems in dependency order and use them to prove block
+    /// evaluation agrees.
+    ///
+    /// Once a helper has its own theorem, the proof makes its definitions
+    /// locally irreducible. Later proofs rewrite calls using that theorem
+    /// without forcing Lean to compare the helper implementations again.
     pub(super) fn loop_correspondence(&self) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
@@ -151,7 +161,10 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
         Ok(out)
     }
 
-    /// Keep the shared codec rule lists in one place in the Lean module.
+    /// Emit tactics for simplifying helper calls before unfolding named codecs.
+    ///
+    /// Both tactics accept call-specific lemmas. The first can cancel codec
+    /// round trips while the second can also unfold individual codecs.
     fn proof_tactics(&self, out: &mut String) -> Result<()> {
         let mut rules = vec![
             "XlsCodec.raw_select, raw_not, raw_and, raw_or, raw_flag, raw_flag_zero, decode_ofBool"
@@ -197,6 +210,8 @@ local macro "{name}" "[" rs:simpLemma,* "]" : tactic => do
     }
 }
 
+/// Apply the invariant arguments of a loop body, leaving its counter and
+/// accumulator open.
 fn loop_body(name: &str, captures: &[String]) -> String {
     if captures.is_empty() {
         name.into()
@@ -205,6 +220,8 @@ fn loop_body(name: &str, captures: &[String]) -> String {
     }
 }
 
+/// Select previously emitted theorems for this graph's direct calls and counted
+/// loops.
 fn call_rules(graph: &ir::NodeGraph, rules: &BTreeMap<&str, usize>) -> String {
     graph
         .nodes
