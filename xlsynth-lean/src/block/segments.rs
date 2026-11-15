@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Split a block's topological order into bounded Lean definitions. A cut
-//! carries each value that a later equation or the clock-step result reads.
+//! Split a block's topological order into bounded Lean definitions.
+//!
+//! A cut is the set of wires live between two definitions. Both evaluators
+//! pack these wires in graph-index order into the same balanced product, so
+//! the proof can compare a pair of leaves on an arbitrary input of that type.
+//! The public result can read input and register fields directly.
 
 use std::{collections::BTreeSet, fmt::Write};
 
@@ -13,11 +17,14 @@ use xlsynth_pir::{
 
 use super::{BlockContext, raw};
 
-// Larger leaves reduce wide intermediate tuples, but the correspondence proof
-// for 192 Boolean operations exceeded Lean's default recursion limit.
+/// Maximum number of graph computations emitted as nested lets in one leaf.
+///
+/// Larger leaves reduce wide intermediate tuples, but a correspondence proof
+/// for 192 Boolean operations exceeded Lean's default recursion limit.
 const MAX_LEAF_OPERATIONS: usize = 160;
 
-/// A public result can select fields directly from the old state or inputs.
+/// Recognize a bare input or register read, optionally followed by tuple
+/// projections.
 pub(super) fn is_interface_projection(graph: &NodeGraph, mut wire: NodeRef) -> bool {
     while let NodePayload::TupleIndex { tuple, .. } = &graph.get_node(wire).payload {
         wire = *tuple;
@@ -28,16 +35,24 @@ pub(super) fn is_interface_projection(graph: &NodeGraph, mut wire: NodeRef) -> b
     )
 }
 
-/// Groups a block's operations into leaves in topological order and records
-/// which wires are needed at each leaf boundary. The raw evaluator, the
-/// readable evaluator, and their correspondence proof share this layout.
+/// Operations and live wires shared by both evaluators and their correspondence
+/// proof.
 pub(super) struct Segments {
+    /// Each inner list contains the computations emitted by one leaf, in
+    /// dependency order.
     pub(super) leaves: Vec<Vec<NodeRef>>,
-    /// Cut i is the input of leaf i. The last cut feeds the public result.
+    /// Cut `i` is the sorted input to leaf `i`, and the extra final cut feeds
+    /// the result.
     pub(super) cuts: Vec<Vec<NodeRef>>,
 }
 
 impl Segments {
+    /// Plan leaf boundaries for blocks whose total node count exceeds the leaf
+    /// limit.
+    ///
+    /// The backward walk starts with operands needed by the clock-step result.
+    /// Crossing a definition removes its wire and adds its operands. Even a
+    /// large block with no leaf computations gets one leaf, so the root exists.
     pub(super) fn new(block: &BlockContext<'_>) -> Option<Self> {
         let graph = &block.graph;
         // Small blocks keep their single readable definition. Include port
@@ -103,6 +118,7 @@ impl Segments {
         Some(Self { leaves, cuts })
     }
 
+    /// Render a cut's product of physical wire types using this plan's block.
     pub(super) fn cut_type(&self, block: &BlockContext<'_>, cut: usize) -> Result<String> {
         bundle(&self.cuts[cut], "L.Unit", " × ", &|wire| {
             raw::lean_type(block.graph.get_node_ty(wire))
@@ -110,8 +126,10 @@ impl Segments {
         })
     }
 
-    /// Both evaluators use the same physical cut types and binary composition.
-    /// Each renderer supplies its own equations and wiring for a leaf.
+    /// Emit stage signatures and joins in dependency order.
+    ///
+    /// The renderer writes each leaf body with its input bound to `w` and
+    /// returns the physical wires prescribed by the following cut.
     pub(super) fn write_definitions(
         &self,
         out: &mut String,
@@ -138,6 +156,8 @@ impl Segments {
         Ok(())
     }
 
+    /// The evaluator calls the stage spanning the entry cut through the result
+    /// cut.
     pub(super) fn root(&self) -> Stage {
         Stage {
             start: 0,
@@ -145,6 +165,8 @@ impl Segments {
         }
     }
 
+    /// Visit children before their parent so each emitted reference resolves in
+    /// Lean.
     pub(super) fn stages(&self) -> Vec<Stage> {
         fn visit(stage: Stage, ordered: &mut Vec<Stage>) {
             if let Some((left, right)) = stage.children() {
@@ -167,10 +189,13 @@ pub(super) struct Stage {
 }
 
 impl Stage {
+    /// Both evaluator namespaces and the proof use the same range-based name.
     pub(super) fn name(self) -> String {
         format!("xls_segment_{}_{}", self.start, self.end)
     }
 
+    /// Split a non-leaf stage at the middle cut, which connects the two
+    /// children.
     pub(super) fn children(self) -> Option<(Self, Self)> {
         let mid = self.start + (self.end - self.start) / 2;
         (mid != self.start).then_some((
@@ -186,7 +211,8 @@ impl Stage {
     }
 }
 
-// Balance only the list of crossing wires. Each wire retains its own XLS type.
+/// Render the balanced product of crossing wires, leaving each wire's XLS shape
+/// intact.
 fn bundle(
     fields: &[NodeRef],
     empty: &str,
@@ -196,6 +222,8 @@ fn bundle(
     bundle_reusing(fields, empty, separator, render, &|_| None)
 }
 
+/// Render a bundle, letting the caller supply a whole product for any matching
+/// subtree.
 fn bundle_reusing(
     fields: &[NodeRef],
     empty: &str,
@@ -221,6 +249,9 @@ fn bundle_reusing(
     }
 }
 
+/// Pack ordered cut wires as a Lean value with the same nesting as `cut_type`.
+///
+/// An empty cut is unit and a singleton is the wire itself.
 pub(super) fn bundle_value(
     fields: &[NodeRef],
     render: impl Fn(NodeRef) -> Result<String>,
@@ -247,8 +278,10 @@ impl Segments {
     }
 }
 
-/// Project directly at the use site. Binding every incoming wire to a local
-/// first can exhaust elaboration depth before any operation in the leaf.
+/// Select wire `index < len` from a balanced cut value at its use site.
+///
+/// Binding every incoming wire to a local first can exhaust elaboration depth
+/// before any operation in the leaf.
 pub(super) fn projection(len: usize, index: usize, root: &str) -> String {
     subtree_projection(len, index, 1, root).0
 }

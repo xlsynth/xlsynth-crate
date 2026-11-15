@@ -53,15 +53,17 @@ fn tuple_value(elements: impl DoubleEndedIterator<Item = String>) -> String {
     })
 }
 
-/// Small evaluators expand anonymous terms in recovered enum match arms.
-/// Segmented evaluators bind each equation once and project incoming wires.
+/// Where to read operands while emitting one readable expression.
 #[derive(Clone, Copy)]
 enum OperandScope<'a> {
     /// The public wrapper reads a verified field projection from q or x.
     Interface,
     Local {
+        /// How deeply to inline anonymous terms in a recovered enum arm.
         inline_depth: usize,
     },
+    /// A segment reads incoming wires from a physical bundle sorted by node
+    /// index.
     Cut {
         wires: &'a [NodeRef],
         bundle: &'a str,
@@ -69,8 +71,11 @@ enum OperandScope<'a> {
 }
 
 impl OperandScope<'_> {
+    /// Read straight-line operands by name until an enum arm requests inlining.
     const LOCAL: Self = Self::Local { inline_depth: 0 };
 
+    /// Project an incoming physical wire when its value is already bound in the
+    /// cut.
     fn incoming(self, reference: NodeRef) -> Option<String> {
         if let Self::Cut { wires, bundle } = self {
             wires
@@ -82,6 +87,8 @@ impl OperandScope<'_> {
         }
     }
 
+    /// Change how far anonymous local terms expand, preserving cut and
+    /// interface reads.
     fn with_inline_depth(self, inline_depth: usize) -> Self {
         match self {
             Self::Local { .. } => Self::Local { inline_depth },
@@ -128,11 +135,10 @@ fn type_identifier(key: &str) -> Result<String> {
     identifier(&type_name(key))
 }
 
-/// Emit five dependent modules after the raw emitter checks supported
-/// operations.
+/// Emit five dependent modules using one block layout for execution and proof.
 ///
-/// Each file gets aliases for its own library references, including any that
-/// occur only in proof scripts. Importing the raw module does not supply them.
+/// The raw emitter checks the supported graph operations first. Both evaluators
+/// then use the same wire order and types at every segment boundary.
 pub(super) fn emit(
     block: &BlockContext<'_>,
     declarations: &[TypeDecl],
@@ -182,11 +188,8 @@ pub(super) fn emit(
 }
 
 impl<'a> Presentation<'a> {
-    /// Infer types and local names for one helper using the block's callable
-    /// paths.
-    ///
-    /// `index` is the helper's position in `block.helpers`, shared by its enum
-    /// dispatch definitions and their correspondence lemmas.
+    /// Infer the helper's names and source types independently of the enclosing
+    /// block's cuts.
     fn helper_model(&self, index: usize, function: &'a ir::Fn) -> Result<Self> {
         Self::new(
             self.block,
@@ -199,13 +202,13 @@ impl<'a> Presentation<'a> {
         )
     }
 
-    /// Choose distinct Lean names and infer source types for this graph's
-    /// nodes.
+    /// Allocate noncapturing names and infer types from checked register
+    /// bindings.
     ///
-    /// Checked helper bindings seed names and types by linked IR node ID.
-    /// Thus a source loop index can name an addition inside the body even
-    /// when the physical iteration parameter is a different value. Register
-    /// reads, projections, and write destinations also supply type information.
+    /// One-bit nodes use `Bool`; nominal types come from register reads,
+    /// projections, and write destinations rather than matching widths alone.
+    /// Segmented blocks also reserve the names of the incoming and final wire
+    /// bundles.
     fn new(
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
@@ -950,8 +953,11 @@ impl<'a> Presentation<'a> {
             .with_context(|| format!("register {name} has no declaration"))
     }
 
-    /// A projected wire is already physical. A local binding has its inferred
-    /// source type. Inline only unnamed local expressions in recovered arms.
+    /// Read an operand in the requested source type or in its physical type
+    /// when `target` is absent.
+    ///
+    /// Incoming wires are physical and local bindings have their inferred
+    /// type. Interface projections read the public input or old state directly.
     fn typed_operand(
         &self,
         reference: NodeRef,
@@ -979,6 +985,8 @@ impl<'a> Presentation<'a> {
         }
     }
 
+    /// Read an operand at its inferred type, decoding any incoming physical
+    /// wire.
     fn operand(&self, reference: NodeRef, scope: OperandScope<'_>) -> Result<String> {
         self.typed_operand(reference, self.node_types[reference.index].as_ref(), scope)
     }
@@ -1299,6 +1307,8 @@ impl<'a> Presentation<'a> {
         )
     }
 
+    /// Bind one block equation at its inferred source type, falling back to its
+    /// IR type.
     fn write_binding(
         &self,
         out: &mut String,
@@ -1320,8 +1330,11 @@ impl<'a> Presentation<'a> {
         Ok(())
     }
 
-    /// Each leaf accepts arbitrary physical wires and returns exactly the
-    /// values used beyond its end. A join composes its two adjacent stages.
+    /// Emit leaves that compute with source types and exchange physical wire
+    /// values.
+    ///
+    /// Each leaf must accept arbitrary values at its cut so its correspondence
+    /// theorem can be applied independently of the preceding stages.
     fn write_segments(&self, out: &mut String, segments: &Segments) -> Result<()> {
         segments.write_definitions(out, self.block(), |out, leaf| {
             let scope = OperandScope::Cut {
@@ -1828,10 +1841,10 @@ end XlsReadable
     /// Emit proofs relating readable and raw evaluation for arbitrary physical
     /// state.
     ///
-    /// When a counted loop has a readable body, emit a proof by induction on
-    /// the trip count. Otherwise normalize the two evaluations directly,
-    /// preserving codec calls until round trips cancel. Lean must check the
-    /// resulting proof. Agreement with XLS execution requires a separate check.
+    /// Structural rewrites preserve codec heads until round trips cancel, then
+    /// unfold enum encoders. With a segment plan the public theorem rewrites
+    /// the root call using the composed leaf proofs. Lean must check the
+    /// resulting source to establish agreement between the two models.
     fn correspondence(&self, segments: Option<&Segments>) -> Result<String> {
         if self
             .block
@@ -2070,6 +2083,8 @@ end XlsReadable
         Ok(())
     }
 
+    /// Destructure state and inputs in declaration order for the public
+    /// evaluation proof.
     fn introduce_state_and_input(&self, out: &mut String) -> Result<()> {
         let mut serial = 0;
         let patterns = self
@@ -2142,12 +2157,13 @@ fn indexed_projection_simp(functions: &BTreeSet<String>) -> String {
     )
 }
 
-// Both correspondence strategies use these laws, but apply them in different
-// orders.
+/// Push encoding through Boolean gates so a leaf proof can cancel codecs at the
+/// operands.
 const BOOLEAN_GATE_ENCODERS: &str =
     "XlsCodec.encode_not, XlsCodec.encode_and, XlsCodec.encode_or, ↓ XlsCodec.encode_decodeBool";
 const BOOL_ENCODE_ITE: &str = "L.apply_ite XlsCodec.encodeBool";
-/// Cancel boolean codecs in either direction.
+/// Cancel both Boolean round trips, simplifying an encoded decoded wire before
+/// its children.
 const BOOL_ROUND_TRIP_RULES: [&str; 2] =
     ["XlsCodec.decode_encodeBool", "↓ XlsCodec.encode_decodeBool"];
 /// Distribute product projections and vector maps over a conditional.

@@ -68,12 +68,13 @@ pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
     Ok(module)
 }
 
-/// Write a named block under `root` and return its Lean source path.
+/// Write the generated block under `root` and return the path of the Lean
+/// source file.
 ///
-/// The project supplies the `XlsynthLean.IR` import. The module name determines
-/// both the path and the namespace. Give each block a distinct module name to
-/// import several together. Library aliases stay local to each file.
-/// Emission errors and file-write failures are returned to the caller.
+/// The module name determines both the file path and the namespace, so blocks
+/// with different module names can be imported together. The project must
+/// supply the `XlsynthLean.IR` import. Errors from [`emit`]'s block checks and
+/// from writing the destination file are propagated to the caller.
 pub fn write_to(
     package: &ir::Package,
     block: &ir::Block,
@@ -92,7 +93,10 @@ pub fn write_to(
     Ok(root.join(path))
 }
 
-/// Render the raw declarations before the caller adds file-local library names.
+/// Emit raw equations with the layout selected for this block.
+///
+/// When generating a readable bundle, pass the same plan to both evaluators
+/// and the correspondence proof so their stage names and wire types agree.
 pub(super) fn emit_with_context(
     block: &BlockContext<'_>,
     namespace: &str,
@@ -108,10 +112,10 @@ pub(super) fn emit_with_context(
 
 /// Assemble a clock-step model after checking the emitter's supported shapes.
 ///
-/// Every register must have exactly one write; outputs use the data operand of
-/// each output port, whose graph node itself has the empty tuple type.
-/// The supplied namespace owns the four physical records and their accessors,
-/// including when the caller chooses a dotted module name.
+/// Every register must have exactly one write. Outputs use the data operand
+/// of each output port, whose graph node itself has the empty tuple type.
+/// In a segmented block the wrapper reads computed results from the final
+/// cut and forwards direct input or old-state projections separately.
 fn emit_block(
     block: &BlockContext<'_>,
     namespace: &str,
@@ -510,7 +514,8 @@ fn write_stages(
     })
 }
 
-/// Both straight-line and segmented definitions render the same typed RHS.
+/// Emit one typed raw let using the caller's names or cut projections for its
+/// operands.
 fn write_node_binding(
     source: &mut String,
     namespace: &str,

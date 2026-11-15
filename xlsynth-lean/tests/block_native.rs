@@ -846,6 +846,8 @@ example (q : State) (x : Input) : observe q x = (x.packet.zebra, x.flag) := by r
     Ok(())
 }
 
+// Verifies: All 64 lane reads project a single field in a segmented reduction.
+// Catches: Reconstructing the whole positional tuple for each field read.
 #[test]
 fn bx_segmented_eval_projects_a_wide_positional_tuple() {
     let lanes = ["u8"; 64].join(", ");
@@ -888,6 +890,8 @@ fn boolean_chain(operations: usize, operator: &str) -> LeanBlockBundle {
     bx_bundle(&bx)
 }
 
+// Verifies: Lean checks XOR-chain correspondence on both sides of the limit.
+// Catches: A Boolean proof that fails when a wire crosses a cut.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn bx_boolean_xor_chain_corresponds_before_and_after_the_cut() {
@@ -896,6 +900,8 @@ fn bx_boolean_xor_chain_corresponds_before_and_after_the_cut() {
     }
 }
 
+// Verifies: Forwarded Boolean inputs and register fields reduce by reflexivity.
+// Catches: A codec round trip blocking reduction on symbolic inputs or state.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn bx_segmented_boolean_passthrough_reduces_symbolically() {
@@ -928,6 +934,8 @@ example (q : State) (x : Input) : (observe q x).2.2.1 = q.saved.status.1 := by r
     );
 }
 
+// Verifies: Both evaluators split the root correctly at 640 and 641 gates.
+// Catches: An off-by-one boundary or a misplaced partial fifth leaf.
 #[test]
 fn bx_segmented_boolean_chain_splits_after_160_operations_and_composes_halves() {
     // Four full leaves meet at the middle cut. One more operation needs a
@@ -956,6 +964,8 @@ fn bx_segmented_boolean_chain_splits_after_160_operations_and_composes_halves() 
     }
 }
 
+// Verifies: The readable model returns 159 across a cut with over 512 words.
+// Catches: Excessive product depth or incorrect wiring in a wide cut.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn bx_segmented_eval_with_more_than_512_live_words() {
@@ -981,6 +991,8 @@ fn bx_segmented_eval_with_more_than_512_live_words() {
     check_bundle(bundle, "wide live words");
 }
 
+// Verifies: The selected packet supplies the output fields and write enable.
+// Catches: Lost packet fields or an incorrect conditional write across cuts.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn bx_segmented_eval_preserves_source_typed_output_and_write_enable() {
@@ -1341,6 +1353,8 @@ fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<Lean
     .emit_readable(None)
 }
 
+// Verifies: Both models return 74 with counted-loop calls in separate leaves.
+// Catches: A leaf proof that cannot use the loop helper's correspondence lemma.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn segmented_block_calls_a_counted_loop_helper() -> Result<()> {

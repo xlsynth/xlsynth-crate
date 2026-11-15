@@ -122,6 +122,8 @@ example : sample 1 0 = (2, 2, 2, false) := by decide
     );
 }
 
+// Verifies: A disconnected assertion tracks its input across a cut.
+// Catches: Dropping a live predicate because no output or register uses it.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn segmented_raw_eval_keeps_disconnected_assertion_activation() {

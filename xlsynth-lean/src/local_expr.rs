@@ -63,8 +63,12 @@ pub(crate) fn write_elaboration_limits<'a>(
     write_body_elaboration_limits(source, graphs.into_iter().map(|g| (g, g.nodes.len())));
 }
 
-/// Segmented block models have bounded local definitions even when their
-/// combined graph is large. Aggregate types still need their instance budget.
+/// Size Lean's recursion and instance-search limits for the generated
+/// definitions.
+///
+/// Pair each graph with the size of its largest generated body. Splitting a
+/// graph bounds its local let depth, but any nested aggregate type in that
+/// graph can still require a large `Packed` instance.
 pub(crate) fn write_body_elaboration_limits<'a>(
     source: &mut String,
     graphs: impl IntoIterator<Item = (&'a NodeGraph, usize)>,

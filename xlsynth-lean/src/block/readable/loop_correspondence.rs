@@ -13,11 +13,11 @@ use std::collections::BTreeMap;
 use super::*;
 
 impl Presentation<'_> {
-    /// Emit helper and loop proofs before the clock-step theorem that uses
-    /// them.
+    /// Emit helper and loop correspondence lemmas and use them at each call in
+    /// the block.
     ///
-    /// Induction on the trip count lets each loop proof reuse its body helper's
-    /// correspondence at every iteration, including when captures are present.
+    /// For segmented blocks, each leaf proves equality for arbitrary incoming
+    /// wires using those lemmas. The public proof then rewrites the root call.
     pub(super) fn loop_correspondence(&self, segments: Option<&Segments>) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
