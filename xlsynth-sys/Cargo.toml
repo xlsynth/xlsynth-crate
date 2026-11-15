@@ -13,6 +13,7 @@ links = "xlsynth"
 workspace = true
 
 [features]
+# Requires a libxls build that exports the loop-binding conversion entry point.
 dslx-loop-bindings = []
 
 [dependencies]

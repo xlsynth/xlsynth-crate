@@ -871,6 +871,23 @@ unsafe extern "C" {
         result_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
 
+    /// Converts a checked module to IR and optionally reports loop bindings
+    /// during conversion.
+    ///
+    /// For each binding the callback receives the caller's context, IR function
+    /// name, node ID, optional DSLX name, checked type, and optional DSLX
+    /// expression. A computed iterable supplies an expression, and an
+    /// unnamed aggregate supplies neither a name nor an expression. Discard
+    /// any reported bindings on failure.
+    ///
+    /// # Safety
+    ///
+    /// Pass a live module and its owning import data, with writable output
+    /// pointers. Free the returned IR string on success or the error string
+    /// on failure with [`xls_c_str_free`]. Keep the context valid for the
+    /// synchronous callbacks. Copy any callback strings that must outlive
+    /// the callback. The checked type remains valid while the import data
+    /// is alive.
     #[cfg(feature = "dslx-loop-bindings")]
     pub fn xls_dslx_typechecked_module_convert_to_ir_with_loop_bindings(
         module: *mut CDslxTypecheckedModule,
