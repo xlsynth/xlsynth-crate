@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Choose declaration and reference paths together, before emitting helper
-//! bodies.
+//! Choose Lean names for the selected block and its readable helpers.
+//!
+//! A DSLX module `a.f` can contain a function `eq_1` even when module `a`
+//! also defines a function `f`. Defining `XLS.a.f` in Lean would reserve
+//! `XLS.a.f.eq_1`. In that case the implementation lives in a separate
+//! namespace and an `export` exposes it as `XLS.a.f`. Lean resolves that
+//! alias by name but cannot use it in a `_root_` reference. Generated calls
+//! and proofs therefore use the rooted implementation path.
 
 use std::collections::BTreeMap;
 
@@ -10,17 +16,25 @@ use super::*;
 /// Stores the Lean paths used to define and reference helpers and the block,
 /// along with the public aliases that expose their source names when needed.
 pub(super) struct CallableNames<'a> {
+    /// Rooted declaration paths keyed by the helper symbols used in the IR.
     pub(super) helpers: BTreeMap<&'a str, String>,
+    /// Rooted path for the selected block's abbreviation of the evaluator.
     pub(super) block: String,
+    /// Lean commands exposing source names after the backing declarations
+    /// exist.
     pub(super) aliases: String,
 }
 
+/// How a declaration under a callable's source name could collide in Lean.
 #[derive(Clone, Copy)]
 enum ChildName {
+    /// Even an abbreviation at the parent name would reserve this child.
     Reserved,
+    /// Elaborating a proof in the parent's body could create this child.
     AuxiliaryProof,
 }
 
+/// Recognize child names used by Lean, including numbered names such as `eq_1`.
 fn child_name(name: &str) -> Option<ChildName> {
     let numbered = |prefix| {
         name.strip_prefix(prefix)
@@ -43,6 +57,10 @@ fn child_name(name: &str) -> Option<ChildName> {
 }
 
 impl<'a> CallableNames<'a> {
+    /// Choose paths after collecting helper, type, and block names.
+    ///
+    /// A child declaration can appear after its parent in emission order. A
+    /// helper with no source declaration keeps its generated helper name.
     pub(super) fn new(
         block: &'a BlockContext<'_>,
         declarations: &[TypeDecl],

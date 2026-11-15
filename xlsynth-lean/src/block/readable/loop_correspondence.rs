@@ -13,8 +13,10 @@ use std::collections::BTreeMap;
 use super::*;
 
 impl Presentation<'_> {
-    /// Generate the proof that helper calls and counted loops agree across the
-    /// two representations.
+    /// Emit the helper and loop lemmas used in the block evaluation proof.
+    ///
+    /// Each helper lemma unfolds the same readable declaration used at call
+    /// sites, including when the source spelling is an exported alias.
     pub(super) fn loop_correspondence(&self) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);

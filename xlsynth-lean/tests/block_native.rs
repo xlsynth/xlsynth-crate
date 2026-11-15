@@ -432,6 +432,8 @@ fn bx_library_record_conflicts_with_a_dslx_declaration_of_the_same_name() -> Res
     Ok(())
 }
 
+// Verifies: Lean resolves functions, the block, and their named children.
+// Catches: hidden source declarations or needless relocation for `hcongr_one`.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn callable_children_keep_their_source_names() -> Result<()> {
@@ -517,6 +519,8 @@ example : _root_.XLS.pkg.a.controller.eq_unfold 7 = 7 := rfl
     Ok(())
 }
 
+// Verifies: Lean evaluates a helper and the block named `hcongr_1` beneath it.
+// Catches: the helper's congruence theorem reserving the block's name.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn selected_block_can_use_a_helpers_congruence_theorem_name() -> Result<()> {

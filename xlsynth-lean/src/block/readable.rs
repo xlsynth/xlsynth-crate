@@ -132,6 +132,11 @@ pub(super) fn emit(
 }
 
 impl<'a> Presentation<'a> {
+    /// Infer types and local names for one helper using the block's callable
+    /// paths.
+    ///
+    /// `index` is the helper's position in `block.helpers`, shared by its enum
+    /// dispatch definitions and their correspondence lemmas.
     fn helper_model(&self, index: usize, function: &'a ir::Fn) -> Result<Self> {
         Self::new(
             self.block,
@@ -1227,9 +1232,9 @@ impl<'a> Presentation<'a> {
                 let model = self.helper_model(index, function)?;
                 out.push_str(&model.enum_dispatch_definitions()?);
                 let path = &self.callables.helpers[function.name.as_str()];
-                // Lean accepts _root_ inside a reference and a top-level
-                // declaration name, but not inside a rooted declaration
-                // command.
+                // A source module named `_root_` must stay a literal path
+                // component. Lean accepts that declaration at top level, but
+                // rejects the component inside a `def _root_.` command.
                 let top_level = path.contains(".«_root_».");
                 if top_level {
                     write!(

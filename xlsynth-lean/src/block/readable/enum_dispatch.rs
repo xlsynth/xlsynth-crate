@@ -87,8 +87,8 @@ impl Presentation<'_> {
         Ok(dispatches)
     }
 
-    /// Emit a match on each recovered source enum, choosing arms by their
-    /// physical encodings.
+    /// Emit each recovered selector as a match using its first matching arm
+    /// or its fallback.
     pub(super) fn enum_dispatch_definitions(&self) -> Result<String> {
         let mut out = String::new();
         for (id, dispatch) in self.enum_dispatches()? {
