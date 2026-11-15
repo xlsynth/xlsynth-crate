@@ -16,6 +16,7 @@ mod helper_types;
 mod library_notation;
 mod raw;
 mod readable;
+mod segments;
 mod source_types;
 pub use bx::{CompiledBx, compile_bx, compile_bx_with_dslx};
 #[cfg(feature = "dslx-loop-bindings")]

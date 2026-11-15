@@ -846,6 +846,197 @@ example (q : State) (x : Input) : observe q x = (x.packet.zebra, x.flag) := by r
     Ok(())
 }
 
+// Verifies: All 64 lane reads project a single field in a segmented reduction.
+// Catches: Reconstructing the whole positional tuple for each field read.
+#[test]
+fn bx_segmented_eval_projects_a_wide_positional_tuple() {
+    let lanes = ["u8"; 64].join(", ");
+    let mut bx = format!(
+        "block reduce(clk, lane: ({lanes}), biases: u8[2], i: u1) -> u8 {{\nlet bias = biases[i];\n"
+    );
+    let mut previous = "bias".to_string();
+    // The 40 additions place the 160-op cut inside the lane reduction.
+    for (i, operand) in std::iter::repeat_n("bias".to_string(), 40)
+        .chain((0..64).map(|i| format!("lane.{i}")))
+        .enumerate()
+    {
+        writeln!(bx, "let v{i} = {previous} + {operand};").unwrap();
+        previous = format!("v{i}");
+    }
+    writeln!(bx, "{previous}\n}}").unwrap();
+    let bundle = bx_bundle(&bx);
+    let readable = &bundle.files[2].1;
+    // Each tuple_index reads one word. Rebuilding the entire tuple at every
+    // read emits a tuple constructor (and its commas) in every binding.
+    let direct_reads = readable
+        .lines()
+        .zip(readable.lines().skip(1))
+        .filter(|(node, binding)| node.contains("op=tuple_index,") && !binding.contains(','))
+        .count();
+    assert_eq!(direct_reads, 64);
+    #[cfg(feature = "lean-tests")]
+    check_bundle(
+        bundle,
+        "64-field tuple crossing a cut with a separately indexed bias",
+    );
+}
+
+fn boolean_chain(operations: usize, operator: &str) -> LeanBlockBundle {
+    let mut bx = String::from("block chain(clk, a: bool, b: bool) -> bool { let v0 = a;\n");
+    for i in 1..=operations {
+        writeln!(bx, "let v{i} = v{} {operator} b;", i - 1).unwrap();
+    }
+    writeln!(bx, "v{operations}\n}}").unwrap();
+    bx_bundle(&bx)
+}
+
+// Verifies: Lean checks XOR-chain correspondence on both sides of the limit.
+// Catches: A Boolean proof that fails when a wire crosses a cut.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn bx_boolean_xor_chain_corresponds_before_and_after_the_cut() {
+    for operations in [150, 161] {
+        check_bundle(boolean_chain(operations, "^"), "Boolean XOR chain");
+    }
+}
+
+// Verifies: Forwarded Boolean inputs and register fields reduce by reflexivity.
+// Catches: A codec round trip blocking reduction on symbolic inputs or state.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn bx_segmented_boolean_passthrough_reduces_symbolically() {
+    let mut bx = String::from(
+        "struct Packet { status: (bool, u8) }
+         block passthrough(clk, flag: bool, p: (bool, u8), packet: Packet, x: u8)
+             -> (bool, bool, bool, u8) {
+             reg saved: Packet;
+             saved := packet;
+             let v0 = x;\n",
+    );
+    for i in 1..=161 {
+        writeln!(bx, "let v{i} = v{} + x;", i - 1).unwrap();
+    }
+    bx.push_str("(flag, p.0, saved.status.0, v161)\n}");
+    let mut bundle = bx_bundle(&bx);
+    bundle.files.push((
+        "PublicInterface.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+example (q : State) (x : Input) : (observe q x).1 = x.flag := by rfl
+example (q : State) (x : Input) : (observe q x).2.1 = x.p.1 := by rfl
+example (q : State) (x : Input) : (observe q x).2.2.1 = q.saved.status.1 := by rfl
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "direct Boolean input and forwarded input and register fields",
+    );
+}
+
+// Verifies: Both evaluators split the root correctly at 640 and 641 gates.
+// Catches: An off-by-one boundary or a misplaced partial fifth leaf.
+#[test]
+fn bx_segmented_boolean_chain_splits_after_160_operations_and_composes_halves() {
+    // Four full leaves meet at the middle cut. One more operation needs a
+    // fifth leaf. At 192 operations per leaf the Boolean proof exceeded
+    // Lean's default recursion limit.
+    for (operations, root_body) in [
+        (640, "  xls_segment_2_4 (xls_segment_0_2 w)"),
+        (641, "  xls_segment_2_5 (xls_segment_0_2 w)"),
+    ] {
+        let bundle = boolean_chain(operations, "&");
+        // Raw and readable execution are the first and third bundle modules.
+        for (name, source) in [&bundle.files[0], &bundle.files[2]] {
+            let last_join = source
+                .lines()
+                .rfind(|line| line.starts_with("  xls_segment_"));
+            assert_eq!(
+                last_join,
+                Some(root_body),
+                "{name}: {operations} operations"
+            );
+        }
+        #[cfg(feature = "lean-tests")]
+        if operations == 641 {
+            check_bundle(bundle, "Boolean chain with a partial fifth leaf");
+        }
+    }
+}
+
+// Verifies: The readable model returns 159 across a cut with over 512 words.
+// Catches: Excessive product depth or incorrect wiring in a wide cut.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn bx_segmented_eval_with_more_than_512_live_words() {
+    // Every seed is used again after the last one is produced. At the
+    // 640-operation boundary more than 512 distinct words are still live.
+    const N: usize = 600;
+    let mut bx = String::from("block wide(clk, x: u8) -> u8 {\nlet seed0 = u8:3;\n");
+    for i in 1..=N {
+        writeln!(bx, "let seed{i} = seed{} + x;", i - 1).unwrap();
+    }
+    writeln!(bx, "let tail0 = seed{N};").unwrap();
+    for i in 1..=N {
+        writeln!(bx, "let tail{i} = seed{i} - tail{};", i - 1).unwrap();
+    }
+    writeln!(bx, "tail{N}\n}}").unwrap();
+    let mut bundle = bx_bundle(&bx);
+    // Two successive subtractions add x to the running tail. With x = 7
+    // the result is seed600 + 300 * 7 = 159 modulo 256.
+    bundle.files.push((
+        "PublicInterface.lean".into(),
+        "import ReadableCorrespondence\n#guard XlsReadable.observe {} { x := 7 } == 159\n".into(),
+    ));
+    check_bundle(bundle, "wide live words");
+}
+
+// Verifies: The selected packet supplies the output fields and write enable.
+// Catches: Lost packet fields or an incorrect conditional write across cuts.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn bx_segmented_eval_preserves_source_typed_output_and_write_enable() {
+    let mut bx = String::from(
+        r#"
+struct Packet { sample: (bool, u8) }
+block choose(clk, advance: bool, incoming: Packet) -> (Packet, u8) {
+    reg saved: Packet;
+    let selected = if advance { incoming } else { saved };
+    let data = incoming.sample.1;
+    let word0 = saved.sample.1;
+"#,
+    );
+    for i in 1..=173 {
+        writeln!(bx, "let word{i} = word{} + data;", i - 1).unwrap();
+    }
+    bx.push_str("if selected.sample.0 { saved := incoming; }\n(selected, word173)\n}");
+    let mut bundle = bx_bundle(&bx);
+    bundle.files.push((
+        "PublicInterface.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+
+private def check (advance : Bool) (output next : Bool × BitVec 8) : Bool :=
+  let q : State := { saved := { sample := (true, 11) } }
+  let x : Input := { advance := advance, incoming := { sample := (false, 3) } }
+  let result := eval q x
+  result.output.1.sample == output && result.output.2 == 18 && result.next.saved.sample == next
+
+#guard check true (false, 3) (true, 11)
+#guard check false (true, 11) (false, 3)
+
+-- Selecting the incoming word still reduces on symbolic state and input.
+example (q : State) (x : Input) :
+    (observe q { x with advance := true }).1.sample.2 = x.incoming.sample.2 := by rfl
+example (q : XlsBlock.State) (x : XlsBlock.Input) :
+    (XlsBlock.observe q { x with advance := 1 }).out_0.1.2.1 = x.incoming.1.2.1 := by rfl
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "source-shaped values across a cut");
+}
+
 // Inline the external DSLX function with XLS so the straight-line raw
 // exporter sees its field projection in the same graph as the BX constructor.
 // Verifies: An inlined DSLX projection reads the intended BX-built field.
@@ -1160,6 +1351,34 @@ fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<Lean
         &Default::default(),
     )?
     .emit_readable(None)
+}
+
+// Verifies: Both models return 74 with counted-loop calls in separate leaves.
+// Catches: A leaf proof that cannot use the loop helper's correspondence lemma.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn segmented_block_calls_a_counted_loop_helper() -> Result<()> {
+    let helper = "fn fold(x: u8) -> u8 { for (_, acc) in u32:0..u32:3 { acc + u8:1 }(x) }";
+    let mut bx = String::from(
+        "extern fn machine::fold(x: u8) -> u8;
+         block cutting(clk, x: u8) -> u8 { let v0 = machine::fold(x);\n",
+    );
+    for i in 1..=161 {
+        writeln!(bx, "let v{i} = v{} + x;", i - 1)?;
+    }
+    bx.push_str("machine::fold(v161) }");
+    let mut bundle = checked_helper_bundle(&bx, helper, &[])?;
+    // For input 2, each call adds 3 and the 161 additions contribute 322.
+    bundle.files.push((
+        "CheckLoop.lean".into(),
+        r#"import ReadableCorrespondence
+#guard XlsReadable.observe {} { x := 2 } == 74
+#guard (XlsBlock.observe {} { x := 2 }).out == 74
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "counted loop calls in different leaves");
+    Ok(())
 }
 
 // Verifies: A checked DSLX helper reads the intended equal-width BX field.

@@ -13,12 +13,12 @@ use std::collections::BTreeMap;
 use super::*;
 
 impl Presentation<'_> {
-    /// Emit helper and loop proofs before the clock-step theorem that uses
-    /// them.
+    /// Emit helper and loop correspondence lemmas and use them at each call in
+    /// the block.
     ///
-    /// Induction on the trip count lets each loop proof reuse its body helper's
-    /// correspondence at every iteration, including when captures are present.
-    pub(super) fn loop_correspondence(&self) -> Result<String> {
+    /// For segmented blocks, each leaf proves equality for arbitrary incoming
+    /// wires using those lemmas. The public proof then rewrites the root call.
+    pub(super) fn loop_correspondence(&self, segments: Option<&Segments>) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
         let mut eval_rules = self.enum_dispatch_laws(&mut out)?;
@@ -141,6 +141,34 @@ private theorem countedFor_succ {w : L.Nat} {α : Type} (n stride : L.Nat) (f : 
         }
         let aliases = aliases.join(", ");
         let eval_close = close(self.graph);
+        let deps = if let Some(segments) = segments {
+            // Leaf inputs are arbitrary physical wires. Apply the helper and
+            // loop laws here, while the calls in each leaf are visible. Limit
+            // the initial equality check so it can yield to those laws on a
+            // deep arithmetic chain with distinct readable and raw calls.
+            writeln!(
+                out,
+                r#"local macro "xls_segment_eq" : tactic => `(tactic|
+  first
+  | with_reducible rfl
+  | (simp only [{BOOLEAN_GATE_ENCODERS}] <;> done)
+  | (
+    xls_normalize [{deps}]
+    all_goals first
+      | (xls_normalize [{aliases}] <;> {eval_close})
+      | (xls_codecs [{deps}] <;> (try simp only [split_prod_ite, prod_fst_ite, prod_snd_ite, L.ite_self]) <;> {eval_close})))
+"#
+            )?;
+            self.segment_proofs(segments, &mut out, "xls_segment_eq")?;
+            let root = segments.root().name();
+            writeln!(
+                out,
+                "attribute [local irreducible] {root} XlsBlock.{root}\n"
+            )?;
+            format!("eq_{root}")
+        } else {
+            deps
+        };
         writeln!(
             out,
             r#"theorem encoded_eval (q : State) (x : Input) :
