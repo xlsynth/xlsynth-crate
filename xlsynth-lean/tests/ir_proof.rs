@@ -4,13 +4,12 @@ use std::fs;
 #[cfg(feature = "lean-tests")]
 use std::path::PathBuf;
 
-use xlsynth_lean::prepare_ir_function_equivalence_target;
 #[cfg(feature = "lean-tests")]
 use xlsynth_lean::{
-    LeanError, LeanIrAxiomPolicy, LeanIrProofSources, LeanModuleName, LeanTheoremName,
-    export_ir_function, run_ir_function_equivalence_proof,
-    run_ir_function_equivalence_proof_with_policy,
+    LeanError, LeanIrAxiomPolicy, LeanIrProofSources, LeanTheoremName,
+    run_ir_function_equivalence_proof, run_ir_function_equivalence_proof_with_policy,
 };
+use xlsynth_lean::{LeanModuleName, export_ir_function, prepare_ir_function_equivalence_target};
 use xlsynth_pir::ir_parser::Parser;
 
 const IDENTITY: &str = r#"package p
@@ -18,6 +17,26 @@ top fn passthrough(unused: (bits[1], bits[7]) id=1, values: bits[3][2] id=2) -> 
   ret output: bits[3][2] = identity(values, id=3)
 }
 "#;
+
+// Verifies: Both proof models match the ordinary Lean export byte for byte.
+// Catches: A proof-specific layout or mismatched entrypoints.
+#[test]
+fn proof_target_uses_the_ordinary_export_for_both_models() {
+    let pkg = Parser::new(include_str!("fixtures/decomposition/route.ir"))
+        .parse_and_validate_package()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    prepare_ir_function_equivalence_target(&pkg, None, &pkg, Some("reference"))
+        .unwrap()
+        .write_to(dir.path())
+        .unwrap();
+    for (side, top) in [("Lhs", None), ("Rhs", Some("reference"))] {
+        let module = LeanModuleName::new(format!("Generated.{side}")).unwrap();
+        let ordinary = export_ir_function(&pkg, top, &module).unwrap();
+        let target = fs::read_to_string(dir.path().join(format!("Generated/{side}.lean"))).unwrap();
+        assert_eq!(target, ordinary.lean_source(), "Generated.{side}");
+    }
+}
 
 #[test]
 fn pointwise_target_preserves_argument_and_result_shapes() {
@@ -334,8 +353,8 @@ theorem add_commutes : Target.Equivalent := by
     );
 }
 
-/// The cut generalizes both tuple results and preserves the condition on each
-/// local contract. Changing one control input invalidates the full proof.
+// Verifies: Each routing call's contract uses its own control operand.
+// Catches: Reusing the first premise when the next call inverts its control.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn factors_repeated_helper_calls_with_pointwise_contracts() {
@@ -373,11 +392,44 @@ fn factors_repeated_helper_calls_with_pointwise_contracts() {
         )
         .replace("invoke(p, wired,", "invoke(other, wired,");
     let failure = check("inverted-control", &changed).unwrap_err();
-    assert!(matches!(
-        *failure.error,
-        LeanError::ProcessFailed {
-            operation: "user proof compilation",
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            failure.error.as_ref(),
+            LeanError::ProcessFailed {
+                operation: "user proof compilation",
+                ..
+            }
+        ) && failure.stdout.contains("~~~p = 0")
+            && failure.stdout.contains("routed1_spec hp"),
+        "{failure}"
+    );
+}
+
+// Verifies: Equal calls have separate cut results and their uses stay shared.
+// Catches: Merging equal calls or losing a sibling during successive cuts.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn preserves_distinct_calls_with_identical_operands_and_shared_uses() {
+    let lean = PathBuf::from(std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN"));
+    let pkg = Parser::new(include_str!("fixtures/decomposition/duplicates.ir"))
+        .parse_and_validate_package()
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target");
+    prepare_ir_function_equivalence_target(&pkg, None, &pkg, None)
+        .unwrap()
+        .write_to(&target)
+        .unwrap();
+    let sources = LeanIrProofSources {
+        root: root.path().into(),
+        module: root.path().join("DuplicateProof.lean"),
+        theorem: LeanTheoremName::new("DuplicateProof.equivalent").unwrap(),
+        modules: vec![],
+    };
+    fs::write(
+        &sources.module,
+        include_str!("fixtures/decomposition/DuplicateProof.lean"),
+    )
+    .unwrap();
+    run_ir_function_equivalence_proof(&lean, &target, &sources, &root.path().join("work")).unwrap();
 }

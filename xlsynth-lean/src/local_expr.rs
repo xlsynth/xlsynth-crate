@@ -11,8 +11,10 @@ use std::fmt::Write as _;
 use xlsynth_pir::ir::{Binop, NaryOp, NodeGraph, NodePayload as P, NodeRef, Type, Unop};
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
-/// Named proof nodes may be applications, and readable equations may inline
-/// entire expressions. Group either before applying a projection or operator.
+/// A Lean operand with the grouping needed for a projection or operator.
+///
+/// Function nodes refer to local bindings by name. A block equation can inline
+/// a whole expression, which needs parentheses when used as an operand.
 pub(crate) enum LeanOperand {
     Atom(String),
     Expression(String),
