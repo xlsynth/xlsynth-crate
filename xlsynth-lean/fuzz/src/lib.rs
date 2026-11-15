@@ -94,9 +94,11 @@ pub fn generate_lean_block(data: &[u8], rng: &mut impl RngCore) -> Package {
     } else {
         data
     };
-    if graph[0] & 1 == 0 {
+    let (mode, graph) = graph.split_first().expect("padded graph");
+    let mut source = DepletableBytes::new(graph);
+    if mode & 1 == 0 {
         return generate_block_package(
-            &mut DepletableBytes::new(graph),
+            &mut source,
             &lean_block_options(),
             StopPolicy::WhenEntropyDepleted,
         )
@@ -111,13 +113,9 @@ pub fn generate_lean_block(data: &[u8], rng: &mut impl RngCore) -> Package {
         allow_extension_ops: false,
         ..lean_function_options()
     };
-    let mut package = generate_package(
-        &mut DepletableBytes::new(&graph[1..]),
-        &options,
-        StopPolicy::WhenEntropyDepleted,
-    )
-    .expect("bounded function generation")
-    .package;
+    let mut package = generate_package(&mut source, &options, StopPolicy::WhenEntropyDepleted)
+        .expect("bounded function generation")
+        .package;
     let function = package.get_top_fn().expect("generated top function");
     let mut block = BlockBuilder::new("sample");
     block.clock_port("clk").unwrap();
