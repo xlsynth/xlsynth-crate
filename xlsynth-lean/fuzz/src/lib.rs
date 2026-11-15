@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Generation options for the word-level Lean differential fuzz targets.
+//!
+//! Both targets draw from the same pure PIR operations and aggregate types.
+//! Blocks use the subset that fits in a single block graph.
 
 use xlsynth_pir::ir_random::{
     ArrayAssumptionMode, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,
     RandomOperation,
 };
 
-/// Generates pure values, including arrays, tuples, and PIR extensions.
+/// Configures function generation for comparing pure return values in Lean and
+/// PIR.
+///
+/// Generated packages can call helper functions and use arrays, tuples,
+/// zero-width bits, and PIR extension operations. The generator excludes
+/// events, counted loops, and partial products from these cases.
 pub fn lean_function_options() -> RandomFnOptions {
     RandomFnOptions {
         max_nodes: 32,
@@ -39,8 +47,11 @@ pub fn lean_function_options() -> RandomFnOptions {
     }
 }
 
-/// Uses the same value operations inside a single clocked block without
-/// callees.
+/// Configures a single clocked block with synchronous reset on every register.
+///
+/// Ports and registers may have zero width. The block reuses the function
+/// generator's value operations except for `Invoke` and `Map`, which need a
+/// separate callee.
 pub fn lean_block_options() -> RandomBlockOptions {
     let function = lean_function_options();
     RandomBlockOptions {

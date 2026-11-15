@@ -54,6 +54,8 @@ fn block_trace_observes_old_state_and_carries_simultaneous_writes() {
     }
 }
 
+// Verifies: Array registers carry wide and zero-width tuple fields over clocks.
+// Catches: Reordered elements, lost high bits, or reads of a same-clock write.
 #[test]
 fn block_trace_carries_arrays_of_tuples_across_clocks() {
     let package = Parser::new(
@@ -104,6 +106,7 @@ top block pipeline(clk: clock, data: (bits[3], bits[0], bits[65])[2], index: bit
     assert_eq!(trace[1].next_state, [second]);
 }
 
+// Negative test: A tuple at an array port must report the cycle and type.
 #[test]
 fn block_trace_rejects_equal_width_input_with_the_wrong_shape() {
     let package = Parser::new(

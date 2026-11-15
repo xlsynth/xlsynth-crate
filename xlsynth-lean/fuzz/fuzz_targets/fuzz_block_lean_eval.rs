@@ -18,7 +18,11 @@ use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 /// Shares the compiled Lean support modules across fuzz cases in this process.
 static EVALUATOR: OnceLock<LeanEvaluator> = OnceLock::new();
 
-/// Replays the same initial state and eight input vectors in Lean and PIR.
+/// Replays the same starting registers and eight input vectors in Lean and PIR.
+///
+/// Each evaluator carries its own next state. Checking both outputs and
+/// registers on every clock exposes a wrong write even if no later output
+/// reads the register.
 fn check_case(data: &[u8]) {
     let mut rng = StdRng::from_seed(*blake3::hash(data).as_bytes());
     // The generator consumes its wiring header before it builds any logic.

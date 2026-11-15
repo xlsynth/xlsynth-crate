@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Runs an emitted block for a sequence of clock edges in one Lean process.
+//! Drives an emitted Lean block for one clock per input vector.
 //!
-//! Lean carries register state between edges and writes one row per edge to
-//! a trace file. Each row contains outputs followed by updated registers, all
-//! in decimal. The block declarations supply their order and bit widths.
+//! Lean carries the register state between clocks and writes outputs followed
+//! by updated register values as packed naturals. The trace reader uses the
+//! block's declarations to recover field widths, tuple members, and array
+//! elements.
 
 use std::{ffi::OsString, fmt::Write, fs, path::Path};
 
@@ -27,10 +28,19 @@ pub struct BlockCycleResult {
 }
 
 impl LeanEvaluator {
-    /// Evaluate a trace of a verified block. Supply registers and data inputs
-    /// with their declared PIR types and in their respective declaration
-    /// orders. Each cycle starts from the state produced by Lean on the
-    /// previous cycle.
+    /// Evaluates a verified block for one clock per input vector.
+    ///
+    /// Supply `initial_state` in register declaration order and each input
+    /// vector in data port declaration order. Values must have their declared
+    /// PIR types. For example, passing a tuple of two bits to an array port
+    /// of type `bits[1][2]` fails even though both values occupy two bits.
+    /// Each result contains the outputs computed from that clock's inputs and
+    /// starting state, plus the register values carried into the next clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid field counts or types, or if emitting the
+    /// block, running Lean, or decoding its trace fails.
     pub fn eval_block_trace(
         &self,
         package: &Package,
@@ -124,6 +134,7 @@ impl LeanEvaluator {
     }
 }
 
+/// Pairs Lean field names with their PIR types in declaration order.
 fn trace_fields<'a>(
     fields: impl Iterator<Item = (&'a str, &'a Type)>,
 ) -> Result<Vec<(String, &'a Type)>> {
@@ -132,8 +143,11 @@ fn trace_fields<'a>(
         .collect()
 }
 
-/// Restore the declared shape from the natural number written by Lean's Packed
-/// instance.
+/// Restores the PIR shape of a field printed by Lean's `Packed` instance.
+///
+/// The decimal field carries no type information. The PIR layout determines
+/// how to divide its bits among array elements and tuple members, including
+/// members that occupy zero bits.
 fn decode_field(ty: &Type, value: &str) -> Result<IrValue> {
     let width = bit_width(ty).map_err(anyhow::Error::msg)?;
     let packed = IrValue::parse_typed(&format!("bits[{width}]:{value}"))?;
@@ -147,7 +161,7 @@ fn decode_field(ty: &Type, value: &str) -> Result<IrValue> {
     ir_value_from_lsb0_bits_with_layout(ty, &flat).map_err(anyhow::Error::msg)
 }
 
-/// Builds a Lean record after checking the value count and each field width.
+/// Builds a Lean record after checking the PIR type of each positional value.
 fn input_record(fields: &[(String, &Type)], values: &[IrValue]) -> Result<String> {
     ensure!(
         fields.len() == values.len(),

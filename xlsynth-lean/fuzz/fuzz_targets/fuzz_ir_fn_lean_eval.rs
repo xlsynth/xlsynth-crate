@@ -2,6 +2,11 @@
 
 #![no_main]
 
+//! Compares the Lean export of a generated pure function with PIR evaluation.
+//!
+//! The corpus entry supplies the argument seed and graph bytes. An entry with
+//! only seed bytes uses the same seed to generate the graph as well.
+
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
