@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! File-local spellings for the Lean library declarations the block emitter
-//! uses.
+//! File-local names for Lean library declarations used by block models.
+//!
+//! A block may have an input named `Vector` or a field named `Repr`. Generated
+//! references such as `L.Vector` still resolve to the root library. Each file
+//! gets its own names, including the modules that contain proof scripts.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-/// Only emitter-owned names may introduce notation. Source identifiers,
-/// comments and assertion messages can contain arbitrary text, including
-/// `L.something`.
+/// Library terms that can be referenced through local notation.
+///
+/// Keep this list explicit because the scan also sees source identifiers,
+/// comments and assertion messages, any of which can mention `L.something`.
 const TERM_NAMES: &[&str] = &[
     "And",
     "Array.getD",
@@ -70,10 +74,11 @@ const TERM_NAMES: &[&str] = &[
     "congrArg",
 ];
 
-// These names occur in generator-controlled proof scopes. Commands such as
-// deriving require identifiers, and simp treats a named rewrite rule
-// differently from an elaborated theorem term (e.g. Vector.map_mk on an unknown
-// vector).
+/// Library names that must also work in positions requiring an identifier.
+///
+/// `deriving` needs the class name. Giving `simp` a theorem name preserves
+/// its registered rewrite behavior, for example when simplifying with
+/// `Vector.map_mk` on an unknown vector.
 const DECLARATION_NAMES: &[&str] = &[
     "DecidableEq",
     "Function.comp_def",
@@ -93,9 +98,11 @@ const DECLARATION_NAMES: &[&str] = &[
     "ite_self",
 ];
 
-/// Each generated file starts with its imports (and optional line comments)
-/// followed by a blank line. Keep the notation in this file's scope so that
-/// separately generated models and proof clients can import it independently.
+/// Insert the aliases mentioned by the completed module after its imports.
+///
+/// Call once, after rendering all declarations. The scan treats leading blank
+/// lines, line comments and imports as the header. A mention in later prose
+/// can request an existing alias, but only listed library names can add one.
 pub(super) fn add_to_module(module: &mut String) {
     let insert_at = module
         .split_inclusive('\n')

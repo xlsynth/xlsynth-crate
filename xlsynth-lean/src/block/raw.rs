@@ -36,6 +36,7 @@ pub struct LeanBlockBundle {
 }
 
 /// Emit a verified XLS block in the `XlsBlock` namespace.
+///
 /// The returned source imports `XlsynthLean.IR`. Use [`write_to`] to
 /// write a named model into a Lean project that supplies this import.
 /// Return an error if the block uses an unsupported operation.
@@ -65,13 +66,12 @@ pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
     Ok(module)
 }
 
-/// Write the selected block as a named Lean module under `root`.
+/// Write a named block under `root` and return its Lean source path.
 ///
-/// Pass a verified block from `package`, as for [`emit`]. The module name
-/// determines its file path and namespace. A second write under the same
-/// root and module name replaces the first model. The project must supply the
-/// `XlsynthLean.IR` import before compiling the returned path. Model emission
-/// and file-write errors are returned to the caller.
+/// The project supplies the `XlsynthLean.IR` import. The module name determines
+/// both the path and the namespace. Give each block a distinct module name to
+/// import several together. Library aliases stay local to each file.
+/// Emission errors and file-write failures are returned to the caller.
 pub fn write_to(
     package: &ir::Package,
     block: &ir::Block,
@@ -88,8 +88,7 @@ pub fn write_to(
     Ok(root.join(path))
 }
 
-/// Generate the raw model from the same normalized graph used for readable
-/// emission.
+/// Render the raw declarations before the caller adds file-local library names.
 pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     emit_block(block, namespace).with_context(|| {
         format!(

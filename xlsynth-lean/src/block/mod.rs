@@ -2,8 +2,8 @@
 
 //! Emit Lean from XLS block IR or a checked BX block with a named interface.
 //!
-//! The block's package supplies definitions for function calls and counted-loop
-//! bodies, including those referenced by other helpers.
+//! The raw and readable emitters share file-local Lean library spellings so
+//! source ports, fields and bindings can retain names such as `Vector`.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::borrow::Cow;

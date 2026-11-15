@@ -35,7 +35,7 @@ impl Dispatch<'_> {
             .join(" ")
     }
 
-    /// Concatenate comparisons high bit first so arm zero occupies the low bit.
+    /// Concatenate tests high bit first so bit zero still selects arm zero.
     fn flags(&self) -> String {
         let comparisons = self
             .comparisons
@@ -49,8 +49,7 @@ impl Dispatch<'_> {
         crate::local_expr::balanced(&comparisons, "L.BitVec.append ", " ")
     }
 
-    /// Expand the priority selector into low-bit-first tests shared by both
-    /// proofs.
+    /// Select the lowest set bit, using the fallback when all tests are false.
     fn physical_selection(&self) -> String {
         let priorities = (0..self.comparisons.len())
             .rev()

@@ -233,8 +233,8 @@ block accumulate(clk, value: u8) -> u6 {
     compiled.emit_readable(None).unwrap();
 }
 
-// Verifies: Array elements with a known record type use named projections.
-// Catches: Guessing an ambiguous record type or dropping known field names.
+// Verifies: Indexing with a known record type preserves field projections.
+// Catches: Guessing a record's field names from its tuple shape alone.
 #[test]
 fn indexed_arrays_use_record_fields_when_the_element_type_is_known() {
     let constructed = "[Slot { write: Write { data: a } }, Slot { write: Write { data: b } }]";

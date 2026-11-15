@@ -92,6 +92,9 @@ fn type_identifier(key: &str) -> Result<String> {
 
 /// Emit five dependent modules after the raw emitter checks supported
 /// operations.
+///
+/// Each file gets aliases for its own library references, including any that
+/// occur only in proof scripts. Importing the raw module does not supply them.
 pub(super) fn emit(
     block: &BlockContext<'_>,
     declarations: &[TypeDecl],
@@ -1860,8 +1863,8 @@ fn has_array_index(graph: &ir::NodeGraph) -> bool {
         .any(|node| matches!(node.payload, NodePayload::ArrayIndex { .. }))
 }
 
-/// Emit a tactic that maps each projection over the vector before comparing
-/// indexed fields.
+/// Move each supplied projection inside a clamped array read so Lean can
+/// simplify the mapped vector.
 fn indexed_projection_simp(functions: &BTreeSet<String>) -> String {
     let rules = functions
         .iter()
@@ -1873,15 +1876,14 @@ fn indexed_projection_simp(functions: &BTreeSet<String>) -> String {
     )
 }
 
-/// Push boolean encoding into the branches of a conditional.
+/// Distribute Boolean encoding across a conditional before reducing its arms.
 const BOOL_ENCODE_ITE: &str = "L.apply_ite XlsCodec.encodeBool";
 /// Cancel boolean codecs in either direction.
 const BOOL_ROUND_TRIP_RULES: [&str; 2] =
     ["XlsCodec.decode_encodeBool", "XlsCodec.encode_decodeBool"];
 /// Distribute product projections and vector maps over a conditional.
 const PROJECTION_ITE_RULES: [&str; 3] = ["prod_fst_ite", "prod_snd_ite", "vector_map_ite"];
-/// Normalize IR reads and updates to Lean vector operations, then simplify
-/// maps.
+/// Relate reads and updates in the physical array model to mapped Lean vectors.
 const VECTOR_MAP_RULES: [&str; 7] = [
     "_root_.XlsynthLean.IR.arrayIndex_eq_getD_back",
     "_root_.XlsynthLean.IR.arrayModify_eq_setIfInBounds",
@@ -2016,11 +2018,11 @@ theorem two_bit_cases (b : L.BitVec 2) : b = 0 ∨ b = 1 ∨ b = 2 ∨ b = 3 := 
 
 "#;
 
-/// Rewrite rules for proving agreement of Boolean operations and aggregate
-/// expressions.
+/// Relate physical one-bit operations and aggregate projections to readable
+/// ones.
 ///
-/// Vector rules carry element conversions through selections, appended
-/// literals, and reads that use the last element as their fallback.
+/// The vector rules cover the last-element fallback of a clamped read and
+/// the explicit append used to build large literals.
 const BOOL_CORRESPONDENCE: &str = r#"private theorem raw_not (b : L.BitVec 1) :
     L.BitVec.not b = XlsCodec.encodeBool (!XlsCodec.decodeBool b) := by
   simpa only [XlsCodec.encode_decodeBool] using

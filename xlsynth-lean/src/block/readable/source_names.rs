@@ -108,8 +108,8 @@ pub(super) fn nominal_reference(
     Ok(format!("{root}{}.{local_name}", module_identifier(owner)?))
 }
 
-/// Render a checked type in the scope where Lean will resolve its component
-/// names.
+/// Render primitive types through the file's library aliases and resolve
+/// nominal types in the caller's source namespace.
 pub(super) fn source_type_in(
     bx_namespace: &str,
     ty: &SourceType,

@@ -13,10 +13,11 @@ use std::collections::BTreeMap;
 use super::*;
 
 impl Presentation<'_> {
-    /// Emit the helper and loop lemmas used in the block evaluation proof.
+    /// Emit helper and loop proofs before the clock-step theorem that uses
+    /// them.
     ///
-    /// Each helper lemma unfolds the same readable declaration used at call
-    /// sites, including when the source spelling is an exported alias.
+    /// Induction on the trip count lets each loop proof reuse its body helper's
+    /// correspondence at every iteration, including when captures are present.
     pub(super) fn loop_correspondence(&self) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
@@ -154,10 +155,11 @@ private theorem countedFor_succ {w : L.Nat} {α : Type} (n stride : L.Nat) (f : 
         Ok(out)
     }
 
-    /// Emit tactics for simplifying helper calls before unfolding named codecs.
+    /// Emit simplification tactics shared by helper, loop and clock-step
+    /// proofs.
     ///
-    /// Both tactics accept call-specific lemmas. The first can cancel codec
-    /// round trips while the second can also unfold individual codecs.
+    /// Call sites supply extra rules by declaration name. The codec tactic
+    /// includes each generated encoder and decoder in its default rule set.
     fn proof_tactics(&self, out: &mut String) -> Result<()> {
         let mut rules = vec![
             "XlsCodec.raw_select, raw_not, raw_and, raw_or, raw_flag, raw_flag_zero, decode_ofBool"

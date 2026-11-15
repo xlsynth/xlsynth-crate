@@ -1746,6 +1746,8 @@ block shift(clk, amount: u64) -> u5 {
     check_bundle(bundle, "negation and variable left shift");
 }
 
+// Verifies: Indexing returns either input Vector or the Vector field of L.
+// Catches: A library alias capturing a source binding or field projection.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn library_names_coexist_with_source_bindings_and_record_fields() {

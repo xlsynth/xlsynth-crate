@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Lean expressions for local values in a PIR function or block graph.
+//!
+//! Function models use ordinary Lean operators and field notation. Block
+//! models also have source-named binders, so the renderer spells library
+//! operations explicitly using aliases supplied by the enclosing block file.
 
 use std::fmt::Write as _;
 
@@ -82,6 +86,10 @@ pub(crate) fn write_elaboration_limits<'a>(
 }
 
 /// Preserve operand order while keeping the Lean expression depth logarithmic.
+///
+/// Each pair is parenthesized. Use an empty prefix and an infix separator for
+/// operators, or a function name with trailing space and a space separator
+/// for applications. An empty input produces no term.
 pub(crate) fn balanced(operands: &[String], prefix: &str, separator: &str) -> String {
     fn emit(out: &mut String, operands: &[String], prefix: &str, separator: &str) {
         match operands {
@@ -112,6 +120,7 @@ fn tuple(fields: &[String]) -> String {
     }
 }
 
+/// Select the Lean library spellings available in the enclosing module.
 #[derive(Clone, Copy)]
 pub(crate) enum LocalRenderer {
     Function,
@@ -121,8 +130,7 @@ pub(crate) enum LocalRenderer {
 const IR: &str = "_root_.XlsynthLean.IR";
 
 impl LocalRenderer {
-    // Block fields retain source names, which may shadow library names in
-    // dependent record declarations. Keep the public function source spelling.
+    /// Prefix library names in blocks, where fields can shadow later types.
     fn root(self) -> &'static str {
         match self {
             Self::Function => "",
@@ -130,6 +138,8 @@ impl LocalRenderer {
         }
     }
 
+    /// Render the physical PIR type, ending tuple products with Lean's unit
+    /// type.
     pub(crate) fn lean_type(self, ty: &Type) -> String {
         let root = self.root();
         match ty {
@@ -175,6 +185,8 @@ impl LocalRenderer {
         )
     }
 
+    /// Render literal bits at their declared width and preserve aggregate
+    /// nesting.
     pub(crate) fn literal(self, value: &IrValue) -> String {
         let fields = |xs: &[IrValue]| xs.iter().map(|x| self.literal(x)).collect::<Vec<_>>();
         match value {
@@ -199,6 +211,8 @@ impl LocalRenderer {
         }
     }
 
+    /// Render a bit-vector method whose receiver is its first explicit
+    /// argument.
     fn method(self, name: &str, a: &str, b: &str) -> String {
         match self {
             Self::Function => format!("{a}.{name} {b}"),
@@ -206,6 +220,8 @@ impl LocalRenderer {
         }
     }
 
+    /// Render a width-changing operation with the width first in the library
+    /// call.
     fn resize(self, name: &str, w: usize, a: &str) -> String {
         match self {
             Self::Function => format!("{a}.{name} {w}"),
@@ -213,6 +229,7 @@ impl LocalRenderer {
         }
     }
 
+    /// Complement all bits, preserving the operand's width.
     fn complement(self, a: &str) -> String {
         match self {
             Self::Function => format!("~~~{a}"),
@@ -220,6 +237,7 @@ impl LocalRenderer {
         }
     }
 
+    /// Render an unsigned index, grouping the block call as a single argument.
     fn to_nat(self, a: &str) -> String {
         match self {
             Self::Function => format!("{a}.toNat"),
@@ -227,6 +245,8 @@ impl LocalRenderer {
         }
     }
 
+    /// Clamp offsets to the width where all larger offsets have the same
+    /// result.
     fn limited_offset(self, a: &str, w: usize) -> String {
         let offset = self.to_nat(a);
         match self {
@@ -235,8 +255,10 @@ impl LocalRenderer {
         }
     }
 
-    /// The declared result width is significant for ordinary multiply and
-    /// shifts.
+    /// Render a binary node using its declared result width.
+    ///
+    /// Multiplication resizes both operands before the operation. Shifts cap
+    /// the unsigned shift amount at that width.
     fn binary<E>(self, op: Binop, a: &str, b: &str, w: usize) -> Result<String, RenderError<E>> {
         let root = self.root();
         Ok(match op {
@@ -283,8 +305,11 @@ impl LocalRenderer {
         })
     }
 
-    /// Resolve operands only when used. The caller handles graph-specific
-    /// bindings, effects and calls, and supplies diagnostic source context.
+    /// Render a local node, resolving each operand through the caller.
+    ///
+    /// An unsupported node may need graph-specific handling for bindings,
+    /// effects or calls. Invalid payloads and operand errors carry separate
+    /// diagnostics that the caller can report with source context.
     pub(crate) fn local_rhs<E>(
         self,
         graph: &NodeGraph,
