@@ -2,6 +2,7 @@
 
 use xlsynth_pir::ir_parser::Parser;
 
+// Negative test: Duplicate block keywords must report the operator and key.
 #[test]
 fn block_nodes_reject_repeated_keyword_arguments() {
     let cases: &[(&str, &str, &str, &[&str])] = &[
@@ -53,6 +54,7 @@ fn block_nodes_reject_repeated_keyword_arguments() {
     }
 }
 
+// Negative test: Duplicate priority or adder ID keywords must name the key.
 #[test]
 fn extension_nodes_reject_repeated_keyword_arguments() {
     for (operator, attribute, args, repeated) in [

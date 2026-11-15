@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Run the BX frontend with the driver's import paths, link package, and
+//! warning policy.
+//!
+//! Lean generation keeps the checked BX declarations alongside the lowered IR
+//! so the readable model can use the source types and field names.
+
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -180,6 +186,8 @@ pub fn bx_prove_invariant_command() -> Command {
     .arg(time_limit_arg())
 }
 
+/// Configure `bx-to-lean` with the shared compilation options and a required
+/// output directory.
 pub fn bx_to_lean_command() -> Command {
     add_bx_args(Command::new("bx-to-lean").about("Generates raw and readable Lean for a BX block"))
         .arg(
@@ -313,6 +321,8 @@ fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Resu
     })
 }
 
+/// Report every warning with the input path before applying the caller's
+/// warning policy.
 fn report_warnings(
     path: &Path,
     warnings_as_errors: bool,
@@ -622,8 +632,13 @@ pub fn bx_prove_invariant(matches: &ArgMatches, config: &Option<ToolchainConfig>
     })
 }
 
-/// Generate and validate the complete model before creating its output
-/// directory.
+/// Emit the selected BX block's raw model, readable model, and correspondence
+/// proof.
+///
+/// Warnings treated as errors and model-generation failures leave the output
+/// directory untouched. The directory must be new. An I/O error while writing
+/// the modules can leave a partial bundle there. Checking the proof requires
+/// Lean.
 pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
     let compiled = with_bx_input(matches, config, |input| {
         let reset = ResetBehavior {

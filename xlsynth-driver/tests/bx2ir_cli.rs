@@ -1089,6 +1089,8 @@ block delay(clk, x: u8) -> u8 {
     Ok(())
 }
 
+// Verifies: BX emits five files and its raw model matches saved-IR output.
+// Catches: Reusing a directory or creating one for an unknown block.
 #[test]
 fn bx_to_lean_emits_the_selected_block_and_preserves_existing_output() -> Result<()> {
     let directory = tempfile::tempdir()?;

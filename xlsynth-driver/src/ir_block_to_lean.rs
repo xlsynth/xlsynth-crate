@@ -11,7 +11,11 @@ use clap::ArgMatches;
 use xlsynth_lean::block;
 use xlsynth_pir::ir_parser::Parser;
 
-/// Generate all Lean text before creating or truncating the output file.
+/// Write a raw Lean model for the selected block to stdout or the requested
+/// file.
+///
+/// Parse and verify the entire package with PIR before selecting the block.
+/// A selection or emission error also leaves an existing output file untouched.
 pub fn handle(matches: &ArgMatches) -> Result<()> {
     let input_path = matches
         .get_one::<String>("input_file")

@@ -16,7 +16,8 @@ use crate::ir_utils::operands;
 pub enum ValidationError {
     /// Two package members share the same name.
     DuplicateMemberName(String),
-    /// Multiple blocks originate from the same proc or function.
+    /// Two blocks name the same source member in their effective provenance
+    /// attributes.
     DuplicateBlockProvenance(BlockProvenance),
     /// The `top` attribute references a missing function.
     MissingTop(String),
@@ -703,8 +704,11 @@ impl std::fmt::Display for InstantiationPortDirection {
     }
 }
 
-/// Validates an entire package, ensuring all member names are unique, the top
-/// function (if set) exists, and all contained functions are valid.
+/// Check functions and blocks together with their package-wide constraints.
+///
+/// Member names must be unique within each kind, and a declared top must
+/// resolve to a member of that kind. Blocks may omit provenance. Among blocks
+/// that declare it, each effective source name and kind must be unique.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     let mut names = HashSet::<(String, MemberType)>::new();
     let mut functions = HashMap::new();
@@ -1968,6 +1972,8 @@ mod tests {
     use crate::ir;
     use crate::ir_parser::Parser;
 
+    // Verifies: PIR and XLS use each block's last provenance name and kind.
+    // Catches: Comparing raw spelling or counting an overridden origin.
     #[test]
     fn blocks_require_distinct_effective_provenance() {
         let function_f = r#"#![provenance(name="f", kind="function")]"#;

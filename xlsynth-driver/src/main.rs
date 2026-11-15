@@ -652,6 +652,8 @@ impl AppExt for clap::Command {
     }
 }
 
+/// Parse the driver's global and command-specific options and dispatch to the
+/// selected handler.
 fn main() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
         .format_timestamp(None)

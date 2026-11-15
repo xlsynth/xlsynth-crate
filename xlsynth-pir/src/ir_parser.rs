@@ -26,8 +26,11 @@ pub(crate) fn parse_outer_attribute(source: &str) -> Result<ir::OuterAttribute, 
     Ok(ir::OuterAttribute::new(kind, source))
 }
 
-/// XLS uses the last inner provenance attribute, if one is present. Read it
-/// from the spelling the block will emit, including programmatic edits.
+/// Decode the last inner provenance attribute, which XLS treats as the block's
+/// origin.
+///
+/// Read the stored attribute text so package verification sees programmatic
+/// edits to the attributes as well as origins parsed from source.
 pub(crate) fn block_provenance(block: &Block) -> Result<Option<ir::BlockProvenance>, ParseError> {
     for source in block.inner_attrs.iter().rev() {
         let mut parser = Parser::new(source);
@@ -116,6 +119,8 @@ impl std::fmt::Display for ParseError {
     }
 }
 
+/// Record a keyword argument and fail the node parse if the keyword was already
+/// supplied.
 fn set_node_attribute<T>(
     slot: &mut Option<T>,
     value: T,
@@ -1283,6 +1288,8 @@ impl Parser {
         self.peek_is("#")
     }
 
+    /// Consume the attribute opener and name, leaving its arguments and closing
+    /// bracket unread.
     fn pop_attribute_name(&mut self, position: AttributePosition) -> Result<String, ParseError> {
         self.drop_or_error("#")?;
         if matches!(position, AttributePosition::Inner) {
@@ -1532,7 +1539,8 @@ impl Parser {
         Ok(reset)
     }
 
-    /// Decodes the source identity regardless of argument order or spelling.
+    /// Decode the source name and kind, requiring each key once in either
+    /// order.
     fn parse_provenance_attribute(&mut self) -> Result<ir::BlockProvenance, ParseError> {
         let mut provenance = ir::BlockProvenance {
             name: String::new(),
@@ -2377,6 +2385,11 @@ impl Parser {
         Ok(members)
     }
 
+    /// Pair each operand with its sign and negation flags, requiring one flag
+    /// of each kind per term.
+    ///
+    /// A dotted node name can supply the ID. Only an actual `id=` keyword
+    /// counts toward the limit of one explicit ID per node.
     fn parse_ext_nary_add_op(
         &mut self,
         node_env: &IrNodeEnv,
@@ -2487,6 +2500,11 @@ impl Parser {
         Ok((terms, arch))
     }
 
+    /// Parse one node, resolving operand references against the supplied graph
+    /// environment.
+    ///
+    /// A dotted name such as `register_write.3` must agree with the operation
+    /// and any explicit ID. The suffix and one matching `id=3` may coexist.
     fn parse_node(&mut self, node_env: &mut IrNodeEnv) -> Result<ir::Node, ParseError> {
         log::debug!("parse_node");
         let (name_or_id, dotted_prefix_opt) =

@@ -79,6 +79,8 @@ fn raw_top_overrides_the_package_top_and_resolves_ambiguity() {
     );
 }
 
+// Verifies: A saved block using ext_carry_out produces a Lean eval definition.
+// Catches: Routing saved IR through a parser that rejects the PIR extension.
 #[test]
 fn accepts_pir_extension_in_saved_block() {
     let directory = tempfile::tempdir().unwrap();
@@ -98,6 +100,7 @@ top block adder(a: bits[1], carry: bits[1]) {
     );
 }
 
+// Negative test: A two-bit load enable must fail and preserve the output file.
 #[test]
 fn invalid_block_preserves_existing_output() {
     let directory = tempfile::tempdir().unwrap();

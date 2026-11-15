@@ -42,7 +42,11 @@ pub fn compile_bx(
 }
 
 impl CompiledBx {
-    /// BX diagnostics collected while checking this compilation.
+    /// Borrow the warnings from checking the BX source that produced this
+    /// package.
+    ///
+    /// Callers that treat warnings as errors can inspect them before emitting
+    /// or writing the model.
     pub fn warnings(&self) -> &[xlsynth_bx::BxWarning] {
         self.checked.warnings()
     }
