@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Export a pure XLS call graph as Lean definitions shared by evaluators and
+//! proofs.
+//!
+//! Each function has local lets for its computations and refers to callees by
+//! name.
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -56,8 +62,16 @@ impl LeanFunction {
     }
 }
 
-/// Converts a selected pure function and its callees to executable Lean
-/// definitions. Every array dimension in these functions must be nonempty.
+/// Converts a selected pure function and its reachable callees to executable
+/// Lean definitions.
+///
+/// Supply `top` to select a function by name. With `None`, the package must
+/// have a function top or, if it has no top, a single function. The generated
+/// `eval` names that function and preserves its positional argument and result
+/// types.
+///
+/// Export fails on invalid IR or unsupported operations and types in the
+/// selected call graph, including zero-length arrays.
 pub fn export_ir_function(
     package: &Package,
     top: Option<&str>,
@@ -198,7 +212,11 @@ fn check_supported(f: &Fn, node: &Node) -> Result<(), LeanError> {
     })
 }
 
-/// Emits one typed binding per IR node, retaining shared operands and calls.
+/// Emits a verified function in dependency order with one typed let per
+/// computation.
+///
+/// Each operand refers to its producer's binding by node ID. Two invokes of the
+/// same callee with identical operands still bind distinct results.
 fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
     let renderer = LocalRenderer::Function;
     let function = function_name(&f.name);

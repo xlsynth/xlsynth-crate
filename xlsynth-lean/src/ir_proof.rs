@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Build a pointwise equality between the ordinary Lean exports of two XLS
+//! functions.
+//!
+//! The generated proof target applies both entrypoints to the same typed
+//! arguments.
+
 use std::path::Path;
 
 use xlsynth_pir::ir::Package;
@@ -27,8 +33,13 @@ pub struct LeanIrFunctionEquivalenceTarget {
     rhs: LeanFunction,
 }
 
-/// Selects the two entrypoints and validates their full argument and result
-/// types.
+/// Prepares a pointwise equality between two independently selected XLS
+/// functions.
+///
+/// Each side uses [`export_ir_function`] with its own top selection.
+/// Preparation propagates export errors and rejects unequal positional argument
+/// or result types, even when the two signatures occupy the same total number
+/// of bits.
 pub fn prepare_ir_function_equivalence_target(
     lhs: &Package,
     lhs_top: Option<&str>,

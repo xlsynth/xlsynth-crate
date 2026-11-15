@@ -18,6 +18,8 @@ top fn passthrough(unused: (bits[1], bits[7]) id=1, values: bits[3][2] id=2) -> 
 }
 "#;
 
+// Verifies: Both proof models match the ordinary Lean export byte for byte.
+// Catches: A proof-specific layout or mismatched entrypoints.
 #[test]
 fn proof_target_uses_the_ordinary_export_for_both_models() {
     let pkg = Parser::new(include_str!("fixtures/decomposition/route.ir"))
@@ -351,8 +353,8 @@ theorem add_commutes : Target.Equivalent := by
     );
 }
 
-/// The cut generalizes both tuple results and preserves the condition on each
-/// local contract. Changing one control input invalidates the full proof.
+// Verifies: Each routing call's contract uses its own control operand.
+// Catches: Reusing the first premise when the next call inverts its control.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn factors_repeated_helper_calls_with_pointwise_contracts() {
@@ -403,6 +405,8 @@ fn factors_repeated_helper_calls_with_pointwise_contracts() {
     );
 }
 
+// Verifies: Equal calls have separate cut results and their uses stay shared.
+// Catches: Merging equal calls or losing a sibling during successive cuts.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn preserves_distinct_calls_with_identical_operands_and_shared_uses() {

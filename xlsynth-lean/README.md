@@ -487,9 +487,9 @@ Lean metaprograms that used `exportedNodes` or the declaration names in
 `XlsynthLean.IR.sliceCalls stage helper fun s => pure s.calls.size`
 counts reachable calls. In the callback, `s.output` is the stage result,
 `s.bindings` are its local lets, and each site in `s.calls` pairs a local
-result with its typed application. `s.downstream` lists reachable non-call
-bindings that depend on a selected result. Use these expressions in the
-callback's local context, or close an expression with
+result with its typed application. `s.downstream` lists other reachable
+bindings that depend on a selected result, including calls to other helpers.
+Use these expressions in the callback's local context, or close an expression with
 `mkLetFVars s.bindings` before returning it. Calls follow binding order.
 When migrating a proof that distinguishes independent calls by number, check
 which arguments correspond to each numbered hypothesis.

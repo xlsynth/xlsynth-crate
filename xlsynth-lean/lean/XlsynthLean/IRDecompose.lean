@@ -2,6 +2,10 @@
 
 import XlsynthLean.IRProof
 
+/-! Inspect direct helper calls in an exported function and apply proved contracts to their results.
+Each live call has its own local let. A cut gives calls with identical operands separate
+results while all uses of a single call still share its result. -/
+
 namespace XlsynthLean.IR
 
 open Lean Meta Elab Tactic
@@ -13,14 +17,17 @@ structure CallSite where
   application : Expr
 
 /-- The opened let bindings and return expression of a fully applied XLS stage.
-    Calls reachable from the return and the non-call bindings downstream of
-    those calls are listed in source binding order (dependencies first). -/
+    `calls` lists direct calls to the selected helper reachable from the return.
+    `downstream` lists the other reachable bindings that depend on those results,
+    including calls to other helpers. Both lists preserve binding order. -/
 structure CallSlice where
   bindings : Array Expr
   output : Expr
   calls : Array CallSite
   downstream : Array Expr
 
+/-- Open a named stage at its actual operands. Give the continuation all opened
+    lets, the subset needed by the return value, and the return value itself. -/
 private def withStageBindings (stage : Expr) (k : Array Expr → Array Expr → Expr → MetaM α) : MetaM α := do
   let some root := stage.getAppFn.constName? | throwError "expected a named XLS stage application"
   if (← whnf (← inferType stage)).isForall then
@@ -35,9 +42,10 @@ private def withStageBindings (stage : Expr) (k : Array Expr → Array Expr → 
         live := collectFVars live (← binding.fvarId!.getDecl).value
     k bindings (bindings.filter fun b => live.fvarSet.contains b.fvarId!) output
 
-/-- Inspect a stage with its local bindings in scope. Use the expressions only
-    inside `k`, or close them with `mkLetFVars slice.bindings` before returning.
-    Reachability follows local values, stopping at the bodies of called functions. -/
+/-- Inspect calls to `helper` within the fully applied, named `stage`.
+    Reachability follows local values, stopping at the bodies of called functions.
+    Use the expressions inside `k`, or close them with `mkLetFVars slice.bindings`
+    before returning. Otherwise the caller loses the local declarations they reference. -/
 def sliceCalls (stage : Expr) (helper : Name) (k : CallSlice → MetaM α) : MetaM α := do
   let callee := (resolveXlsAliases (← getEnv) helper).1
   withStageBindings stage fun bindings live output => do
@@ -77,6 +85,9 @@ private def specializeCall (law : Expr) (site : CallSite) : MetaM (Expr × Expr)
     definitionally the original RHS, and the let itself distinguishes equal calls. -/
 private abbrev stageBinding {α β : Type} (_stage : α) (value : β) := value
 
+/-- Expose this stage application in the goal and affected hypotheses, matching
+    aliases of `caller` at the same arguments. Keep each reachable sibling call as a
+    marked local let so later cuts can still identify it after another cut. -/
 private def openStage (goal : MVarId) (stage : Expr) (caller : Name) : MetaM MVarId := goal.withContext do
   let env ← getEnv
   let args := stage.getAppArgs
@@ -174,9 +185,11 @@ private def cutCalls (goal : MVarId) (stage law : Expr) (helper base : Name)
       goal.assign next
       return next.mvarId!
 
-/-- Factor a stage proof at all calls to a helper. Each fresh result has the
-    helper's proved contract at the actual operands. The remaining goal and
-    conditional premises are left to the proof author. -/
+/-- Replace each live direct call to the helper with a fresh result and a hypothesis
+    giving its contract at the actual operands. `as r` names results and contracts
+    in binding order (`r0`, `r0_spec`, ...). `expect n` checks the number of calls.
+    The proof author must establish any premises to use a conditional contract.
+    The cut fails if a local proof would become ill-typed with abstract results. -/
 syntax "xls_cut " term:max " at " ident " using " term:max (" as " ident)? (" expect " num)? : tactic
 
 elab_rules : tactic

@@ -4,11 +4,15 @@ import Std.Tactic.BVDecide
 import Lean
 import Lean.Meta.Native
 
+/-! Tactics for unfolding exported XLS functions and simplifying their word-level operations.
+`#check_ir_axioms` audits the axioms used by a completed theorem and replays native Boolean checks. -/
+
 namespace XlsynthLean.IR
 
 open Lean in
-/-- Resolve the bare constant abbreviations used for XLS entrypoints and user
-    aliases. Return the function with the names needed to unfold its aliases. -/
+/-- Follow bare constant abbreviations, including the exported `eval` and user aliases.
+    Return the first name that cannot be followed and the aliases visited, outermost first.
+    An abbreviation that applies a function to arguments terminates the chain. -/
 partial def resolveXlsAliases (env : Environment) (name : Name) : Name × List Name :=
   match env.find? name with
   | some (.defnInfo info) =>
