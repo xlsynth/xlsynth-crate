@@ -2,8 +2,8 @@
 
 //! Emit Lean from XLS block IR or a checked BX block with a named interface.
 //!
-//! [`compile_bx_with_dslx`] also retains source declarations for helpers in a
-//! linked DSLX module. The helpers' equations come from the same module's IR.
+//! The block's package supplies definitions for function calls and counted-loop
+//! bodies, including those referenced by other helpers.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::borrow::Cow;
@@ -75,14 +75,13 @@ impl<'a> BlockContext<'a> {
     }
 }
 
-/// Collect the functions invoked directly or transitively by the block in Lean
-/// declaration order.
+/// Collect invoked functions and counted-loop bodies in Lean declaration order.
 ///
-/// Scan every node, including disconnected calls. A missing callee or a cycle
-/// prevents emission of a sequence of ordinary Lean definitions.
+/// Both kinds of helper can call other helpers. Emit each dependency once,
+/// before its callers. A missing function or a cycle prevents emission.
 fn reachable_helpers<'a>(package: &'a ir::Package, block: &ir::Block) -> Result<Vec<&'a ir::Fn>> {
-    /// Append a callee after visiting its own calls and skip already emitted
-    /// definitions.
+    /// Track the active call chain separately from helpers already in `result`
+    /// so two callers can share a helper without reporting a cycle.
     fn visit<'a>(
         package: &'a ir::Package,
         graph: &ir::NodeGraph,

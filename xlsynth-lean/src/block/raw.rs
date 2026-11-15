@@ -99,9 +99,12 @@ pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Re
 
 /// Assemble a clock-step model after checking the emitter's supported shapes.
 ///
-/// Every register must have exactly one write. Outputs use the data operand of
-/// each output port, whose graph node itself has the empty tuple type. Helpers
-/// contribute to the elaboration limits and are emitted before the block.
+/// Every register must have exactly one write; outputs use the data operand of
+/// each output port, whose graph node itself has the empty tuple type.
+/// If the block or any reachable helper contains a counted loop, emit a shared
+/// fold before the helpers. Each iteration passes the current carry and an
+/// index equal to the iteration number (starting at zero) times the stride,
+/// truncated to the body's index width.
 fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     ensure!(
         block.graph.instantiations.is_empty(),
@@ -515,9 +518,10 @@ fn predicate(value: &str) -> String {
 /// Render one supported graph operation using caller-supplied operand
 /// expressions.
 ///
-/// Resolve operands in the supplied graph and function calls in the supplied
-/// Lean namespace. Block callers validate register reads and collect the
-/// effects of writes and output ports, whose node expressions return unit.
+/// Resolve only the operands used by this operation. Register writes and
+/// output ports return unit here; their effects are collected by `emit_block`.
+/// For a counted loop, bind the invariant operands in IR order, leaving the
+/// body's index and carry parameters for the fold to supply on each iteration.
 pub(crate) fn node_expression(
     namespace: &str,
     graph: &ir::NodeGraph,

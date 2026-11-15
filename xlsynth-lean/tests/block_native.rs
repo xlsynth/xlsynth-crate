@@ -520,6 +520,11 @@ block tags(clk, a: u2, b: u2, c: u2, d: u2, e: u2, f: u2, g: u2, h: u2, i: u2, j
     check_bundle(bundle, "ten independent enum inputs");
 }
 
+/// Build the readable BX model and an XLS interpreter reference from the same
+/// DSLX source.
+///
+/// The fixture must define `machine` in `machine.x` to supply the reference
+/// function.
 fn compile_lean_and_xls_machine(
     bx: &str,
     source: &str,
@@ -535,6 +540,8 @@ fn compile_lean_and_xls_machine(
     Ok((bundle, machine))
 }
 
+// Verifies: Lean matches the XLS next count for three seed/mask/offset cases.
+// Catches: Starting at the wrong index or swapping loop captures.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn counted_loop_matches_xls() {
@@ -577,6 +584,8 @@ block counter(clk, mask: u8, offset: u8) -> u8 {
     );
 }
 
+// Verifies: Lean checks enum dispatch after a loop, inline and in a callee.
+// Catches: A failing proof when a match arm uses a counted-loop result.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn counted_loop_proves_computed_enum_dispatch_in_linked_helpers() {
