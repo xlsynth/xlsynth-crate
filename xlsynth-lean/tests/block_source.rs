@@ -131,6 +131,8 @@ block accumulate(clk, value: u8) -> u6 {
     compiled.emit_readable(None).unwrap();
 }
 
+// Verifies: Indexed fields retain names when operands or results fix the type.
+// Catches: Losing known names or inferring a record from one operand alone.
 #[test]
 fn indexed_arrays_use_record_fields_when_the_element_type_is_known() {
     let constructed = "[Slot { write: Write { data: a } }, Slot { write: Write { data: b } }]";

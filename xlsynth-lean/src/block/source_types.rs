@@ -116,6 +116,10 @@ fn declaration<'a>(declarations: &'a [TypeDecl], name: &str) -> Result<&'a TypeD
 
 /// Expand transparent aliases while preserving named struct and enum
 /// identities.
+///
+/// Two arrays or tuples can agree even when their elements use different
+/// aliases. Compare their resolved types before inferring a shared element
+/// type.
 pub(super) fn resolve_aliases(ty: &SourceType, declarations: &[TypeDecl]) -> Result<SourceType> {
     match ty {
         SourceType::Alias { name } => {
@@ -138,11 +142,10 @@ pub(super) fn resolve_aliases(ty: &SourceType, declarations: &[TypeDecl]) -> Res
     }
 }
 
-/// Erase source names to bit widths and ordered tuple fields for comparison
-/// with IR.
+/// Erase nominal types to the physical shapes used by block IR.
 ///
-/// Use the same acyclic declarations that produced the type. A missing name
-/// or a reference to the wrong declaration kind returns an error.
+/// Array lengths survive erasure even when a named element becomes a tuple or
+/// bits.
 pub(super) fn source_shape(
     source_type: &SourceType,
     declarations: &[TypeDecl],

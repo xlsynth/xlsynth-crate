@@ -811,6 +811,8 @@ block shift(clk, amount: u64) -> u5 {
     check_bundle(bundle, "negation and variable left shift");
 }
 
+// Verifies: A model with a local named Vector elaborates an array of tuples.
+// Catches: Generated vector types or operations captured by the local binding.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn source_binding_named_vector_preserves_physical_array_types() {
@@ -830,6 +832,8 @@ block pick(clk, Vector: u8, b: u8, index: u8) -> u8 {
     check_bundle(bundle, "local Vector and a physical array of tuples");
 }
 
+// Verifies: Nested fields survive, reads clamp, and writes respect bounds.
+// Catches: A helper update changing the last slot for an out-of-range index.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn arrays_keep_record_elements_and_xls_index_bounds() {
@@ -876,6 +880,8 @@ private def clock (index : BitVec 8) :=
     check_bundle(bundle, "array of nested records");
 }
 
+// Verifies: Lean proves correspondence for indexing a selected record array.
+// Catches: Field projections that fail to agree across the two representations.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn constructed_and_selected_record_arrays_prove_correspondence() {
@@ -893,6 +899,8 @@ block pick(clk, choose: bool, a: Slot, b: Slot, supplied: Slot[2], index: u8) ->
     check_bundle(bx_bundle(bx), "indexed field of a selected record array");
 }
 
+// Verifies: Lean checks the model and proof for a 2048-element Bool literal.
+// Catches: Vector construction or conversion exceeding Lean's limits.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn large_constructed_bool_array_elaborates() {

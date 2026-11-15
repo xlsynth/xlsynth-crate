@@ -2,6 +2,10 @@
 
 import Std
 
+/-! Operations shared by generated Lean models, including XLS bit packing and array bounds.
+The array lemmas relate the raw model's index and update operations to the vector operations
+used in readable block equations. -/
+
 namespace XlsynthLean.IR
 
 /-- The LSB-first bit layout used at the evaluator boundary and by aggregate one-hot select. -/
@@ -80,6 +84,7 @@ def oneHotSel [p : Packed α] (s : BitVec w) (cases : Array α) : α :=
   p.unpack (cases.toList.zipIdx.foldl (fun acc (v, i) =>
     if s.getLsbD i then acc ||| p.pack v else acc) 0)
 
+/-- On a nonempty vector, using its last element as the fallback implements an XLS read. -/
 theorem arrayIndex_eq_getD_back [Inhabited α] [NeZero n] (xs : Vector α n) (i : Nat) :
     arrayIndex xs i = xs.getD i xs.back := by
   have hn := NeZero.ne n
@@ -88,6 +93,8 @@ theorem arrayIndex_eq_getD_back [Inhabited α] [NeZero n] (xs : Vector α n) (i 
   · simp [arrayIndex, Nat.min_eq_right (by omega : n - 1 ≤ i), Vector.getD, Array.getD,
       Vector.back_eq_getElem, h, (by omega : n - 1 < n)]
 
+/-- A guarded vector write implements an XLS update. An out-of-range write discards the
+result of applying `f` to the fallback element. -/
 theorem arrayModify_eq_setIfInBounds [NeZero n] (xs : Vector α n) (i : Nat) (f : α → α) :
     arrayModify xs i f = xs.setIfInBounds i (f (xs.getD i xs.back)) := by
   by_cases h : i < n <;> simp [arrayModify, Vector.setIfInBounds, Array.setIfInBounds, Vector.getD, Array.getD, h]

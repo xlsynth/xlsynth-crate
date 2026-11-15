@@ -510,15 +510,21 @@ pub(crate) fn record_value(fields: &[(String, String)]) -> String {
     )
 }
 
-// Whitespace keeps this Lean local distinct from DSLX and IR identifiers.
+/// Shared Lean lookup binding whose space keeps it distinct from source
+/// identifiers.
 const ARRAY_LOCAL: &str = "«indexed array»";
 
-/// XLS clamps reads to the last element of each indexed dimension.
+/// Read the nonempty vector already bound to `ARRAY_LOCAL`, clamping to its
+/// last element.
 fn read_bound_array(index: &str) -> String {
     format!("(_root_.Vector.getD {ARRAY_LOCAL} ({index}).toNat (_root_.Vector.back {ARRAY_LOCAL}))")
 }
 
-/// Share the operand between the lookup and its fallback at each dimension.
+/// Emit a clamped read with a single occurrence of the rendered array
+/// expression.
+///
+/// Each nested read can use the preceding expression as its operand without
+/// duplicating it in the fallback.
 pub(super) fn array_read(array: &str, index: &str) -> String {
     format!(
         "(let {ARRAY_LOCAL} := {array}; {})",
@@ -526,7 +532,10 @@ pub(super) fn array_read(array: &str, index: &str) -> String {
     )
 }
 
-/// Updating an out-of-bounds index leaves the whole array unchanged.
+/// Emit an update along an outermost-first index path.
+///
+/// An empty path replaces the whole value. An out-of-bounds index at any
+/// dimension leaves the whole array unchanged.
 pub(super) fn array_write(array: &str, indices: &[String], value: &str) -> String {
     match indices {
         [] => value.to_owned(),

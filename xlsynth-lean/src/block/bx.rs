@@ -206,8 +206,11 @@ impl CompiledBx {
     }
 }
 
-/// Collect only interface-reachable types. Lean requires a nested struct to
-/// precede its user even when the BX declarations appear in the reverse order.
+/// Translate a checked BX interface type and collect its reachable struct
+/// declarations.
+///
+/// Descending through array elements and tuple fields emits each nested struct
+/// before the Lean declaration that uses it.
 fn bx_type(
     ty: &Type,
     module: &CheckedModule,

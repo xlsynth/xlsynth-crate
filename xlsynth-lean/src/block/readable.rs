@@ -90,12 +90,12 @@ pub(super) fn emit(
 }
 
 impl<'a> Presentation<'a> {
-    /// Allocate noncapturing names and propagate source types through the
+    /// Allocate local names and recover source types for one block or helper
     /// graph.
     ///
-    /// A recovered helper signature supplies preferred parameter names and
-    /// nominal types by position. Call sites use the same signature for
-    /// argument and result types. Equally wide types can have different fields.
+    /// One-bit nodes default to `Bool`. Checked interfaces supply argument
+    /// and destination types first, so a later traversal in dependency order
+    /// can recover named fields through array indices and tuple projections.
     fn new(
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
@@ -306,6 +306,10 @@ impl<'a> Presentation<'a> {
     }
 
     /// Keep a shared spelling, or its common target if only the aliases differ.
+    ///
+    /// Array literals and selections can infer a type only when every operand
+    /// has one and all agree. Equal physical shapes alone leave the type
+    /// unknown.
     fn common_operand_type<'b>(
         &self,
         mut operands: impl Iterator<Item = &'b NodeRef>,
@@ -351,6 +355,7 @@ impl<'a> Presentation<'a> {
         }
     }
 
+    /// Follow one array dimension per index, retaining any alias on the result.
     fn indexed_type<'b>(&'b self, mut ty: &'b SourceType, rank: usize) -> Result<&'b SourceType> {
         for _ in 0..rank {
             let SourceType::Array { element, .. } = self.unalias(ty)? else {
@@ -361,7 +366,8 @@ impl<'a> Presentation<'a> {
         Ok(ty)
     }
 
-    /// Restore the indexed dimensions around a declared element type.
+    /// Rebuild an indexed operand's source type from its IR lengths and the
+    /// result's type.
     fn array_type_for_index(shape: &Type, rank: usize, element: &SourceType) -> Result<SourceType> {
         if rank == 0 {
             Ok(element.clone())
@@ -379,7 +385,8 @@ impl<'a> Presentation<'a> {
         }
     }
 
-    /// Propagate destination type context through tuples and selections once.
+    /// Propagate each destination type through array operations, tuples, and
+    /// selections.
     ///
     /// A node retains its first inferred type, while each distinct context is
     /// propagated through its operands. Uses with another type convert through
@@ -479,6 +486,8 @@ impl<'a> Presentation<'a> {
     /// type.
     ///
     /// Absent annotations and plain bit vectors already use physical values.
+    /// A vector keeps its length in both representations. Only elements that
+    /// need a codec require mapping a conversion over the vector.
     fn convert(&self, ty: Option<&SourceType>, value: &str, encode: bool) -> Result<String> {
         let operation = if encode { "encode" } else { "decode" };
         match ty {
@@ -830,8 +839,8 @@ impl<'a> Presentation<'a> {
     /// Render source-shaped equations where type context supports that
     /// spelling.
     ///
-    /// A call with a recovered signature converts each argument to its
-    /// declared parameter type and converts the result to the node's type.
+    /// A typed index preserves the element's source fields and clamps an
+    /// out-of-range read to the last element of that dimension.
     /// Other operations reuse the raw operator translation with explicit
     /// codecs; the generated readable evaluator never delegates to the raw
     /// evaluator.
@@ -1447,10 +1456,10 @@ end XlsReadable
     /// Emit proofs relating readable and raw evaluation for arbitrary physical
     /// state.
     ///
-    /// The proof unfolds each readable helper alongside its raw definition and
-    /// uses enum dispatch rules from both the block and its readable helpers.
-    /// Structural rewrites preserve codec heads until round trips cancel,
-    /// then enum encoders unfold. Lean must elaborate the generated proof.
+    /// Structural rewrites keep codecs intact until round trips cancel, then
+    /// unfold enum encoders. Indexed graphs can also move a field projection
+    /// across a clamped read by mapping it over the vector. Lean must check
+    /// the emitted proofs to establish agreement between the two models.
     fn correspondence(&self) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
@@ -1766,8 +1775,11 @@ theorem two_bit_cases (b : BitVec 2) : b = 0 ∨ b = 1 ∨ b = 2 ∨ b = 3 := by
 
 "#;
 
-/// Rewrite rules aligning raw one-bit operations with readable Boolean
+/// Rewrite rules for proving agreement of Boolean operations and aggregate
 /// expressions.
+///
+/// Vector rules carry element conversions through selections, appended
+/// literals, and reads that use the last element as their fallback.
 const BOOL_CORRESPONDENCE: &str = r#"private theorem raw_not (b : BitVec 1) :
     ~~~b = XlsCodec.encodeBool (!XlsCodec.decodeBool b) := by
   simpa only [XlsCodec.encode_decodeBool] using
