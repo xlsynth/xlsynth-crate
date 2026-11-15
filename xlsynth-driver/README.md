@@ -635,6 +635,11 @@ xlsynth-driver bx-to-lean counter.bx --output-dir lean
   their IR types. For example, a block declaring
   `extern fn arithmetic::twice(x: u8) -> u8;` can link the implementation
   with `--link-dslx arithmetic.x`.
+- Drivers built with Cargo feature `dslx-loop-bindings` accept
+  `--readable-loop-names` for BX imports and for functions supplied by
+  `--link-dslx`. This asks the linked
+  compiler to record DSLX loop bindings so the generated Lean can use their
+  source names. The default leaves collection disabled.
 - BX warnings stop generation by default. Use `--warnings-as-errors=false`
   to print them to stderr and continue.
 - Reset defaults to synchronous and active-high. Use `--reset-active-low` to

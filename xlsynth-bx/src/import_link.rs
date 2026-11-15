@@ -11,20 +11,34 @@ use xlsynth_pir::ir_verify::verify_package;
 
 use crate::lower::check_function_purity;
 
-/// Append the imported functions and return their destination identities.
+/// Records where imported functions were placed in the destination IR package.
 ///
-/// Root indices follow the order in `roots`, including repeats. The map covers
-/// every imported function, including private callees that were renamed to
-/// avoid collisions. Allocation and validation precede changes to the
-/// destination.
+/// `roots` lists destination member indices in the order the roots were
+/// requested. `symbols` maps each imported function's original name to its
+/// destination name and member index. `node_id_base` is the offset added to
+/// both imported IR node IDs and the node IDs in retained DSLX loop bindings.
+pub(crate) struct ImportLink {
+    pub(crate) roots: Vec<usize>,
+    pub(crate) symbols: BTreeMap<String, Symbol>,
+    pub(crate) node_id_base: usize,
+}
+
+/// Link a checked import and return its destination symbols and node ID offset.
+///
+/// The caller must first retain the functions reachable from `roots`. All
+/// allocation and validation take place before changing the destination.
 pub(crate) fn link_imported_functions(
     destination: &mut Package,
     mut imported: Package,
     roots: &[String],
     reserved_names: &[String],
-) -> Result<(Vec<usize>, BTreeMap<String, Symbol>), String> {
+) -> Result<ImportLink, String> {
     if roots.is_empty() {
-        return Ok((Vec::new(), BTreeMap::new()));
+        return Ok(ImportLink {
+            roots: Vec::new(),
+            symbols: BTreeMap::new(),
+            node_id_base: 0,
+        });
     }
     let symbols = allocate_symbols(destination, &imported, reserved_names);
     let files = allocate_files(destination, &imported)?;
@@ -68,10 +82,11 @@ pub(crate) fn link_imported_functions(
     verify_package(&imported).map_err(|error| format!("invalid imported DSLX IR: {error}"))?;
     destination.file_table.id_to_path.extend(files.additions);
     destination.members.extend(imported.members);
-    Ok((
-        roots.iter().map(|root| symbols[root].index).collect(),
+    Ok(ImportLink {
+        roots: roots.iter().map(|root| symbols[root].index).collect(),
         symbols,
-    ))
+        node_id_base: node_base,
+    })
 }
 
 /// Selects and checks the IR bodies reachable from the requested
@@ -220,8 +235,8 @@ mod tests {
     use super::*;
     use xlsynth_pir::ir_parser::Parser;
 
-    // Verifies: Calls, roots, and positions survive name and file ID clashes.
-    // Catches: Renaming a function without fixing callers and source positions.
+    // Verifies: Linked calls, roots, and source positions survive collisions.
+    // Catches: Resolving a callee or file to an unrelated destination entry.
     #[test]
     fn reachable_functions_keep_their_calls_and_source_files_across_collisions() {
         let mut destination = Parser::new(
@@ -268,7 +283,7 @@ fn unused() -> bits[8] {
         let top = destination.top.clone();
         let roots = ["main".into(), "piece__bx_1".into(), "main".into()];
         retain_reachable_functions(&mut imported, &roots).unwrap();
-        let (indices, _) =
+        let ImportLink { roots: indices, .. } =
             link_imported_functions(&mut destination, imported, &roots, &["main".into()]).unwrap();
         assert_eq!(indices[0], indices[2]);
         assert_eq!(destination.members[indices[0]].graph().name, "main__bx_1");

@@ -594,19 +594,17 @@ fn probe_{id}({}) {{ capture({}) }}
     /// until BX links their generated IR symbols into the destination.
     #[cfg(test)]
     pub(crate) fn finish(self) -> Result<ResolvedImports, String> {
-        self.finish_with_calls(None, |_| {})
+        self.finish_with_calls(None, |batch| batch.plain_ir())
     }
 
-    /// Compile the selected calls and pass each batch's checked module to the
-    /// caller.
+    /// Convert only the concrete DSLX calls used by retained BX definitions.
     ///
-    /// `None` selects all requested calls. The callback order matches the
-    /// returned batch order so lowering can pair declarations with linked
-    /// symbols.
+    /// Conversion order is also link order, so a caller can pair each checked
+    /// batch with its destination symbols after lowering.
     pub(crate) fn finish_with_calls(
         self,
         used: Option<&BTreeSet<usize>>,
-        mut on_import: impl FnMut(TypecheckedModule),
+        mut convert: impl FnMut(ImportConversion<'_>) -> Result<String, String>,
     ) -> Result<ResolvedImports, String> {
         let mut batches = Vec::new();
         if let Some(mut data) = self.imports? {
@@ -627,7 +625,7 @@ fn probe_{id}({}) {{ capture({}) }}
                 // Keep invocation metadata for the supported concrete instances
                 // independent of earlier type probes and ordinary imports.
                 let mut isolated = concrete.then(|| self.structs.fresh_import_data());
-                let (batch, checked) = compile_batch(
+                let batch = compile_batch(
                     BatchRoots {
                         subject,
                         call_ids: ids,
@@ -638,6 +636,7 @@ fn probe_{id}({}) {{ capture({}) }}
                     isolated.as_mut().unwrap_or(&mut data),
                     &self.stdlib_path,
                     &self.structs,
+                    &mut convert,
                 )
                 .map_err(|e| {
                     format!(
@@ -646,7 +645,6 @@ fn probe_{id}({}) {{ capture({}) }}
                     )
                 })?;
                 batches.push(batch);
-                on_import(checked);
             }
         }
         Ok(ResolvedImports {
@@ -969,10 +967,31 @@ struct BatchRoots<'a> {
     has_instances: bool,
 }
 
+/// Pairs a batch's original checked declarations with its conversion probe.
+///
+/// Read source declarations from `module` and recover their names with
+/// `module_names`. Generate both IR and any node bindings from `probe.checked`
+/// so a binding's ID identifies a node in that IR.
+pub(crate) struct ImportConversion<'a> {
+    pub(crate) module: TypecheckedModule,
+    pub(crate) module_names: crate::ImportNames,
+    pub(crate) probe: crate::import_structs::ConversionProbe<'a>,
+}
+
+impl ImportConversion<'_> {
+    /// Convert the probe to IR without collecting loop bindings.
+    pub(crate) fn plain_ir(&self) -> Result<String, String> {
+        self.probe
+            .checked
+            .to_ir_text()
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Recover each specialization's exact IR symbol from its generated probe.
 ///
-/// Return the checked probe alongside the reachable IR so consumers can look
-/// up the original DSLX declarations and concrete invocation bindings.
+/// Restore the source filenames and symbols in the converter's IR, then
+/// retain only the functions reachable from the requested calls.
 fn compile_batch(
     roots: BatchRoots<'_>,
     index: usize,
@@ -980,7 +999,8 @@ fn compile_batch(
     imports: &mut ImportData,
     stdlib_path: &Path,
     structs: &ImportedStructs,
-) -> Result<(ImportBatch, TypecheckedModule), String> {
+    convert: &mut impl FnMut(ImportConversion<'_>) -> Result<String, String>,
+) -> Result<ImportBatch, String> {
     let BatchRoots {
         subject,
         call_ids,
@@ -1036,11 +1056,14 @@ fn compile_batch(
             explicit_values,
         )?;
     }
-    let ir = converted
-        .checked
-        .to_ir_text()
-        .map_err(|e| converted.files.remap_diagnostic(e.to_string()))?;
-    let mut ir = converted.files.restore_ir_names(&ir);
+    let files = converted.files;
+    let ir = convert(ImportConversion {
+        module: checked,
+        module_names: structs.import_names(),
+        probe: converted,
+    })
+    .map_err(|e| files.remap_diagnostic(e))?;
+    let mut ir = files.restore_ir_names(&ir);
     // libxls accepts a numeric initial in a synthetic DSLX module name.
     // Give just the enclosing PIR package a legal initial; the generated
     // function symbols retain their collision-free prefix.
@@ -1057,17 +1080,14 @@ fn compile_batch(
         for node in &mut member.graph_mut().nodes {
             for pos in node.pos.iter_mut().flatten() {
                 if let Some(path) = package.file_table.id_to_path.get(&pos.fileno) {
-                    pos.colno =
-                        converted
-                            .files
-                            .original_column(Path::new(path), pos.lineno, pos.colno);
+                    pos.colno = files.original_column(Path::new(path), pos.lineno, pos.colno);
                 }
             }
         }
     }
     for path in package.file_table.id_to_path.values_mut() {
         let physical = Path::new(path);
-        let logical = converted.files.logical_path(physical).unwrap_or(physical);
+        let logical = files.logical_path(physical).unwrap_or(physical);
         if let Ok(relative) = logical.strip_prefix(stdlib_path) {
             let relative = relative
                 .to_string_lossy()
@@ -1087,33 +1107,33 @@ fn compile_batch(
         let call = &calls[id];
         let name = xlsynth::mangle_dslx_name(&module, &format!("probe_{id}"))
             .map_err(|e| e.to_string())?;
-        let probe = functions
-            .get(name.as_str())
-            .ok_or_else(|| format!("missing compiled probe for {subject}::{}", call.function))?;
+        let probe = functions.get(name.as_str()).ok_or_else(|| {
+            format!(
+                "missing compiled probe for {}::{}",
+                call.module, call.function
+            )
+        })?;
         let mut invokes = probe.nodes.iter().filter_map(|n| match &n.payload {
             NodePayload::Invoke { to_apply, .. } => Some(to_apply),
             _ => None,
         });
         let symbol = invokes
             .next()
-            .ok_or_else(|| format!("missing invoke for {subject}::{}", call.function))?;
+            .ok_or_else(|| format!("missing invoke for {}::{}", call.module, call.function))?;
         if invokes.next().is_some() {
             return Err(format!(
-                "ambiguous compiled probe for {subject}::{}",
-                call.function
+                "ambiguous compiled probe for {}::{}",
+                call.module, call.function
             ));
         }
         roots.push(symbol.clone());
     }
     crate::import_link::retain_reachable_functions(&mut package, &roots)?;
-    Ok((
-        ImportBatch {
-            package,
-            roots,
-            call_ids,
-        },
-        checked,
-    ))
+    Ok(ImportBatch {
+        package,
+        roots,
+        call_ids,
+    })
 }
 
 #[cfg(test)]

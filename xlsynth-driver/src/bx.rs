@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parse BX command-line options and drive checking, lowering, and export.
+//! Connect BX command-line inputs and diagnostics to the compiler and backends.
 
 use std::fs;
 use std::num::NonZeroUsize;
@@ -184,10 +184,11 @@ pub fn bx_prove_invariant_command() -> Command {
     .arg(time_limit_arg())
 }
 
-/// Define the Lean exporter CLI, with mutually exclusive DSLX and IR link
-/// inputs.
+/// Define the BX-to-Lean inputs and output directory for this driver build.
+///
+/// Builds with `dslx-loop-bindings` also expose `--readable-loop-names`.
 pub fn bx_to_lean_command() -> Command {
-    add_bx_args(Command::new("bx-to-lean").about("Generates raw and readable Lean for a BX block"))
+    let command = add_bx_args(Command::new("bx-to-lean").about("Generates raw and readable Lean for a BX block"))
         .arg(
             Arg::new("link-dslx")
                 .long("link-dslx")
@@ -202,7 +203,15 @@ pub fn bx_to_lean_command() -> Command {
                 .value_parser(value_parser!(PathBuf))
                 .required(true)
                 .help("Create a new directory for the five Lean modules"),
-        )
+        );
+    #[cfg(feature = "dslx-loop-bindings")]
+    let command = command.arg(
+        Arg::new("readable-loop-names")
+            .long("readable-loop-names")
+            .action(clap::ArgAction::SetTrue)
+            .help("Use checked DSLX loop bindings to name locals in the readable model"),
+    );
+    command
 }
 
 pub fn bx2gv_command() -> Command {
@@ -637,13 +646,11 @@ pub fn bx_prove_invariant(matches: &ArgMatches, config: &Option<ToolchainConfig>
     })
 }
 
-/// Emit the selected BX block's raw model, readable model, and correspondence
-/// proof source.
+/// Generate the selected block's Lean model before creating its directory.
 ///
-/// The UTF-8 stem of the BX input path supplies its public module name.
-/// For example, a block `stepper` in `chip.bx` is callable as
-/// `XLS.chip.stepper`. Emission must succeed before the command creates the
-/// output directory.
+/// With `--readable-loop-names`, the DSLX converter supplies loop bindings
+/// for BX imports and any explicitly linked DSLX module. The generated
+/// correspondence proofs can be checked separately with Lean.
 pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
     let compiled = with_bx_input(matches, config, |input| {
         let bx_name = input
@@ -665,9 +672,23 @@ pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Res
             );
             let module = dslx::parse_and_typecheck(&dslx_source, path, name, &mut import_data)
                 .with_context(|| format!("checking linked DSLX module '{path}'"))?;
-            block::compile_bx_with_dslx(bx_name, &input.source, module, reset, &input.imports)
+            let compile = block::compile_bx_with_dslx;
+            #[cfg(feature = "dslx-loop-bindings")]
+            let compile = if matches.get_flag("readable-loop-names") {
+                block::compile_bx_with_dslx_loop_bindings
+            } else {
+                compile
+            };
+            compile(bx_name, &input.source, module, reset, &input.imports)
         } else {
-            block::compile_bx(bx_name, &input.source, input.package, reset, &input.imports)
+            let compile = block::compile_bx;
+            #[cfg(feature = "dslx-loop-bindings")]
+            let compile = if matches.get_flag("readable-loop-names") {
+                block::compile_bx_with_loop_bindings
+            } else {
+                compile
+            };
+            compile(bx_name, &input.source, input.package, reset, &input.imports)
         }
         .with_context(|| input.path.display().to_string())?;
         report_warnings(input.path, input.warnings_as_errors, compiled.warnings())?;

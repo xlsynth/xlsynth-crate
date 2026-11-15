@@ -24,6 +24,7 @@ use crate::dslx_import::TypeWitness;
 use crate::parser::parse_value_type;
 use crate::typed::CheckedEnum;
 pub(crate) use effect_source::{EffectFunctionSource, EffectSources, is_token_builtin};
+pub(crate) use enum_conversion::ConversionProbe;
 pub(crate) use outline_graph::DslxSourceLoader;
 use outline_graph::{DeclId, ImportFeatures, NativeSourceFiles, OutlineGraph, ResolvedShape};
 
@@ -73,11 +74,10 @@ impl ImportNames {
     }
 }
 
-/// Source identities retained after checking BX against its DSLX imports.
+/// BX type spellings and DSLX module subjects retained after checking.
 #[derive(Default)]
 pub(crate) struct CapturedSources {
     pub(crate) types: WrittenTypes,
-    pub(crate) names: Option<ImportNames>,
     pub(crate) modules: BTreeSet<String>,
 }
 
@@ -585,12 +585,24 @@ impl ImportedStructs {
         ))
     }
 
-    /// Move the written type annotations out and snapshot the logical subjects
-    /// of all imports.
+    /// Share the frozen filename mappings with a batch checked against these
+    /// files.
+    ///
+    /// The batch's source snapshot must already exist.
+    pub(crate) fn import_names(&self) -> ImportNames {
+        ImportNames(
+            self.files
+                .as_ref()
+                .expect("DSLX batch has a source snapshot")
+                .clone(),
+        )
+    }
+
+    /// Move the recorded type spellings and include every loaded module
+    /// subject.
     pub(crate) fn take_sources(&mut self) -> CapturedSources {
         CapturedSources {
             types: self.written_types.take().unwrap_or_default(),
-            names: self.files.clone().map(ImportNames),
             modules: self.graph.sources().map(|s| s.subject.clone()).collect(),
         }
     }

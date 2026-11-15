@@ -98,10 +98,7 @@ pub(super) struct StatefulInterface {
     pub(super) outputs: Vec<SourceType>,
 }
 
-/// The qualified DSLX name and declared signature of a linked IR function.
-///
-/// Parameters keep their DSLX names and declaration order. Each parameter is
-/// paired by position with its linked IR node, whose physical type is checked.
+/// Source names and types used to render a linked IR function in readable Lean.
 pub(super) struct HelperSignature {
     /// Public declaring module and local name, including specialization
     /// arguments.
@@ -111,6 +108,9 @@ pub(super) struct HelperSignature {
     pub(super) source_name: Option<(String, String)>,
     pub(super) params: Vec<(String, SourceType)>,
     pub(super) result: SourceType,
+    /// Named non-parameter locals keyed by their text IDs in the linked IR.
+    /// These IDs can change when BX imports the function into a package.
+    pub(super) node_bindings: BTreeMap<usize, (String, SourceType)>,
 }
 
 /// Resolve a name within the collected leaf declarations, rejecting unknowns.

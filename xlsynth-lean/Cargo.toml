@@ -14,6 +14,7 @@ workspace = true
 [features]
 default = []
 lean-tests = []
+dslx-loop-bindings = ["xlsynth/dslx-loop-bindings", "xlsynth-bx/dslx-loop-bindings"]
 
 [[test]]
 name = "lean_eval"
