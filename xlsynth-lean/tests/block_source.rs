@@ -8,6 +8,7 @@ use xlsynth_pir::ir_parser::Parser;
 /// Compile one self-contained BX fixture in an empty package.
 fn compile(source: &str) -> CompiledBx {
     compile_bx(
+        "design",
         source,
         xlsynth_bx::empty_package("example"),
         Default::default(),
@@ -47,8 +48,8 @@ block show(clk, value: Packet) -> (Packet,) { (value,) }
     assert!(!types.contains("Unused"));
 }
 
-// Verifies: Local and library Packet types expose fields under distinct names.
-// Catches: Losing a library qualifier or the private record used by a field.
+// Verifies: Readable BX interfaces preserve public and private library names.
+// Catches: Leaking linker names or accepting a duplicate library declaration.
 #[test]
 fn readable_interface_uses_linked_bx_library_structs() {
     let library = tempfile::tempdir().unwrap();
@@ -57,23 +58,41 @@ fn readable_interface_uses_linked_bx_library_structs() {
         "struct Word { value: u8 } pub struct Packet { payload: Word }",
     )
     .unwrap();
-    let compiled = compile_bx(
-        "use lib; struct Packet { tag: bool }
+    let emit = |module_name| {
+        compile_bx(
+            module_name,
+            "use lib; struct Packet { tag: bool }
          block demo(clk, p: lib::Packet, q: Packet) -> lib::Packet { p }",
-        xlsynth_bx::empty_package("example"),
-        Default::default(),
-        &xlsynth_bx::ImportOptions {
-            additional_search_paths: vec![library.path()],
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let bundle = compiled.emit_readable(Some("demo")).unwrap();
+            xlsynth_bx::empty_package("example"),
+            Default::default(),
+            &xlsynth_bx::ImportOptions {
+                additional_search_paths: vec![library.path()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .emit_readable(Some("demo"))
+    };
+    let bundle = emit("design").unwrap();
     let types = &bundle.files[1].1;
-    assert!(types.contains("structure «lib::Packet»"), "{types}");
-    assert!(types.contains("structure «Packet»"), "{types}");
-    assert!(types.contains("«value» : _root_.BitVec 8"), "{types}");
+    assert!(
+        types.contains("-- Source struct lib::Packet { payload }"),
+        "{types}"
+    );
+    assert!(
+        types.contains("-- Source struct design::Packet { tag }"),
+        "{types}"
+    );
+    assert!(
+        types.contains("-- Source struct lib::Word { value }"),
+        "{types}"
+    );
+    assert!(!types.contains("$bx$"), "{types}");
     assert!(types.contains("«payload» :"), "{types}");
+    assert_eq!(
+        emit("lib").err().unwrap().to_string(),
+        "duplicate BX source declaration 'lib::Packet' in the root and an imported library"
+    );
 }
 
 // Negative test: A signed BX output must report its port and unsupported type.
@@ -87,27 +106,35 @@ fn signed_public_output_reports_the_bx_port() {
     );
 }
 
-// Negative test: A recOn field collision must name the owning struct.
+// Verifies: Fields with the listed Lean-generated names can be emitted.
+// Catches: Rejecting a legal record that needs an explicit field accessor.
 #[test]
-fn unsupported_lean_field_reports_the_bx_declaration() {
-    let compiled =
-        compile("struct Packet { recOn: u8 } block machine(clk, x: Packet) -> u8 { x.recOn }");
-    let diagnostic = format!("{:#}", compiled.emit_readable(None).err().unwrap());
-    assert!(
-        diagnostic.contains("Packet")
-            && diagnostic.contains("recOn")
-            && diagnostic.contains("Lean generates"),
-        "{diagnostic}"
-    );
+fn source_struct_fields_can_use_lean_generated_member_names() {
+    for field in [
+        "rec",
+        "recOn",
+        "casesOn",
+        "noConfusion",
+        "noConfusionType",
+        "ctorIdx",
+        "_sizeOf_1",
+        "_sizeOf_inst",
+    ] {
+        let compiled = compile(&format!(
+            "struct Packet {{ {field}: u8 }} block machine(clk, x: Packet) -> u8 {{ x.{field} }}"
+        ));
+        compiled.emit_readable(None).unwrap();
+    }
 }
 
-// Negative test: Reject ambiguous selections and blocks with no BX declaration.
+// Negative test: Reject ambiguous tops and linked blocks lacking a BX source.
 #[test]
 fn readable_emission_requires_a_selected_bx_declaration() {
     let package = Parser::new("package example\nblock preexisting() {}")
         .parse_and_validate_package()
         .unwrap();
     let compiled = compile_bx(
+        "design",
         "block a(clk) -> u8 { u8:1 } block b(clk) -> u8 { u8:2 }",
         package,
         Default::default(),
@@ -126,8 +153,8 @@ fn readable_emission_requires_a_selected_bx_declaration() {
     );
 }
 
-// Verifies: Readable DSLX helpers accept defaulted struct arguments.
-// Catches: Mishandling constant or dependent defaults in helper parameters.
+// Verifies: Helpers accept inferred and explicit struct defaults.
+// Catches: Treating equal concrete struct bindings as different signatures.
 #[test]
 fn checked_helpers_accept_defaulted_struct_arguments() {
     let source = r#"
@@ -151,6 +178,7 @@ block accumulate(clk, value: u8) -> u6 {
     let module =
         xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports).unwrap();
     let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+        "design",
         bx,
         module,
         Default::default(),
@@ -160,8 +188,8 @@ block accumulate(clk, value: u8) -> u6 {
     compiled.emit_readable(None).unwrap();
 }
 
-// Verifies: Indexed fields retain names when operands or results fix the type.
-// Catches: Losing known names or inferring a record from one operand alone.
+// Verifies: Array elements with a known record type use named projections.
+// Catches: Guessing an ambiguous record type or dropping known field names.
 #[test]
 fn indexed_arrays_use_record_fields_when_the_element_type_is_known() {
     let constructed = "[Slot { write: Write { data: a } }, Slot { write: Write { data: b } }]";
@@ -231,6 +259,7 @@ block storage(clk, {bx_inputs}, index: u8) -> u8 {{
             xlsynth::dslx::parse_and_typecheck(&source, "machine.x", "machine", &mut imports)
                 .unwrap();
         let model = xlsynth_lean::block::compile_bx_with_dslx(
+            "design",
             &bx,
             module,
             Default::default(),
@@ -255,8 +284,8 @@ block storage(clk, {bx_inputs}, index: u8) -> u8 {{
             .collect();
         let expected = if named {
             [
-                "let «slot» : _root_.XlsSource.«machine::Slot» := (let «indexed array» := «slots»; (_root_.Vector.getD «indexed array» («index»).toNat (_root_.Vector.back «indexed array»)))",
-                "let «slot_write» : _root_.XlsSource.«machine::Write» := («slot»).«write»",
+                "let «slot» : XLS.«machine».«Slot» := (let «indexed array» := «slots»; (_root_.Vector.getD «indexed array» («index»).toNat (_root_.Vector.back «indexed array»)))",
+                "let «slot_write» : XLS.«machine».«Write» := («slot»).«write»",
                 "let «slot_write_data» : _root_.BitVec 8 := («slot_write»).«data»",
             ]
         } else {

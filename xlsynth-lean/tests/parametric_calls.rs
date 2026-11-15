@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Directed checks for nested parametric calls and the Lean guards used by the
-//! fuzzer.
+//! Compare specialized calls in generated Lean with independently evaluated
+//! DSLX results.
 
 #[path = "common/lean_bundle.rs"]
 mod lean_bundle;
@@ -41,7 +41,7 @@ fn concat_permutations_have_distinct_results() {
     lean_bundle::check_bundle(&bundle).unwrap();
 }
 
-// Negative test: A wrong specialization must fail its Lean result guard.
+// Negative test: Swapped specialization arguments must fail the Lean guard.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn wrong_specialization_in_caller_fails_the_oracle() {
@@ -54,15 +54,16 @@ fn wrong_specialization_in_caller_fails_the_oracle() {
             .iter_mut()
             .find(|(name, _)| name == "ReadableGenerated.lean")
             .unwrap();
-        let (helpers, caller) = source.split_once("def Helpers.«machine::g»").unwrap();
-        let correct = "_root_.XlsReadable.Helpers.«machine::outer<2,5>»";
-        let wrong = "_root_.XlsReadable.Helpers.«machine::outer<5,2>»";
-        assert!(helpers.contains("def Helpers.«machine::outer<2,5>»"));
-        assert!(helpers.contains("def Helpers.«machine::outer<5,2>»"));
+        let caller_decl = "def _root_.XLS.«machine».«g»";
+        let (helpers, caller) = source.split_once(caller_decl).unwrap();
+        let correct = "_root_.XLS.«machine».«outer<2,5>»";
+        let wrong = "_root_.XLS.«machine».«outer<5,2>»";
+        assert!(helpers.contains(&format!("def {correct}")));
+        assert!(helpers.contains(&format!("def {wrong}")));
         assert!(caller.contains(correct));
         // Keep both correct helper definitions and alter only g's first call.
         *source = format!(
-            "{helpers}def Helpers.«machine::g»{}",
+            "{helpers}{caller_decl}{}",
             caller.replacen(correct, wrong, 1)
         );
         let error = lean_bundle::check_bundle(&bundle).unwrap_err().to_string();

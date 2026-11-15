@@ -13,12 +13,8 @@ use std::collections::BTreeMap;
 use super::*;
 
 impl Presentation<'_> {
-    /// Emit helper theorems in dependency order and use them to prove block
-    /// evaluation agrees.
-    ///
-    /// Once a helper has its own theorem, the proof makes its definitions
-    /// locally irreducible. Later proofs rewrite calls using that theorem
-    /// without forcing Lean to compare the helper implementations again.
+    /// Generate the proof that helper calls and counted loops agree across the
+    /// two representations.
     pub(super) fn loop_correspondence(&self) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
@@ -64,7 +60,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
                 continue;
             };
             let raw = lean::helper_path("XlsBlock", &function.name)?;
-            let readable = format!("Helpers.{}", identifier(&sig.name)?);
+            let readable = helper_path(sig, &function.name)?;
             let mut binders = Vec::new();
             let mut params = Vec::new();
             let mut decoded = Vec::new();
@@ -181,7 +177,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
             let codec = format!("XlsCodec.{name}");
             rules.extend(codec_round_trip_rules(&name));
             rules.extend(
-                declaration_functions(decl, &name)?
+                declaration_functions(&self.bx_namespace, decl, &name)?
                     .into_iter()
                     .map(|f| format!("apply_ite {f}")),
             );

@@ -88,6 +88,8 @@ pub(super) enum SourceType {
 /// They pair each entry in `outputs` with the IR output port at the same index
 /// when constructing the result or converting it between readable and raw Lean.
 pub(super) struct StatefulInterface {
+    /// Logical owner of the block and locally declared BX types.
+    pub(super) bx_module: String,
     /// Physical IR function names mapped to the source signatures available for
     /// readable calls.
     pub(super) helpers: BTreeMap<String, HelperSignature>,
@@ -101,7 +103,12 @@ pub(super) struct StatefulInterface {
 /// Parameters keep their DSLX names and declaration order. Each parameter is
 /// paired by position with its linked IR node, whose physical type is checked.
 pub(super) struct HelperSignature {
-    pub(super) name: String,
+    /// Public declaring module and local name, including specialization
+    /// arguments.
+    ///
+    /// Generated loop bodies and additional linked copies of the same source
+    /// specialization use their physical IR symbol instead.
+    pub(super) source_name: Option<(String, String)>,
     pub(super) params: Vec<(String, SourceType)>,
     pub(super) result: SourceType,
 }

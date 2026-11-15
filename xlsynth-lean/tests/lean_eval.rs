@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Run emitted Lean models on concrete inputs and check the resulting traces
+//! and values.
+
 mod common;
 
 use std::path::PathBuf;
@@ -26,13 +29,17 @@ fn evaluator() -> &'static LeanEvaluator {
     })
 }
 
-// Verifies: Both registers read old state during a swap or reset.
-// Catches: Sequential register writes or a low enable masking reset.
+// Verifies: Trace outputs use old state across simultaneous writes and reset.
+// Catches: Swapping positional fields whose names clash with Lean declarations.
 #[test]
 fn block_trace_observes_old_state_and_carries_simultaneous_writes() {
-    let package = Parser::new(include_str!("fixtures/block_step.ir"))
-        .parse_and_validate_package()
-        .unwrap();
+    // Exercise positional trace construction with a generated-name collision
+    // and nonalphabetical declaration order in both input and state records.
+    let ir = include_str!("fixtures/block_step.ir")
+        .replace("rst", "recOn")
+        .replace("reg a(", "reg noConfusion(")
+        .replace("register=a", "register=noConfusion");
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
     let block = package.get_top_block().unwrap();
     let word = |n| IrValue::make_ubits(2, n).unwrap();
     let bit = |n| IrValue::make_ubits(1, n).unwrap();

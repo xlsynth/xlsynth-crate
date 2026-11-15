@@ -7,7 +7,10 @@
 //! fixes the port order and the equations used for both Lean models.
 
 use anyhow::{Context, Result, bail, ensure};
-use std::{collections::BTreeMap, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 use xlsynth_bx::{
     CheckedModule, ImportOptions, LinkedStruct, ResetBehavior,
     ast::{Module, Param, Stmt, Type},
@@ -26,6 +29,8 @@ use super::{BlockContext, LeanBlockBundle, readable, select_block};
 /// emission can recover names without reopening the source files.
 pub struct CompiledBx {
     checked: CheckedModule,
+    module_name: String,
+    imported_modules: BTreeSet<String>,
     imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
     source: Module,
     pub(super) package: ir::Package,
@@ -33,13 +38,16 @@ pub struct CompiledBx {
     imports: Vec<super::helper_types::DslxLink>,
 }
 
-/// Check BX source and lower it into the supplied package.
+/// Check BX source with its import paths and lower it into the supplied IR
+/// package.
 ///
-/// The package supplies definitions for BX externs, and `options` controls
-/// source import lookup. Imported functions retain their checked declarations
-/// even if linking changes their IR names. Compilation errors carry a BX
-/// diagnostic. Inspect [`CompiledBx::warnings`] on success.
+/// The package may already contain functions or blocks used by BX externs.
+///
+/// `module_name` is the logical BX module name used in Lean paths such as
+/// `XLS.design.Packet`. Passing an IR package name that differs from the
+/// source module puts root BX declarations under that package name.
 pub fn compile_bx(
+    module_name: &str,
     source: &str,
     package: ir::Package,
     reset: ResetBehavior,
@@ -51,11 +59,14 @@ pub fn compile_bx(
         package,
         imports,
         imported_structs,
+        imported_modules,
         ..
     } = xlsynth_bx::compile_with_source(source, package, reset, options)
         .map_err(anyhow::Error::msg)?;
     Ok(CompiledBx {
         checked,
+        module_name: module_name.to_owned(),
+        imported_modules,
         imported_structs,
         source,
         package,
@@ -67,25 +78,21 @@ pub fn compile_bx(
     })
 }
 
-/// Lower BX against the IR produced from a checked DSLX module.
+/// Link the IR produced from this checked DSLX module and retain its source
+/// types for calls from the BX block.
 ///
-/// The checked module supplies both the implementations for extern functions
-/// and their declarations for readable Lean. Helpers with supported signatures
-/// retain their declared types. Helpers with unsupported signatures use their
-/// IR types.
-///
-/// # Errors
-///
-/// Returns an error if DSLX lowering, IR validation, BX checking, or linking
-/// fails. BX extern declarations must match the linked functions' IR shapes.
+/// `module_name` names the BX source. The checked DSLX module supplies its own
+/// logical name. When the two inputs independently import the same DSLX
+/// subject, [`CompiledBx::emit_readable`] reports the overlapping subject.
 pub fn compile_bx_with_dslx(
+    module_name: &str,
     source: &str,
     module: xlsynth::dslx::TypecheckedModule,
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledBx> {
     let (package, link) = super::helper_types::DslxLink::compile(module)?;
-    let compiled = compile_bx(source, package, reset, options)?;
+    let compiled = compile_bx(module_name, source, package, reset, options)?;
     Ok(CompiledBx {
         dslx: Some(link),
         ..compiled
@@ -131,32 +138,100 @@ impl CompiledBx {
     /// Emit the selected BX block, defaulting to the package's top or sole
     /// block.
     ///
-    /// The block must have a matching BX declaration. An ambiguous selection
-    /// or a disagreement between the source interface and linked IR is an
-    /// error.
+    /// The selected block and its reachable source types and functions keep
+    /// their declaring modules. Emission rejects competing declarations at
+    /// the same Lean path and independently checked copies of a DSLX
+    /// module. Multiple BX imports from a shared checked graph may refer to
+    /// the same declaration.
     pub fn emit_readable(&self, block_name: Option<&str>) -> Result<LeanBlockBundle> {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
         let (mut declarations, mut interface) = self.readable_interface(&block)?;
-        for link in self.dslx.iter().chain(&self.imports) {
-            link.add_signatures(&block, &mut declarations, &mut interface)?;
+        let independent = |owner: &str| {
+            anyhow::anyhow!(
+                "DSLX module '{owner}' was checked independently by the supplied DSLX module and BX imports; use one source for '{owner}' (remove the redundant BX use and call the supplied helper via extern, or omit the separate DSLX input)"
+            )
+        };
+        let mut external = BTreeSet::new();
+        if let Some(link) = &self.dslx {
+            let mut bx_imports = self.imported_modules.clone();
+            bx_imports.extend(declarations.iter().filter_map(|decl| {
+                decl.name()
+                    .split_once("::")
+                    .map(|(owner, _)| owner.to_owned())
+            }));
+            link.module.collect_import_subjects(&mut external);
+            external.insert(link.module.get_module().get_name());
+            if let Some(owner) = bx_imports.intersection(&external).next() {
+                return Err(independent(owner));
+            }
+            link.add_signatures(&block, &mut declarations, &mut interface, |owner| {
+                if bx_imports.contains(owner) {
+                    return Err(independent(owner));
+                }
+                external.insert(owner.to_owned());
+                Ok(())
+            })?;
         }
-        // Two specializations (or two linked copies of the same definition)
-        // share a DSLX name but need separate Lean definitions.
+        for link in &self.imports {
+            link.add_signatures(&block, &mut declarations, &mut interface, |owner| {
+                if external.contains(owner) {
+                    return Err(independent(owner));
+                }
+                Ok(())
+            })?;
+        }
+        // Root and library BX keys are distinct from qualified DSLX keys,
+        // but both languages can declare the same name in the same Lean
+        // namespace.
+        let mut bx_names = BTreeSet::from([(self.module_name.as_str(), graph.name.as_str())]);
+        for (owner, local) in declarations
+            .iter()
+            .map(TypeDecl::name)
+            .filter(|name| !name.contains("::"))
+            .map(|name| xlsynth_bx::library_item(name).unwrap_or((&self.module_name, name)))
+        {
+            ensure!(
+                bx_names.insert((owner, local)),
+                "duplicate BX source declaration '{owner}::{local}' in the root and an imported library"
+            );
+        }
+        for (owner, local) in declarations
+            .iter()
+            .map(TypeDecl::name)
+            .filter_map(|name| name.split_once("::"))
+            .chain(
+                interface
+                    .helpers
+                    .values()
+                    .filter_map(|helper| helper.source_name.as_ref())
+                    .map(|(owner, local)| (owner.as_str(), local.as_str())),
+            )
+        {
+            ensure!(
+                !bx_names.contains(&(owner, local)),
+                "duplicate source declaration '{owner}::{local}' in BX '{owner}.bx' and DSLX '{owner}.x'; rename one declaration"
+            );
+        }
+        // Two linked copies can share a checked declaration and specialization.
+        // Give it one public definition, keeping any other physical copy
+        // callable.
         let mut names = std::collections::BTreeSet::new();
-        for (symbol, signature) in &mut interface.helpers {
-            if !names.insert(signature.name.clone()) {
-                signature.name = format!("{}@{symbol}", signature.name);
+        for signature in interface.helpers.values_mut() {
+            if let Some(name) = &signature.source_name
+                && !names.insert(name.clone())
+            {
+                signature.source_name = None;
             }
         }
         readable::emit(&block, &declarations, &interface)
     }
 
-    /// Recover declared types and check their names, order and shapes against
-    /// the block IR.
+    /// Match written BX types to checked ports and registers in physical
+    /// declaration order.
     ///
-    /// A struct returned directly by BX contributes one physical output per
-    /// field. A struct inside a result tuple remains a single tuple member.
+    /// Port names distinguish equal-width fields whose order affects the Lean
+    /// result.
     pub(super) fn readable_interface(
         &self,
         block: &BlockContext<'_>,
@@ -322,6 +397,7 @@ impl CompiledBx {
         Ok((
             declarations,
             StatefulInterface {
+                bx_module: self.module_name.clone(),
                 inputs,
                 registers,
                 outputs,
@@ -444,11 +520,12 @@ fn bx_type(
 mod tests {
     use super::*;
 
-    // Verifies: Readable models accept aliases, constant widths and BX structs.
-    // Catches: Emitting a type parameter the BX checker already resolved.
+    // Verifies: Lean resolves BX aliases, constant widths and nested instances.
+    // Catches: Taking port or register types from unresolved annotations.
     #[test]
     fn readable_interface_uses_concrete_bx_types() -> Result<()> {
         let compiled = compile_bx(
+            "example",
             r#"
 type Byte = u8;
 const WIDTH = u32:8;
@@ -473,8 +550,8 @@ block nested(clk, x: Wrap<Byte>) -> (Byte, Wrap<Byte>) {
         Ok(())
     }
 
-    // Verifies: Tuple outputs and nested arrays keep both DSLX struct aliases.
-    // Catches: Choosing one alias for both members based on their layout.
+    // Verifies: Nested arrays and output ports retain each written DSLX alias.
+    // Catches: collapsing two aliases because their checked BX layouts match.
     #[test]
     fn checked_bx_layout_preserves_each_written_dslx_alias() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -483,6 +560,7 @@ block nested(clk, x: Wrap<Byte>) -> (Byte, Wrap<Byte>) {
             "pub struct Packet { data: u8 } pub type First = Packet; pub type Second = Packet;",
         )?;
         let compiled = compile_bx(
+            "example",
             r#"
 use ops;
 const COUNT = u32:2;
@@ -523,10 +601,11 @@ block demo(clk, p: Envelope) -> Pair { p.items[u32:0] }
         Ok(())
     }
 
-    // Negative test: Swapped equal-width outputs must report mismatched names.
+    // Negative test: Swapped BX outputs must report both mismatched port names.
     #[test]
     fn equal_width_output_reordering_is_rejected() {
         let mut compiled = compile_bx(
+            "example",
             "struct Ports { zebra: u8, apple: u8 } block pair(clk, x: u8) -> Ports { Ports { apple: u8:42, zebra: x } }",
             xlsynth_bx::empty_package("example"),
             Default::default(),

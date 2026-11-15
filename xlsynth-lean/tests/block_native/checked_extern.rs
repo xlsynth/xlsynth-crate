@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Check which declaration supplies a BX extern's readable interface when IR
-//! layouts coincide.
+//! Check which source declarations type a BX extern call when the linked IR
+//! layouts match.
 
 use xlsynth::dslx::{ImportData, parse_and_typecheck};
 use xlsynth_lean::block::compile_bx_with_dslx;
 
-// Verifies: The selected extern module determines its alias and field order.
-// Catches: Selecting same-shaped helpers by local name or layout alone.
+// Verifies: A BX extern uses its selected module's alias and field order.
+// Catches: Resolving equal signatures by layout across different modules.
 #[test]
 #[ignore = "requires a matching native XLS library and Lean 4.34.1"]
 fn same_layout_extern_uses_the_selected_modules_declarations() {
@@ -48,6 +48,7 @@ fn same_layout_extern_uses_the_selected_modules_declarations() {
              block circuit(clk, x: Pair) -> u8 {{ {owner}::step(x) }}"
         );
         let compiled = compile_bx_with_dslx(
+            "design",
             &bx,
             checked.clone(),
             Default::default(),
@@ -62,13 +63,13 @@ fn same_layout_extern_uses_the_selected_modules_declarations() {
             .unwrap();
         let signature = executable
             .lines()
-            .find(|line| line.starts_with(&format!("def Helpers.«{owner}::step»")))
+            .find(|line| line.starts_with(&format!("def _root_.XLS.«{owner}».«step»")))
             .unwrap();
         assert!(
-            signature.contains(&format!("«{owner}::Request»")),
+            signature.contains(&format!("XLS.«{owner}».«Request»")),
             "{signature}"
         );
-        assert!(!executable.contains(&format!("Helpers.«{other}::step»")));
+        assert!(!executable.contains(&format!("XLS.«{other}».«step»")));
         bundle.files.push(("Selected.lean".into(), format!(
             "import ReadableCorrespondence\nopen XlsReadable\nexample (q : State) (input : Input) : observe q input = input.x.{expected} := rfl\n"
         )));

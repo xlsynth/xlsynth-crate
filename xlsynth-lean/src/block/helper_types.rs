@@ -29,7 +29,7 @@ use xlsynth_pir::{ir, ir_parser::Parser};
 /// Externs compiled into the initial package keep their symbols. For a BX
 /// import, the linker records any renames needed to avoid a collision.
 pub(super) struct DslxLink {
-    module: dslx::TypecheckedModule,
+    pub(super) module: dslx::TypecheckedModule,
     module_names: Option<ImportNames>,
     symbols: BTreeMap<String, String>,
 }
@@ -75,13 +75,16 @@ impl DslxLink {
         ))
     }
 
-    /// Attach representable source signatures to reachable helpers after
-    /// checking their IR shapes.
+    /// Attach reachable checked signatures to their final linked IR symbols.
+    ///
+    /// `observe_owner` sees each source module contributing a type or helper so
+    /// the caller can reject overlap with an independently checked graph.
     pub(super) fn add_signatures(
         &self,
         block: &BlockContext<'_>,
         declarations: &mut Vec<TypeDecl>,
         interface: &mut StatefulInterface,
+        mut observe_owner: impl FnMut(&str) -> Result<()>,
     ) -> Result<()> {
         let linked: BTreeSet<_> = block.helpers.iter().map(|f| f.name.as_str()).collect();
         let reachable = self
@@ -95,6 +98,22 @@ impl DslxLink {
         }
         let mut catalogue = Catalogue::new(&self.module, self.module_names.as_ref(), reachable);
         catalogue.collect_helpers()?;
+        // These are the checked declarations behind reachable references,
+        // including references brought into scope by DSLX use trees.
+        for owner in catalogue
+            .declarations
+            .iter()
+            .map(TypeDecl::name)
+            .filter_map(|name| name.split_once("::").map(|(owner, _)| owner))
+            .chain(
+                catalogue
+                    .helpers
+                    .values()
+                    .filter_map(|sig| sig.source_name.as_ref().map(|(owner, _)| owner.as_str())),
+            )
+        {
+            observe_owner(owner)?;
+        }
         catalogue.helpers = catalogue
             .helpers
             .into_iter()
@@ -253,7 +272,7 @@ fn merge_declarations(
     Ok(())
 }
 
-// Negative test: Reordered equal-width alias fields must report a conflict.
+// Negative test: Reordered fields in an alias target must report a conflict.
 #[cfg(test)]
 #[test]
 fn linked_struct_alias_rejects_reordered_equal_width_fields() {
@@ -278,6 +297,7 @@ fn linked_struct_alias_rejects_reordered_equal_width_fields() {
         },
     ];
     let mut interface = StatefulInterface {
+        bx_module: "machine".into(),
         inputs: Default::default(),
         outputs: Default::default(),
         registers: Default::default(),
@@ -1019,7 +1039,7 @@ impl Catalogue<'_> {
                 self.helpers.insert(
                     function.name.clone(),
                     HelperSignature {
-                        name: function.name.clone(),
+                        source_name: None,
                         result: params[1].1.clone(),
                         params,
                     },
@@ -1073,10 +1093,9 @@ impl Catalogue<'_> {
             })
         }
     }
-    /// Pair the helper's source names with types resolved in the current module
-    /// and instance.
-    ///
-    /// A missing return annotation denotes the empty tuple.
+
+    /// Resolve parameters and result in the declaring module's current type
+    /// context.
     fn helper_signature<'a>(
         &mut self,
         name: &str,
@@ -1093,7 +1112,7 @@ impl Catalogue<'_> {
             },
         };
         Ok(HelperSignature {
-            name: self.qualified_name(name),
+            source_name: Some((self.source_qualifier().to_owned(), name.to_owned())),
             params,
             result,
         })

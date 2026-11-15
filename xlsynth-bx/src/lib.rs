@@ -43,7 +43,11 @@ pub use typed::BoundParametricValue;
 pub use warnings::{BxWarning, BxWarningKind};
 pub use xlsynth_pir::ir_builder::ResetBehavior;
 
-use std::{collections::BTreeMap, path::Path, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    rc::Rc,
+};
 use xlsynth::dslx;
 use xlsynth_pir::ir::{FileTable, Package};
 
@@ -175,17 +179,17 @@ pub struct CompiledModule {
     /// Checked modules and destination symbols for imports that supplied
     /// functions.
     pub imports: Vec<LinkedImport>,
+    /// Original module subjects in the frozen DSLX import graph, including
+    /// unused imports.
+    pub imported_modules: BTreeSet<String>,
     /// Indexed by the spelling used in BX, including unqualified use bindings.
     pub imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
 }
 
 /// Compile BX while retaining the source graph for each linked DSLX import.
 ///
-/// Supply the IR package that implements any BX externs. Syntax, type,
-/// import, and lowering errors return a diagnostic. Successful compilation
-/// leaves warnings available through [`CheckedModule::warnings`].
-/// Use each batch's symbol map to locate its functions in the resulting
-/// package, since existing functions can occupy their original names.
+/// The result preserves written type names for ports and keeps the logical
+/// subjects of all imported DSLX modules, even those with no linked calls.
 pub fn compile_with_source(
     source: &str,
     package: Package,
@@ -231,5 +235,6 @@ pub fn compile_with_source(
         package,
         imports,
         imported_structs: sources.types,
+        imported_modules: sources.modules,
     })
 }

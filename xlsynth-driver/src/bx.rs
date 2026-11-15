@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Run BX driver commands with their configured import paths and linked
-//! package.
+//! Parse BX command-line options and drive checking, lowering, and export.
 
 use std::fs;
 use std::num::NonZeroUsize;
@@ -638,13 +637,20 @@ pub fn bx_prove_invariant(matches: &ArgMatches, config: &Option<ToolchainConfig>
     })
 }
 
-/// Generate the Lean modules before creating their output directory.
+/// Emit the selected BX block's raw model, readable model, and correspondence
+/// proof source.
 ///
-/// With `--link-dslx`, check the module using the BX command's import paths
-/// so the readable model can use declarations from the same compilation as
-/// the linked IR. Model generation leaves proof checking to Lean.
+/// The UTF-8 stem of the BX input path supplies its public module name.
+/// For example, a block `stepper` in `chip.bx` is callable as
+/// `XLS.chip.stepper`. Emission must succeed before the command creates the
+/// output directory.
 pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
     let compiled = with_bx_input(matches, config, |input| {
+        let bx_name = input
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .context("BX input requires a UTF-8 module name")?;
         let reset = ResetBehavior {
             active_low: input.active_low,
             asynchronous: matches.get_flag("reset-asynchronous"),
@@ -659,9 +665,9 @@ pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Res
             );
             let module = dslx::parse_and_typecheck(&dslx_source, path, name, &mut import_data)
                 .with_context(|| format!("checking linked DSLX module '{path}'"))?;
-            block::compile_bx_with_dslx(&input.source, module, reset, &input.imports)
+            block::compile_bx_with_dslx(bx_name, &input.source, module, reset, &input.imports)
         } else {
-            block::compile_bx(&input.source, input.package, reset, &input.imports)
+            block::compile_bx(bx_name, &input.source, input.package, reset, &input.imports)
         }
         .with_context(|| input.path.display().to_string())?;
         report_warnings(input.path, input.warnings_as_errors, compiled.warnings())?;
