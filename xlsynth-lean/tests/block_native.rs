@@ -1043,7 +1043,7 @@ private def clock (a b : BitVec 5) :=
     check_bundle(bundle, "unsigned fixed-width arithmetic");
 }
 
-/// Elaborate every generated file in dependency order with the requested Lean.
+/// Checks the complete bundle and names the fixture in any compilation failure.
 fn check_bundle(bundle: LeanBlockBundle, fixture: &str) {
     lean_bundle::check_bundle(&bundle).unwrap_or_else(|error| panic!("{fixture}: {error:#}"));
 }

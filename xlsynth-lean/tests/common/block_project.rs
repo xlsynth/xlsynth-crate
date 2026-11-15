@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Elaborate block models and proof clients against the repository's Lean
+//! Compiles generated Lean projects against the repository's embedded IR
 //! support module.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-/// Run the requested Lean toolchain with only the supplied project import
-/// paths.
+/// Runs `XLSYNTH_LEAN` in the module root with the supplied import paths.
 fn compile_lean(root: &Path, imports: &[&Path], source: &Path, object: &Path) -> Result<()> {
     let lean =
         std::env::var_os("XLSYNTH_LEAN").context("set XLSYNTH_LEAN to the Lean executable")?;
@@ -30,11 +29,17 @@ fn compile_lean(root: &Path, imports: &[&Path], source: &Path, object: &Path) ->
     Ok(())
 }
 
-/// Build the support module, then compile sources in their caller-supplied
-/// dependency order.
+/// Compiles the supplied files in order, writing an `.olean` beside each
+/// source.
 ///
-/// Each compiled module is available to later clients. A missing executable,
-/// failed import, or rejected proof fails the calling test with a panic.
+/// List dependencies before their importers so Lean can find their objects
+/// under `root`. The shared `XlsynthLean.IR` lives in a separate temporary
+/// root.
+///
+/// # Errors
+///
+/// Returns an error if setup or compilation fails. A failing Lean process
+/// reports the source path and both output streams.
 pub fn compile_project(root: &Path, sources: impl IntoIterator<Item = PathBuf>) -> Result<()> {
     // Compile the repository module once, outside the model output directory.
     let support = tempfile::tempdir()?;

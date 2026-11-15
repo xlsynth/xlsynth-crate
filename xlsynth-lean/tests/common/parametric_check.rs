@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Checks the readable Lean caller against DSLX constant evaluation of the same
+//! calls.
+
 use anyhow::{Context, Result, ensure};
 use xlsynth::dslx::{ImportData, MatchableModuleMember, parse_and_typecheck};
 use xlsynth_lean::block::{LeanBlockBundle, compile_bx_with_dslx};
@@ -9,17 +12,34 @@ use super::{lean_bundle, parametric_cases::Case};
 /// Executable Lean and native results for each generated runtime input set.
 pub struct CheckedCase {
     pub bundle: LeanBlockBundle,
+    /// Indexed by input set, then call site. Each pair holds the outer and
+    /// inner results.
     pub expected: Vec<Vec<(u16, u16)>>,
 }
 
-/// Evaluate concrete calls in native DSLX and check the emitted runtime caller.
+/// Elaborates the generated model and checks each runtime input against native
+/// DSLX.
+///
+/// # Errors
+///
+/// Returns an error if preparing or compiling the model fails, including
+/// when a Lean guard observes a different result.
 pub fn check_case(case: &Case) -> Result<()> {
     let checked = checked_bundle(case)?;
     assert_eq!(checked.expected.len(), case.inputs.len());
     lean_bundle::check_bundle(&checked.bundle).with_context(|| case.source.clone())
 }
 
-/// Build guards from AST interpreter results, independently of IR lowering.
+/// Builds Lean guards from native DSLX constant values for each call to `g`.
+///
+/// The case's signature must describe `g` in declaration order. The bundle
+/// includes a client that applies the same inputs to `observe`. Elaborate it
+/// with `check_bundle` to run the guards.
+///
+/// # Errors
+///
+/// Returns an error if the DSLX cannot be checked, its constants cannot be
+/// read as the expected result pairs, or the readable model cannot be emitted.
 pub fn checked_bundle(case: &Case) -> Result<CheckedCase> {
     let calls = case
         .inputs

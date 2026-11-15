@@ -22,6 +22,7 @@ use xlsynth_pir::{
 
 const BLOCK: &str = include_str!("fixtures/block_step.ir");
 
+/// Compiles the top block as `XlsBlock`, then checks a client that imports it.
 fn check_block(package: &Package, client: &str) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -290,6 +291,8 @@ example (q : State) (x : Input) : (observe q x).result = x.mk_ := rfl
     );
 }
 
+// Verifies: Lean and PIR combine both selected tuple cases field by field.
+// Catches: Dropping a selected case or reversing the generated case order.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn tuple_one_hot_select_agrees_with_pir_for_functions_and_blocks() {

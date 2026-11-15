@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Builds nested DSLX calls that expose which parameter reached each helper.
+
 /// A DSLX module and two argument sets for its `g` entry point.
 pub struct Case {
     pub source: String,
+    /// Runtime argument names and bit widths in declaration order.
     pub parameters: Vec<(String, u32)>,
+    /// Each row supplies one value per runtime argument in the same order.
     pub inputs: Vec<Vec<u16>>,
     /// Number of `(u16, u16)` pairs in the returned tuple.
     pub result_count: usize,
@@ -16,6 +20,9 @@ pub struct Case {
 /// select `1 + value % 3` ordinary arguments. Bits 5-7 are unused. The
 /// remaining bytes encode little-endian u16 values a, b, c, x, and bias, in
 /// that order.
+///
+/// Each call returns both the final value and the nested helper's value.
+/// Repeating the first call after the other calls checks specialization reuse.
 pub fn generate(data: [u8; 11]) -> Case {
     let arity = usize::from((data[0] >> 3) & 3) % 3 + 1;
     let [a, b, c, x, bias] =

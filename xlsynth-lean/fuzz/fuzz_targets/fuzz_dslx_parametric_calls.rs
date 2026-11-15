@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Compares nested DSLX calls with their readable Lean model on the same
+//! inputs.
+
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -11,6 +14,8 @@ mod parametric_cases;
 #[path = "../../tests/common/parametric_check.rs"]
 mod parametric_check;
 
+// Verifies: Inner and outer Lean results match native DSLX evaluation.
+// Catches: Reusing the wrong helper after a caller's parameters change.
 fuzz_target!(init: {
     std::env::var_os("XLSYNTH_LEAN")
         .expect("set XLSYNTH_LEAN to the actual Lean executable");

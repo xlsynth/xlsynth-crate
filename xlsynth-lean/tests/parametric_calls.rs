@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Directed checks for nested parametric calls and the Lean guards used by the
+//! fuzzer.
+
 #[path = "common/lean_bundle.rs"]
 mod lean_bundle;
 #[path = "common/parametric_cases.rs"]
@@ -7,6 +10,7 @@ mod parametric_cases;
 #[path = "common/parametric_check.rs"]
 mod parametric_check;
 
+/// Encodes a directed case in the same byte layout accepted by the fuzz target.
 fn sample(flags: u8, values: [u16; 5]) -> parametric_cases::Case {
     let mut data = [0; 11];
     data[0] = flags;
@@ -16,6 +20,8 @@ fn sample(flags: u8, values: [u16; 5]) -> parametric_cases::Case {
     parametric_cases::generate(data)
 }
 
+// Verifies: Six nibble permutations differ and the repeated call agrees.
+// Catches: Swapped nibbles or a stale helper specialization in the Lean caller.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn concat_permutations_have_distinct_results() {
@@ -35,6 +41,7 @@ fn concat_permutations_have_distinct_results() {
     lean_bundle::check_bundle(&bundle).unwrap();
 }
 
+// Negative test: A wrong specialization must fail its Lean result guard.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn wrong_specialization_in_caller_fails_the_oracle() {
@@ -64,6 +71,8 @@ fn wrong_specialization_in_caller_fails_the_oracle() {
     }
 }
 
+// Verifies: Formal order and names select the value to square or pass inward.
+// Catches: Binding arithmetic by position after formal names are swapped.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn square_parameter_order_and_body_order() {
@@ -84,6 +93,8 @@ fn square_parameter_order_and_body_order() {
     }
 }
 
+// Verifies: Lean matches DSLX across template arities and binding orders.
+// Catches: Miswiring runtime arguments or forwarding the wrong nested value.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn generated_callers_cover_arities_and_binding_orders() {

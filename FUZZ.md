@@ -732,8 +732,8 @@ subtract a runtime argument. They vary formal-parameter order, body bindings,
 one to three ordinary arguments, and value parameters. Every result includes
 the inner result, and every program repeats its first call after intervening
 calls. Concat cases exercise all six permutations of three
-sampled nibbles, including collisions. Arithmetic cases cover all 16-bit input
-patterns with unsigned, wrapping arithmetic. This surfaces incorrect forwarding,
+sampled nibbles, including collisions. Arithmetic operands can span the full
+16-bit range and use unsigned, wrapping arithmetic. This surfaces incorrect forwarding,
 specialization reuse, argument order, and emitted caller wiring.
 
 Set `XLSYNTH_LEAN` to the Lean 4.34.1 executable and use an XLS DSO matching the
