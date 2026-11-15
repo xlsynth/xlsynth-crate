@@ -629,6 +629,8 @@ block router(clk, fresh: bool, incoming: u2, a: bool, b: bool, c: bool) -> bool 
     }
 }
 
+// Verifies: Imported parametric helpers typecheck and execute a step in Lean.
+// Catches: Helper instances sharing a name or accepting the wrong record.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_parametric_helpers_preserve_instances() {
@@ -691,6 +693,8 @@ private def fallback : XlsSource.«packets::Fallback<5>» := {value := 17, enabl
     check_bundle(bundle, "parametric");
 }
 
+// Verifies: Tagged<TWO> accepts Tagged<2> and rejects Tagged<1>.
+// Catches: deriving a struct's identity from its fields alone.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn helpers_distinguish_equal_layout_struct_instances() {
@@ -725,6 +729,8 @@ example : Helpers.«machine::take_two» two = two.value := rfl
     check_bundle(bundle, "equal-layout struct instances");
 }
 
+// Verifies: Explicit and omitted defaults yield the same Lean struct type.
+// Catches: Splitting equivalent spellings or merging distinct overrides.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn compose_helpers_across_dependent_struct_defaults() {

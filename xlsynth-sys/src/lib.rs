@@ -1221,6 +1221,7 @@ unsafe extern "C" {
     ) -> *mut CDslxExpr;
 
     // -- StructDef
+    /// Borrows the module that declares the given live DSLX struct definition.
     pub fn xls_dslx_struct_def_get_module(def: *mut CDslxStructDef) -> *mut CDslxModule;
 
     pub fn xls_dslx_struct_def_get_identifier(
@@ -1415,8 +1416,12 @@ unsafe extern "C" {
     pub fn xls_dslx_type_is_enum(type_: *const CDslxType) -> bool;
     pub fn xls_dslx_type_is_struct(type_: *const CDslxType) -> bool;
     pub fn xls_dslx_type_is_array(type_: *const CDslxType) -> bool;
+    /// Tests whether the live checked type supports the tuple member accessors.
     pub fn xls_dslx_type_is_tuple(type_: *const CDslxType) -> bool;
+    /// Returns the arity of a live checked tuple, including zero for `()`.
     pub fn xls_dslx_type_tuple_get_member_count(type_: *const CDslxType) -> i64;
+    /// Borrows an element type from a live checked tuple at a zero-based index
+    /// below its arity.
     pub fn xls_dslx_type_tuple_get_member_type(
         type_: *const CDslxType,
         index: i64,
@@ -1438,6 +1443,12 @@ unsafe extern "C" {
     pub fn xls_dslx_type_get_enum_def(ty: *const CDslxType) -> *mut CDslxEnumDef;
 
     pub fn xls_dslx_type_get_struct_def(ty: *const CDslxType) -> *mut CDslxStructDef;
+    /// Copies a struct's checked value bindings into a caller-owned
+    /// environment.
+    ///
+    /// Supply a live type and writable output pointers. On success, free
+    /// `*env_out` with `xls_dslx_parametric_env_free`. On failure, free the
+    /// diagnostic in `*error_out` with `xls_c_str_free`.
     pub fn xls_dslx_type_get_struct_parametric_env(
         ty: *const CDslxType,
         error_out: *mut *mut std::os::raw::c_char,

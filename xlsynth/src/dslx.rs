@@ -1313,6 +1313,10 @@ impl Hash for StructDef {
 }
 
 impl StructDef {
+    /// Returns the module that declares this struct.
+    ///
+    /// Use this owner to qualify the struct name when resolving an imported
+    /// type. Another module can declare a struct with the same identifier.
     pub fn get_owner_module(&self) -> Module {
         Module {
             parent: self.parent.clone(),
@@ -2680,6 +2684,10 @@ impl std::fmt::Display for Type {
 
 impl Type {
     /// Returns the checked element types in declaration order for a tuple.
+    ///
+    /// Returns `Some` with an empty vector for `()` and `None` for other
+    /// kinds of type. This also works when a type parameter resolves to a
+    /// tuple without an explicit tuple annotation.
     pub fn get_tuple_members(&self) -> Option<Vec<Type>> {
         unsafe {
             sys::xls_dslx_type_is_tuple(self.ptr).then(|| {
@@ -2795,8 +2803,17 @@ impl Type {
         })
     }
 
-    /// Returns the evaluated value bindings of a concrete parametric struct,
-    /// including defaults and bindings that do not occur in its fields.
+    /// Returns the evaluated value bindings of a checked struct type.
+    ///
+    /// The environment includes defaults and bindings unused by the fields.
+    /// Such bindings can distinguish two struct types with identical fields.
+    /// A non-parametric struct has an empty environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-struct type or when a parametric struct
+    /// lacks a complete set of checked value bindings, including when it has
+    /// a type-valued parameter.
     pub fn get_struct_parametric_env(&self) -> Result<ParametricEnv, XlsynthError> {
         let mut error = std::ptr::null_mut();
         let mut env = std::ptr::null_mut();

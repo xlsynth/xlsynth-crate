@@ -97,6 +97,8 @@ fn readable_emission_requires_a_selected_bx_declaration() {
     );
 }
 
+// Verifies: Readable DSLX helpers accept defaulted struct arguments.
+// Catches: Mishandling constant or dependent defaults in helper parameters.
 #[test]
 fn checked_helpers_accept_defaulted_struct_arguments() {
     let source = r#"

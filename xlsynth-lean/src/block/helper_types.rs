@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Recover source names and types for the DSLX functions called by a BX block.
+//! Recover helper signatures from the checked DSLX compilation linked into BX.
 //!
-//! The DSLX compiler supplies both the IR bodies and the checked declarations.
-//! The mangled function name connects each body to its declaring module, even
-//! when two imports use the same local names and lower to the same IR types.
-//! A helper whose signature cannot be represented uses the raw IR call path.
+//! A single parametric helper can have several reachable IR functions. The
+//! catalogue matches each IR symbol to a checked invocation and pairs the
+//! callee's parameter names with their types in that specialization.
+//! A helper whose source signature cannot be represented keeps its IR types.
 use super::{
     BlockContext,
     source_types::{
@@ -203,12 +203,12 @@ impl Catalogue<'_> {
         Ok(())
     }
 
-    /// Reconstruct the written type with concrete widths from the declaring
-    /// module.
+    /// Recover a readable source type from the checked type and its optional
+    /// annotation.
     ///
-    /// Imported type references temporarily switch to their owner's type
-    /// information. Tuple members are resolved from their own annotations
-    /// so aliases remain visible.
+    /// The annotation identifies aliases and imports. The checked type supplies
+    /// the concrete fields and tuple elements after parametric substitution,
+    /// even when a type parameter stands for an entire tuple.
     fn source_type(
         &mut self,
         annotation: Option<&dslx::TypeAnnotation>,
@@ -320,11 +320,14 @@ impl Catalogue<'_> {
         }
     }
 
-    /// A specialization reuses the declared field names with their checked
-    /// concrete types. Two uses can spell the same specialization differently.
+    /// Register a struct specialization under its evaluated arguments in
+    /// declaration order.
+    ///
+    /// Omitted defaults and explicit equal values name the same Lean struct.
+    /// Even an argument unused by the fields contributes to the name, so two
+    /// DSLX types with the same layout can stay distinct in Lean.
     fn concrete_record(&mut self, record: &dslx::StructDef, ty: &dslx::Type) -> Result<SourceType> {
         let base = self.qualified_name(&record.get_identifier());
-        // A binding can distinguish two DSLX types without changing any field.
         let bindings: BTreeMap<_, _> = ty
             .get_struct_parametric_env()
             .with_context(|| format!("getting checked parametric bindings for {base}"))?
@@ -366,7 +369,8 @@ impl Catalogue<'_> {
         Ok(SourceType::Struct { name })
     }
 
-    /// Pair an annotation with its concrete type in the current module.
+    /// Resolve an annotation using the type information for the current helper
+    /// instance.
     fn annotation_type(&mut self, annotation: &dslx::TypeAnnotation) -> Result<SourceType> {
         let ty = self
             .context
@@ -492,9 +496,8 @@ impl BridgeBuilder for Catalogue<'_> {
         Ok(())
     }
 
-    /// Index each representable signature by its mangled IR name.
-    ///
-    /// Omitting a signature leaves the helper callable with the raw IR types.
+    /// Record a representable non-parametric signature under its module's IR
+    /// symbol.
     fn add_function_signature_typed(
         &mut self,
         name: &str,
@@ -516,12 +519,11 @@ impl BridgeBuilder for Catalogue<'_> {
 }
 
 impl Catalogue<'_> {
-    /// Walk calls from the entry module and collect concrete signatures for the
-    /// block's helpers.
+    /// Walk calls from the linked module to find signatures for the block's
+    /// reachable IR functions.
     ///
-    /// Cross-module calls use the callee's type information. Parametric
-    /// functions can lead to other callees, but supply no single concrete
-    /// signature here.
+    /// Visit each function body once, but collect parametric instances from
+    /// every calling module that has checked invocations of that function.
     fn collect_helpers(&mut self) -> Result<()> {
         let root = self.context.clone();
         let root_name = root.module.get_name();
@@ -594,8 +596,13 @@ impl Catalogue<'_> {
         Ok(())
     }
 
-    /// Instantiations belong to the module containing the invocation. The
-    /// derived type information, on the other hand, describes the callee.
+    /// Recover a source signature for each reachable specialization recorded by
+    /// the caller.
+    ///
+    /// The caller supplies the invocation's bindings and derived type
+    /// information. The callee supplies the declarations those types describe.
+    /// The IR symbol uses free parametric keys, while the readable name lists
+    /// all bound arguments in the callee's declaration order.
     fn collect_specializations(
         &mut self,
         invoker: &dslx::TypeInfo,
@@ -672,8 +679,10 @@ impl Catalogue<'_> {
         }
         Ok(())
     }
-    /// Preserve parameter names and order, using the empty tuple for an omitted
-    /// return type.
+    /// Pair the helper's source names with types resolved in the current module
+    /// and instance.
+    ///
+    /// A missing return annotation denotes the empty tuple.
     fn helper_signature<'a>(
         &mut self,
         name: &str,
