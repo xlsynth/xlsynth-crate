@@ -75,8 +75,10 @@ impl DslxLink {
         ))
     }
 
-    /// Attach representable source signatures to reachable helpers after
-    /// checking their IR shapes.
+    /// Attach reachable checked signatures to their final linked IR symbols.
+    ///
+    /// `observe_owner` sees each source module contributing a type or helper so
+    /// the caller can reject overlap with an independently checked graph.
     pub(super) fn add_signatures(
         &self,
         block: &BlockContext<'_>,
@@ -270,7 +272,7 @@ fn merge_declarations(
     Ok(())
 }
 
-// Negative test: Reordered equal-width alias fields must report a conflict.
+// Negative test: Reordered fields in an alias target must report a conflict.
 #[cfg(test)]
 #[test]
 fn linked_struct_alias_rejects_reordered_equal_width_fields() {
@@ -1091,10 +1093,9 @@ impl Catalogue<'_> {
             })
         }
     }
-    /// Pair the helper's source names with types resolved in the current module
-    /// and instance.
-    ///
-    /// A missing return annotation denotes the empty tuple.
+
+    /// Resolve parameters and result in the declaring module's current type
+    /// context.
     fn helper_signature<'a>(
         &mut self,
         name: &str,

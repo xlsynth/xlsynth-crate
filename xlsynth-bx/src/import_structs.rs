@@ -73,8 +73,7 @@ impl ImportNames {
     }
 }
 
-/// Written annotations and source-name mappings retained for source-aware
-/// lowering.
+/// Source identities retained after checking BX against its DSLX imports.
 #[derive(Default)]
 pub(crate) struct CapturedSources {
     pub(crate) types: WrittenTypes,
@@ -586,7 +585,8 @@ impl ImportedStructs {
         ))
     }
 
-    /// Drain written annotations and share the source-name map with the caller.
+    /// Move the written type annotations out and snapshot the logical subjects
+    /// of all imports.
     pub(crate) fn take_sources(&mut self) -> CapturedSources {
         CapturedSources {
             types: self.written_types.take().unwrap_or_default(),

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Directed checks for nested parametric calls and the Lean guards used by the
-//! fuzzer.
+//! Compare specialized calls in generated Lean with independently evaluated
+//! DSLX results.
 
 #[path = "common/lean_bundle.rs"]
 mod lean_bundle;
@@ -41,7 +41,7 @@ fn concat_permutations_have_distinct_results() {
     lean_bundle::check_bundle(&bundle).unwrap();
 }
 
-// Negative test: A wrong specialization must fail its Lean result guard.
+// Negative test: Swapped specialization arguments must fail the Lean guard.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn wrong_specialization_in_caller_fails_the_oracle() {

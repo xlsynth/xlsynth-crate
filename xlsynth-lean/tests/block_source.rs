@@ -48,8 +48,8 @@ block show(clk, value: Packet) -> (Packet,) { (value,) }
     assert!(!types.contains("Unused"));
 }
 
-// Verifies: Local and library Packet types expose fields under distinct names.
-// Catches: Losing a library qualifier or the private record used by a field.
+// Verifies: Readable BX interfaces preserve public and private library names.
+// Catches: Leaking linker names or accepting a duplicate library declaration.
 #[test]
 fn readable_interface_uses_linked_bx_library_structs() {
     let library = tempfile::tempdir().unwrap();
@@ -106,6 +106,8 @@ fn signed_public_output_reports_the_bx_port() {
     );
 }
 
+// Verifies: Fields with the listed Lean-generated names can be emitted.
+// Catches: Rejecting a legal record that needs an explicit field accessor.
 #[test]
 fn source_struct_fields_can_use_lean_generated_member_names() {
     for field in [
@@ -125,7 +127,7 @@ fn source_struct_fields_can_use_lean_generated_member_names() {
     }
 }
 
-// Negative test: Reject ambiguous selections and blocks with no BX declaration.
+// Negative test: Reject ambiguous tops and linked blocks lacking a BX source.
 #[test]
 fn readable_emission_requires_a_selected_bx_declaration() {
     let package = Parser::new("package example\nblock preexisting() {}")
@@ -151,8 +153,8 @@ fn readable_emission_requires_a_selected_bx_declaration() {
     );
 }
 
-// Verifies: Readable DSLX helpers accept defaulted struct arguments.
-// Catches: Mishandling constant or dependent defaults in helper parameters.
+// Verifies: Helpers accept inferred and explicit struct defaults.
+// Catches: Treating equal concrete struct bindings as different signatures.
 #[test]
 fn checked_helpers_accept_defaulted_struct_arguments() {
     let source = r#"
@@ -186,8 +188,8 @@ block accumulate(clk, value: u8) -> u6 {
     compiled.emit_readable(None).unwrap();
 }
 
-// Verifies: Indexed fields retain names when operands or results fix the type.
-// Catches: Losing known names or inferring a record from one operand alone.
+// Verifies: Array elements with a known record type use named projections.
+// Catches: Guessing an ambiguous record type or dropping known field names.
 #[test]
 fn indexed_arrays_use_record_fields_when_the_element_type_is_known() {
     let constructed = "[Slot { write: Write { data: a } }, Slot { write: Write { data: b } }]";

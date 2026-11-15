@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Drives an emitted Lean block for one clock per input vector.
-//!
-//! Lean carries the register state between clocks and writes outputs followed
-//! by updated register values as packed naturals. The trace reader uses the
-//! block's declarations to recover field widths, tuple members, and array
-//! elements.
+//! Run Lean block traces and unpack each clock's outputs and next state in IR
+//! declaration order.
 
 use std::{ffi::OsString, fmt::Write, fs, path::Path};
 
@@ -161,7 +157,10 @@ fn decode_field(ty: &Type, value: &str) -> Result<IrValue> {
     ir_value_from_lsb0_bits_with_layout(ty, &flat).map_err(anyhow::Error::msg)
 }
 
-/// Builds a Lean record after checking the PIR type of each positional value.
+/// Build a Lean input or state literal from IR values in declaration order.
+///
+/// Check each physical type before printing. Records with a generated-name
+/// collision bind values positionally.
 fn input_record(fields: &[(String, &Type)], values: &[IrValue]) -> Result<String> {
     ensure!(
         fields.len() == values.len(),

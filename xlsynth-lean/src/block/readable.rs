@@ -85,6 +85,7 @@ struct Presentation<'a> {
     /// A shared graph node is traversed once for each distinct nominal context.
     annotation_contexts: Vec<Vec<SourceType>>,
     names: Vec<String>,
+    /// Evaluator binders that can shadow a module prefix in a rendered type.
     local_names: BTreeSet<String>,
     register_fields: Vec<String>,
 }
@@ -1163,11 +1164,12 @@ impl<'a> Presentation<'a> {
     /// Emit readable clock-step equations with physical ports and assertion
     /// results.
     ///
-    /// Helpers with source signatures get definitions with named, typed
-    /// parameters before the block equations that call them.
     /// Raw emission has already established single writes and supported resets.
     /// All equations read old state, and reset takes precedence over load
     /// enable.
+    ///
+    /// The block's source-qualified name abbreviates the evaluator. Checked
+    /// DSLX helpers are also callable under their declaring module.
     fn executable(&self) -> Result<String> {
         let block = self.block;
         let mut out = format!(
@@ -1381,6 +1383,9 @@ def eval (q : State) (x : Input) : Evaluation :=
     /// Emit total state/result conversions and their round-trip proof source.
     ///
     /// Inputs and outputs use their source codecs and the block's port names.
+    ///
+    /// Input records use IR declaration order because a generated-name
+    /// collision requires positional construction.
     fn representation(&self) -> Result<String> {
         let mut out = String::from(
             "import ReadableGenerated\n\nnamespace XlsReadable\n\nattribute [local simp] Function.comp_def\n\n",

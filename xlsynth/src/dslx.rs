@@ -393,6 +393,11 @@ pub struct InvocationRewriteRule<'a> {
 impl TypecheckedModule {
     /// Visit the logical subjects of explicit DSLX `import` statements,
     /// including transitive imports, in the original checked graph.
+    ///
+    /// Use an empty set to collect the full import closure. An existing entry
+    /// marks that subject as already visited and skips traversal of its
+    /// imports. The caller adds the starting module's own name if it needs
+    /// that too.
     pub fn collect_import_subjects(&self, subjects: &mut std::collections::BTreeSet<String>) {
         let mut pending = vec![(self.get_module(), self.get_type_info())];
         while let Some((module, info)) = pending.pop() {

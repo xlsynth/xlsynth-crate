@@ -38,12 +38,14 @@ pub struct CompiledBx {
     imports: Vec<super::helper_types::DslxLink>,
 }
 
-/// Check BX source and lower it into the supplied package.
+/// Check BX source with its import paths and lower it into the supplied IR
+/// package.
 ///
-/// The package supplies definitions for BX externs, and `options` controls
-/// source import lookup. Imported functions retain their checked declarations
-/// even if linking changes their IR names. Compilation errors carry a BX
-/// diagnostic. Inspect [`CompiledBx::warnings`] on success.
+/// The package may already contain functions or blocks used by BX externs.
+///
+/// `module_name` is the logical BX module name used in Lean paths such as
+/// `XLS.design.Packet`. Passing an IR package name that differs from the
+/// source module puts root BX declarations under that package name.
 pub fn compile_bx(
     module_name: &str,
     source: &str,
@@ -76,17 +78,12 @@ pub fn compile_bx(
     })
 }
 
-/// Lower BX against the IR produced from a checked DSLX module.
+/// Link the IR produced from this checked DSLX module and retain its source
+/// types for calls from the BX block.
 ///
-/// The checked module supplies both the implementations for extern functions
-/// and their declarations for readable Lean. Helpers with supported signatures
-/// retain their declared types. Helpers with unsupported signatures use their
-/// IR types.
-///
-/// # Errors
-///
-/// Returns an error if DSLX lowering, IR validation, BX checking, or linking
-/// fails. BX extern declarations must match the linked functions' IR shapes.
+/// `module_name` names the BX source. The checked DSLX module supplies its own
+/// logical name. When the two inputs independently import the same DSLX
+/// subject, [`CompiledBx::emit_readable`] reports the overlapping subject.
 pub fn compile_bx_with_dslx(
     module_name: &str,
     source: &str,
@@ -141,9 +138,11 @@ impl CompiledBx {
     /// Emit the selected BX block, defaulting to the package's top or sole
     /// block.
     ///
-    /// The block must have a matching BX declaration. An ambiguous selection
-    /// or a disagreement between the source interface and linked IR is an
-    /// error.
+    /// The selected block and its reachable source types and functions keep
+    /// their declaring modules. Emission rejects competing declarations at
+    /// the same Lean path and independently checked copies of a DSLX
+    /// module. Multiple BX imports from a shared checked graph may refer to
+    /// the same declaration.
     pub fn emit_readable(&self, block_name: Option<&str>) -> Result<LeanBlockBundle> {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
@@ -228,11 +227,11 @@ impl CompiledBx {
         readable::emit(&block, &declarations, &interface)
     }
 
-    /// Recover declared types and check their names, order and shapes against
-    /// the block IR.
+    /// Match written BX types to checked ports and registers in physical
+    /// declaration order.
     ///
-    /// A struct returned directly by BX contributes one physical output per
-    /// field. A struct inside a result tuple remains a single tuple member.
+    /// Port names distinguish equal-width fields whose order affects the Lean
+    /// result.
     pub(super) fn readable_interface(
         &self,
         block: &BlockContext<'_>,
@@ -521,8 +520,8 @@ fn bx_type(
 mod tests {
     use super::*;
 
-    // Verifies: Readable models accept aliases, constant widths and BX structs.
-    // Catches: Emitting a type parameter the BX checker already resolved.
+    // Verifies: Lean resolves BX aliases, constant widths and nested instances.
+    // Catches: Taking port or register types from unresolved annotations.
     #[test]
     fn readable_interface_uses_concrete_bx_types() -> Result<()> {
         let compiled = compile_bx(
@@ -551,8 +550,8 @@ block nested(clk, x: Wrap<Byte>) -> (Byte, Wrap<Byte>) {
         Ok(())
     }
 
-    // Verifies: Tuple outputs and nested arrays keep both DSLX struct aliases.
-    // Catches: Choosing one alias for both members based on their layout.
+    // Verifies: Nested arrays and output ports retain each written DSLX alias.
+    // Catches: collapsing two aliases because their checked BX layouts match.
     #[test]
     fn checked_bx_layout_preserves_each_written_dslx_alias() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -602,7 +601,7 @@ block demo(clk, p: Envelope) -> Pair { p.items[u32:0] }
         Ok(())
     }
 
-    // Negative test: Swapped equal-width outputs must report mismatched names.
+    // Negative test: Swapped BX outputs must report both mismatched port names.
     #[test]
     fn equal_width_output_reordering_is_rejected() {
         let mut compiled = compile_bx(

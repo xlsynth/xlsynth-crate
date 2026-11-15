@@ -87,7 +87,8 @@ impl Presentation<'_> {
         Ok(dispatches)
     }
 
-    /// Emit an exhaustive Lean enum match for each recognized priority select.
+    /// Emit a match on each recovered source enum, choosing arms by their
+    /// physical encodings.
     pub(super) fn enum_dispatch_definitions(&self) -> Result<String> {
         let mut out = String::new();
         for (id, dispatch) in self.enum_dispatches()? {

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Run emitted Lean models on concrete inputs and check the resulting traces
+//! and values.
+
 mod common;
 
 use std::path::PathBuf;
@@ -26,8 +29,8 @@ fn evaluator() -> &'static LeanEvaluator {
     })
 }
 
-// Verifies: Both registers read old state during a swap or reset.
-// Catches: Sequential register writes or a low enable masking reset.
+// Verifies: Trace outputs use old state across simultaneous writes and reset.
+// Catches: Swapping positional fields whose names clash with Lean declarations.
 #[test]
 fn block_trace_observes_old_state_and_carries_simultaneous_writes() {
     // Exercise positional trace construction with a generated-name collision

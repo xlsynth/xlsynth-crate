@@ -13,12 +13,8 @@ use std::collections::BTreeMap;
 use super::*;
 
 impl Presentation<'_> {
-    /// Emit helper theorems in dependency order and use them to prove block
-    /// evaluation agrees.
-    ///
-    /// Once a helper has its own theorem, the proof makes its definitions
-    /// locally irreducible. Later proofs rewrite calls using that theorem
-    /// without forcing Lean to compare the helper implementations again.
+    /// Generate the proof that helper calls and counted loops agree across the
+    /// two representations.
     pub(super) fn loop_correspondence(&self) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);

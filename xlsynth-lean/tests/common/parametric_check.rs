@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Checks the readable Lean caller against DSLX constant evaluation of the same
-//! calls.
+//! Build executable Lean guards from native DSLX evaluations of generated
+//! parametric calls.
 
 use anyhow::{Context, Result, ensure};
 use xlsynth::dslx::{ImportData, MatchableModuleMember, parse_and_typecheck};

@@ -211,6 +211,8 @@ open XlsBlock
 }
 
 // All four physical records can have fields whose names Lean also generates.
+// Verifies: IR names still select raw inputs, state, outputs and assertions.
+// Catches: Lean members hiding a projection or blocking a reset update.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn raw_projections_keep_lean_generated_member_names() {

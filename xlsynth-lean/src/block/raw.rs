@@ -432,6 +432,8 @@ pub(super) fn generated_member(field: &str) -> bool {
     )
 }
 
+/// Reject a member that would occupy the same Lean name as a generated
+/// eliminator or helper.
 pub(super) fn validate_lean_member(owner: &str, field: &str) -> Result<()> {
     ensure!(
         !generated_member(field),
@@ -455,6 +457,8 @@ pub(super) fn source_record(name: &str, fields: &[(String, String)]) -> Result<S
     record_declaration(name, fields, Some("_root_.Repr"), &[])
 }
 
+/// Return the structure that owns the actual fields and constructor for this
+/// public name.
 pub(super) fn record_backing_name(name: &str, fields: &[(String, String)]) -> String {
     if has_generated_field(fields) {
         format!("«xls:implementation».{name}")
@@ -463,6 +467,12 @@ pub(super) fn record_backing_name(name: &str, fields: &[(String, String)]) -> St
     }
 }
 
+/// Declare fields in source order and expose their original names as
+/// projections.
+///
+/// A colliding field requires a distinct backing structure and public
+/// accessors. Optional comments correspond by position to fields and must be
+/// safe on one Lean comment line.
 pub(super) fn record_declaration(
     name: &str,
     fields: &[(String, String)],
@@ -496,6 +506,8 @@ pub(super) fn record_declaration(
     Ok(out)
 }
 
+/// Return the underlying field identifier for declarations and Lean record
+/// updates.
 pub(super) fn storage_field(field: &str) -> String {
     let spelling = field.trim_matches(['«', '»']);
     if generated_member(spelling) {
@@ -505,6 +517,7 @@ pub(super) fn storage_field(field: &str) -> String {
     }
 }
 
+/// Decide whether these rendered field names require positional construction.
 fn has_generated_field(fields: &[(String, String)]) -> bool {
     fields
         .iter()

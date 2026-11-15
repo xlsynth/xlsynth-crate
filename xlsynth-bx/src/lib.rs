@@ -188,11 +188,8 @@ pub struct CompiledModule {
 
 /// Compile BX while retaining the source graph for each linked DSLX import.
 ///
-/// Supply the IR package that implements any BX externs. Syntax, type,
-/// import, and lowering errors return a diagnostic. Successful compilation
-/// leaves warnings available through [`CheckedModule::warnings`].
-/// Use each batch's symbol map to locate its functions in the resulting
-/// package, since existing functions can occupy their original names.
+/// The result preserves written type names for ports and keeps the logical
+/// subjects of all imported DSLX modules, even those with no linked calls.
 pub fn compile_with_source(
     source: &str,
     package: Package,

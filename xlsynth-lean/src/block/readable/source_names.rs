@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Translate nominal catalogue identities into Lean namespace components.
+//!
+//! BX types use the module that declared them. Checked DSLX types keep their
+//! full import subject, including dotted prefixes. Type references also account
+//! for the module and earlier binders in scope at the point of emission.
 
 use anyhow::{Result, bail};
 use std::{collections::BTreeSet, fmt::Write};
@@ -8,6 +12,10 @@ use std::{collections::BTreeSet, fmt::Write};
 use super::{SourceType, identifier, lean, product_type};
 use crate::block::source_types::{StatefulInterface, StructField, TypeDecl};
 
+/// Resolve a BX library key or qualified DSLX name to its declaring module and
+/// local spelling.
+///
+/// An unqualified root declaration belongs to `bx_namespace`.
 pub(super) fn declaring_name<'a>(bx_namespace: &'a str, name: &'a str) -> (&'a str, &'a str) {
     xlsynth_bx::library_item(name)
         .or_else(|| name.split_once("::"))
@@ -49,6 +57,8 @@ pub(super) fn check_type_namespaces(
     Ok(())
 }
 
+/// Quote each component of a dotted logical module name beneath Lean's `XLS`
+/// namespace.
 pub(super) fn module_identifier(module: &str) -> Result<String> {
     let mut namespace = String::from("XLS");
     for component in module.split('.') {
@@ -57,6 +67,11 @@ pub(super) fn module_identifier(module: &str) -> Result<String> {
     Ok(namespace)
 }
 
+/// Choose a Lean type reference that resolves to the original source
+/// declaration.
+///
+/// `current` identifies the source module around the declaration, if any.
+/// `shadowed` reports names hidden by fields or local binders at this use site.
 pub(super) fn nominal_reference(
     bx_namespace: &str,
     name: &str,
@@ -84,6 +99,8 @@ pub(super) fn nominal_reference(
     Ok(format!("{root}{}.{local_name}", module_identifier(owner)?))
 }
 
+/// Render a checked type in the scope where Lean will resolve its component
+/// names.
 pub(super) fn source_type_in(
     bx_namespace: &str,
     ty: &SourceType,
@@ -110,6 +127,11 @@ pub(super) fn source_type_in(
     }
 }
 
+/// Write a struct in field order and return the name on which to derive
+/// instances.
+///
+/// Each earlier field is in scope in a later field's type, so a source field
+/// can force qualification of a type from the same module.
 pub(super) fn write_struct(
     out: &mut String,
     bx_namespace: &str,

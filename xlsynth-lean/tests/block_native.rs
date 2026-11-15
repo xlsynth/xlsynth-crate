@@ -11,7 +11,7 @@ use xlsynth_pir::ir_parser::Parser;
 #[path = "common/lean_bundle.rs"]
 mod lean_bundle;
 
-/// Build both models for a BX fixture using the default reset behavior.
+/// Compile a self-contained BX fixture under the source module `design`.
 fn bx_bundle(source: &str) -> LeanBlockBundle {
     compile_bx(
         "design",
@@ -25,8 +25,8 @@ fn bx_bundle(source: &str) -> LeanBlockBundle {
     .unwrap()
 }
 
-// Verifies: Lean projects a private nested field and runs the imported helper.
-// Catches: omitting a private type needed by a public port.
+// Verifies: Imported public records expose their private nested field type.
+// Catches: dropping private types that a public helper needs.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_packet_keeps_private_field_type() -> Result<()> {
@@ -67,6 +67,8 @@ end XLS
     Ok(())
 }
 
+// Verifies: A BX type named succ coexists with Lean's Nat.succ in module Nat.
+// Catches: A declaration or an XLS port capturing a qualified reference.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_module_and_struct_names_can_coincide_with_a_lean_declaration() -> Result<()> {
@@ -90,6 +92,8 @@ fn bx_module_and_struct_names_can_coincide_with_a_lean_declaration() -> Result<(
     Ok(())
 }
 
+// Verifies: Each port retains its record or alias name in either order.
+// Catches: reusing the first type spelling for every port with the same layout.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_preserves_each_imported_struct_spelling_in_either_port_order() -> Result<()> {
@@ -160,8 +164,8 @@ example (q : State) (x : Input) :
     Ok(())
 }
 
-// Verifies: Direct outputs flatten in field order and tuples retain records.
-// Catches: Conflating 4-bit and 8-bit packets carried by ports or registers.
+// Verifies: BX state and ports retain both 4-bit and 8-bit Packet types.
+// Catches: assigning a nested field or register the wrong specialization.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_parametric_structs_preserve_bx_interface_types() -> Result<()> {
@@ -213,8 +217,8 @@ example (q : State) (x : Input) : observe q x = (q.stored, x.src.narrow) := rfl
     Ok(())
 }
 
-// Verifies: Lean resolves both aliases and evaluates the BX update and outputs.
-// Catches: Losing an alias or selecting the wrong field in an equation.
+// Verifies: Imported aliases connect a nested BX field to state and output.
+// Catches: Erasing the field's alias or misconnecting the helper result.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_struct_alias_survives_bx_register_and_nested_ports() -> Result<()> {
@@ -268,6 +272,8 @@ example (q : State) (x : Input) : observe q x = (q.stored, x.src.item.zebra) := 
     Ok(())
 }
 
+// Verifies: Lean can execute BX and DSLX field projections named recOn.
+// Catches: A generated member hiding a field or a field hiding a type name.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_and_imported_dslx_fields_keep_their_source_names() -> Result<()> {
@@ -320,6 +326,8 @@ example (q : XlsBlock.State) (x : XlsBlock.Input) :
     Ok(())
 }
 
+// Verifies: A BX block and DSLX helper can be called in one Lean namespace.
+// Catches: Rejecting distinct declarations because their modules share a name.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn selected_bx_block_and_dslx_function_share_a_module() -> Result<()> {
@@ -352,6 +360,8 @@ example (q : XlsReadable.State) (x : XlsReadable.Input) :
     Ok(())
 }
 
+// Verifies: the root and imported BX library each expose their own Packet type.
+// Catches: qualifying a library record with the importing module's name.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_library_record_keeps_its_declaring_module() -> Result<()> {
@@ -382,6 +392,7 @@ example (x : XlsReadable.Input) : XLS.design.Packet := x.q
     Ok(())
 }
 
+// Negative test: Reject a BX type and DSLX helper with the same qualified name.
 #[test]
 fn bx_library_record_conflicts_with_a_dslx_declaration_of_the_same_name() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -418,6 +429,8 @@ fn bx_library_record_conflicts_with_a_dslx_declaration_of_the_same_name() -> Res
     Ok(())
 }
 
+// Verifies: BX and DSLX can share a module when emitted names are distinct.
+// Catches: Reserving unused names or missing an emitted alias target collision.
 #[test]
 fn module_owner_can_be_shared_by_disjoint_bx_and_dslx_declarations() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -457,6 +470,7 @@ fn module_owner_can_be_shared_by_disjoint_bx_and_dslx_declarations() -> Result<(
     Ok(())
 }
 
+// Negative test: A type and module sharing a namespace must report a conflict.
 #[test]
 fn module_owner_cannot_supply_declarations_under_a_source_type() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -509,6 +523,8 @@ fn module_owner_cannot_supply_declarations_under_a_source_type() -> Result<()> {
     Ok(())
 }
 
+// Verifies: two imports may reach the same DSLX module from one checked graph.
+// Catches: treating a shared transitive import as a second independent module.
 #[test]
 fn module_owner_is_shared_by_transitive_imports() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -537,6 +553,7 @@ fn module_owner_is_shared_by_transitive_imports() -> Result<()> {
     Ok(())
 }
 
+// Negative test: Reject duplicate unused modules on either DSLX import path.
 #[test]
 fn module_owner_cannot_come_from_independent_dslx_inputs() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -577,6 +594,8 @@ fn module_owner_cannot_come_from_independent_dslx_inputs() -> Result<()> {
     Ok(())
 }
 
+// Verifies: Same-named DSLX modules under left and right have distinct helpers.
+// Catches: Losing a module prefix or rejecting repeated uses of one owner.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn module_owner_uses_the_full_dotted_subject() -> Result<()> {
@@ -625,8 +644,8 @@ fn module_owner_uses_the_full_dotted_subject() -> Result<()> {
     Ok(())
 }
 
-// Verifies: Renamed callees and both id instances keep their DSLX parameters.
-// Catches: Reopening replaced source or using the occupied function's type.
+// Verifies: Renamed IR callees keep their checked parameters and projections.
+// Catches: Using the occupied IR name or reopening an import after compilation.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_imports_keep_source_fields_through_linker_renames() -> Result<()> {
@@ -703,8 +722,10 @@ example (q : State) (x : Input) : observe q x = (x.packet.zebra, x.flag) := by r
     Ok(())
 }
 
-// Verifies: The inlined DSLX projection selects the intended BX field.
-// Catches: Swapped equal-width fields across the BX and DSLX boundary.
+// Inline the external DSLX function with XLS so the straight-line raw
+// exporter sees its field projection in the same graph as the BX constructor.
+// Verifies: An inlined DSLX projection reads the intended BX-built field.
+// Catches: Swapping equal-width fields in construction or projection.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_field_order_across_linked_dslx() {
@@ -780,8 +801,8 @@ example (q : XlsBlock.State) (x : XlsBlock.Input) :
     }
 }
 
-// Verifies: Both reset polarities reload the counter and expose the old count.
-// Catches: Inverted reset polarity or an output that exposes the next count.
+// Verifies: Both reset polarities reset the next count and output old count.
+// Catches: Inverting reset or exposing the reset value one clock too early.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_counter_reset_polarities() {
@@ -886,8 +907,8 @@ example (q : State) (x : Input) : (step q { x with rst := false }).one.1 = x.x.1
     check_bundle(bx_bundle("block empty(clk) -> () { () }"), "empty block");
 }
 
-// Verifies: Lean can resolve mk, _root_ and the qualified constructor.
-// Catches: Fields shadowing type names or colliding with constructors.
+// Verifies: Fields named mk and _root_ coexist with constructors and Repr.
+// Catches: A generated constructor or instance taking a declaration's name.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_fields_keep_lean_names() {
@@ -944,8 +965,8 @@ top block flags(en: bits[1], BitVec: bits[1], other: bits[1]) {
     );
 }
 
-// Verifies: Nested helpers update the register and outputs read old state.
-// Catches: Unresolved helper calls or an incorrect register update.
+// Verifies: Nested prelinked helpers compute the next register from old state.
+// Catches: Dropping a transitive helper or feeding next state into the call.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn prelinked_helpers_drive_a_bx_register() {
@@ -1002,8 +1023,8 @@ private def initial : State := { count := 7 }
     check_bundle(bundle, "nested prelinked calls across a register update");
 }
 
-/// Compile the DSLX test module as `machine` so BX externs resolve against its
-/// checked declarations.
+/// Link the BX fixture to the checked `machine` module and its DSLX import
+/// paths.
 fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<LeanBlockBundle> {
     let mut imports = xlsynth::dslx::ImportData::new(None, paths);
     let module = xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports)?;
@@ -1017,8 +1038,8 @@ fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<Lean
     .emit_readable(None)
 }
 
-// Verifies: A linked DSLX projection reads the intended BX record field.
-// Catches: Swapping equal-width fields at the call boundary.
+// Verifies: A checked DSLX helper reads the intended equal-width BX field.
+// Catches: reversing the source fields across the unoptimized helper call.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn linked_field_order_uses_the_checked_helper() {
@@ -1061,8 +1082,8 @@ example (q : State) (x : Input) :
     );
 }
 
-// Verifies: A nested DSLX call uses its named parameter to update a register.
-// Catches: Mixing up same-named local and imported functions or their fields.
+// Verifies: Same-named helpers from two modules compose in a register update.
+// Catches: Resolving a nested call to the wrong module's function or type.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn nested_helper_calls() {
@@ -1236,8 +1257,8 @@ fn xls_machine(source: &str) -> Result<xlsynth::IrFunction> {
         .context("look up __machine__machine in XLS IR")
 }
 
-// Verifies: Both models output old count and choose reset or the XLS fold.
-// Catches: Reversing reset polarity or misusing loop indices or captures.
+// Verifies: Both Lean models match the XLS fold after either reset polarity.
+// Catches: Using the wrong index, carry, or reset branch for a register write.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn counted_loop_matches_xls() {
@@ -1366,8 +1387,8 @@ block router(clk, fresh: bool, incoming: u2, a: bool, b: bool, c: bool) -> bool 
     }
 }
 
-// Verifies: Specialized imports accept the caller's Packet type.
-// Catches: Resolving Packet in the helper module instead of the caller.
+// Verifies: Each imported helper computes at its concrete specialization.
+// Catches: Merging different value arguments or erasing nominal types.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_parametric_helpers_preserve_instances() {
@@ -1431,8 +1452,8 @@ private def fallback : XLS.packets.«Fallback<5>» := {value := 17, enabled := t
     check_bundle(bundle, "parametric");
 }
 
-// Verifies: Tagged<TWO> accepts Tagged<2> and rejects Tagged<1>.
-// Catches: deriving a struct's identity from its fields alone.
+// Verifies: Lean accepts Tagged<2> and rejects same-shaped Tagged<1>.
+// Catches: choosing a nominal specialization solely by its field layout.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn helpers_distinguish_equal_layout_struct_instances() {
@@ -1467,8 +1488,8 @@ example : XLS.machine.take_two two = two.value := rfl
     check_bundle(bundle, "equal-layout struct instances");
 }
 
-// Verifies: Explicit and omitted defaults yield the same Lean struct type.
-// Catches: Splitting equivalent spellings or merging distinct overrides.
+// Verifies: Explicit and omitted dependent defaults use the same record type.
+// Catches: Separating equal bindings or merging a distinct final argument.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn compose_helpers_across_dependent_struct_defaults() {
@@ -1697,8 +1718,8 @@ private def clock (index : BitVec 64) :=
     check_bundle(bundle, "dynamic bit slice and update");
 }
 
-// Verifies: Lean matches XLS encode for zero, one, or two changed mask bits.
-// Catches: selecting just one index when bits 2 and 4 change together.
+// Verifies: Lean and XLS encode zero, one, and multiple changed bits alike.
+// Catches: Priority encoding or losing the source parameter named List.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn encode_changed_bits_matches_xls_for_multihot_masks() {
@@ -1801,8 +1822,8 @@ fn checked_nonzero_range() -> xlsynth::dslx::TypecheckedModule {
     .unwrap()
 }
 
-// Verifies: Run sums enabled slot data from a nonzero start and Idle holds.
-// Catches: Including slot 0 or losing a nested write field or enum capture.
+// Verifies: The nonzero-range loop yields the expected count in each mode.
+// Catches: Updating the wrong loop carry when the model executes in Lean.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn nonzero_range_without_loop_records() {
