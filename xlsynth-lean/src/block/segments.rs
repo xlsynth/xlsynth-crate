@@ -28,6 +28,9 @@ pub(super) fn is_interface_projection(graph: &NodeGraph, mut wire: NodeRef) -> b
     )
 }
 
+/// Groups a block's operations into leaves in topological order and records
+/// which wires are needed at each leaf boundary. The raw evaluator, the
+/// readable evaluator, and their correspondence proof share this layout.
 pub(super) struct Segments {
     pub(super) leaves: Vec<Vec<NodeRef>>,
     /// Cut i is the input of leaf i. The last cut feeds the public result.
