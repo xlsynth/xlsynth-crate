@@ -61,7 +61,7 @@ impl CompiledBx {
             .find(|b| b.name == graph.name)
             .with_context(|| format!("block {} has no checked BX declaration", graph.name))?;
         ensure!(
-            Some(source.clock.as_str()) == graph.clock_port_name(),
+            source.clock.as_deref() == graph.clock_port_name(),
             "BX clock differs from block {}",
             graph.name
         );
