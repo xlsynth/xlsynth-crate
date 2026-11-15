@@ -79,8 +79,7 @@ returns source in the `XlsBlock` namespace with the same import.
 The generated clock step preserves old-state outputs, simultaneous register
 writes, reset precedence and source assertions. Blocks use the function
 emitter's translation of PIR types, literals and local operations, including
-one-hot selection over tuples and arrays. Block emission reports an error for
-unsupported operations, including function calls, and for asynchronous resets.
+one-hot selection over tuples and arrays. Calls to pure functions and fixed-trip-count loops remain explicit. Unsupported operations and asynchronous resets return contextual errors.
 
 When starting from saved IR text, call PIR's `Parser::parse_and_validate_package`
 before selecting the block, as in the `export_block` example.
@@ -119,12 +118,18 @@ let bundle = compiled.emit_readable(None)?;
 ```
 
 The readable interface preserves unsigned bits, Boolean fields, positional
-tuples and named BX structs. A struct result exposes its fields as output
-ports in BX declaration order. One output becomes the value of `observe q x`;
+tuples, fixed-size arrays and named BX structs. A struct result exposes its fields
+as output ports in BX declaration order. One output becomes the value of `observe q x`;
 several outputs become a Lean product in port order. The register and port
 types come from checked declarations. The equations come from the linked
 block and the IR functions it calls. Internal bindings can be renamed without
 changing these public fields.
+
+A register declared as `Slot[2]` becomes a Lean vector of two `Slot` values.
+Reading index 2 returns the last slot. Writing index 2 leaves both slots
+unchanged. For a locally constructed array, the readable model uses named
+fields when the operand types agree or a checked destination supplies the
+element type. Without that information it uses the physical tuple projections.
 
 `LeanBlockBundle::files` contains these five files in dependency order:
 

@@ -27,7 +27,7 @@ use xlsynth_pir::{
 use crate::block::{
     BlockContext,
     raw::{self as lean, LeanBlockBundle, identifier, lean_type, record_value},
-    source_types::{SourceType, StatefulInterface, TypeDecl, source_shape},
+    source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
 };
 use crate::local_expr::{LeanOperand, LocalRenderer};
 
@@ -90,12 +90,12 @@ pub(super) fn emit(
 }
 
 impl<'a> Presentation<'a> {
-    /// Allocate noncapturing names and propagate source types through the
+    /// Allocate local names and recover source types for one block or helper
     /// graph.
     ///
-    /// A recovered helper signature supplies preferred parameter names and
-    /// nominal types by position. Call sites use the same signature for
-    /// argument and result types. Equally wide types can have different fields.
+    /// One-bit nodes default to `Bool`. Checked interfaces supply argument
+    /// and destination types first, so a later traversal in dependency order
+    /// can recover named fields through array indices and tuple projections.
     fn new(
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
@@ -190,8 +190,9 @@ impl<'a> Presentation<'a> {
                 result.node_types[param.index] = Some(ty.clone());
             }
         }
-        for reference in ir_utils::get_topological_nodes(&graph.nodes) {
-            match &graph.get_node(reference).payload {
+        let order = ir_utils::get_topological_nodes(&graph.nodes);
+        for reference in &order {
+            match &graph.get_node(*reference).payload {
                 NodePayload::Invoke { to_apply, operands } => {
                     if let Some(signature) = interface.helpers.get(to_apply) {
                         result.node_types[reference.index] = Some(signature.result.clone());
@@ -206,28 +207,14 @@ impl<'a> Presentation<'a> {
                 NodePayload::RegisterRead { register } => {
                     result.node_types[reference.index] = result.register_type(register)?;
                 }
-                NodePayload::TupleIndex { tuple, index } => {
-                    if let Some(source_type) = &result.node_types[tuple.index]
-                        && let SourceType::Struct { name } = result.unalias(source_type)?
-                    {
-                        let TypeDecl::Struct { fields, .. } = result.declaration(name)? else {
-                            unreachable!("validated struct reference")
-                        };
-                        result.node_types[reference.index] =
-                            Some(fields[*index].source_type.clone());
-                    } else if let Some(source_type) = &result.node_types[tuple.index]
-                        && let SourceType::Tuple { members } = result.unalias(source_type)?
-                    {
-                        result.node_types[reference.index] = Some(members[*index].clone());
-                    }
-                }
                 _ => {
-                    // Other nodes get their context from register destinations.
+                    // Other operations have no declared type to copy here.
+                    // Their uses or operands can supply a source type later.
                 }
             }
         }
-        // Register destinations supply exact type context to tuple construction
-        // and selections. A reused node can still be converted at another use.
+        // Supply declared destination types before following projections
+        // forward.
         for node in &graph.nodes {
             if let NodePayload::RegisterWrite { arg, register, .. } = &node.payload
                 && let Some(ty) = result.register_type(register)?
@@ -245,6 +232,57 @@ impl<'a> Presentation<'a> {
         } else {
             for (port, ty) in block.graph.output_ports().zip(&interface.outputs) {
                 result.annotate(block.graph.output_value(port), ty)?;
+            }
+        }
+        for reference in order {
+            let node = graph.get_node(reference);
+            match &node.payload {
+                NodePayload::Array(args) if result.node_types[reference.index].is_none() => {
+                    if let Some(element) = result.common_operand_type(args.iter())? {
+                        result.node_types[reference.index] = Some(SourceType::Array {
+                            element: Box::new(element),
+                            size: args.len(),
+                        });
+                    }
+                }
+                NodePayload::Sel { cases, default, .. }
+                | NodePayload::PrioritySel { cases, default, .. }
+                    if matches!(node.ty, Type::Array(_))
+                        && result.node_types[reference.index].is_none() =>
+                {
+                    result.node_types[reference.index] =
+                        result.common_operand_type(cases.iter().chain(default))?;
+                }
+                NodePayload::ArrayIndex { array, indices, .. } => {
+                    if let Some(ty) = &result.node_types[array.index] {
+                        result.node_types[reference.index] =
+                            Some(result.indexed_type(ty, indices.len())?.clone());
+                    }
+                }
+                NodePayload::ArrayUpdate { array, .. } => {
+                    if let Some(ty) = result.node_types[array.index].clone() {
+                        result.annotate(reference, &ty)?;
+                    }
+                }
+                NodePayload::TupleIndex { tuple, index } => {
+                    if let Some(source_type) = &result.node_types[tuple.index]
+                        && let SourceType::Struct { name } = result.unalias(source_type)?
+                    {
+                        let TypeDecl::Struct { fields, .. } = result.declaration(name)? else {
+                            unreachable!("validated struct reference")
+                        };
+                        result.node_types[reference.index] =
+                            Some(fields[*index].source_type.clone());
+                    } else if let Some(source_type) = &result.node_types[tuple.index]
+                        && let SourceType::Tuple { members } = result.unalias(source_type)?
+                    {
+                        result.node_types[reference.index] = Some(members[*index].clone());
+                    }
+                }
+                _ => {
+                    // No operand supplies a new source type here. Keep any
+                    // existing annotation, or render with the physical IR type.
+                }
             }
         }
         Ok(result)
@@ -265,6 +303,35 @@ impl<'a> Presentation<'a> {
 
     fn register_type(&self, register: &str) -> Result<Option<SourceType>> {
         Ok(self.interface.registers.get(register).cloned())
+    }
+
+    /// Keep a shared spelling, or its common target if only the aliases differ.
+    ///
+    /// Array literals and selections can infer a type only when every operand
+    /// has one and all agree. Equal physical shapes alone leave the type
+    /// unknown.
+    fn common_operand_type<'b>(
+        &self,
+        mut operands: impl Iterator<Item = &'b NodeRef>,
+    ) -> Result<Option<SourceType>> {
+        let Some(mut common) = operands
+            .next()
+            .and_then(|arg| self.node_types[arg.index].clone())
+        else {
+            return Ok(None);
+        };
+        for arg in operands {
+            let Some(ty) = &self.node_types[arg.index] else {
+                return Ok(None);
+            };
+            if *ty != common {
+                common = resolve_aliases(&common, self.declarations)?;
+                if resolve_aliases(ty, self.declarations)? != common {
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(common))
     }
 
     /// Recover a declaration's nominal kind without erasing its name.
@@ -288,7 +355,38 @@ impl<'a> Presentation<'a> {
         }
     }
 
-    /// Propagate destination type context through tuples and selections once.
+    /// Follow one array dimension per index, retaining any alias on the result.
+    fn indexed_type<'b>(&'b self, mut ty: &'b SourceType, rank: usize) -> Result<&'b SourceType> {
+        for _ in 0..rank {
+            let SourceType::Array { element, .. } = self.unalias(ty)? else {
+                anyhow::bail!("indexed source type is not an array: {ty:?}");
+            };
+            ty = element;
+        }
+        Ok(ty)
+    }
+
+    /// Rebuild an indexed operand's source type from its IR lengths and the
+    /// result's type.
+    fn array_type_for_index(shape: &Type, rank: usize, element: &SourceType) -> Result<SourceType> {
+        if rank == 0 {
+            Ok(element.clone())
+        } else if let Type::Array(array) = shape {
+            Ok(SourceType::Array {
+                element: Box::new(Self::array_type_for_index(
+                    &array.element_type,
+                    rank - 1,
+                    element,
+                )?),
+                size: array.element_count,
+            })
+        } else {
+            bail!("expected an array dimension in a verified array index")
+        }
+    }
+
+    /// Propagate each destination type through array operations, tuples, and
+    /// selections.
     ///
     /// A node retains its first inferred type, while each distinct context is
     /// propagated through its operands. Uses with another type convert through
@@ -303,6 +401,32 @@ impl<'a> Presentation<'a> {
             }
             let payload = self.graph.get_node(reference).payload.clone();
             match payload {
+                NodePayload::Array(args) => {
+                    let element = self.indexed_type(ty, 1)?.clone();
+                    for arg in args {
+                        self.annotate(arg, &element)?;
+                    }
+                }
+                NodePayload::ArrayIndex { array, indices, .. }
+                    if self.node_types[array.index].is_none() =>
+                {
+                    let array_type = Self::array_type_for_index(
+                        &self.graph.get_node(array).ty,
+                        indices.len(),
+                        ty,
+                    )?;
+                    self.annotate(array, &array_type)?;
+                }
+                NodePayload::ArrayUpdate {
+                    array,
+                    value,
+                    indices,
+                    ..
+                } => {
+                    let element = self.indexed_type(ty, indices.len())?.clone();
+                    self.annotate(array, ty)?;
+                    self.annotate(value, &element)?;
+                }
                 NodePayload::Tuple(args) => {
                     if let SourceType::Struct { name } = self.unalias(ty)? {
                         let TypeDecl::Struct { fields, .. } = self.declaration(name)? else {
@@ -341,6 +465,10 @@ impl<'a> Presentation<'a> {
         match ty {
             SourceType::Bool => Ok("_root_.Bool".into()),
             SourceType::Bits { width } => Ok(format!("_root_.BitVec {width}")),
+            SourceType::Array { element, size } => Ok(format!(
+                "_root_.Vector ({}) {size}",
+                self.source_type(element)?
+            )),
             SourceType::Tuple { members } => Ok(product_type(
                 &members
                     .iter()
@@ -358,11 +486,23 @@ impl<'a> Presentation<'a> {
     /// type.
     ///
     /// Absent annotations and plain bit vectors already use physical values.
+    /// A vector keeps its length in both representations. Only elements that
+    /// need a codec require mapping a conversion over the vector.
     fn convert(&self, ty: Option<&SourceType>, value: &str, encode: bool) -> Result<String> {
         let operation = if encode { "encode" } else { "decode" };
         match ty {
             None | Some(SourceType::Bits { .. }) => Ok(value.into()),
             Some(SourceType::Bool) => Ok(format!("(XlsCodec.{operation}Bool ({value}))")),
+            Some(SourceType::Array { element, .. }) => {
+                let item = self.convert(Some(element), "item", encode)?;
+                if item == "item" {
+                    Ok(value.into())
+                } else {
+                    Ok(format!(
+                        "(_root_.Vector.map (fun item => {item}) ({value}))"
+                    ))
+                }
+            }
             Some(SourceType::Tuple { members }) => {
                 let fields = members
                     .iter()
@@ -485,7 +625,9 @@ impl<'a> Presentation<'a> {
                 }
             }
         }
-        out.push_str("end XlsSource\n\nnamespace XlsCodec\n\n");
+        out.push_str(
+            "end XlsSource\n\nnamespace XlsCodec\n\nattribute [local simp] Function.comp_def\n\n",
+        );
         out.push_str(BOOL_REPRESENTATION);
         for declaration in self.declarations {
             let name = identifier(declaration.name())?;
@@ -697,8 +839,8 @@ impl<'a> Presentation<'a> {
     /// Render source-shaped equations where type context supports that
     /// spelling.
     ///
-    /// A call with a recovered signature converts each argument to its
-    /// declared parameter type and converts the result to the node's type.
+    /// A typed index preserves the element's source fields and clamps an
+    /// out-of-range read to the last element of that dimension.
     /// Other operations reuse the raw operator translation with explicit
     /// codecs; the generated readable evaluator never delegates to the raw
     /// evaluator.
@@ -722,6 +864,45 @@ impl<'a> Presentation<'a> {
                 self.coerce(Some(&signature.result), target, &format!("({call})"))
             }
             NodePayload::InputPort { name, .. } => Ok(format!("x.{}", identifier(name)?)),
+            NodePayload::Array(args) if let Some(ty) = target => {
+                let element = self.indexed_type(ty, 1)?;
+                let values = args
+                    .iter()
+                    .map(|arg| self.typed_operand(*arg, Some(element), depth))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(LocalRenderer::Block.vector_literal(&values))
+            }
+            NodePayload::ArrayIndex { array, indices, .. }
+                if let Some(ty) = &self.node_types[array.index] =>
+            {
+                let expr =
+                    indices
+                        .iter()
+                        .try_fold(self.operand(*array, depth)?, |items, index| {
+                            Ok::<_, anyhow::Error>(lean::array_read(
+                                &items,
+                                &self.typed_operand(*index, None, depth)?,
+                            ))
+                        })?;
+                self.coerce(Some(self.indexed_type(ty, indices.len())?), target, &expr)
+            }
+            NodePayload::ArrayUpdate {
+                array,
+                value,
+                indices,
+                ..
+            } if let Some(ty) = target => {
+                let element = self.indexed_type(ty, indices.len())?;
+                let indices = indices
+                    .iter()
+                    .map(|index| self.typed_operand(*index, None, depth))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(lean::array_write(
+                    &self.typed_operand(*array, Some(ty), depth)?,
+                    &indices,
+                    &self.typed_operand(*value, Some(element), depth)?,
+                ))
+            }
             NodePayload::RegisterRead { register } => {
                 let index = self.register_index(register)?;
                 self.coerce(
@@ -1103,7 +1284,9 @@ def eval (q : State) (x : Input) : Evaluation :=
     ///
     /// Inputs and outputs use their source codecs and the block's port names.
     fn representation(&self) -> Result<String> {
-        let mut out = String::from("import ReadableGenerated\n\nnamespace XlsReadable\n\n");
+        let mut out = String::from(
+            "import ReadableGenerated\n\nnamespace XlsReadable\n\nattribute [local simp] Function.comp_def\n\n",
+        );
         let encoded = self
             .block()
             .graph
@@ -1273,10 +1456,10 @@ end XlsReadable
     /// Emit proofs relating readable and raw evaluation for arbitrary physical
     /// state.
     ///
-    /// The proof unfolds each readable helper alongside its raw definition and
-    /// uses enum dispatch rules from both the block and its readable helpers.
-    /// Structural rewrites preserve codec heads until round trips cancel,
-    /// then enum encoders unfold. Lean must elaborate the generated proof.
+    /// Structural rewrites keep codecs intact until round trips cancel, then
+    /// unfold enum encoders. Indexed graphs can also move a field projection
+    /// across a clamped read by mapping it over the vector. Lean must check
+    /// the emitted proofs to establish agreement between the two models.
     fn correspondence(&self) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
@@ -1356,24 +1539,21 @@ end XlsReadable
             })
             .collect::<Result<Vec<_>>>()?;
         writeln!(out, "  rcases x with ⟨{}⟩", inputs.join(", "))?;
-        let structural_rules = {
-            // Fix each function: bare apply_ite can distribute nested
-            // conditionals through each other. Projections also cross selected
-            // records and physical tuples, not just their enclosing codecs.
-            let mut conditional_rules = BTreeSet::from([
-                "apply_ite XlsCodec.encodeBool".to_owned(),
-                "apply_ite XlsCodec.decodeBool".to_owned(),
+        let (structural_rules, indexed_rules) = {
+            // Distribute only codecs and projections; arbitrary functions could
+            // move nested conditionals or array reads through each other.
+            let mut functions = BTreeSet::from([
+                "XlsCodec.encodeBool".to_owned(),
+                "XlsCodec.decodeBool".to_owned(),
             ]);
+            let mut has_array_index = false;
             for declaration in self.declarations {
                 let name = identifier(declaration.name())?;
-                conditional_rules.insert(format!("apply_ite XlsCodec.{name}.encode"));
-                conditional_rules.insert(format!("apply_ite XlsCodec.{name}.decode"));
+                functions.insert(format!("XlsCodec.{name}.encode"));
+                functions.insert(format!("XlsCodec.{name}.decode"));
                 if let TypeDecl::Struct { fields, .. } = declaration {
                     for field in fields {
-                        conditional_rules.insert(format!(
-                            "apply_ite XlsSource.{name}.{}",
-                            identifier(&field.name)?
-                        ));
+                        functions.insert(format!("XlsSource.{name}.{}", identifier(&field.name)?));
                     }
                 }
             }
@@ -1381,17 +1561,39 @@ end XlsReadable
                 std::iter::once(self.graph).chain(self.block.helpers.iter().map(|f| &f.graph))
             {
                 for node in &graph.nodes {
+                    has_array_index |= matches!(node.payload, NodePayload::ArrayIndex { .. });
                     if let NodePayload::TupleIndex { tuple, index } = &node.payload {
-                        conditional_rules.insert(format!(
-                            "apply_ite (fun (value : {}) => {})",
+                        functions.insert(format!(
+                            "(fun (value : {}) => {})",
                             lean_type(&graph.get_node(*tuple).ty)?,
                             tuple_element("value", *index)
                         ));
                     }
                 }
             }
-            let mut rules = conditional_rules.into_iter().collect::<Vec<_>>();
-            rules.extend(["prod_fst_ite".into(), "prod_snd_ite".into()]);
+            let indexed_rules = has_array_index.then(|| {
+                functions
+                    .iter()
+                    .map(|f| format!("← vector_getD_back_map {f}"))
+                    .collect::<Vec<_>>()
+                    .join(",\n       ")
+            });
+            let mut rules = functions
+                .into_iter()
+                .map(|f| format!("apply_ite {f}"))
+                .collect::<Vec<_>>();
+            rules.extend([
+                "prod_fst_ite".into(),
+                "prod_snd_ite".into(),
+                "vector_map_ite".into(),
+                "vector_getD_back_map".into(),
+                "_root_.XlsynthLean.IR.arrayIndex_eq_getD_back".into(),
+                "_root_.XlsynthLean.IR.arrayModify_eq_setIfInBounds".into(),
+                "Vector.map_setIfInBounds".into(),
+                "Vector.map_map".into(),
+                "Function.comp_def".into(),
+                "Vector.map_id'".into(),
+            ]);
             for declaration in self.declarations.iter().rev() {
                 let name = identifier(declaration.name())?;
                 // Keep codec heads until roundtrips cancel.
@@ -1410,7 +1612,7 @@ end XlsReadable
             // Codec cancellation can expose priority selectors, so normalize
             // recovered matches and raw selectors in the same simp pass.
             rules.extend(dispatch_rules);
-            rules.join(",\n       ")
+            (rules.join(",\n       "), indexed_rules)
         };
         let mut helper_rules = String::new();
         for function in &self.block.helpers {
@@ -1459,7 +1661,21 @@ end XlsReadable
         // A source tuple is encoded one field at a time, while the raw
         // register update selects the entire physical tuple at once.
         out.push_str("  all_goals try simp only [ite_prod_mk, ite_self]\n");
-        out.push_str("  all_goals rfl\n\n");
+        if let Some(rules) = indexed_rules {
+            writeln!(
+                out,
+                r#"  all_goals first
+    | with_reducible rfl
+    | -- Compare indexed fields by mapping the projection over each vector.
+      simp only [{rules},
+       vector_map_ite, Vector.map_map, Function.comp_def,
+       vector_map_append, Array.toVector, Vector.map_mk, List.map_toArray,
+       List.map_cons, List.map_nil] <;> rfl
+"#
+            )?;
+        } else {
+            out.push_str("  all_goals rfl\n\n");
+        }
         out.push_str(CORRESPONDENCE);
         out.push_str("\nend XlsReadable\n");
         Ok(out)
@@ -1559,8 +1775,11 @@ theorem two_bit_cases (b : BitVec 2) : b = 0 ∨ b = 1 ∨ b = 2 ∨ b = 3 := by
 
 "#;
 
-/// Rewrite rules aligning raw one-bit operations with readable Boolean
+/// Rewrite rules for proving agreement of Boolean operations and aggregate
 /// expressions.
+///
+/// Vector rules carry element conversions through selections, appended
+/// literals, and reads that use the last element as their fallback.
 const BOOL_CORRESPONDENCE: &str = r#"private theorem raw_not (b : BitVec 1) :
     ~~~b = XlsCodec.encodeBool (!XlsCodec.decodeBool b) := by
   simpa only [XlsCodec.encode_decodeBool] using
@@ -1596,6 +1815,23 @@ private theorem ite_prod_mk {α β : Type} (p : Prop) [Decidable p] (a c : α) (
     (if p then (a, b) else (c, d)) = ((if p then a else c), (if p then b else d)) := by
   split <;> rfl
 
+private theorem vector_map_ite {α β : Type} {n : Nat} (f : α → β)
+    (p : Prop) [Decidable p] (x y : Vector α n) :
+    (if p then x else y).map f = (if p then x.map f else y.map f) :=
+  apply_ite (Vector.map f) p x y
+
+-- The size-safe literal renderer calls Vector.append with explicit lengths.
+-- Match that head directly; Vector.map_append is stated using ++.
+private theorem vector_map_append {α β : Type} {n m : Nat} (f : α → β)
+    (xs : Vector α n) (ys : Vector α m) :
+    (Vector.append xs ys).map f = Vector.append (xs.map f) (ys.map f) :=
+  Vector.map_append
+
+private theorem vector_getD_back_map {α β : Type} {n : Nat} [NeZero n]
+    (f : α → β) (xs : Vector α n) (i : Nat) :
+    (xs.map f).getD i (xs.map f).back = f (xs.getD i xs.back) := by
+  by_cases h : i < n <;> simp [Vector.getD, Array.getD, Vector.back_eq_getElem, h]
+
 "#;
 
 /// Step, reset, and trace proof source derived from the generated evaluation
@@ -1613,10 +1849,12 @@ theorem decoded_step (q : XlsBlock.State) (x : XlsBlock.Input) :
   exact congrArg Evaluation.next (decoded_eval q x)
 theorem encoded_observe (q : State) (x : Input) :
     encodeOutput (observe q x) = XlsBlock.observe (encodeState q) (encodeInput x) := by
-  exact congrArg XlsBlock.Evaluation.output (encoded_eval q x)
+  simpa only [encodeEvaluation, observe, XlsBlock.observe] using
+    congrArg XlsBlock.Evaluation.output (encoded_eval q x)
 theorem decoded_observe (q : XlsBlock.State) (x : XlsBlock.Input) :
     decodeOutput (XlsBlock.observe q x) = observe (decodeState q) (decodeInput x) := by
-  exact congrArg Evaluation.output (decoded_eval q x)
+  simpa only [decodeEvaluation, observe, XlsBlock.observe] using
+    congrArg Evaluation.output (decoded_eval q x)
 theorem encoded_assertions (q : State) (x : Input) :
     encodeAssertions (assertions q x) = XlsBlock.assertions (encodeState q) (encodeInput x) := by
   exact congrArg XlsBlock.Evaluation.assertions (encoded_eval q x)

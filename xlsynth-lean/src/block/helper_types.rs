@@ -203,12 +203,11 @@ impl Catalogue<'_> {
         Ok(())
     }
 
-    /// Recover a readable source type from the checked type and its optional
-    /// annotation.
+    /// Resolve each reference in the declaring module's type environment.
     ///
-    /// The annotation identifies aliases and imports. The checked type supplies
-    /// the concrete fields and tuple elements after parametric substitution,
-    /// even when a type parameter stands for an entire tuple.
+    /// The checked type supplies concrete array lengths. When the element has a
+    /// written annotation, following it also preserves aliases hidden by type
+    /// checking.
     fn source_type(
         &mut self,
         annotation: Option<&dslx::TypeAnnotation>,
@@ -311,6 +310,16 @@ impl Catalogue<'_> {
             } else {
                 Ok(SourceType::Bits { width })
             }
+        } else if ty.is_array() {
+            let element_annotation = annotation
+                .and_then(dslx::TypeAnnotation::to_array_type_annotation)
+                .map(|array| array.get_element_type());
+            let element =
+                self.source_type(element_annotation.as_ref(), &ty.get_array_element_type())?;
+            Ok(SourceType::Array {
+                element: Box::new(element),
+                size: ty.get_array_size(),
+            })
         } else {
             bail!(
                 "unsupported source shape {} in readable Lean",

@@ -206,8 +206,11 @@ impl CompiledBx {
     }
 }
 
-/// Collect only interface-reachable types. Lean requires a nested struct to
-/// precede its user even when the BX declarations appear in the reverse order.
+/// Translate a checked BX interface type and collect its reachable struct
+/// declarations.
+///
+/// Descending through array elements and tuple fields emits each nested struct
+/// before the Lean declaration that uses it.
 fn bx_type(
     ty: &Type,
     module: &CheckedModule,
@@ -238,7 +241,10 @@ fn bx_type(
         | Type::ParametricArray { .. }
         | Type::ParametricStruct { .. }
         | Type::TypeApplied { .. } => bail!("BX type {ty} is unsupported by readable Lean"),
-        Type::Array { .. } => bail!("BX array type {ty} is unsupported by readable Lean"),
+        Type::Array { element, size } => SourceType::Array {
+            element: Box::new(bx_type(element, module, declarations)?),
+            size: *size,
+        },
         Type::Named(name) => {
             if !declarations.iter().any(|d| d.name() == name) {
                 let def = module
