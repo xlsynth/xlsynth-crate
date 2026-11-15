@@ -28,10 +28,13 @@ pub(crate) struct BlockContext<'a> {
     pub(crate) file_table: &'a ir::FileTable,
     pub(crate) graph: Cow<'a, ir::Block>,
     source_block: &'a ir::Block,
+    /// Functions reached through `invoke`, each listed once after its callees.
     pub(crate) helpers: Vec<&'a ir::Fn>,
 }
 
 impl<'a> BlockContext<'a> {
+    /// Lower block extensions and resolve calls in the package that owns the
+    /// block.
     pub(crate) fn new(package: &'a ir::Package, graph: &'a ir::Block) -> Result<Self> {
         ensure!(
             package
@@ -73,8 +76,14 @@ impl<'a> BlockContext<'a> {
     }
 }
 
-/// Lean requires each helper to be defined before its first caller.
+/// Collect the functions invoked directly or transitively by the block in Lean
+/// declaration order.
+///
+/// Scan every node, including disconnected calls. A missing callee or a cycle
+/// prevents emission of a sequence of ordinary Lean definitions.
 fn reachable_helpers<'a>(package: &'a ir::Package, block: &ir::Block) -> Result<Vec<&'a ir::Fn>> {
+    /// Append a callee after visiting its own calls and skip already emitted
+    /// definitions.
     fn visit<'a>(
         package: &'a ir::Package,
         graph: &ir::NodeGraph,

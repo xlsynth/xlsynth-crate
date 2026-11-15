@@ -258,6 +258,8 @@ top block flags(en: bits[1], BitVec: bits[1], other: bits[1]) {
     );
 }
 
+// Verifies: Nested helpers update the register and outputs read old state.
+// Catches: Unresolved helper calls or an incorrect register update.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn prelinked_helpers_drive_a_bx_register() {

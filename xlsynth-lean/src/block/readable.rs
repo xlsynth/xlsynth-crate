@@ -2,8 +2,8 @@
 
 //! Source-shaped Lean values and executable expressions over a checked block.
 //!
-//! The checked BX declarations supply names and types. The block graph
-//! supplies every equation and physical port. Codecs include undeclared
+//! The checked BX declarations supply names and types. Equations come from
+//! the block graph and the IR functions it invokes. Codecs include undeclared
 //! enum encodings so arbitrary physical state remains representable. This
 //! module emits correspondence proof source but does not check it with Lean.
 //!
@@ -43,11 +43,12 @@ fn tuple_value(elements: impl DoubleEndedIterator<Item = String>) -> String {
     })
 }
 
-/// Source type annotations and collision-free names for one verified block.
+/// Source type annotations and collision-free names for one block or helper
+/// graph.
 ///
-/// All vectors use the checked graph's node or register order. Annotation
-/// contexts memoize propagation through shared nodes; they are local to one
-/// emission and cannot outlive the validated inputs.
+/// Node references, names, and type annotations use this graph's node order.
+/// Register fields use the enclosing block's register order. The helper index
+/// distinguishes its enum dispatch definitions from those in other graphs.
 struct Presentation<'a> {
     graph: &'a ir::NodeGraph,
     helper_index: Option<usize>,
@@ -88,12 +89,12 @@ pub(super) fn emit(
 }
 
 impl<'a> Presentation<'a> {
-    /// Allocate local Lean names and attach source types to graph nodes.
+    /// Allocate local names and propagate source types within the selected
+    /// graph.
     ///
-    /// Start with one-bit Booleans and checked input and register types.
-    /// Propagate types forward through projections, then back from register
-    /// writes and output ports through tuples and selections. Two aggregates
-    /// can have the same physical shape and different BX names.
+    /// One-bit nodes default to `Bool`. Ports, registers, projections, and
+    /// available helper signatures supply nominal types. Use the helper's index
+    /// in the block's helper list when naming its enum dispatch definitions.
     fn new(
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
@@ -691,9 +692,10 @@ impl<'a> Presentation<'a> {
     /// Render source-shaped equations where type context supports that
     /// spelling.
     ///
-    /// Other operations reuse the raw operator translation with explicit
-    /// codecs; the generated readable evaluator never delegates to the raw
-    /// evaluator.
+    /// Calls with a source signature use the readable helper and convert
+    /// arguments to its declared types. Other calls use the raw helper with
+    /// encoded arguments. In both cases the result is converted at its use.
+    /// The readable evaluator computes the block equations itself.
     fn expression(&self, reference: NodeRef, depth: usize) -> Result<String> {
         let node = self.graph.get_node(reference);
         let target = self.node_types[reference.index].as_ref();
@@ -854,8 +856,10 @@ impl<'a> Presentation<'a> {
         }
     }
 
-    /// Reuse one raw graph operation with encoded operands and a decoded
+    /// Render one physical operation with encoded operands and decode its
     /// result.
+    ///
+    /// A call without a source signature resolves in `XlsBlock.Helpers`.
     fn raw_expression(&self, reference: NodeRef, depth: usize) -> Result<String> {
         let expression = lean::node_expression("XlsBlock", self.graph, reference, |operand| {
             self.typed_operand(operand, None, depth)
@@ -872,6 +876,8 @@ impl<'a> Presentation<'a> {
     /// results.
     ///
     /// Raw emission has already established single writes and supported resets.
+    /// Helpers with source signatures are defined before block equations, in
+    /// the same callee-before-caller order used by the raw emitter.
     /// All equations read old state, and reset takes precedence over load
     /// enable.
     fn executable(&self) -> Result<String> {
@@ -1261,9 +1267,10 @@ end XlsReadable
     /// Emit proofs relating readable and raw evaluation for arbitrary physical
     /// state.
     ///
-    /// Structural rewrites preserve codec heads until round trips cancel; enum
-    /// encoders unfold afterward. Successful text generation is not Lean proof
-    /// checking and does not establish correspondence to XLS execution.
+    /// The proof unfolds each readable helper alongside its raw definition and
+    /// uses enum dispatch rules from both the block and its readable helpers.
+    /// Structural rewrites preserve codec heads until round trips cancel,
+    /// then enum encoders unfold. Lean must elaborate the generated proof.
     fn correspondence(&self) -> Result<String> {
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);

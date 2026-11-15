@@ -19,6 +19,8 @@ pub(super) struct Dispatch<'a> {
 }
 
 impl Dispatch<'_> {
+    /// Select the lowest matching selector bit, or leave the value to the
+    /// fallback arm.
     fn arm_index(&self, encoding: u64) -> Option<usize> {
         self.comparisons.iter().position(|test| match test {
             Comparison::LiteralFirst(n) | Comparison::LiteralLast(n) => *n == encoding,
@@ -60,13 +62,15 @@ impl Dispatch<'_> {
 }
 
 impl Presentation<'_> {
+    /// Include the enclosing helper's index so graphs may reuse IR node IDs.
     pub(super) fn enum_dispatch_name(&self, id: usize) -> String {
         match self.helper_index {
             Some(index) => format!("helper_{index}_node_{id}"),
             None => format!("node_{id}"),
         }
     }
-    /// Associate each recognized enum priority selection with its IR text ID.
+
+    /// Pair each recognized priority select in this graph with its IR text ID.
     fn enum_dispatches(&self) -> Result<Vec<(usize, Dispatch<'_>)>> {
         let mut dispatches = Vec::new();
         for node in &self.graph.nodes {
@@ -83,8 +87,7 @@ impl Presentation<'_> {
         Ok(dispatches)
     }
 
-    /// Emit a Lean match choosing the first matching arm or the default for
-    /// each encoding.
+    /// Emit an exhaustive Lean enum match for each recognized priority select.
     pub(super) fn enum_dispatch_definitions(&self) -> Result<String> {
         let mut out = String::new();
         for (id, dispatch) in self.enum_dispatches()? {
@@ -106,8 +109,10 @@ impl Presentation<'_> {
         Ok(out)
     }
 
-    /// Rewrite on the subject itself, including an enum decoded from computed
-    /// bits.
+    /// Emit and name rules that rewrite the enum match and raw selector to the
+    /// same conditionals.
+    ///
+    /// Match on the subject itself so the rule also applies to decoded bits.
     pub(super) fn enum_dispatch_laws(&self, out: &mut String) -> Result<Vec<String>> {
         let mut rules = Vec::new();
         for (id, dispatch) in self.enum_dispatches()? {

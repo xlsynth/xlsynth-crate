@@ -71,11 +71,11 @@ impl CompiledBx {
         readable::emit(&block, &declarations, &interface)
     }
 
-    /// Match checked declarations to physical ports and registers in lowering
-    /// order.
+    /// Pair the checked BX block's ordered ports and registers with their
+    /// lowered IR shapes.
     ///
-    /// A matching width cannot distinguish two equal-width fields. Check each
-    /// name before assigning its type and retain the matched order for outputs.
+    /// Linked functions can be called at their physical IR types even when
+    /// the interface supplies no source signature for them.
     pub(super) fn readable_interface(
         &self,
         block: &BlockContext<'_>,

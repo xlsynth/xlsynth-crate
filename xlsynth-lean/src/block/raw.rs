@@ -7,6 +7,8 @@
 //! registers, and every source assertion, including disconnected assertions.
 //! No assertion narrows the input/state domain. Tuples remain typed products;
 //! no enum decoding or payload projection is part of this translation.
+//! Each reachable IR function becomes a definition under `Helpers` in the
+//! block's namespace. Both the evaluator and nested calls refer to it by name.
 
 use anyhow::{Context, Result, ensure};
 use std::fmt::Write;
@@ -97,8 +99,9 @@ pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Re
 
 /// Assemble a clock-step model after checking the emitter's supported shapes.
 ///
-/// Every register must have exactly one write; outputs use the data operand of
-/// each output port, whose graph node itself has the empty tuple type.
+/// Every register must have exactly one write. Outputs use the data operand of
+/// each output port, whose graph node itself has the empty tuple type. Helpers
+/// contribute to the elaboration limits and are emitted before the block.
 fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     ensure!(
         block.graph.instantiations.is_empty(),
@@ -330,6 +333,8 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     Ok(source)
 }
 
+/// Qualify the IR function name from the Lean root so local bindings cannot
+/// capture a call.
 pub(super) fn helper_path(namespace: &str, physical: &str) -> Result<String> {
     Ok(format!(
         "_root_.{namespace}.Helpers.{}",
@@ -337,6 +342,11 @@ pub(super) fn helper_path(namespace: &str, physical: &str) -> Result<String> {
     ))
 }
 
+/// Emit one function over physical Lean types with its IR parameter order and
+/// return node.
+///
+/// Callees must already be in scope. A helper returns only its value, so an
+/// assertion in its graph is rejected instead of being lost at the call site.
 fn write_helper(source: &mut String, namespace: &str, function: &ir::Fn) -> Result<()> {
     write!(source, "def Helpers.{}", identifier(&function.name)?)?;
     for param in &function.params {
@@ -491,8 +501,9 @@ fn predicate(value: &str) -> String {
 /// Render one supported graph operation using caller-supplied operand
 /// expressions.
 ///
-/// Resolve only the operands used by this operation. Register writes and
-/// output ports return unit here; their effects are collected by `emit_block`.
+/// Resolve operands in the supplied graph and function calls in the supplied
+/// Lean namespace. Block callers validate register reads and collect the
+/// effects of writes and output ports, whose node expressions return unit.
 pub(crate) fn node_expression(
     namespace: &str,
     graph: &ir::NodeGraph,
