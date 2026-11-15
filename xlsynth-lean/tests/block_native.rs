@@ -272,8 +272,8 @@ example (q : State) (x : Input) : observe q x = (q.stored, x.src.item.zebra) := 
     Ok(())
 }
 
-// Verifies: Lean can execute BX and DSLX field projections named recOn.
-// Catches: A generated member hiding a field or a field hiding a type name.
+// Verifies: BX and imported field names select the declared positions.
+// Catches: A Packet field hiding its type in later accessors.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_and_imported_dslx_fields_keep_their_source_names() -> Result<()> {

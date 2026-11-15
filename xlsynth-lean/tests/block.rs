@@ -27,6 +27,7 @@ fn check_block(package: &Package, client: &str) {
     check_block_in(package, "XlsBlock", client);
 }
 
+/// Compile the named block module and a separate Lean client that imports it.
 fn check_block_in(package: &Package, module: &str, client: &str) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -214,7 +215,8 @@ open XlsBlock
     );
 }
 
-// A named block module owns the readers for all four physical records.
+// Verifies: Dotted-module clients can use source names on all four records.
+// Catches: Fields hiding record types or calls missing the renamed helper.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn raw_projections_keep_lean_generated_member_names() {

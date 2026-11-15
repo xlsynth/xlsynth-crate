@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Translate nominal catalogue identities into Lean namespace components.
-//!
-//! BX types use the module that declared them. Checked DSLX types keep their
-//! full import subject, including dotted prefixes. Type references also account
-//! for the module and earlier binders in scope at the point of emission.
+//! Resolve source declarations and field types in their emitted Lean
+//! namespaces.
 
 use anyhow::{Result, bail, ensure};
 use std::{collections::BTreeSet, fmt::Write};
@@ -67,7 +64,10 @@ pub(super) fn module_identifier(module: &str) -> Result<String> {
     Ok(namespace)
 }
 
-/// Explicit Lean declarations cannot end in `_root_`, even when quoted.
+/// Quote a source name for an explicit Lean declaration.
+///
+/// Lean reserves `_root_` even when quoted. Report the source module and
+/// declaration role so callers can identify the name that needs to change.
 pub(super) fn declaration_identifier(module: &str, name: &str, role: &str) -> Result<String> {
     ensure!(
         name != "_root_",
@@ -136,11 +136,11 @@ pub(super) fn source_type_in(
     }
 }
 
-/// Write a struct in field order and return the name on which to derive
-/// instances.
+/// Emit a source struct and return the name used to derive its instances.
 ///
-/// Each earlier field is in scope in a later field's type, so a source field
-/// can force qualification of a type from the same module.
+/// Earlier fields can shadow names used in later field types. A field that
+/// conflicts with a Lean-generated member also requires a separate underlying
+/// structure, whose name is returned relative to the module.
 pub(super) fn write_struct(
     out: &mut String,
     bx_namespace: &str,

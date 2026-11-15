@@ -127,6 +127,7 @@ fn source_struct_fields_can_use_lean_generated_member_names() {
     }
 }
 
+// Negative test: Reject a block, type or explicit accessor named `_root_`.
 #[test]
 fn root_qualifier_is_rejected_for_explicit_lean_declarations() {
     for (source, owner) in [
@@ -145,6 +146,7 @@ fn root_qualifier_is_rejected_for_explicit_lean_declarations() {
     }
 }
 
+// Negative test: Reject the checked DSLX helper `ops::_root_` by name.
 #[test]
 fn checked_dslx_function_cannot_use_the_root_qualifier_as_its_name() {
     let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
