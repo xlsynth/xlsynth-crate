@@ -629,8 +629,8 @@ block router(clk, fresh: bool, incoming: u2, a: bool, b: bool, c: bool) -> bool 
     }
 }
 
-// Verifies: Imported parametric helpers typecheck and execute a step in Lean.
-// Catches: Helper instances sharing a name or accepting the wrong record.
+// Verifies: Specialized imports accept the caller's Packet type.
+// Catches: Resolving Packet in the helper module instead of the caller.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_parametric_helpers_preserve_instances() {

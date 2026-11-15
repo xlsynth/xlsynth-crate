@@ -2,10 +2,9 @@
 
 //! Recover helper signatures from the checked DSLX compilation linked into BX.
 //!
-//! A single parametric helper can have several reachable IR functions. The
-//! catalogue matches each IR symbol to a checked invocation and pairs the
-//! callee's parameter names with their types in that specialization.
-//! A helper whose source signature cannot be represented keeps its IR types.
+//! An imported helper can take a type argument declared by its caller. The
+//! checked type identifies which module supplies the declaration and field
+//! names.
 use super::{
     BlockContext,
     source_types::{
@@ -55,12 +54,12 @@ impl DslxLink {
         Ok((package, Self { module, symbols }))
     }
 
-    /// Attach source declarations for reachable DSLX helpers to the selected
-    /// block.
+    /// Attach recoverable DSLX signatures for linked block helpers after
+    /// checking their IR shapes.
     ///
-    /// Each recovered parameter and result must erase to its linked IR type.
-    /// Commit the declarations and signatures together after checking all
-    /// matches.
+    /// Supply the block linked against this compilation. A recovered signature
+    /// with a different arity, parameter shape, or result shape is an error.
+    /// Helpers without a recovered signature keep their IR types.
     pub(super) fn add_signatures(
         &self,
         block: &BlockContext<'_>,
@@ -124,6 +123,8 @@ impl DslxLink {
 /// referenced declarations first. Unsupported declarations are remembered by
 /// qualified name.
 struct Catalogue<'a> {
+    /// The linked compilation's entry module supplies cross-module type lookups
+    /// even when `context` holds an imported helper's specialization.
     entry: ModuleContext,
     declarations: Vec<TypeDecl>,
     reachable: BTreeSet<&'a str>,
@@ -142,7 +143,11 @@ struct ModuleContext {
 }
 
 impl ModuleContext {
-    /// A captured declaration may belong to a transitive import of the top.
+    /// Find the type information for a declaration's module from the entry
+    /// module.
+    ///
+    /// A type argument can come from the entry module itself or a transitive
+    /// import. The generic helper need not import the module that supplied it.
     fn declaration_owner(&self, module: dslx::Module) -> Result<Self> {
         let qualifier = module.get_name();
         if self.module.get_name() == qualifier {
@@ -225,11 +230,11 @@ impl Catalogue<'_> {
         Ok(())
     }
 
-    /// Resolve each reference in the declaring module's type environment.
+    /// Recover a source type from its written annotation and checked type.
     ///
-    /// The checked type supplies concrete array lengths. When the element has a
-    /// written annotation, following it also preserves aliases hidden by type
-    /// checking.
+    /// Keep explicit aliases and qualified names when present. For a type
+    /// parameter such as `T` instantiated with a struct, the checked type
+    /// supplies the declaration that the annotation alone cannot identify.
     fn source_type(
         &mut self,
         annotation: Option<&dslx::TypeAnnotation>,
@@ -704,6 +709,12 @@ impl Catalogue<'_> {
         }
         Ok(())
     }
+
+    /// Resolve a declaration in its module and restore the caller's context on
+    /// success or error.
+    ///
+    /// Within the same module, keep the current type information because it
+    /// can carry bindings for a particular helper invocation.
     fn with_declaration_owner<T>(
         &mut self,
         module: dslx::Module,
@@ -720,6 +731,11 @@ impl Catalogue<'_> {
         }
     }
 
+    /// Recover a checked struct or enum using its declaring module's qualifier.
+    ///
+    /// Parametric structs also need their concrete bindings and field types.
+    /// For an enum, the first member's value identifies its module, so an
+    /// empty enum cannot be resolved here.
     fn checked_nominal_type(&mut self, ty: &dslx::Type) -> Result<SourceType> {
         if ty.is_struct() {
             let record = ty.get_struct_def()?;
