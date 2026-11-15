@@ -20,8 +20,10 @@ use xlsynth_pir::ir_random::{
 };
 use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 
+/// Shares the compiled Lean support modules across fuzz cases in this process.
 static EVALUATOR: OnceLock<LeanEvaluator> = OnceLock::new();
 
+/// Restricts generated blocks to operations the raw Lean emitter can evaluate.
 fn block_options() -> RandomBlockOptions {
     RandomBlockOptions {
         min_input_ports: 1,
@@ -53,6 +55,7 @@ fn block_options() -> RandomBlockOptions {
     }
 }
 
+/// Replays the same initial state and eight input vectors in Lean and PIR.
 fn check_case(data: &[u8]) {
     let mut rng = StdRng::from_seed(*blake3::hash(data).as_bytes());
     // The generator consumes its wiring header before it builds any logic.
@@ -122,6 +125,8 @@ fn check_case(data: &[u8]) {
     }
 }
 
+// Verifies: Lean and PIR agree on outputs and register values at every clock.
+// Catches: Transient mismatches that a later register write can hide.
 fuzz_target!(init: {
     let lean = std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the actual Lean executable");
     EVALUATOR.set(LeanEvaluator::new(lean).expect("initialize Lean evaluator")).unwrap();

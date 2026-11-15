@@ -26,6 +26,8 @@ fn evaluator() -> &'static LeanEvaluator {
     })
 }
 
+// Verifies: Both registers read old state during a swap or reset.
+// Catches: Sequential register writes or a low enable masking reset.
 #[test]
 fn block_trace_observes_old_state_and_carries_simultaneous_writes() {
     let package = Parser::new(include_str!("fixtures/block_step.ir"))
@@ -52,6 +54,8 @@ fn block_trace_observes_old_state_and_carries_simultaneous_writes() {
     }
 }
 
+// Verifies: Bit 64 survives in the output and the updated register.
+// Catches: Truncation to 64 bits on the round trip through Lean.
 #[test]
 fn block_trace_preserves_bits_above_the_machine_word() {
     let ir = include_str!("fixtures/block_step.ir").replace("bits[2]", "bits[65]");

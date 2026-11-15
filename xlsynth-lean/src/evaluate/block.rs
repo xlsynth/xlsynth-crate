@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Runs an emitted block for a sequence of clock edges in one Lean process.
+//!
+//! Lean carries register state between edges and writes one row per edge to
+//! a trace file. Each row contains outputs followed by updated registers, all
+//! in decimal. The block declarations supply their order and bit widths.
+
 use std::{ffi::OsString, fmt::Write, fs, path::Path};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -19,10 +25,22 @@ pub struct BlockCycleResult {
 }
 
 impl LeanEvaluator {
-    /// Evaluate a trace of a verified block with bits-valued ports and
-    /// registers. Supply registers and data inputs in their respective
-    /// declaration orders. Each cycle starts from the state produced by
-    /// Lean on the previous cycle.
+    /// Evaluates one clock edge per input vector for a verified block.
+    ///
+    /// Pass a block from `package` and its initial registers in declaration
+    /// order. Each input vector follows input port declaration order, including
+    /// any reset or enable input. The clock itself takes no value. Ports and
+    /// registers must be bit vectors of their declared widths. Two inputs of
+    /// equal width supplied in the wrong order will drive the wrong ports.
+    ///
+    /// Each result pairs the outputs computed from the current registers and
+    /// inputs with the updated registers used for the following cycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the block cannot be emitted, the register or port
+    /// values do not match the interface, or the Lean trace cannot be run or
+    /// decoded.
     pub fn eval_block_trace(
         &self,
         package: &Package,
@@ -114,6 +132,7 @@ impl LeanEvaluator {
     }
 }
 
+/// Converts PIR fields to Lean field names and bit widths in declaration order.
 fn bit_fields<'a>(
     fields: impl Iterator<Item = (&'a str, &'a Type)>,
 ) -> Result<Vec<(String, usize)>> {
@@ -125,6 +144,7 @@ fn bit_fields<'a>(
         .collect()
 }
 
+/// Builds a Lean record after checking the value count and each field width.
 fn input_record(fields: &[(String, usize)], values: &[IrValue]) -> Result<String> {
     ensure!(
         fields.len() == values.len(),
