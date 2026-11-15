@@ -2,10 +2,8 @@
 
 //! Emit Lean from XLS block IR or a checked BX block with a named interface.
 //!
-//! Use [`emit`] for physical port and register types. For fields and types
-//! from BX declarations, [`compile_bx`] retains those declarations alongside
-//! their lowered package. [`CompiledBx::emit_readable`] uses that pair to
-//! generate both models and the Lean source relating their clock steps.
+//! [`compile_bx_with_dslx`] also retains source declarations for helpers in a
+//! linked DSLX module. The helpers' equations come from the same module's IR.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::borrow::Cow;

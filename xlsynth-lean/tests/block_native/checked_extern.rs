@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Check which declaration supplies a BX extern's readable interface when IR
+//! layouts coincide.
+
 use xlsynth::dslx::{ImportData, parse_and_typecheck};
 use xlsynth_lean::block::compile_bx_with_dslx;
 
+// Verifies: The selected extern module determines its alias and field order.
+// Catches: Selecting same-shaped helpers by local name or layout alone.
 #[test]
 #[ignore = "requires a matching native XLS library and Lean 4.34.1"]
 fn same_layout_extern_uses_the_selected_modules_declarations() {

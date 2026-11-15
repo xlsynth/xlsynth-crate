@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Run the BX frontend with the driver's import paths, link package, and
-//! warning policy.
-//!
-//! Lean generation keeps the checked BX declarations alongside the lowered IR
-//! so the readable model can use the source types and field names.
+//! Run BX driver commands with their configured import paths and linked
+//! package.
 
 use std::fs;
 use std::num::NonZeroUsize;
@@ -188,8 +185,8 @@ pub fn bx_prove_invariant_command() -> Command {
     .arg(time_limit_arg())
 }
 
-/// Configure `bx-to-lean` with the shared compilation options and a required
-/// output directory.
+/// Define the Lean exporter CLI, with mutually exclusive DSLX and IR link
+/// inputs.
 pub fn bx_to_lean_command() -> Command {
     add_bx_args(Command::new("bx-to-lean").about("Generates raw and readable Lean for a BX block"))
         .arg(
@@ -641,13 +638,11 @@ pub fn bx_prove_invariant(matches: &ArgMatches, config: &Option<ToolchainConfig>
     })
 }
 
-/// Emit the selected BX block's raw model, readable model, and correspondence
-/// proof.
+/// Generate the Lean modules before creating their output directory.
 ///
-/// Warnings treated as errors and model-generation failures leave the output
-/// directory untouched. The directory must be new. An I/O error while writing
-/// the modules can leave a partial bundle there. Checking the proof requires
-/// Lean.
+/// With `--link-dslx`, check the module using the BX command's import paths
+/// so the readable model can use declarations from the same compilation as
+/// the linked IR. Model generation leaves proof checking to Lean.
 pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
     let compiled = with_bx_input(matches, config, |input| {
         let reset = ResetBehavior {

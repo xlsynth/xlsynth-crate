@@ -66,8 +66,8 @@ fn bx_field_order_across_linked_dslx() {
     );
 }
 
-// Verifies: Both models retain field order and values under a BX local rename.
-// Catches: Reordering equal-width fields by constructor order or spelling.
+// Verifies: Renaming a BX local preserves named fields and tuple positions.
+// Catches: Swapped fields when constructor and declaration order differ.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_fields_keep_declaration_order_after_local_rename() {
@@ -314,6 +314,8 @@ private def initial : State := { count := 7 }
     check_bundle(bundle, "nested prelinked calls across a register update");
 }
 
+/// Compile the DSLX test module as `machine` so BX externs resolve against its
+/// checked declarations.
 fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<LeanBlockBundle> {
     let mut imports = xlsynth::dslx::ImportData::new(None, paths);
     let module = xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports)?;
@@ -321,6 +323,8 @@ fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<Lean
         .emit_readable(None)
 }
 
+// Verifies: A linked DSLX projection reads the intended BX record field.
+// Catches: Swapping equal-width fields at the call boundary.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn linked_field_order_uses_the_checked_helper() {
@@ -362,6 +366,8 @@ example (q : State) (x : Input) :
     );
 }
 
+// Verifies: A nested DSLX call uses its named parameter to update a register.
+// Catches: Mixing up same-named local and imported functions or their fields.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn nested_helper_calls() {
@@ -422,6 +428,8 @@ private def initial : State := { count := 7 }
     check_bundle(bundle, "nested calls across a register update");
 }
 
+// Verifies: Lean checks dispatch on a selected enum and its original sender.
+// Catches: Missing constructor patterns or matching on the wrong value.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn computed_enum_dispatch_in_checked_helper() {
@@ -477,6 +485,8 @@ block router(clk, {control}, incoming: u2, a: bool, b: bool, c: bool) -> bool {{
     }
 }
 
+// Verifies: Lean proves correspondence for ten enum inputs passed in a tuple.
+// Catches: generating case splits over all combinations of independent inputs.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn independent_enum_inputs_pass_through_symbolically() {

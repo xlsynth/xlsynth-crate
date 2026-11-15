@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Recover helper signatures from the checked DSLX compilation linked into BX.
+//! Recover source names and types for the DSLX functions called by a BX block.
+//!
+//! The DSLX compiler supplies both the IR bodies and the checked declarations.
+//! The mangled function name connects each body to its declaring module, even
+//! when two imports use the same local names and lower to the same IR types.
+//! A helper whose signature cannot be represented uses the raw IR call path.
 use super::{
     BlockContext,
     source_types::{
@@ -19,15 +24,18 @@ use xlsynth::{
 };
 use xlsynth_pir::{ir, ir_parser::Parser};
 
-/// The owner of the checked declarations and the functions emitted from them.
-/// BX adds its blocks and imports to the supplied package without renaming
-/// these functions.
+/// The checked DSLX module and the IR function names emitted from it.
+///
+/// BX adds blocks and imports to the linked package, so membership in this
+/// original set identifies callees eligible for a DSLX signature.
 pub(super) struct DslxLink {
     module: dslx::TypecheckedModule,
     symbols: BTreeSet<String>,
 }
 
 impl DslxLink {
+    /// Lower the module once and record its function names before BX adds
+    /// members.
     pub(super) fn compile(module: dslx::TypecheckedModule) -> Result<(ir::Package, Self)> {
         let text = module
             .to_ir_text()
@@ -47,6 +55,12 @@ impl DslxLink {
         Ok((package, Self { module, symbols }))
     }
 
+    /// Attach source declarations for reachable DSLX helpers to the selected
+    /// block.
+    ///
+    /// Each recovered parameter and result must erase to its linked IR type.
+    /// Commit the declarations and signatures together after checking all
+    /// matches.
     pub(super) fn add_signatures(
         &self,
         block: &BlockContext<'_>,
@@ -102,7 +116,12 @@ impl DslxLink {
         Ok(())
     }
 }
-/// Declarations collected in source order from the native DSLX type checker.
+/// Source types and helper signatures recovered while visiting the DSLX call
+/// graph.
+///
+/// Looking up field and alias types before recording their owner puts
+/// referenced declarations first. Unsupported declarations are remembered by
+/// qualified name.
 struct Catalogue<'a> {
     declarations: Vec<TypeDecl>,
     reachable: BTreeSet<&'a str>,
@@ -121,13 +140,14 @@ struct ModuleContext {
 }
 
 impl Catalogue<'_> {
+    /// Qualify a declaration with its owning module, even when the import has
+    /// an alias.
     fn qualified_name(&self, local: &str) -> String {
         format!("{}::{local}", self.context.qualifier)
     }
 
-    // Visit imported declarations on demand. The compiler already resolved each
-    // import, and unrelated declarations need not be suitable for the
-    // model's interface.
+    /// Collect a referenced declaration on first use and retain its nominal
+    /// identity.
     fn nominal_reference(&mut self, local: &str) -> Result<SourceType> {
         let name = self.qualified_name(local);
         if !self.declarations.iter().any(|decl| decl.name() == name)
@@ -147,8 +167,8 @@ impl Catalogue<'_> {
         }
     }
 
-    // For a function, diagnose an unsupported declaration at the interface
-    // element that actually needs it. An unrelated type is not an interface.
+    /// Save a conversion failure for lookups of this name so other helpers can
+    /// still use source types.
     fn finish_declaration(&mut self, name: &str, result: Result<()>) -> Result<(), XlsynthError> {
         if let Err(error) = result {
             self.unsupported
@@ -157,6 +177,8 @@ impl Catalogue<'_> {
         Ok(())
     }
 
+    /// Look up a qualified declaration or report the reason its conversion
+    /// failed.
     fn declaration(&self, name: &str) -> Result<&TypeDecl> {
         if let Some(reason) = self.unsupported.get(name) {
             bail!("unsupported source type {name}: {reason}")
@@ -181,7 +203,12 @@ impl Catalogue<'_> {
         Ok(())
     }
 
-    /// Resolve each reference in the declaring module's type environment.
+    /// Reconstruct the written type with concrete widths from the declaring
+    /// module.
+    ///
+    /// Imported type references temporarily switch to their owner's type
+    /// information. Tuple members are resolved from their own annotations
+    /// so aliases remain visible.
     fn source_type(
         &mut self,
         annotation: &dslx::TypeAnnotation,
@@ -274,6 +301,7 @@ impl Catalogue<'_> {
         }
     }
 
+    /// Pair an annotation with its concrete type in the current module.
     fn annotation_type(&mut self, annotation: &dslx::TypeAnnotation) -> Result<SourceType> {
         let ty = self
             .context
@@ -285,7 +313,8 @@ impl Catalogue<'_> {
 }
 
 impl BridgeBuilder for Catalogue<'_> {
-    /// Start a leaf-module catalogue without retaining earlier declarations.
+    /// Module entry needs no callback setup because the call graph walk selects
+    /// the owner.
     fn start_module(&mut self, _name: &str) -> Result<(), XlsynthError> {
         Ok(())
     }
@@ -398,6 +427,9 @@ impl BridgeBuilder for Catalogue<'_> {
         Ok(())
     }
 
+    /// Index each representable signature by its mangled IR name.
+    ///
+    /// Omitting a signature leaves the helper callable with the raw IR types.
     fn add_function_signature_typed(
         &mut self,
         name: &str,
@@ -406,10 +438,7 @@ impl BridgeBuilder for Catalogue<'_> {
         return_annotation: Option<&dslx::TypeAnnotation>,
         _return_type: Option<&dslx::Type>,
     ) -> Result<(), XlsynthError> {
-        // Without a DSLX signature, calls to this helper use its IR types.
         if let Ok(signature) = self.helper_signature(name, params, return_annotation) {
-            // Key by the IR symbol so a function of the same name in an import
-            // cannot acquire a local function's source types.
             let symbol = xlsynth::mangle_dslx_name(&self.context.module.get_name(), name)?;
             self.helpers.insert(symbol, signature);
         }
@@ -418,6 +447,12 @@ impl BridgeBuilder for Catalogue<'_> {
 }
 
 impl Catalogue<'_> {
+    /// Walk calls from the entry module and collect concrete signatures for the
+    /// block's helpers.
+    ///
+    /// Cross-module calls use the callee's type information. Parametric
+    /// functions can lead to other callees, but supply no single concrete
+    /// signature here.
     fn collect_helpers(&mut self) -> Result<()> {
         let root = self.context.clone();
         let root_name = root.module.get_name();
@@ -486,6 +521,8 @@ impl Catalogue<'_> {
         self.context = root;
         Ok(())
     }
+    /// Preserve parameter names and order, using the empty tuple for an omitted
+    /// return type.
     fn helper_signature(
         &mut self,
         name: &str,

@@ -629,9 +629,10 @@ xlsynth-driver bx-to-lean counter.bx --output-dir lean
   DSLX imports as in [`bx2ir`](#bx2ir-bx-to-block-ir). The selected block
   and the functions it calls must use operations supported by the Lean emitter.
 - `--link-dslx <MODULE.x>` takes a DSLX source file in place of `--link-ir`.
-  It compiles the checked module to implement BX extern functions and uses
-  the same checked declarations to name helper arguments, result types, and
-  record fields in Lean. For example, a block declaring
+  It compiles the module to implement BX extern functions. When a helper's
+  declared signature is supported, readable Lean uses its DSLX parameter
+  names and types, including types declared in imports. Other helpers use
+  their IR types. For example, a block declaring
   `extern fn arithmetic::twice(x: u8) -> u8;` can link the implementation
   with `--link-dslx arithmetic.x`.
 - BX warnings stop generation by default. Use `--warnings-as-errors=false`

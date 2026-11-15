@@ -1174,6 +1174,8 @@ block b(clk, x: u8) -> u8 { x + x }"#,
     Ok(())
 }
 
+// Verifies: Lean keeps struct fields from DSLX linked through its import path.
+// Catches: Lost DSLX field names or acceptance of conflicting link inputs.
 #[test]
 fn bx_to_lean_links_externs_from_a_checked_dslx_module() -> Result<()> {
     let directory = tempfile::tempdir()?;

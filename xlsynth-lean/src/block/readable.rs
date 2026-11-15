@@ -2,8 +2,9 @@
 
 //! Source-shaped Lean values and executable expressions over a checked block.
 //!
-//! The checked BX declarations supply names and types. Equations come from
-//! the block graph and the IR functions it invokes. Codecs include undeclared
+//! Checked BX declarations supply names and types for the block interface.
+//! Linked DSLX declarations supply them for helpers with supported signatures.
+//! The IR supplies every equation and physical port. Codecs include undeclared
 //! enum encodings so arbitrary physical state remains representable. This
 //! module emits correspondence proof source but does not check it with Lean.
 //!
@@ -89,12 +90,12 @@ pub(super) fn emit(
 }
 
 impl<'a> Presentation<'a> {
-    /// Allocate local names and propagate source types within the selected
+    /// Allocate noncapturing names and propagate source types through the
     /// graph.
     ///
-    /// One-bit nodes default to `Bool`. Ports, registers, projections, and
-    /// available helper signatures supply nominal types. Use the helper's index
-    /// in the block's helper list when naming its enum dispatch definitions.
+    /// A recovered helper signature supplies preferred parameter names and
+    /// nominal types by position. Call sites use the same signature for
+    /// argument and result types. Equally wide types can have different fields.
     fn new(
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
@@ -696,10 +697,11 @@ impl<'a> Presentation<'a> {
     /// Render source-shaped equations where type context supports that
     /// spelling.
     ///
-    /// Calls with a source signature use the readable helper and convert
-    /// arguments to its declared types. Other calls use the raw helper with
-    /// encoded arguments. In both cases the result is converted at its use.
-    /// The readable evaluator computes the block equations itself.
+    /// A call with a recovered signature converts each argument to its
+    /// declared parameter type and converts the result to the node's type.
+    /// Other operations reuse the raw operator translation with explicit
+    /// codecs; the generated readable evaluator never delegates to the raw
+    /// evaluator.
     fn expression(&self, reference: NodeRef, depth: usize) -> Result<String> {
         let node = self.graph.get_node(reference);
         let target = self.node_types[reference.index].as_ref();
@@ -879,9 +881,9 @@ impl<'a> Presentation<'a> {
     /// Emit readable clock-step equations with physical ports and assertion
     /// results.
     ///
+    /// Helpers with source signatures get definitions with named, typed
+    /// parameters before the block equations that call them.
     /// Raw emission has already established single writes and supported resets.
-    /// Helpers with source signatures are defined before block equations, in
-    /// the same callee-before-caller order used by the raw emitter.
     /// All equations read old state, and reset takes precedence over load
     /// enable.
     fn executable(&self) -> Result<String> {

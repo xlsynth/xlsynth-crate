@@ -91,10 +91,10 @@ pub(super) struct StatefulInterface {
     pub(super) outputs: Vec<SourceType>,
 }
 
-/// Source name and declared parameter and return types of a linked IR function.
+/// The qualified DSLX name and declared signature of a linked IR function.
 ///
-/// The readable definition uses `name`. Its parameter types must align with
-/// both the IR parameter list and every invoke's operands in arity and order.
+/// Parameters keep their DSLX names and declaration order. Each parameter is
+/// paired by position with its linked IR node, whose physical type is checked.
 pub(super) struct HelperSignature {
     pub(super) name: String,
     pub(super) params: Vec<(String, SourceType)>,
