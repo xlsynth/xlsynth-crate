@@ -64,7 +64,11 @@ impl Segments {
                 NodePayload::Assert { activate, .. } => {
                     live.insert(activate.index);
                 }
-                _ => {}
+                _ => {
+                    // This operation goes into the leaf below. The reverse walk
+                    // collects its operands. Only outputs, register writes, and
+                    // assertions seed the wires needed for the final result.
+                }
             }
             leaf.push(reference);
             if leaf.len() == MAX_LEAF_OPERATIONS {

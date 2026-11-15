@@ -2122,7 +2122,10 @@ fn collect_tuple_types<'a>(ty: &'a Type, tuples: &mut BTreeSet<&'a Type>) {
             }
         }
         Type::Array(array) => collect_tuple_types(&array.element_type, tuples),
-        _ => {}
+        _ => {
+            // Previously visited tuples have already contributed their fields.
+            // The remaining types have no children to visit.
+        }
     }
 }
 
