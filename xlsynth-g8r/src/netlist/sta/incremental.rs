@@ -211,7 +211,7 @@ struct Instance {
 }
 
 /// A physical output or a complete register capture boundary.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimingEndpoint {
     Output(usize),
     Capture(usize),
@@ -262,6 +262,7 @@ pub struct IncrementalSta<'lib> {
     bit_sources: Vec<BitSource>,
     primary_inputs: BTreeSet<usize>,
     instance_names: HashSet<String>,
+    rewirable_ff_data: HashMap<usize, topology::CaptureRole>,
     timing_constants: Vec<Option<bool>>,
     coverage_values: Vec<Option<bool>>,
     instances: Vec<Instance>,
@@ -522,8 +523,6 @@ impl<'lib> IncrementalSta<'lib> {
             }
         }
         let mut consumers = vec![Vec::new(); n];
-        let mut successors = vec![BTreeSet::new(); instances.len()];
-        let mut indegree = vec![0; instances.len()];
         for (i, inst) in instances.iter_mut().enumerate() {
             for (name, sources) in &inst.pins {
                 let pin = lib.pin(cells[i], name).expect("validated pin");
@@ -538,40 +537,11 @@ impl<'lib> IncrementalSta<'lib> {
                     // sequential cell cuts arrival propagation; a clock pin
                     // annotation on a combinational cell does not.
                     consumers[*bit].push(i);
-                    if !inst.sequential
-                        && let Some(driver) = drivers[*bit]
-                        && driver != i
-                        && successors[driver].insert(i)
-                    {
-                        indegree[i] += 1;
-                    }
                 }
             }
         }
-        let mut ready: BTreeSet<_> = indegree
-            .iter()
-            .enumerate()
-            .filter(|(_, d)| **d == 0)
-            .map(|(i, _)| i)
-            .collect();
-        let mut topological = Vec::new();
-        while let Some(i) = ready.pop_first() {
-            topological.push(i);
-            for j in &successors[i] {
-                indegree[*j] -= 1;
-                if indegree[*j] == 0 {
-                    ready.insert(*j);
-                }
-            }
-        }
-        if topological.len() != instances.len() {
-            return Err(UnsupportedTopology.into());
-        }
-        let mut positions = vec![0; instances.len()];
-        let rank_gap = topology::RANK_GAP.min(usize::MAX / (instances.len() + 1));
-        for (pos, i) in topological.iter().enumerate() {
-            positions[*i] = (pos + 1) * rank_gap;
-        }
+        let topological = topology::canonical_order(&instances, &drivers, &consumers)?;
+        let positions = topology::positions_for_order(&topological);
         let mut endpoints = Vec::new();
         let mut endpoints_by_bit = vec![Vec::new(); n];
         let mut capture_endpoint = vec![None; instances.len()];
@@ -643,8 +613,10 @@ impl<'lib> IncrementalSta<'lib> {
             bit_names: (0..n)
                 .map(|bit| normalized.render_bit(bit, nets, interner))
                 .collect(),
-            bit_sources: (0..n)
-                .map(|bit| canonicalize_pin_bit_source(BitSource::Bit(bit), &resolved))
+            bit_sources: normalized
+                .canonical_bits()
+                .iter()
+                .map(|&bit| canonicalize_pin_bit_source(BitSource::Bit(bit), &resolved))
                 .collect(),
             primary_inputs: normalized
                 .ports
@@ -653,6 +625,7 @@ impl<'lib> IncrementalSta<'lib> {
                 .flat_map(|p| p.bits.iter().copied())
                 .collect(),
             instance_names: instances.iter().map(|inst| inst.name.clone()).collect(),
+            rewirable_ff_data: HashMap::new(),
             timing_constants: constants,
             coverage_values: vec![None; n],
             instances,
@@ -1366,5 +1339,8 @@ mod tests {
 
 mod timed_fanins;
 mod topology;
-pub use topology::{TimingEdit, TimingInstance, TimingMutation, TrialOptions, TrialResult};
+pub use topology::{
+    TimingEdit, TimingInstance, TimingMutation, TrialOptions, TrialResult,
+    UnsupportedRegisteredEdit,
+};
 pub(crate) mod urgency;

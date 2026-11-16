@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::liberty::parser::parse_liberty_files;
+use crate::liberty_model::SequentialKind;
 use crate::netlist::io::{ParsedNetlist, read_gv_from_str};
 use crate::netlist::sta::analyze_combinational_max_arrival;
 use std::io::Write;
@@ -201,6 +202,432 @@ fn inserted(name: &str, lib: &Library, a: BitSource, y: usize) -> Result<TimingM
         cell: cell(lib, "BUF")?,
         connections: vec![("A".into(), a), ("Y".into(), BitSource::Bit(y))],
     }))
+}
+
+/// Checks each launch class and individual capture against the full boundary
+/// analysis.
+fn compare_registered(
+    sta: &IncrementalSta<'_>,
+    parsed: &ParsedNetlist,
+    registers: &[usize],
+) -> Result<()> {
+    for mode in 0..2 {
+        let full = sta.lib.analyze_register_boundary_max_arrival(
+            &parsed.modules[0],
+            &parsed.nets,
+            &parsed.interner,
+            options(),
+            mode == 0,
+            if mode == 0 { &[] } else { registers },
+        )?;
+        assert_eq!(sta.bit_count(), full.net_timing.len());
+        for (bit, expected) in full.net_timing.iter().enumerate() {
+            let actual = sta.timing[mode][bit]
+                .as_ref()
+                .and_then(SignalTimingSet::as_report_signal_timing);
+            assert_eq!(&actual, expected, "mode {mode}, bit {bit}");
+        }
+        for (endpoint, arrivals) in sta.endpoint_values() {
+            if let TimingEndpoint::Capture(i) = endpoint {
+                assert_eq!(
+                    arrivals[mode], full.register_input_arrivals[i],
+                    "mode {mode}, capture {i}"
+                );
+            }
+        }
+        let scores = sta.score().values();
+        assert_eq!(scores[mode * 2], full.worst_output_arrival);
+        assert_eq!(scores[mode * 2 + 1], full.worst_register_input_arrival);
+    }
+    Ok(())
+}
+
+// The capture changes its data source. The changed launch Q load also
+// affects the sibling timing through its original wire.
+//
+//     before  Q +--> capture D
+//               +--> sibling
+//     trial   Q +--> BUF --> capture D
+//               +--> sibling
+#[test]
+fn registered_buffer_trial_retimes_launch_siblings_and_setup_capture() -> Result<()> {
+    for next_state in ["D", "!D"] {
+        check_registered_buffer_trial(next_state)?;
+    }
+    Ok(())
+}
+
+fn check_registered_buffer_trial(next_state: &str) -> Result<()> {
+    let mut lib = crate::netlist::resize::tests::library()?;
+    let ff = cell(&lib, "DFF1")?;
+    lib.cells[ff].sequential[0].next_state = next_state.into();
+    let source = r#"module m(input clk, input d, output captured, output sibling);
+      wire q;
+      DFF1 capture(.CLK(clk), .D(q), .Q(captured));
+      DFF1 launch(.CLK(clk), .D(d), .Q(q));
+      BUF1 receiver(.A(q), .Y(sibling));
+    endmodule"#;
+    let original = read_gv_from_str(source)?;
+    let buffered = read_gv_from_str(&source.replace(".D(q)", ".D(added)").replace(
+        "endmodule",
+        "wire added; BUF2 inserted(.A(q), .Y(added)); endmodule",
+    ))?;
+    let registers = [0, 1];
+    let mut sta = IncrementalSta::new(
+        &original.modules[0],
+        &original.nets,
+        &original.interner,
+        &lib,
+        options(),
+    )?;
+    let q = bit(&original, "q")?;
+    let sibling = bit(&original, "sibling")?;
+    let added = sta.bit_count();
+    let before = sta.score();
+    let old_load = sta.load_for_bit(q);
+    let old_sibling = sta.timing[1][sibling]
+        .as_ref()
+        .and_then(SignalTimingSet::as_report_signal_timing)
+        .expect("register-launched sibling timing");
+    assert!(before.register_to_register > 0.0);
+    let cycle = TimingEdit {
+        new_bits: 0,
+        mutations: vec![TimingMutation::Rewire {
+            instance: 2,
+            pin: "A".into(),
+            source: BitSource::Bit(sibling),
+        }],
+    };
+    let error = sta
+        .trial_edit(&cycle, TrialOptions::default(), |s, _| {
+            panic!(
+                "cycle reached acceptance with register-to-output delay {} (was {})",
+                s.score().register_to_output,
+                before.register_to_output
+            )
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("cycle"), "{error}");
+    assert_eq!(sta.instance(2).unwrap().pins["A"], [BitSource::Bit(q)]);
+    compare_registered(&sta, &original, &registers)?;
+    let edit = TimingEdit {
+        new_bits: 1,
+        mutations: vec![
+            TimingMutation::Insert(TimingInstance {
+                name: "inserted".into(),
+                cell: cell(&lib, "BUF2")?,
+                connections: vec![
+                    ("A".into(), BitSource::Bit(q)),
+                    ("Y".into(), BitSource::Bit(added)),
+                ],
+            }),
+            TimingMutation::Rewire {
+                instance: 0,
+                pin: "D".into(),
+                source: BitSource::Bit(added),
+            },
+        ],
+    };
+    // The extra buffer slows the setup path. Hitting either bound must roll
+    // back the appended instance, the capture binding and all launch timing.
+    for (opts, outcome) in [
+        (
+            TrialOptions {
+                cell_budget: 0,
+                ..Default::default()
+            },
+            TrialOutcome::PropagationLimit,
+        ),
+        (
+            TrialOptions {
+                limits: Some(BoundaryDelays {
+                    register_to_output: f64::INFINITY,
+                    ..before
+                }),
+                ..Default::default()
+            },
+            TrialOutcome::Rejected,
+        ),
+    ] {
+        let result = sta.trial_edit(&edit, opts, |_, _| panic!("trial exceeded its bound"))?;
+        assert_eq!(result.outcome, outcome);
+        compare_registered(&sta, &original, &registers)?;
+    }
+    for accept in [false, true] {
+        let result = sta.trial_edit(&edit, TrialOptions::default(), |s, _| {
+            assert_ne!(s.load_for_bit(q), old_load);
+            let sibling = s.timing[1][sibling]
+                .as_ref()
+                .and_then(SignalTimingSet::as_report_signal_timing)
+                .expect("register-launched sibling timing");
+            assert!(sibling.rise.arrival > old_sibling.rise.arrival);
+            assert!(sibling.rise.transition > old_sibling.rise.transition);
+            assert!(s.score().register_to_register > before.register_to_register);
+            compare_registered(s, &buffered, &registers)?;
+            Ok(accept)
+        })?;
+        assert_eq!(
+            result.outcome,
+            if accept {
+                TrialOutcome::Accepted
+            } else {
+                TrialOutcome::Rejected
+            }
+        );
+        compare_registered(&sta, if accept { &buffered } else { &original }, &registers)?;
+    }
+    let fresh = IncrementalSta::new(
+        &buffered.modules[0],
+        &buffered.nets,
+        &buffered.interner,
+        &lib,
+        options(),
+    )?;
+    assert_eq!(sta.timing, fresh.timing);
+    assert_eq!(sta.endpoint_values, fresh.endpoint_values);
+    assert_eq!(sta.score(), fresh.score());
+    let clock_edit = TimingEdit {
+        new_bits: 0,
+        mutations: vec![
+            TimingMutation::Rewire {
+                instance: 0,
+                pin: "D".into(),
+                source: BitSource::Bit(q),
+            },
+            TimingMutation::Rewire {
+                instance: 0,
+                pin: "CLK".into(),
+                source: BitSource::Bit(q),
+            },
+        ],
+    };
+    let error = sta
+        .trial_edit(&clock_edit, TrialOptions::default(), |_, _| Ok(true))
+        .unwrap_err();
+    assert!(error.is::<UnsupportedRegisteredEdit>());
+    assert_eq!(sta.instance(0).unwrap().pins["D"], [BitSource::Bit(added)]);
+    compare_registered(&sta, &buffered, &registers)
+}
+
+#[test]
+fn capture_rewire_uses_each_instances_ties() -> Result<()> {
+    let source = r#"module m(input clk, input d, input en, output q, output r);
+        wire n;
+        BUF1 driver(.A(d), .Y(n));
+        DFF1 tied(.CLK(clk), .A(1'b0), .D(n), .Q(q));
+        DFF1 live(.CLK(clk), .A(en), .D(n), .Q(r));
+    endmodule"#;
+    let parsed = read_gv_from_str(source)?;
+    let edited = read_gv_from_str(&source.replacen(".D(n)", ".D(d)", 1))?;
+    let mut lib = crate::netlist::resize::tests::library()?;
+    let ff = cell(&lib, "DFF1")?;
+    let select = lib.cells[cell(&lib, "BUF1")?]
+        .pins
+        .iter()
+        .find(|pin| lib.resolve_string(&pin.name) == "A")
+        .unwrap()
+        .clone();
+    lib.cells[ff].pins.push(select);
+    lib.cells[ff].sequential[0].next_state = "!A & !D".into();
+    let mut sta = IncrementalSta::new(
+        &parsed.modules[0],
+        &parsed.nets,
+        &parsed.interner,
+        &lib,
+        options(),
+    )?;
+    let d = BitSource::Bit(bit(&parsed, "d")?);
+    let edit = |instance| TimingEdit {
+        new_bits: 0,
+        mutations: vec![TimingMutation::Rewire {
+            instance,
+            pin: "D".into(),
+            source: d,
+        }],
+    };
+    for accept in [false, true] {
+        sta.trial_edit(&edit(1), TrialOptions::default(), |trial, _| {
+            compare_registered(trial, &edited, &[1, 2])?;
+            Ok(accept)
+        })?;
+        let error = sta
+            .trial_edit(&edit(2), TrialOptions::default(), |_, _| Ok(true))
+            .unwrap_err();
+        assert!(error.is::<UnsupportedRegisteredEdit>());
+        compare_registered(&sta, if accept { &edited } else { &parsed }, &[1, 2])?;
+    }
+    Ok(())
+}
+
+// Unsupported sequential controls must leave the session reusable.
+#[test]
+fn capture_rewire_requires_an_unambiguous_flip_flop_data_pin() -> Result<()> {
+    let parsed = read_gv_from_str(
+        r#"module m(input clk, input d, output q);
+        wire n;
+        BUF1 driver(.A(d), .Y(n));
+        DFF1 capture(.CLK(clk), .A(clk), .D(n), .Q(q));
+    endmodule"#,
+    )?;
+    let d = BitSource::Bit(bit(&parsed, "d")?);
+    let clk = BitSource::Bit(bit(&parsed, "clk")?);
+    let n = BitSource::Bit(bit(&parsed, "n")?);
+    for (kind, clock_expr, clk_marked, a_marked) in [
+        (SequentialKind::Ff, "CLK", true, true),
+        (SequentialKind::Ff, "D", false, false),
+        (SequentialKind::Latch, "CLK", true, false),
+    ] {
+        let mut lib = crate::netlist::resize::tests::library()?;
+        let ff = cell(&lib, "DFF1")?;
+        let clock = lib.cells[ff]
+            .pins
+            .iter()
+            .position(|pin| lib.resolve_string(&pin.name) == "CLK")
+            .unwrap();
+        let mut aux = lib.cells[cell(&lib, "BUF1")?]
+            .pins
+            .iter()
+            .find(|pin| lib.resolve_string(&pin.name) == "A")
+            .unwrap()
+            .clone();
+        aux.is_clocking_pin = a_marked;
+        lib.cells[ff].pins.push(aux);
+        lib.cells[ff].pins[clock].is_clocking_pin = clk_marked;
+        lib.cells[ff].sequential[0].kind = kind as i32;
+        lib.cells[ff].sequential[0].clock_expr = clock_expr.into();
+        let mut sta = IncrementalSta::new(
+            &parsed.modules[0],
+            &parsed.nets,
+            &parsed.interner,
+            &lib,
+            options(),
+        )?;
+        let edit = TimingEdit {
+            new_bits: 0,
+            mutations: vec![
+                TimingMutation::Rewire {
+                    instance: 0,
+                    pin: "A".into(),
+                    source: clk,
+                },
+                TimingMutation::Rewire {
+                    instance: 1,
+                    pin: "D".into(),
+                    source: d,
+                },
+            ],
+        };
+        let error = sta
+            .trial_edit(&edit, TrialOptions::default(), |_, _| {
+                panic!("unsupported capture rewire reached acceptance")
+            })
+            .unwrap_err();
+        assert!(
+            error.is::<UnsupportedRegisteredEdit>(),
+            "{kind:?} {clock_expr}: {error}"
+        );
+        assert_eq!(sta.instance(0).unwrap().pins["A"], [d]);
+        assert_eq!(sta.instance(1).unwrap().pins["D"], [n]);
+        compare_registered(&sta, &parsed, &[1])?;
+    }
+    Ok(())
+}
+
+// Swapping equal-time data nets through a tran alias leaves endpoint scores
+// unchanged. Resize only the left branch afterward to reveal which capture it
+// actually feeds. Test both the restored and the committed graph.
+#[test]
+fn equal_arrival_capture_swap_tracks_the_next_edit_after_rollback_and_commit() -> Result<()> {
+    let lib = crate::netlist::resize::tests::library()?;
+    let source = r#"module m(input clk, input d, output x, output y);
+      wire qa, qb, a, b, b_alias;
+      tran(b, b_alias);
+      DFF1 launch_a(.CLK(clk), .D(x), .Q(qa));
+      DFF1 launch_b(.CLK(clk), .D(d), .Q(qb));
+      BUF1 left(.A(qa), .Y(a));
+      BUF1 right(.A(qb), .Y(b));
+      DFF1 capture_x(.CLK(clk), .D(a), .Q(x));
+      DFF1 capture_y(.CLK(clk), .D(b), .Q(y));
+    endmodule"#;
+    let swapped_text = source
+        .replace(".D(a), .Q(x)", ".D(b_alias), .Q(x)")
+        .replace(".D(b), .Q(y)", ".D(a), .Q(y)");
+    let original = read_gv_from_str(source)?;
+    let swapped = read_gv_from_str(&swapped_text)?;
+    let registers = [0, 1, 4, 5];
+    let mut sta = IncrementalSta::new(
+        &original.modules[0],
+        &original.nets,
+        &original.interner,
+        &lib,
+        options(),
+    )?;
+    let a = bit(&original, "a")?;
+    let b = bit(&original, "b")?;
+    let b_alias = bit(&original, "b_alias")?;
+    let connect = |x, y| TimingEdit {
+        new_bits: 0,
+        mutations: vec![
+            TimingMutation::Rewire {
+                instance: 4,
+                pin: "D".into(),
+                source: BitSource::Bit(x),
+            },
+            TimingMutation::Rewire {
+                instance: 5,
+                pin: "D".into(),
+                source: BitSource::Bit(y),
+            },
+        ],
+    };
+    let resize_left = TimingEdit {
+        new_bits: 0,
+        mutations: vec![TimingMutation::Resize {
+            instance: 2,
+            cell: cell(&lib, "BUF2")?,
+        }],
+    };
+    let before: Vec<_> = sta.endpoint_values().collect();
+    for accept in [false, true] {
+        sta.trial_edit(&connect(b_alias, a), TrialOptions::default(), |s, _| {
+            // Both branches carry the same timing and retain equal loads.
+            assert_eq!(s.endpoint_values().collect::<Vec<_>>(), before);
+            compare_registered(s, &swapped, &registers)?;
+            Ok(accept)
+        })?;
+        let (current, parsed) = if accept {
+            (swapped_text.as_str(), &swapped)
+        } else {
+            (source, &original)
+        };
+        compare_registered(&sta, parsed, &registers)?;
+        let resized = read_gv_from_str(&current.replace("BUF1 left", "BUF2 left"))?;
+        sta.trial_edit(&resize_left, TrialOptions::default(), |s, _| {
+            // Only the capture still attached to the left branch must change.
+            let changed: Vec<_> = s
+                .endpoint_values()
+                .zip(&before)
+                .filter_map(|((endpoint, values), (_, previous))| {
+                    (values != *previous).then_some(endpoint)
+                })
+                .collect();
+            assert_eq!(
+                changed,
+                [TimingEndpoint::Capture(if accept { 5 } else { 4 })]
+            );
+            compare_registered(s, &resized, &registers)?;
+            Ok(accept)
+        })?;
+        compare_registered(&sta, if accept { &resized } else { parsed }, &registers)?;
+    }
+    // Swap the now unequal sources back. The data nets keep their timing and
+    // loads, but both setup captures must update in this transaction.
+    let resized_original = read_gv_from_str(&source.replace("BUF1 left", "BUF2 left"))?;
+    sta.trial_edit(&connect(a, b), TrialOptions::default(), |s, _| {
+        compare_registered(s, &resized_original, &registers)?;
+        Ok(true)
+    })?;
+    compare_registered(&sta, &resized_original, &registers)
 }
 
 // Two sinks share an arrival but have different paths to the endpoint.

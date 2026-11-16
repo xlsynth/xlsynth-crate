@@ -783,7 +783,7 @@ struct InstanceCoverageInputs<'a, 'lib> {
     coverage_known_pin_values: &'a HashMap<String, bool>,
     output_pin_order: &'a [usize],
     instance_name: &'a str,
-    /// If present, only inputs launched in this timing pass require coverage.
+    /// If present, identifies inputs launched in this timing pass.
     launched_timing: Option<&'a [Option<SignalTimingSet>]>,
 }
 
@@ -819,11 +819,15 @@ fn validate_instance_functional_timing_coverage(
         }
         let mut coverage = check.required_inputs(coverage_known_pin_values, pin_sources);
         if let Some(timing) = launched_timing {
+            // A functional self-loop can suppress the very launch that
+            // would expose its missing timing arc.
+            let output = pin_sources.get(lib.library.resolve_string(&pin.name));
             coverage.retain(|input| {
-                matches!(
-                    pin_sources.get(input.name).map(Vec::as_slice),
-                    Some([PinBitSource::Bit(bit_idx)]) if timing[*bit_idx].is_some()
-                )
+                let source = pin_sources.get(input.name);
+                let Some([PinBitSource::Bit(bit_idx)]) = source.map(Vec::as_slice) else {
+                    return false;
+                };
+                timing[*bit_idx].is_some() || source == output
             });
         }
         if coverage.is_empty() {
@@ -2393,6 +2397,15 @@ fn evaluate_instance_outputs(
                             PinBitSource::Bit(related_bit_idx) => {
                                 let Some(timing) = bit_timing_sets[*related_bit_idx].as_ref()
                                 else {
+                                    // Instance ordering omits self-edges. An
+                                    // active arc cannot use the output being
+                                    // timed as its own source.
+                                    if Some(*related_bit_idx) == output_bit_idx {
+                                        return Err(anyhow!(
+                                            "combinational cycle in instance '{instance_name}': output '{pin_name}' drives timing-related input '{related_pin_name}' on net '{}'",
+                                            render_bit(*related_bit_idx)
+                                        ));
+                                    }
                                     if register_boundaries {
                                         continue;
                                     }
@@ -7432,7 +7445,7 @@ endmodule
     }
 
     #[test]
-    fn register_boundary_sta_checks_only_launched_functional_inputs() {
+    fn register_boundary_sta_checks_launched_and_self_driven_functional_inputs() {
         let src = r#"
 module top (a, d, clk, y);
   input a, d, clk;
@@ -7530,6 +7543,30 @@ endmodule
             prepared_check,
             prepared.functional_check(0, 2).unwrap()
         ));
+
+        // Feeding Y back to the uncharacterized B pin creates a loop
+        // when A is high. A tied low makes Y constant.
+        for (a, has_loop) in [("1'b1", true), ("1'b0", false)] {
+            let text = src.replace(".A(a), .B(q)", &format!(".A({a}), .B(y)"));
+            let (module, nets, interner) = parse_single_module(&text);
+            let result = prepared.analyze_register_boundary_max_arrival(
+                &module,
+                &nets,
+                &interner,
+                StaOptions::default(),
+                false,
+                &[1],
+            );
+            if has_loop {
+                let error = result.unwrap_err();
+                assert!(
+                    error.to_string().contains("functional input 'B'"),
+                    "{error}"
+                );
+            } else {
+                result.expect("a constant output cuts the feedback path");
+            }
+        }
     }
 
     #[test]

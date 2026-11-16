@@ -379,7 +379,11 @@ commits, while `Ok(false)`, an error, or an exhausted budget restores the
 incumbent. A `Resize` preserves pin bindings and timing-condition constants.
 One compatible `Resize` also supports sequential modules and updates launch and
 capture timing. Combinational batches additionally support `Replace`, `Insert`
-and `Rewire`; these can append bits and instances. The caller owns equivalence,
+and `Rewire` and can append bits and instances. Registered batches can insert
+combinational cells driving new bits and rewire existing scalar data inputs
+to other bits, including through existing aliases. A flip-flop rewire requires
+an unambiguous data pin. Callers can check for `UnsupportedRegisteredEdit`
+to fall back to full STA on the edited netlist. The caller owns equivalence,
 optimization policy and the matching source-netlist edit.
 
 `TrialOptions::cell_budget` bounds combined timing and Boolean-coverage cell
@@ -389,7 +393,7 @@ ordering work. Ordinary edits journal only touched state. Backward dependencies
 may require a full ordering pass; accepted insertions maintain the traversal
 list once. Registered feedback retains the bounded least-fixed-point coverage
 fallback. Direct input-slew/output-load updates, deletions, module-port changes,
-original-alias rewrites and registered topology changes are outside this API.
+and changes to the original alias definitions are outside this API.
 
 Resizing and fanout optimization are clients of this engine. Resize selection,
 area/timing merit and electrical acceptance remain in the resize client; fanout

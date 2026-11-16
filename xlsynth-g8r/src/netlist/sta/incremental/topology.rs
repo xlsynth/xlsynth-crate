@@ -1,12 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generic combinational topology transactions on the existing timing engine.
+//! Transactional topology updates on the existing timing engine.
 //! Connectivity, Boolean coverage and timing use sparse transactional journals.
 //! Backward dependencies can require an explicitly counted ordering fallback.
 
 use super::*;
+use crate::liberty::cell_formula::parse_formula;
+use crate::netlist::sequential_liberty::{classify_tied_ff_data, get_sequential_ff_clock_spec};
 use anyhow::ensure;
 use std::collections::BTreeMap;
+
+/// The last data-pin proof for a master under a specific set of tied inputs.
+pub(super) struct CaptureRole {
+    known: HashMap<String, bool>,
+    data: Option<String>,
+}
+
+fn rewirable_data_pin(
+    cell: &crate::liberty_model::Cell,
+    library: &Library,
+    known: &HashMap<String, bool>,
+) -> Option<String> {
+    let clock = get_sequential_ff_clock_spec(cell, library).ok()??;
+    let ff = &cell.sequential[0];
+    if !ff.clear_expr.is_empty() || !ff.preset_expr.is_empty() {
+        return None;
+    }
+    let inputs: Vec<_> = cell
+        .pins
+        .iter()
+        .filter(|p| p.direction == PinDirection::Input as i32)
+        .map(|p| library.resolve_string(&p.name).to_owned())
+        .collect();
+    let expr = parse_formula(&ff.next_state).ok()?;
+    // A simple D pin may itself be driven by a tie cell before the edit.
+    classify_tied_ff_data(&expr, &HashMap::new(), &inputs)
+        .or_else(|| classify_tied_ff_data(&expr, known, &inputs))
+        .filter(|pin| *pin != clock.pin_name)
+}
 
 /// One scalar cell instance; cell indices refer to the session's Liberty
 /// library.
@@ -67,6 +98,21 @@ impl Default for TrialOptions {
     }
 }
 
+/// The edit is outside the supported registered wiring changes. The caller
+/// can distinguish this from a timing error and fall back to full STA.
+#[derive(Debug)]
+pub struct UnsupportedRegisteredEdit;
+
+impl std::fmt::Display for UnsupportedRegisteredEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "registered topology edits require combinational insertions and data-input rewires",
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedRegisteredEdit {}
+
 /// Coverage work required by mutation preparation.
 enum CoverageUpdate {
     Unchanged,
@@ -120,6 +166,7 @@ struct NetUndo {
     driver: Option<usize>,
     loads: Vec<(usize, String)>,
     consumers: Vec<usize>,
+    endpoints: Vec<usize>,
     capacitance: EdgeLoadCapacitance,
     constant: Option<bool>,
 }
@@ -146,6 +193,7 @@ impl TransactionUndo {
             driver: s.drivers[bit],
             loads: s.loads[bit].clone(),
             consumers: s.consumers[bit].clone(),
+            endpoints: s.endpoints_by_bit[bit].clone(),
             capacitance: s.capacitances[bit],
             constant: s.timing_constants[bit],
         });
@@ -174,6 +222,7 @@ impl TransactionUndo {
             s.drivers[bit] = old.driver;
             s.loads[bit] = old.loads;
             s.consumers[bit] = old.consumers;
+            s.endpoints_by_bit[bit] = old.endpoints;
             s.capacitances[bit] = old.capacitance;
             s.timing_constants[bit] = old.constant;
         }
@@ -212,6 +261,56 @@ impl TransactionUndo {
             timing.truncate(self.bits);
         }
     }
+}
+
+/// Construct a canonical order with register inputs cutting timing edges. The
+/// smallest ready instance ID wins ties both at construction and after edits.
+pub(super) fn canonical_order(
+    instances: &[Instance],
+    drivers: &[Option<usize>],
+    consumers: &[Vec<usize>],
+) -> Result<Vec<usize>> {
+    let mut degree = vec![0; instances.len()];
+    let mut successors = vec![BTreeSet::new(); instances.len()];
+    for (bit, driver) in drivers.iter().enumerate() {
+        if let Some(d) = *driver {
+            for &j in &consumers[bit] {
+                if !instances[j].sequential && d != j && successors[d].insert(j) {
+                    degree[j] += 1;
+                }
+            }
+        }
+    }
+    let mut ready: BTreeSet<_> = degree
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| **d == 0)
+        .map(|(i, _)| i)
+        .collect();
+    let mut order = Vec::with_capacity(instances.len());
+    while let Some(i) = ready.pop_first() {
+        order.push(i);
+        for &j in &successors[i] {
+            degree[j] -= 1;
+            if degree[j] == 0 {
+                ready.insert(j);
+            }
+        }
+    }
+    if order.len() != instances.len() {
+        return Err(UnsupportedTopology.into());
+    }
+    Ok(order)
+}
+
+/// Leave room between canonical ranks for subsequent sparse insertions.
+pub(super) fn positions_for_order(order: &[usize]) -> Vec<usize> {
+    let gap = RANK_GAP.min(usize::MAX / (order.len() + 1));
+    let mut positions = vec![0; order.len()];
+    for (pos, &i) in order.iter().enumerate() {
+        positions[i] = (pos + 1) * gap;
+    }
+    positions
 }
 
 impl IncrementalSta<'_> {
@@ -480,7 +579,7 @@ impl IncrementalSta<'_> {
                 .outputs
                 .iter()
                 .flat_map(|b| self.consumers[*b].iter())
-                .filter(|&&j| j != i)
+                .filter(|&&j| j != i && !self.instances[j].sequential)
                 .map(|&j| {
                     if j < old {
                         self.positions[j]
@@ -516,54 +615,89 @@ impl IncrementalSta<'_> {
         }
         fits &= undo.nets.keys().all(|&b| {
             self.drivers[b].is_none_or(|d| {
-                self.consumers[b]
-                    .iter()
-                    .all(|&j| d == j || self.positions[d] < self.positions[j])
+                self.consumers[b].iter().all(|&j| {
+                    self.instances[j].sequential || d == j || self.positions[d] < self.positions[j]
+                })
             })
         });
+        // A buffer insertion usually fits between its producer and earliest
+        // consumer. Preserve the existing order in that case. A backward edge
+        // or a spent gap needs a fresh order, which also detects cycles.
         if fits {
             return Ok(0);
         }
-        let mut degree = vec![0; self.instance_count()];
-        let mut successors = vec![BTreeSet::new(); self.instance_count()];
-        for (bit, driver) in self.drivers.iter().enumerate() {
-            if let Some(d) = *driver {
-                for &j in &self.consumers[bit] {
-                    if d != j && successors[d].insert(j) {
-                        degree[j] += 1;
-                    }
-                }
-            }
-        }
-        let mut ready: BTreeSet<_> = degree
-            .iter()
-            .enumerate()
-            .filter(|(_, d)| **d == 0)
-            .map(|(i, _)| i)
-            .collect();
-        let mut ranks = vec![0; self.instance_count()];
-        let mut count: usize = 0;
-        let rank_gap = RANK_GAP.min(usize::MAX / (self.instance_count() + 1));
-        while let Some(i) = ready.pop_first() {
-            count += 1;
-            ranks[i] = count
-                .checked_mul(rank_gap)
-                .ok_or_else(|| anyhow!("rank overflow"))?;
-            for &j in &successors[i] {
-                degree[j] -= 1;
-                if degree[j] == 0 {
-                    ready.insert(j);
-                }
-            }
-        }
-        if count != self.instance_count() {
-            return Err(UnsupportedTopology.into());
-        }
-        undo.ranks = Some(std::mem::replace(&mut self.positions, ranks));
-        Ok(count)
+        let order = canonical_order(&self.instances, &self.drivers, &self.consumers)?;
+        undo.ranks = Some(std::mem::replace(
+            &mut self.positions,
+            positions_for_order(&order),
+        ));
+        Ok(order.len())
     }
 
-    /// Updates connectivity for a combinational batch, journaling only touched
+    /// Rewiring the D pin leaves the launch boundary and all other bindings in
+    /// place. In particular, do not disconnect and reconnect every clock sink.
+    fn rewire_registered_input(
+        &mut self,
+        i: usize,
+        name: &str,
+        source: BitSource,
+        undo: &mut TransactionUndo,
+    ) -> Result<()> {
+        let inst = self
+            .instances
+            .get(i)
+            .ok_or_else(|| anyhow!("unknown instance {i}"))?;
+        let cell = &self.lib.library.cells[self.cells[i]];
+        let pin = self
+            .lib
+            .pin(self.cells[i], name)
+            .ok_or_else(|| anyhow!("unknown pin {name}"))?;
+        if i >= undo.instances
+            || cell.clock_gate.is_some()
+            || pin.is_clocking_pin
+            || pin.direction != PinDirection::Input as i32
+            || !matches!(
+                inst.pins.get(name).map(Vec::as_slice),
+                Some([BitSource::Bit(_)])
+            )
+        {
+            return Err(UnsupportedRegisteredEdit.into());
+        }
+        if inst.sequential {
+            let classify = || CaptureRole {
+                known: inst.known.clone(),
+                data: rewirable_data_pin(cell, self.lib.library, &inst.known),
+            };
+            let role = self
+                .rewirable_ff_data
+                .entry(self.cells[i])
+                .or_insert_with(classify);
+            if role.known != inst.known {
+                *role = classify();
+            }
+            if role.data.as_deref() != Some(name) {
+                return Err(UnsupportedRegisteredEdit.into());
+            }
+        } else if !self.lib.supports_boolean_analysis(self.cells[i]) {
+            return Err(UnsupportedRegisteredEdit.into());
+        }
+        let BitSource::Bit(bit) = source else {
+            return Err(UnsupportedRegisteredEdit.into());
+        };
+        let Some(&BitSource::Bit(canonical)) = self.bit_sources.get(bit) else {
+            return Err(UnsupportedRegisteredEdit.into());
+        };
+        undo.changed
+            .entry(i)
+            .or_insert_with(|| (inst.clone(), self.cells[i], self.orders[i].clone()));
+        self.instances[i]
+            .pins
+            .get_mut(name)
+            .expect("validated input")[0] = BitSource::Bit(canonical);
+        Ok(())
+    }
+
+    /// Updates connectivity for a batch, journaling only touched
     /// records. Timing, coverage and endpoint updates are coordinated
     /// afterward.
     fn prepare_topology(
@@ -572,10 +706,6 @@ impl IncrementalSta<'_> {
         undo: &mut TransactionUndo,
         work: &mut TrialResult,
     ) -> Result<EditPlan> {
-        ensure!(
-            !self.registered,
-            "topology transactions currently support combinational modules"
-        );
         let old_bits = self.bit_count();
         let n = old_bits
             .checked_add(edit.new_bits)
@@ -595,7 +725,42 @@ impl IncrementalSta<'_> {
         self.timing_constants.resize(n, None);
         self.coverage_values.resize(n, None);
         let mut changed = BTreeSet::new();
+        let mut rewired = BTreeMap::<usize, BTreeSet<&str>>::new();
         for mutation in &edit.mutations {
+            if self.registered {
+                match mutation {
+                    TimingMutation::Rewire {
+                        instance,
+                        pin,
+                        source,
+                    } => {
+                        self.rewire_registered_input(*instance, pin, *source, undo)?;
+                        changed.insert(*instance);
+                        rewired.entry(*instance).or_default().insert(pin);
+                        continue;
+                    }
+                    TimingMutation::Insert(spec) => {
+                        let cell = self
+                            .lib
+                            .library
+                            .cells
+                            .get(spec.cell)
+                            .ok_or_else(|| anyhow!("unknown cell index"))?;
+                        if !self.lib.supports_boolean_analysis(spec.cell)
+                            || spec.connections.iter().any(|(name, source)| {
+                                self.lib.pin(spec.cell, name).is_some_and(|pin| {
+                                    pin.direction == PinDirection::Output as i32
+                                        && !matches!(source, BitSource::Bit(b) if *b >= old_bits)
+                                })
+                            })
+                            || is_sequential_boundary_cell(cell)
+                        {
+                            return Err(UnsupportedRegisteredEdit.into());
+                        }
+                    }
+                    _ => return Err(UnsupportedRegisteredEdit.into()),
+                }
+            }
             let (i, spec) = match mutation {
                 TimingMutation::Insert(spec) => (self.instances.len(), spec.clone()),
                 TimingMutation::Replace {
@@ -713,43 +878,49 @@ impl IncrementalSta<'_> {
             changed.insert(i);
         }
         work.rebuilt_instances = changed.len();
-        // Disconnect all old bindings before adding the batch's final
-        // bindings.
+        // Remove the old loads once per net. For fixed-register rewires only
+        // the named input changes; every other pin retains its connection.
+        let registered = self.registered;
+        let old_instances = undo.instances;
+        let reconnect = |i: usize, name: &str| {
+            !registered
+                || i >= old_instances
+                || rewired.get(&i).is_some_and(|pins| pins.contains(name))
+        };
         let old_bits: BTreeSet<_> = undo
             .changed
-            .values()
-            .flat_map(|(inst, _, _)| inst.pins.values())
-            .flatten()
-            .filter_map(|s| {
-                if let BitSource::Bit(b) = s {
-                    Some(*b)
-                } else {
-                    None
-                }
+            .iter()
+            .flat_map(|(&i, (old, _, _))| {
+                old.pins
+                    .iter()
+                    .filter(move |(pin, _)| reconnect(i, pin))
+                    .flat_map(|(_, sources)| sources)
+            })
+            .filter_map(|s| match s {
+                BitSource::Bit(b) => Some(*b),
+                _ => None,
             })
             .collect();
         for bit in old_bits {
             undo.net(self, bit);
-        }
-        for (&i, (inst, _, _)) in &undo.changed {
-            for sources in inst.pins.values() {
-                for source in sources {
-                    if let BitSource::Bit(bit) = *source {
-                        self.loads[bit].retain(|(j, _)| *j != i);
-                        self.consumers[bit].retain(|&j| j != i);
-                        if self.drivers[bit] == Some(i) {
-                            self.drivers[bit] = None;
-                            self.timing_constants[bit] = None;
-                        }
-                    }
-                }
+            self.loads[bit].retain(|(i, pin)| !undo.changed.contains_key(i) || !reconnect(*i, pin));
+            if !registered && self.drivers[bit].is_some_and(|i| undo.changed.contains_key(&i)) {
+                self.drivers[bit] = None;
+                self.timing_constants[bit] = None;
             }
         }
+        let mut endpoints = BTreeSet::new();
         for &i in &changed {
+            endpoints.extend(self.capture_endpoint[i]);
             let pins: Vec<_> = self.instances[i]
                 .pin_order
                 .iter()
-                .map(|name| (name.clone(), self.instances[i].pins[name][0]))
+                .filter(|name| reconnect(i, name))
+                .filter_map(|name| {
+                    self.instances[i].pins[name]
+                        .first()
+                        .map(|s| (name.clone(), *s))
+                })
                 .collect();
             for (name, source) in pins {
                 let direction = self
@@ -795,7 +966,23 @@ impl IncrementalSta<'_> {
                 )
             });
             self.consumers[bit] = self.loads[bit].iter().map(|(i, _)| *i).collect();
-            self.consumers[bit].dedup();
+            if registered {
+                // A D-pin rewire changes future setup dependencies even when
+                // the old and new signals have identical arrival and slew.
+                self.endpoints_by_bit[bit]
+                    .retain(|&e| matches!(self.endpoints[e], TimingEndpoint::Output(_)));
+                self.endpoints_by_bit[bit].extend(self.loads[bit].iter().filter_map(
+                    |(i, name)| {
+                        let capture = self.capture_endpoint[*i]?;
+                        (!self
+                            .lib
+                            .pin(self.cells[*i], name)
+                            .expect("validated input")
+                            .is_clocking_pin)
+                            .then_some(capture)
+                    },
+                ));
+            }
             ensure!(
                 self.drivers[bit].is_some()
                     || self.primary_inputs.contains(&bit)
@@ -875,7 +1062,7 @@ impl IncrementalSta<'_> {
         Ok(EditPlan {
             queue,
             affected,
-            endpoints: BTreeSet::new(),
+            endpoints,
             coverage: CoverageUpdate::Sparse(coverage_changed),
         })
     }
@@ -1021,9 +1208,12 @@ impl IncrementalSta<'_> {
     /// The budget counts timing and Boolean-coverage cell visits in this trial;
     /// connectivity and ordering work are reported separately. Limits are
     /// optional caller-supplied early-rejection bounds, not optimization
-    /// policy. Module ports and existing aliases stay fixed. Sequential
-    /// modules support one compatible Resize; combinational modules also
-    /// support graph batches.
+    /// policy. Module ports and existing aliases stay fixed. A registered
+    /// graph accepts one compatible resize, or a batch that inserts scalar
+    /// combinational cells driving new nets and rewires existing data inputs.
+    /// The callback observes tentative timing; its affected instances have
+    /// incumbent cached violations until commit. Use `electrical_violations`
+    /// for their tentative electrical values.
     pub fn trial_edit(
         &mut self,
         edit: &TimingEdit,
@@ -1035,6 +1225,10 @@ impl IncrementalSta<'_> {
         let limit = start_work.saturating_add(options.cell_budget);
         let mut work = TrialResult::default();
         let result = (|| -> Result<TrialOutcome> {
+            // Both paths produce the same worklist contract. First update loads
+            // and dependencies, then propagate timing and coverage, then
+            // recompute setup and output endpoints. Keep that state only if the
+            // caller accepts it.
             let plan = match edit.mutations.as_slice() {
                 [TimingMutation::Resize { instance, cell }] if edit.new_bits == 0 => {
                     self.prepare_resize(*instance, *cell, &mut undo, &mut work)?
