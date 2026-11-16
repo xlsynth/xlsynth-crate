@@ -1050,6 +1050,7 @@ impl IncrementalSta<'_> {
             let before = self.propagated;
             let outcome = self.propagate_edits(
                 queue,
+                |i| i < undo.instances && !undo.changed.contains_key(&i),
                 &mut undo.timing,
                 &mut affected,
                 &mut endpoints,

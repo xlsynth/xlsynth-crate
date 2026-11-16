@@ -84,17 +84,8 @@ pub(crate) fn measure_boundary_delays_with_library(
             ..BoundaryDelays::default()
         });
     }
-    let input = prepared.analyze_register_boundary_max_arrival(
-        module,
-        nets,
-        interner,
-        options,
-        true,
-        &[],
-    )?;
-    let register = prepared.analyze_register_boundary_max_arrival(
-        module, nets, interner, options, false, &registers,
-    )?;
+    let (input, register) =
+        prepared.analyze_register_boundary_pair(module, nets, interner, options, &registers)?;
     Ok(BoundaryDelays {
         input_to_output: input.worst_output_arrival,
         input_to_register: input.worst_register_input_arrival,
@@ -687,7 +678,7 @@ impl<'lib> IncrementalSta<'lib> {
             sta.capacitances[bit] = sta.compute_load(bit)?;
         }
         for pos in 0..sta.topological.len() {
-            sta.recompute(sta.topological[pos])?;
+            sta.recompute(sta.topological[pos], false)?;
         }
         sta.coverage_known = sta
             .coverage_constants(usize::MAX)
@@ -851,10 +842,29 @@ impl<'lib> IncrementalSta<'lib> {
 
     /// Updates the two independent launch classes through the shared STA
     /// kernel.
-    fn recompute(&mut self, i: usize) -> Result<()> {
+    fn recompute(&mut self, i: usize, unchanged_instance: bool) -> Result<()> {
         self.evaluation.diagnostics = TimingQueryDiagnosticCounts::default();
         let inst = &self.instances[i];
+        let may_reuse_empty = self.registered
+            && unchanged_instance
+            && !inst.sequential
+            && self.orders[i].len() == 1
+            && !super::sta_trace_enabled();
         for mode in 0..if self.registered { 2 } else { 1 } {
+            // Registered STA ignores literal inputs. An unchanged single-output
+            // instance with no timing on any bound pin already has its exact
+            // empty result for this class. Its previous successful evaluation
+            // validated the arc metadata; this visit issues no table queries.
+            if may_reuse_empty
+                && let [output] = inst.outputs.as_slice()
+                && self.timing[mode][*output].is_none()
+                && inst.pins.values().flatten().all(|source| match source {
+                    BitSource::Bit(bit) => self.timing[mode][*bit].is_none(),
+                    BitSource::Literal(_) | BitSource::Unknown => true,
+                })
+            {
+                continue;
+            }
             for bit in &inst.outputs {
                 self.timing[mode][*bit] = None;
             }
@@ -1243,6 +1253,7 @@ impl<'lib> IncrementalSta<'lib> {
     fn propagate_edits(
         &mut self,
         mut queue: BTreeSet<(usize, usize)>,
+        unchanged_instance: impl Fn(usize) -> bool,
         undo: &mut Undo,
         affected: &mut BTreeSet<usize>,
         endpoints: &mut BTreeSet<usize>,
@@ -1262,7 +1273,7 @@ impl<'lib> IncrementalSta<'lib> {
                 ));
             }
             undo.counts.push((inst, self.query_counts[inst]));
-            self.recompute(inst)?;
+            self.recompute(inst, unchanged_instance(inst))?;
             affected.insert(inst);
             for (bit, old) in &undo.bits[start..] {
                 if old[0] == self.timing[0][*bit] && old[1] == self.timing[1][*bit] {

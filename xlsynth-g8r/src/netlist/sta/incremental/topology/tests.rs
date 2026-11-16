@@ -184,6 +184,113 @@ fn compare_options(
     Ok(())
 }
 
+// An input-led branch and a register-led branch meet at one resized gate.
+// Verify both sets of timings after a veto and a commit. A changed
+// literal-only cell still has to validate its input timing arcs.
+#[test]
+fn registered_resize_keeps_launch_classes_through_a_mixed_cone_and_rollback() -> Result<()> {
+    let lib = crate::netlist::resize::tests::library()?;
+    let source = r#"module m(input clk, input a, output y, output z);
+      wire q, r, p, alias_r, unused;
+      DFF1 launch(.CLK(clk), .D(1'b0), .Q(q));
+      BUF1 reg_path(.A(q), .Y(r));
+      assign alias_r = r;
+      AND4 pi_path(.A(1'b1), .B(a), .Y(p));
+      AND1 mix(.A(alias_r), .B(p), .Y(y));
+      DFF1 capture(.CLK(clk), .D(y), .Q(z));
+      BUF1 dark(.A(1'b0), .Y(unused));
+    endmodule"#;
+    let original = read_gv_from_str(source)?;
+    let resized = read_gv_from_str(&source.replace("AND1 mix", "AND2 mix"))?;
+    let opts = StaOptions {
+        primary_input_transition: 15.0,
+        ..options()
+    };
+    let mut sta = IncrementalSta::new(
+        &original.modules[0],
+        &original.nets,
+        &original.interner,
+        &lib,
+        opts,
+    )?;
+    let compare = |sta: &IncrementalSta<'_>, p: &ParsedNetlist| -> Result<()> {
+        let mut counts = TimingQueryDiagnosticCounts::default();
+        for (mode, launches) in [(0, &[][..]), (1, &[0, 4][..])] {
+            let full = sta.lib.analyze_register_boundary_max_arrival(
+                &p.modules[0],
+                &p.nets,
+                &p.interner,
+                opts,
+                mode == 0,
+                launches,
+            )?;
+            // Each branch has one dormant class. Both reach the mixed output.
+            for name in ["p", "r", "y", "z"] {
+                let b = bit(p, name)?;
+                let timing = sta.timing[mode][b]
+                    .as_ref()
+                    .and_then(SignalTimingSet::as_report_signal_timing);
+                assert_eq!(timing, full.net_timing[b], "mode {mode}, net {name}");
+                assert_eq!(
+                    timing.is_some(),
+                    match name {
+                        "p" => mode == 0,
+                        "r" | "z" => mode == 1,
+                        _ => true,
+                    }
+                );
+            }
+            let score = sta.score().values();
+            assert_eq!(score[mode * 2], full.worst_output_arrival);
+            assert_eq!(score[mode * 2 + 1], full.worst_register_input_arrival);
+            counts += full.timing_query_diagnostic_counts;
+        }
+        // PI slew exceeds the delay table range. Setup queries remain in range.
+        assert!(counts.delay_slew_single_above_max_extrapolation_count > 0);
+        assert_eq!(sta.query_totals, counts);
+        Ok(())
+    };
+    compare(&sta, &original)?;
+    let edit = TimingEdit {
+        new_bits: 0,
+        mutations: vec![TimingMutation::Resize {
+            instance: 3,
+            cell: cell(&lib, "AND2")?,
+        }],
+    };
+    for (accept, outcome) in [
+        (false, TrialOutcome::Rejected),
+        (true, TrialOutcome::Accepted),
+    ] {
+        let trial = sta.trial_edit(&edit, TrialOptions::default(), |trial, affected| {
+            // The changed input loads retime both otherwise unchanged branches.
+            assert!(affected.contains(&1) && affected.contains(&2));
+            compare(trial, &resized)?;
+            Ok(accept)
+        })?;
+        assert_eq!(trial.outcome, outcome);
+        compare(&sta, if accept { &resized } else { &original })?;
+    }
+    // This literal-fed cell has never had an arrival in either class. Its
+    // replacement still has to report an unbound timing-related input.
+    let missing_input = TimingEdit {
+        new_bits: 0,
+        mutations: vec![TimingMutation::Resize {
+            instance: 5,
+            cell: cell(&lib, "AND2")?,
+        }],
+    };
+    let error = sta
+        .trial_edit(&missing_input, TrialOptions::default(), |_, _| Ok(true))
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "instance 'dark' output pin 'AND2.Y' requires timing-related input pin 'B' to be connected"
+    );
+    compare(&sta, &resized)?;
+    Ok(())
+}
+
 fn network(unrelated: usize) -> String {
     let mut s = String::from(
         "module m(a,y,z); input a; output y,z; wire p,n; BUF pre(.A(a),.Y(p)); INV drive(.A(p),.Y(n)); BUF sink(.A(n),.Y(y)); BUF sibling(.A(p),.Y(z));",
