@@ -162,7 +162,8 @@ pub struct ResizePhaseStats {
     pub renewed_windows: usize,
     /// Accepted area trials outside the cheapest per-site candidate allowance.
     pub accepted_beyond_area_prefix: usize,
-    /// Instance visits for timing and functional-coverage propagation.
+    /// Timing and functional-coverage visits charged to the search budget,
+    /// including the original charge for exactly replayed recovery trials.
     pub propagated_instances: usize,
     pub stop_reason: ResizeStopReason,
 }
@@ -398,6 +399,13 @@ struct ResizeSearch<'a> {
     work_limits: ResizeWorkLimits,
 }
 
+/// Logical cost of a completed site scan in which every replacement was
+/// rejected.
+struct RejectedSite {
+    trials: usize,
+    propagated: usize,
+}
+
 impl ResizeSearch<'_> {
     /// Selects timing sites or ranks recoverable area once per unchanged round.
     fn candidate_sites(&self, phase: SearchPhase, sta: &IncrementalSta<'_>) -> Vec<usize> {
@@ -564,10 +572,33 @@ impl ResizeSearch<'_> {
         let mut timing_candidates = Vec::new();
         let mut timing_paths = menu::LoadedPaths::default();
         let mut recovery_menus = menu::RecoveryMenus::default();
-        'rounds: for _ in 0..rounds {
+        // A failed site scan is repeatable while the netlist and timing bounds
+        // stay fixed. Reuse the rejection, but charge the original trials and
+        // propagation so later sites see the same work limit.
+        let reuse_sites = matches!(phase, SearchPhase::AreaRecovery)
+            && rounds > 1
+            && !crate::netlist::sta::sta_trace_enabled();
+        let mut rejected_sites = HashMap::<usize, RejectedSite>::new();
+        let mut replayed_work = 0;
+        'rounds: for round in 0..rounds {
             let sites = self.candidate_sites(phase, sta);
             let mut accepted = 0;
             for i in sites {
+                // Every accepted edit and window renewal discards this
+                // snapshot. Run the real scan if a budget boundary might split
+                // it.
+                let site_start_work = sta.propagated_instances();
+                let site_start_trials = stats.trials;
+                if let Some(scan) = rejected_sites.get(&i)
+                    && scan.propagated < work_limit.saturating_sub(replayed_work + site_start_work)
+                {
+                    stats.trials += scan.trials;
+                    replayed_work += scan.propagated;
+                    continue;
+                }
+                // A sweep without an acceptance ends the search. Only its
+                // suffix after a successful change can benefit the next sweep.
+                let mut remember = reuse_sites && accepted > 0 && round + 1 < rounds;
                 let current = sta.cell_indices()[i];
                 let area = self.area;
                 let area_limit = self.area_limit;
@@ -624,7 +655,8 @@ impl ResizeSearch<'_> {
                         + library.cells[cell].area;
                     let result = loop {
                         stats.trials += 1;
-                        let trial = self.trial(phase, sta, i, cell, work_limit, new_area);
+                        let trial =
+                            self.trial(phase, sta, i, cell, work_limit - replayed_work, new_area);
                         let Some(window) = window else { break trial };
                         if !matches!(trial, Ok(TrialOutcome::PropagationLimit))
                             || work_limit >= hard_limit
@@ -635,6 +667,8 @@ impl ResizeSearch<'_> {
                         // Retry the rolled-back trial at the same position with
                         // a fresh allowance.
                         accepted_at_window_start = stats.accepted;
+                        rejected_sites.clear();
+                        remember = false;
                         let observed = sta.score();
                         self.timing_checkpoint = match checkpoint {
                             RecoveryWindowCheckpoint::Latest => observed,
@@ -650,6 +684,8 @@ impl ResizeSearch<'_> {
                     }
                     match result {
                         Ok(TrialOutcome::Accepted) => {
+                            rejected_sites.clear();
+                            remember = false;
                             stats.accepted += 1;
                             if matches!(phase, SearchPhase::AreaRecovery)
                                 && self.options.recovery_cell_menu != RecoveryCellMenu::Area
@@ -671,6 +707,7 @@ impl ResizeSearch<'_> {
                             break 'rounds;
                         }
                         Err(error) => {
+                            remember = false;
                             // The incumbent passed full STA, and trial errors
                             // restore it before returning. An equivalent cell
                             // can still have unusable timing data: skip this
@@ -682,13 +719,22 @@ impl ResizeSearch<'_> {
                         }
                     }
                 }
+                if remember && stats.trials != site_start_trials {
+                    rejected_sites.insert(
+                        i,
+                        RejectedSite {
+                            trials: stats.trials - site_start_trials,
+                            propagated: sta.propagated_instances() - site_start_work,
+                        },
+                    );
+                }
             }
             if accepted == 0 {
                 stats.stop_reason = ResizeStopReason::NoImprovement;
                 break;
             }
         }
-        stats.propagated_instances = sta.propagated_instances() - start_work;
+        stats.propagated_instances = sta.propagated_instances() - start_work + replayed_work;
         stats
     }
 }
@@ -737,8 +783,8 @@ pub fn resize_netlist_with_recovery_checkpoint(
     )
 }
 
-/// Charges each phase's actual visits to explicit budgets shared across resize
-/// calls.
+/// Charges each phase's propagation work to explicit budgets shared across
+/// resize calls.
 pub(crate) fn resize_netlist_with_remaining_budget(
     module: &mut NetlistModule,
     nets: &[Net],

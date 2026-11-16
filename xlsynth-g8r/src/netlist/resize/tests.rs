@@ -370,6 +370,63 @@ fn default_work_limits_scale_with_instances_and_saturate() {
     );
 }
 
+// Revisit one rejected site above, at, and below its recorded work cost.
+// Only a scan strictly inside the remaining budget can be skipped.
+#[test]
+fn repeated_recovery_scan_keeps_trial_charges_and_partial_budget_stops() -> Result<()> {
+    let library = library()?;
+    let netlist = read_gv_from_str(
+        r#"module m(input a, output y);
+        wire unused;
+        BUF4 spare(.A(a), .Y(unused));
+        BUF4 critical(.A(a), .Y(y));
+        endmodule"#,
+    )?;
+    let families = CellFamilies::new(&library);
+    let options = options();
+    // The spare shrinks once. Both smaller masters at the critical output
+    // fail, then are revisited on the unchanged circuit in the next sweep.
+    for (budget, trials, physical_visits, stopped_early) in
+        [(4, 5, 4, true), (5, 5, 5, false), (6, 5, 3, false)]
+    {
+        let mut sta = IncrementalSta::new(
+            &netlist.modules[0],
+            &netlist.nets,
+            &netlist.interner,
+            &library,
+            options.timing,
+        )?;
+        let mut search = ResizeSearch {
+            electrical_guard: ElectricalGuard::Absolute,
+            library: &library,
+            options: &options,
+            families: &families,
+            area_weight: 0.5,
+            initial_delay: sta.score(),
+            timing_checkpoint: sta.score(),
+            area: 8.0,
+            area_limit: 8.0,
+            work_limits: ResizeWorkLimits {
+                recovery_evaluations: budget,
+                ..options.work_limits(sta.instance_count())
+            },
+        };
+        let stats = search.run_phase(SearchPhase::AreaRecovery, &mut sta, 2);
+        assert_eq!(stats.trials, trials);
+        assert_eq!(stats.accepted, 1);
+        assert_eq!(stats.propagated_instances, budget.min(5));
+        assert_eq!(
+            stats.stop_reason == ResizeStopReason::PropagationLimit,
+            stopped_early
+        );
+        assert_eq!(search.area, 5.0);
+        if !crate::netlist::sta::sta_trace_enabled() {
+            assert_eq!(sta.propagated_instances(), physical_visits);
+        }
+    }
+    Ok(())
+}
+
 // Make the early area candidates exhaust the first work window. A productive
 // search can renew its budget and resume at the next untried strength.
 #[test]
