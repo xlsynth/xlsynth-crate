@@ -172,7 +172,7 @@ pub(super) struct RecoveryMenus {
 impl RecoveryMenus {
     pub(super) fn shortlist<'a>(
         &'a mut self,
-        area_sorted: &'a [usize],
+        families: &'a super::CellFamilies,
         current: usize,
         sta: &IncrementalSta<'_>,
         instance: usize,
@@ -182,8 +182,9 @@ impl RecoveryMenus {
         let width = options
             .recovery_cell_limit
             .unwrap_or(options.max_cell_candidates);
-        let end = area_sorted.partition_point(|&c| lib.cells[c].area < lib.cells[current].area);
-        let eligible = &area_sorted[..end];
+        let sorted = families.alternatives(current);
+        let end = sorted.partition_point(|&c| families.costs[c] < families.costs[current]);
+        let eligible = &sorted[..end];
         if eligible.len() <= width
             || width <= 1
             || options.recovery_cell_menu == RecoveryCellMenu::Area
@@ -223,8 +224,8 @@ impl RecoveryMenus {
                 let end = 1 + (band + 1) * (eligible.len() - 1) / (width - 1);
                 result.push(fastest(&eligible[start..end]));
             }
-            let min_area = lib.cells[eligible[0]].area;
-            let end = eligible.partition_point(|&c| lib.cells[c].area == min_area);
+            let minimum_cost = families.costs[eligible[0]];
+            let end = eligible.partition_point(|&c| families.costs[c] == minimum_cost);
             if end > 1 {
                 // Try a minimum-cost cell first. If several cells have the same
                 // area or leakage cost, choose the fastest estimated one so a

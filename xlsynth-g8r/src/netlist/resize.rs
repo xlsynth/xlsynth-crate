@@ -23,6 +23,8 @@ use crate::netlist::sta::incremental::{
 };
 
 pub mod adaptive;
+mod leakage;
+pub use leakage::RecoveryCellLeakage;
 mod menu;
 pub use menu::{RecoveryCellMenu, TimingCellMenu};
 pub mod registered_opt;
@@ -40,6 +42,8 @@ pub enum RecoveryWindowCheckpoint {
     /// tolerance.
     #[default]
     Latest,
+    /// Preserve the recovery phase entry checkpoint across all windows.
+    Entry,
     /// Keep the lowest observed limit independently for each timing boundary.
     Tightest,
 }
@@ -245,25 +249,50 @@ struct CellSignature {
 /// semantics. Missed equivalent functions are safe; false equivalences are not.
 struct CellFamilies {
     family_by_cell: Vec<Option<usize>>,
+    /// Area in ordinary sizing, scalar nW in equal-area leakage recovery.
+    /// Only masters admitted to a family participate in cost comparisons.
+    costs: Vec<f64>,
+    fixed_area: bool,
     alternatives: Vec<Vec<usize>>,
 }
 
 impl CellFamilies {
     /// Builds deterministic families once for the immutable library snapshot.
     fn new(library: &Library) -> Self {
-        let mut groups: BTreeMap<CellSignature, Vec<usize>> = BTreeMap::new();
+        Self::with_recovery_cost(library, None)
+    }
+
+    /// For leakage recovery, partition each functional family by exact area;
+    /// omit uncharacterized masters even when they would be the only choice.
+    fn with_recovery_cost(library: &Library, leakage: Option<&RecoveryCellLeakage>) -> Self {
+        let mut groups: BTreeMap<(CellSignature, u64), Vec<usize>> = BTreeMap::new();
+        let mut costs = vec![0.0; library.cells.len()];
         for (i, cell) in library.cells.iter().enumerate() {
+            let area_class = if let Some(table) = leakage {
+                let Some(cost) = table.get(&cell.name) else {
+                    continue;
+                };
+                costs[i] = cost;
+                // The ordinary area equality rule treats +0.0 and -0.0 alike.
+                if cell.area == 0.0 {
+                    0
+                } else {
+                    cell.area.to_bits()
+                }
+            } else {
+                costs[i] = cell.area;
+                0
+            };
             if let Some(signature) = cell_signature(cell, library) {
-                groups.entry(signature).or_default().push(i);
+                groups.entry((signature, area_class)).or_default().push(i);
             }
         }
         let mut family_by_cell = vec![None; library.cells.len()];
         let mut alternatives = Vec::with_capacity(groups.len());
         for mut group in groups.into_values() {
             group.sort_by(|a, b| {
-                library.cells[*a]
-                    .area
-                    .total_cmp(&library.cells[*b].area)
+                costs[*a]
+                    .total_cmp(&costs[*b])
                     .then(library.cells[*a].name.cmp(&library.cells[*b].name))
             });
             let selectable: Vec<_> = group
@@ -278,11 +307,13 @@ impl CellFamilies {
         }
         Self {
             family_by_cell,
+            costs,
+            fixed_area: leakage.is_some(),
             alternatives,
         }
     }
 
-    /// Returns a shared area/name-sorted list, excluding `dont_use`
+    /// Returns a shared (recovery cost, name)-sorted list, excluding `dont_use`
     /// alternatives.
     fn alternatives(&self, cell: usize) -> &[usize] {
         self.family_by_cell[cell].map_or(&[], |family| &self.alternatives[family])
@@ -422,12 +453,12 @@ impl ResizeSearch<'_> {
                     .into_iter()
                     .zip(sta.cell_indices())
                     .map(|(headroom, cell)| {
-                        let area = self.library.cells[*cell].area;
+                        let cost = self.families.costs[*cell];
                         let savings = self
                             .families
                             .alternatives(*cell)
                             .first()
-                            .map_or(0.0, |smallest| area - self.library.cells[*smallest].area);
+                            .map_or(0.0, |smallest| cost - self.families.costs[*smallest]);
                         if savings > 0.0 {
                             headroom * savings
                         } else {
@@ -445,9 +476,8 @@ impl ResizeSearch<'_> {
                     priorities[*b]
                         .total_cmp(&priorities[*a])
                         .then_with(|| {
-                            self.library.cells[sta.cell_indices()[*b]]
-                                .area
-                                .total_cmp(&self.library.cells[sta.cell_indices()[*a]].area)
+                            self.families.costs[sta.cell_indices()[*b]]
+                                .total_cmp(&self.families.costs[sta.cell_indices()[*a]])
                         })
                         .then(a.cmp(b))
                 });
@@ -572,16 +602,22 @@ impl ResizeSearch<'_> {
                 let area = self.area;
                 let area_limit = self.area_limit;
                 let library = self.library;
+                let replacement_area = |cell: usize| {
+                    if self.families.fixed_area {
+                        area
+                    } else {
+                        area - library.cells[current].area + library.cells[cell].area
+                    }
+                };
                 let allowed = |cell: &usize| {
                     *cell != current
                         && match phase {
                             SearchPhase::Timing => true,
                             SearchPhase::AreaRecovery => {
-                                library.cells[*cell].area < library.cells[current].area
+                                self.families.costs[*cell] < self.families.costs[current]
                             }
                         }
-                        && area - library.cells[current].area + library.cells[*cell].area
-                            <= area_limit + AREA_COMPARISON_TOLERANCE
+                        && replacement_area(*cell) <= area_limit + AREA_COMPARISON_TOLERANCE
                 };
                 let alternatives = self.families.alternatives(current);
                 let candidates = match phase {
@@ -602,7 +638,7 @@ impl ResizeSearch<'_> {
                         if self.options.recovery_cell_menu != RecoveryCellMenu::Area =>
                     {
                         recovery_menus.shortlist(
-                            alternatives,
+                            self.families,
                             current,
                             sta,
                             i,
@@ -620,8 +656,7 @@ impl ResizeSearch<'_> {
                     SearchPhase::Timing => self.options.max_cell_candidates,
                 };
                 for cell in candidates.iter().copied().filter(allowed).take(limit) {
-                    let new_area = self.area - library.cells[sta.cell_indices()[i]].area
-                        + library.cells[cell].area;
+                    let new_area = replacement_area(cell);
                     let result = loop {
                         stats.trials += 1;
                         let trial = self.trial(phase, sta, i, cell, work_limit, new_area);
@@ -638,6 +673,7 @@ impl ResizeSearch<'_> {
                         let observed = sta.score();
                         self.timing_checkpoint = match checkpoint {
                             RecoveryWindowCheckpoint::Latest => observed,
+                            RecoveryWindowCheckpoint::Entry => self.timing_checkpoint,
                             RecoveryWindowCheckpoint::Tightest => {
                                 self.timing_checkpoint.tightened_with(observed)
                             }
@@ -747,6 +783,21 @@ pub(crate) fn resize_netlist_with_remaining_budget(
     options: &mut ResizeOptions,
     checkpoint: RecoveryWindowCheckpoint,
 ) -> Result<ResizeReport> {
+    resize_with_recovery_cost(module, nets, interner, library, options, checkpoint, None)
+}
+
+/// Area and leakage recovery share the same STA edits, candidate selection,
+/// work accounting, and final full STA check. Leakage recovery changes the
+/// compatible cell groups and the cost used to sort them.
+fn resize_with_recovery_cost(
+    module: &mut NetlistModule,
+    nets: &[Net],
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &mut ResizeOptions,
+    checkpoint: RecoveryWindowCheckpoint,
+    leakage: Option<&RecoveryCellLeakage>,
+) -> Result<ResizeReport> {
     if !options.max_area_growth.is_finite() || options.max_area_growth < 0.0 {
         return Err(anyhow!("max_area_growth must be finite and nonnegative"));
     }
@@ -757,7 +808,7 @@ pub(crate) fn resize_netlist_with_remaining_budget(
     {
         return Err(anyhow!("candidate limits must be positive"));
     }
-    let families = CellFamilies::new(library);
+    let families = CellFamilies::with_recovery_cost(library, leakage);
     let mut sta = IncrementalSta::new(module, nets, interner, library, options.timing)?;
     let registered = (0..sta.instance_count()).any(|i| sta.is_register(i));
     let recovery_window = (registered && options.recovery_evaluation_budget.is_none())
@@ -834,6 +885,9 @@ pub(crate) fn resize_netlist_with_remaining_budget(
         .iter()
         .map(|i| library.cells[*i].area)
         .sum();
+    if leakage.is_some() && final_area != initial_area {
+        return Err(anyhow!("terminal leakage recovery changed cell area"));
+    }
     if !final_area.is_finite() || final_area > area_limit + AREA_COMPARISON_TOLERANCE {
         return Err(anyhow!("final resizing exceeds the area allowance"));
     }
@@ -868,6 +922,75 @@ pub(crate) fn resize_netlist_with_remaining_budget(
         downsize,
         work_limits,
         budget_exhausted,
+    })
+}
+
+/// Terminal-only results. Leakage sums exclude uncharacterized instances,
+/// whose masters the pass always preserves.
+#[derive(Debug, Serialize)]
+pub struct LeakageRecoveryReport {
+    pub initial_area: f64,
+    pub final_area: f64,
+    pub initial_delay: BoundaryDelays,
+    pub final_delay: BoundaryDelays,
+    pub initial_characterized_leakage_nw: f64,
+    pub final_characterized_leakage_nw: f64,
+    pub uncharacterized_instances: usize,
+    pub recovery: ResizePhaseStats,
+}
+
+/// Reduce scalar leakage by substituting strictly lower-leakage cells of the
+/// same area and pin-compatible function. All timing boundaries are protected
+/// at their achieved values on entry. No ordinary timing or area edits run.
+/// Recovery uses the supplied round, menu, register and work settings.
+pub fn recover_leakage_netlist(
+    module: &mut NetlistModule,
+    nets: &[Net],
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &ResizeOptions,
+    leakage: &RecoveryCellLeakage,
+) -> Result<LeakageRecoveryReport> {
+    let inventory = |module: &NetlistModule, names: &StringInterner<StringBackend<SymbolU32>>| {
+        let mut known_nw = 0.0;
+        let mut unknown = 0;
+        for instance in &module.instances {
+            if let Some(value) = names
+                .resolve(instance.type_name)
+                .and_then(|name| leakage.get(name))
+            {
+                known_nw += value;
+            } else {
+                unknown += 1;
+            }
+        }
+        (known_nw, unknown)
+    };
+    let (initial_characterized_leakage_nw, uncharacterized_instances) = inventory(module, interner);
+    let mut options = ResizeOptions {
+        max_upsize_rounds: 0,
+        max_area_growth: 0.0,
+        ..options.clone()
+    };
+    let result = resize_with_recovery_cost(
+        module,
+        nets,
+        interner,
+        library,
+        &mut options,
+        RecoveryWindowCheckpoint::Entry,
+        Some(leakage),
+    )?;
+    let (final_characterized_leakage_nw, _) = inventory(module, interner);
+    Ok(LeakageRecoveryReport {
+        initial_area: result.initial_area,
+        final_area: result.final_area,
+        initial_delay: result.initial_delay,
+        final_delay: result.final_delay,
+        initial_characterized_leakage_nw,
+        final_characterized_leakage_nw,
+        uncharacterized_instances,
+        recovery: result.downsize,
     })
 }
 

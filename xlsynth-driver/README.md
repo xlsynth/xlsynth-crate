@@ -1709,11 +1709,30 @@ timing conditions are skipped.
   default the renewed window uses the latest observed delays. This flag
   applies to standalone `gv-resize`.
 - `--no-register-resize`: leave FF cells fixed; default permits resizing.
+- `--terminal-leakage-table <PATH>` enables an optional final recovery on the
+  resulting netlist. It tries pin-compatible cells of the **same area** with
+  strictly lower scalar leakage. The JSON object supplies
+  `liberty_proto_sha256` (SHA-256 of the timing proto file) and
+  `cell_leakage_nw` (cell name to nonnegative nW, all at the same operating
+  condition). Unknown cell leakage is skipped. The timing library continues to
+  determine timing feasibility. The operating condition used for scoring
+  workload power can be measured separately with `gv-eval`.
+- `--terminal-leakage-rounds <COUNT>` sets the round limit for that final
+  pass (default 4). It uses the recovery cell limit and its own recovery work
+  budget, with the same timing, load, and register eligibility as ordinary
+  sizing. The terminal menu defaults to `electrical-min-area` and ranks
+  alternatives by leakage in place of area, using the modeled fastest cell
+  among minimum-leakage ties when the shortlist is bounded.
+  `--recovery-cell-menu` explicitly overrides it.
 - `--report-json <PATH>`: deterministic before/after boundary timing, cell area,
   accepted moves, propagation counts, resolved `work_limits`, per-phase stopping
   reasons, and budget-exhaustion status. Phase reasons are `disabled`,
   `no_improvement`, `round_limit`, and `propagation_limit`. `budget_exhausted` is
   true if either phase stops because its evaluation budget is exhausted.
+  When terminal recovery is enabled the report instead has `resize` (the
+  ordinary report, or null when both ordinary phases are disabled) and
+  `terminal_leakage` (area, timing, characterized leakage and search work).
+  The report destination must be distinct from stdout and each input file.
 
 Search defaults come from the library's `ResizeOptions`. Timing visits up to
 `max(64, ceil(N / 512))` candidate sites per round; recovery has no site cap.
@@ -1734,9 +1753,19 @@ xlsynth-driver gv-stats --netlist resized.gv \
   --liberty_proto /path/to/cells.timing.proto
 ```
 
+To recover leakage once on a previously resized netlist:
+
+```bash
+xlsynth-driver gv-resize --netlist resized.gv \
+  --liberty_proto /path/to/cells.timing.proto \
+  --upsize-rounds 0 --downsize-rounds 0 \
+  --terminal-leakage-table /path/to/cells.leakage.json \
+  --report-json terminal.json > recovered.gv
+```
+
 ### `g8r2gv`: G8R to mapped gate-level netlist
 
-Registered native delay mapping runs the complete adaptive sizing flow in this command. The [registered fixture example](../docs/registered-native.md) shows the clock, boundary registers, and timing library used to map a circuit with boundary registers.
+Registered native delay mapping runs the complete adaptive sizing flow in this command. The [registered fixture example](../docs/registered-native.md) shows the clock, boundary registers, timing library and leakage table used to map a circuit with boundary registers.
 
 Maps a `.g8r` or `.g8rbin` design to a flat gate-level netlist. With
 `--liberty-proto` alone, g8r delay-maps the combinational logic natively.
@@ -1751,7 +1780,7 @@ and area recovery share the same timed circuit. They see the launch cell's Q
 drive and the capacitance of every capture D pin. Delay mapping selects the
 finished cover with the lowest register-to-register delay, breaking ties by
 area. When there is no register-to-register path it uses the worst available
-boundary delay. After choosing the cover, the adaptive flow optimizes area, then timing and area. It writes the finished gates to the requested output. ABC uses a separate final `gv-resize` pass by default.
+boundary delay. After choosing the cover, the adaptive flow optimizes area, then timing and area, and finally leakage when characterized cell prices are available. It writes the finished gates to the requested output. ABC uses a separate final `gv-resize` pass by default.
 A fixed `--register-cell` remains fixed. Delay mapping and electrical
 optimization require a timing-enabled proto. For timing-free native area
 mapping, use `--strategy=area`.
@@ -1794,10 +1823,15 @@ Use `--clock-gating=false` to generate an ungated baseline.
 - `--refinement-report <PATH>` writes JSON with the chosen cover's
   optimization and buffer-tree edits. This report is available in registered
   native delay mapping when resizing and fanout optimization are enabled.
-- `--adaptive-resize-report <PATH>` writes the sizing decisions and gate hashes for the adaptive flow. Gate checkpoint hashes
+- `--adaptive-resize-report <PATH>` writes the sizing decisions, gate hashes,
+  and leakage-recovery status for the adaptive flow. Gate checkpoint hashes
   refer to Verilog text. The `output_sha256` field hashes the output file's
   bytes in the chosen format. The report also identifies the sizing library
-  by its content hash.
+  and selected leakage table by their content hashes.
+- `--terminal-leakage-table <PATH>` selects the per-cell leakage table for
+  the sizing library. It must identify the exact proto by SHA-256. The driver
+  can also discover a table packaged with the library. See the
+  [library layout and search phases](../docs/registered-native.md#cell-library-inputs).
 - `--resize-liberty-proto <PATH>` selects a separate timing view for adaptive
   sizing. By default, sizing uses the mapping proto. The sizing view must
   contain every mapped master and may supply additional cells. For each shared

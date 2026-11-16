@@ -18,6 +18,7 @@ use xlsynth_g8r::liberty::model::library_to_proto;
 use xlsynth_g8r::liberty::parser::parse_liberty_files;
 use xlsynth_g8r::netlist::emit::emit_netlist_as_text;
 use xlsynth_g8r::netlist::fanout_opt::FanoutOptimizationOptions;
+use xlsynth_g8r::netlist::io::read_gv_from_str;
 use xlsynth_g8r::netlist::registered_opt::RegisteredCandidateSelection;
 use xlsynth_g8r::netlist::resize::{RecoveryCellMenu, ResizeOptions};
 use xlsynth_g8r::netlist::sequential_mapping::{
@@ -54,13 +55,140 @@ fn default_registered_mapping_matches_separate_resize_commands() -> Result<()> {
         assert_eq!(finish[phase]["epochs"], phases[phase]["epochs"], "{phase}");
         assert_eq!(finish[phase]["stop"], phases[phase]["stop"], "{phase}");
     }
+    assert!(finish["terminal_leakage"].is_null());
     assert_eq!(finish["sizing_liberty_sha256"], digest);
+    assert_eq!(finish["terminal_leakage_status"], "missing_table");
+    assert!(finish["terminal_leakage_table"].is_null());
+    assert!(finish["terminal_leakage_table_sha256"].is_null());
     assert_eq!(
         finish["output_sha256"],
         format!("{:x}", Sha256::digest(&expected))
     );
     assert_eq!(finish["mapped_sha256"], mapped_sha256);
     assert_eq!(report, original_report);
+    Ok(())
+}
+
+#[test]
+fn uses_the_requested_leakage_characterization() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let dir = temp.path();
+    let digest = write_fixture(dir)?;
+    let expected = success(&mut native_map(dir))?;
+
+    // The two AND cells differ only in leakage. Give the unused one the
+    // lower price, so skipping the final pass would change the answer.
+    let parsed = read_gv_from_str(std::str::from_utf8(&expected)?)?;
+    let cells: Vec<_> = parsed.modules[0]
+        .instances
+        .iter()
+        .map(|i| parsed.interner.resolve(i.type_name).unwrap())
+        .filter(|name| matches!(*name, "AND2" | "AND2_LL"))
+        .collect();
+    assert_eq!(cells.len(), 1);
+    let alternative = if cells[0] == "AND2" {
+        "AND2_LL"
+    } else {
+        "AND2"
+    };
+    let table = json!({"liberty_proto_sha256": digest,
+                       "cell_leakage_nw": {(cells[0]): 2.0, (alternative): 1.0}});
+    let price_path = dir.join("prices.json");
+    fs::write(&price_path, serde_json::to_vec(&table)?)?;
+    fs::write(dir.join("epoch.gv"), &expected)?;
+    let mut terminal = resize_command(dir);
+    terminal
+        .args([
+            "--upsize-rounds=0",
+            "--downsize-rounds=0",
+            "--recovery-evaluation-budget=1300000",
+            "--terminal-leakage-rounds=4",
+            "--terminal-leakage-table",
+        ])
+        .arg(&price_path);
+    let priced = success(&mut terminal)?;
+    assert_ne!(priced, expected);
+    let report_path = dir.join("linked-prices.json");
+    fs::hard_link(&price_path, &report_path)?;
+    let collision = terminal.arg("--report-json").arg(&report_path).output()?;
+    assert_eq!(collision.status.code(), Some(1));
+    assert!(collision.stdout.is_empty());
+    assert!(String::from_utf8(collision.stderr)?.contains("--report-json aliases input"));
+    assert_eq!(fs::read(&price_path)?, serde_json::to_vec(&table)?);
+    assert_eq!(
+        success(
+            native_map(dir)
+                .arg("--terminal-leakage-table")
+                .arg(&price_path)
+        )?,
+        priced
+    );
+
+    let auto = dir.join("sidecars");
+    fs::create_dir(&auto)?;
+    let auto = auto.join(format!("{digest}.json"));
+    fs::write(&auto, serde_json::to_vec(&table)?)?;
+    let mut automatic = native_map(dir);
+    automatic
+        .arg("--adaptive-resize-report")
+        .arg(dir.join("auto.json"));
+    assert_eq!(success(&mut automatic)?, priced);
+    let receipt: Value = serde_json::from_slice(&fs::read(dir.join("auto.json"))?)?;
+    assert_eq!(receipt["terminal_leakage_status"], "applied");
+    assert_eq!(
+        Path::new(receipt["terminal_leakage_table"].as_str().unwrap()),
+        auto
+    );
+    let mut wrong = table;
+    wrong["liberty_proto_sha256"] = json!("0".repeat(64));
+    fs::write(&price_path, serde_json::to_vec(&wrong)?)?;
+    let target = dir.join("bad.gv");
+    let refused = native_map(dir)
+        .arg("--terminal-leakage-table")
+        .arg(&price_path)
+        .arg("-o")
+        .arg(&target)
+        .output()?;
+    assert!(!refused.status.success());
+    assert!(String::from_utf8(refused.stderr)?.contains("does not match timing library"));
+    assert!(!target.exists());
+    Ok(())
+}
+
+// Supply compatible mapping and sizing libraries with different hashes.
+// Discover the leakage table using the library that will price the swaps.
+#[test]
+fn automatic_leakage_lookup_uses_the_sizing_library() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let dir = temp.path();
+    let mapping_digest = write_fixture(dir)?;
+    let mut sizing = TimingLibrarySnapshot::from_path(&dir.join("cells.proto"))?.library;
+    // Vary the bytes while keeping all mapper-selected cells compatible.
+    sizing.default_output_load = Some(0.02);
+    let sizing_path = dir.join("sizing.proto");
+    fs::write(&sizing_path, library_to_proto(sizing)?.encode_to_vec())?;
+    let sizing_digest = TimingLibrarySnapshot::from_path(&sizing_path)?.sha256;
+    assert_ne!(sizing_digest, mapping_digest);
+    let table = dir.join(format!("{sizing_digest}.json"));
+    fs::write(
+        &table,
+        serde_json::to_vec(&json!({
+            "liberty_proto_sha256": sizing_digest, "cell_leakage_nw": {"AND2": 1.0},
+        }))?,
+    )?;
+    let mut map = native_map(dir);
+    map.arg("--resize-liberty-proto")
+        .arg(&sizing_path)
+        .arg("--adaptive-resize-report")
+        .arg(dir.join("size.json"));
+    success(&mut map)?;
+    let receipt: Value = serde_json::from_slice(&fs::read(dir.join("size.json"))?)?;
+    assert_eq!(receipt["sizing_liberty_sha256"], sizing_digest);
+    assert_eq!(receipt["terminal_leakage_status"], "applied");
+    assert_eq!(
+        Path::new(receipt["terminal_leakage_table"].as_str().unwrap()),
+        table
+    );
     Ok(())
 }
 
@@ -214,12 +342,20 @@ fn success(cmd: &mut Command) -> Result<Vec<u8>> {
 }
 
 /// Make the function and library visible to both the mapper and the
-/// independent resize commands.
+/// independent resize commands. Prices can select between the two AND cells.
 fn write_fixture(dir: &Path) -> Result<String> {
     let lib_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testdata/native_registered_timing.lib");
     let mut library = parse_liberty_files(&[lib_path]).map_err(anyhow::Error::msg)?;
     library.default_output_load = Some(0.01);
+    let mut alternative = library
+        .cells
+        .iter()
+        .find(|c| c.name == "AND2")
+        .unwrap()
+        .clone();
+    alternative.name = "AND2_LL".to_string();
+    library.cells.push(alternative);
     let proto = dir.join("cells.proto");
     fs::write(&proto, library_to_proto(library)?.encode_to_vec())?;
 

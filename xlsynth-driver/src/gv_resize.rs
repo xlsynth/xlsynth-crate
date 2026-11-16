@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueEnum};
+use serde::Serialize;
 use xlsynth_g8r::liberty::Library;
 use xlsynth_g8r::liberty::io_defaults::default_output_load;
-use xlsynth_g8r::liberty::load::load_library_with_timing_data_from_path;
+use xlsynth_g8r::liberty::load::{TimingLibrarySnapshot, load_library_with_timing_data_from_path};
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::{read_gv_from_path, select_module};
 use xlsynth_g8r::netlist::resize::{
-    RecoveryCellMenu, RecoveryWindowCheckpoint, ResizeOptions, TimingCellMenu,
+    LeakageRecoveryReport, RecoveryCellLeakage, RecoveryCellMenu, RecoveryWindowCheckpoint,
+    ResizeOptions, ResizeReport, TimingCellMenu, recover_leakage_netlist,
     resize_netlist_with_recovery_checkpoint,
 };
 use xlsynth_g8r::netlist::sta::{StaOptions, WireLoadModel};
+
+use crate::mapped_netlist_output::{PendingOutput, path_aliases_stream};
 
 /// CLI spellings of the compatible-cell selection policies used in area
 /// recovery.
@@ -86,18 +91,60 @@ pub fn command() -> Command {
         .arg(Arg::new("recovery-evaluation-budget").long("recovery-evaluation-budget").help("Hard total timing/coverage propagation visits for recovery; default starts at max(100000, 8 * instances) and renews productive registered sweeps").value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("upsize-rounds").long("upsize-rounds").help(format!("Timing-search rounds, in either size direction [default: {}]", defaults.max_upsize_rounds)).value_parser(clap::value_parser!(usize)))
         .args(recovery_cell_args())
+        .arg(Arg::new("terminal-leakage-table").long("terminal-leakage-table").value_name("PATH").value_parser(clap::value_parser!(PathBuf)).help("Finish with equal-area, lower-leakage substitutions using a per-cell nW table bound to this Liberty proto"))
+        .arg(Arg::new("terminal-leakage-rounds").long("terminal-leakage-rounds").value_name("COUNT").value_parser(clap::value_parser!(usize)).requires("terminal-leakage-table").help("Maximum rounds of terminal leakage recovery (default: 4)"))
         .arg(Arg::new("monotone-recovery-checkpoint").long("monotone-recovery-checkpoint").action(ArgAction::SetTrue).help("Keep each timing boundary's tightest limit when an automatic area-recovery window renews"))
         .arg(Arg::new("downsize-rounds").long("downsize-rounds").help(format!("Area-recovery rounds [default: {}]", defaults.max_downsize_rounds)).value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("no-register-resize").long("no-register-resize").action(ArgAction::SetTrue))
         .arg(Arg::new("report-json").long("report-json").help("Write deterministic before/after timing, area and search-work statistics"))
 }
 
+/// A terminal run records both checkpoints. An archive-only invocation omits
+/// ordinary resizing and has a null `resize` field.
+#[derive(Serialize)]
+struct TerminalReport {
+    resize: Option<ResizeReport>,
+    terminal_leakage: LeakageRecoveryReport,
+}
+
+/// Check the opened report's identity before truncating any existing file.
+fn write_report(matches: &ArgMatches, path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let mut report = PendingOutput::open(path)?;
+    anyhow::ensure!(
+        report.handle() != &same_file::Handle::stdout()?,
+        "--report-json and netlist stdout must name different destinations"
+    );
+    let table = matches.get_one::<PathBuf>("terminal-leakage-table");
+    for input in ["netlist", "liberty_proto"]
+        .map(|arg| Path::new(matches.get_one::<String>(arg).unwrap()))
+        .into_iter()
+        .chain(table.map(PathBuf::as_path))
+    {
+        anyhow::ensure!(
+            !path_aliases_stream(input, report.handle(), &[])?,
+            "--report-json aliases input '{}'",
+            input.display()
+        );
+    }
+    Ok(report.prepare_write()?.write_all(bytes)?)
+}
+
 /// Reads one flat mapped module and delegates all optimization to the library.
 pub fn handle(matches: &ArgMatches) -> Result<(), String> {
-    let library = load_library_with_timing_data_from_path(Path::new(
-        matches.get_one::<String>("liberty_proto").unwrap(),
-    ))
-    .map_err(|e| e.to_string())?;
+    let library_path = Path::new(matches.get_one::<String>("liberty_proto").unwrap());
+    let (library, leakage) = if let Some(sidecar) =
+        matches.get_one::<PathBuf>("terminal-leakage-table")
+    {
+        let snapshot = TimingLibrarySnapshot::from_path(library_path).map_err(|e| e.to_string())?;
+        let table =
+            RecoveryCellLeakage::from_library_digest(sidecar, &snapshot.sha256, library_path)
+                .map_err(|e| format!("{e:#}"))?;
+        (snapshot.library, Some(table))
+    } else {
+        let library =
+            load_library_with_timing_data_from_path(library_path).map_err(|e| e.to_string())?;
+        (library, None)
+    };
     let mut parsed = read_gv_from_path(Path::new(matches.get_one::<String>("netlist").unwrap()))
         .map_err(|e| e.to_string())?;
     let mut module = select_module(
@@ -112,20 +159,59 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
     } else {
         RecoveryWindowCheckpoint::Latest
     };
-    let report = resize_netlist_with_recovery_checkpoint(
-        &mut module,
-        &parsed.nets,
-        &mut parsed.interner,
-        &library,
-        &options,
-        checkpoint,
-    )
-    .map_err(|e| e.to_string())?;
+    let resize = if leakage.is_some()
+        && options.max_upsize_rounds == 0
+        && options.max_downsize_rounds == 0
+    {
+        None
+    } else {
+        Some(
+            resize_netlist_with_recovery_checkpoint(
+                &mut module,
+                &parsed.nets,
+                &mut parsed.interner,
+                &library,
+                &options,
+                checkpoint,
+            )
+            .map_err(|e| e.to_string())?,
+        )
+    };
+    let terminal = if let Some(table) = leakage {
+        let mut terminal_options = options;
+        terminal_options.max_downsize_rounds = matches
+            .get_one::<usize>("terminal-leakage-rounds")
+            .copied()
+            .unwrap_or(4);
+        if matches.get_one::<CellMenu>("recovery-cell-menu").is_none() {
+            terminal_options.recovery_cell_menu = RecoveryCellMenu::ElectricalMinArea;
+        }
+        Some(
+            recover_leakage_netlist(
+                &mut module,
+                &parsed.nets,
+                &mut parsed.interner,
+                &library,
+                &terminal_options,
+                &table,
+            )
+            .map_err(|e| format!("{e:#}"))?,
+        )
+    } else {
+        None
+    };
     let verilog = emit_module_as_netlist_text(&module, &parsed.nets, &parsed.interner)
         .map_err(|e| e.to_string())?;
     if let Some(path) = matches.get_one::<String>("report-json") {
-        let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
-        std::fs::write(path, format!("{json}\n"))
+        let json = match terminal {
+            Some(terminal_leakage) => serde_json::to_string_pretty(&TerminalReport {
+                resize,
+                terminal_leakage,
+            }),
+            None => serde_json::to_string_pretty(&resize),
+        }
+        .map_err(|e| e.to_string())?;
+        write_report(matches, Path::new(path), format!("{json}\n").as_bytes())
             .map_err(|e| format!("writing resizing report: {e}"))?;
     }
     print!("{verilog}");
@@ -187,6 +273,37 @@ fn resize_options(matches: &ArgMatches, library: &Library) -> Result<ResizeOptio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_mode_disables_ordinary_rounds_independently_of_terminal_rounds() -> anyhow::Result<()>
+    {
+        let args = [
+            "gv-resize",
+            "--netlist",
+            "input.gv",
+            "--liberty_proto",
+            "cells.proto",
+            "--upsize-rounds=0",
+            "--downsize-rounds=0",
+            "--terminal-leakage-rounds=3",
+        ];
+        assert!(command().try_get_matches_from(args).is_err());
+        let matches = command().try_get_matches_from(args.into_iter().chain([
+            "--terminal-leakage-table",
+            "cells.leakage.json",
+            "--module_output_load=0",
+        ]))?;
+        let options = resize_options(&matches, &Library::default()).map_err(anyhow::Error::msg)?;
+        assert_eq!(
+            (options.max_upsize_rounds, options.max_downsize_rounds),
+            (0, 0)
+        );
+        assert_eq!(
+            matches.get_one::<usize>("terminal-leakage-rounds"),
+            Some(&3)
+        );
+        Ok(())
+    }
 
     #[test]
     fn cli_inherits_search_defaults_and_only_overrides_supplied_values() -> anyhow::Result<()> {
