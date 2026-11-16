@@ -202,11 +202,7 @@ impl Search<'_> {
             let phases = permutation.iter().enumerate().fold(0, |mask, (pin, leaf)| {
                 mask | (((physical_phases >> pin) & 1) << leaf)
             });
-            let candidate = Binding {
-                cell: self.function.cell,
-                perm: permutation.to_vec(),
-                phases,
-            };
+            let candidate = Binding::new(self.function.cell, permutation, phases);
             let key = (phases, candidate.leaf_delay_key(self.cells));
             if self
                 .best
@@ -306,11 +302,7 @@ mod tests {
                 if bound_table(table, &permutation, phases) != query {
                     continue;
                 }
-                let candidate = Binding {
-                    cell: 0,
-                    perm: permutation.clone(),
-                    phases,
-                };
+                let candidate = Binding::new(0, &permutation, phases);
                 if slot.as_ref().is_none_or(|current| candidate < *current) {
                     *slot = Some(candidate);
                 }
@@ -353,21 +345,13 @@ mod tests {
             SixInputIndex::new((0..cells.len()).rev().map(|i| (i, table)).collect(), &cells);
         let phases = 0b010101;
         let query = bound_table(table, &[0, 1, 2, 3, 4, 5], phases);
-        let mut expected = vec![Binding {
-            cell: 0,
-            perm: (0..INPUTS).collect(),
-            phases,
-        }];
+        let mut expected = vec![Binding::new(0, &[0, 1, 2, 3, 4, 5], phases)];
         // Every leaf can take the fast pin. The first minimum-area cell wins.
         // Its equal-delay pins receive the remaining leaves in order.
         for fast_leaf in 0..INPUTS {
             let mut perm = vec![fast_leaf];
             perm.extend((0..INPUTS).filter(|leaf| *leaf != fast_leaf));
-            expected.push(Binding {
-                cell: 1,
-                perm,
-                phases,
-            });
+            expected.push(Binding::new(1, &perm, phases));
         }
         assert_eq!(index.matches(query, &cells), expected);
     }
@@ -382,15 +366,18 @@ mod tests {
         let matches = index.matches(!table, &cells);
         let expected = (0usize..64)
             .filter(|phases| phases.count_ones() % 2 != 0)
-            .map(|phases| Binding {
-                cell: 1,
-                perm: (0..INPUTS).collect(),
-                phases,
-            })
+            .map(|phases| Binding::new(1, &[0, 1, 2, 3, 4, 5], phases))
             .collect::<Vec<_>>();
         assert_eq!(matches, expected);
         for binding in matches {
-            assert_eq!(bound_table(table, &binding.perm, binding.phases), !table);
+            assert_eq!(
+                bound_table(
+                    table,
+                    &std::array::from_fn::<_, INPUTS, _>(|i| usize::from(binding.perm[i])),
+                    binding.phases
+                ),
+                !table
+            );
         }
     }
 

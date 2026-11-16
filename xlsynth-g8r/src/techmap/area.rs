@@ -29,6 +29,7 @@ use crate::netlist::parse::{
     NetlistModule, NetlistPort, PortDirection, Pos, Span,
 };
 use anyhow::{Result, anyhow, ensure};
+use arrayvec::ArrayVec;
 use imbl::OrdSet;
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -63,7 +64,7 @@ struct Cell {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Binding {
     cell: usize,
-    perm: Vec<usize>,
+    perm: ArrayVec<u8, MAX_INPUTS>,
     phases: usize,
 }
 
@@ -74,6 +75,17 @@ fn delay_bits(delay: f64) -> u64 {
 }
 
 impl Binding {
+    /// Cut permutations have at most six leaves. Store their indices directly
+    /// in each binding so phase expansion and copying a winning plan allocate
+    /// no pin list.
+    fn new(cell: usize, leaves: &[usize], phases: usize) -> Self {
+        Self {
+            cell,
+            perm: leaves.iter().map(|&leaf| leaf as u8).collect(),
+            phases,
+        }
+    }
+
     /// Resolves a logical cut leaf to the signal consumed by this binding.
     fn operand(&self, cut: &Cut, leaf: usize) -> AigOperand {
         AigOperand {
@@ -89,7 +101,7 @@ impl Binding {
     fn leaf_delay_key(&self, cells: &[Cell]) -> [u64; MAX_INPUTS] {
         let mut delays = [0; MAX_INPUTS];
         for (&leaf, &delay) in self.perm.iter().zip(&cells[self.cell].pin_delays) {
-            delays[leaf] = delay_bits(delay);
+            delays[usize::from(leaf)] = delay_bits(delay);
         }
         delays
     }
@@ -177,11 +189,7 @@ fn eager_matches(
                 });
                 permuted |= ((table >> physical) & 1) << assignment;
             }
-            let binding = Binding {
-                cell,
-                perm,
-                phases: 0,
-            };
+            let binding = Binding::new(cell, &perm, 0);
             unphased
                 .entry((n, permuted, binding.leaf_delay_key(cells)))
                 .or_insert(binding);
@@ -359,19 +367,30 @@ impl AreaMappingLibrary {
         }
         functions
             .sort_by(|(a, _), (b, _)| cells[*a].area.total_cmp(&cells[*b].area).then(a.cmp(b)));
-        // Equal physical tables with equal pin delays expand identically.
-        // The delay vector gives the arity and is all zeros in area mode.
-        let mut seen = BTreeSet::new();
+        // In area/index order an earlier cell wins all ties. With the same
+        // truth table and pin correspondence, it also has identical feasible
+        // leaf phases and demand costs. If every pin is at least as fast,
+        // the later cell cannot win for any choice of leaf arrivals.
+        let mut retained = BTreeMap::<_, Vec<usize>>::new();
         let (wide, eager) = functions
             .into_iter()
-            .filter(|(cell, table)| {
-                let delays = cells[*cell]
-                    .pin_delays
-                    .iter()
-                    .copied()
-                    .map(delay_bits)
-                    .collect::<Vec<_>>();
-                seen.insert((*table, delays))
+            .filter(|&(cell, table)| {
+                let delays = &cells[cell].pin_delays;
+                // Compare the physical pins individually. For example, (2, 8)
+                // and (4, 3) cross: either cell can win depending on which
+                // input arrives late.
+                let earlier = retained.entry((delays.len(), table)).or_default();
+                if earlier.iter().any(|&other| {
+                    cells[other]
+                        .pin_delays
+                        .iter()
+                        .zip(delays)
+                        .all(|(a, b)| a <= b)
+                }) {
+                    return false;
+                }
+                earlier.push(cell);
+                true
             })
             .partition(|(cell, _)| cells[*cell].pins.len() == MAX_INPUTS);
         let matches = eager_matches(eager, &cells);
@@ -443,6 +462,37 @@ fn embed(cut: &Cut, leaves: &[usize]) -> u64 {
     })
 }
 
+/// Cache the cut's leaf arrival times independently of the cell and pin
+/// permutation. Use them to reject slower matches before calculating exact
+/// area with shared logic taken into account.
+struct CutArrivals([[Option<f64>; MAX_INPUTS]; 2]);
+
+impl CutArrivals {
+    fn new(cover: &Cover<'_>, cut: &Cut) -> Self {
+        Self(std::array::from_fn(|phase| {
+            std::array::from_fn(|leaf| {
+                cover
+                    .leaf_plan(AigOperand {
+                        node: AigRef {
+                            id: *cut.leaves.get(leaf)?,
+                        },
+                        negated: phase != 0,
+                    })
+                    .map(|plan| plan.arrival)
+            })
+        }))
+    }
+
+    /// Missing inputs and strictly late pins cannot win. Exact arrival ties
+    /// still run the original shared-demand area comparison.
+    fn misses(&self, binding: &Binding, pin_delays: &[f64], incumbent: &Plan) -> bool {
+        binding.perm.iter().zip(pin_delays).any(|(&leaf, &delay)| {
+            self.0[(binding.phases >> leaf) & 1][usize::from(leaf)]
+                .is_none_or(|arrival| arrival + delay > incumbent.arrival)
+        })
+    }
+}
+
 /// Selected local implementation; boundary demands are charged only once per
 /// region.
 #[derive(Clone, Debug)]
@@ -473,7 +523,7 @@ impl Plan {
             PlanKind::Invert(inner) => inner.mark_input_demands(demanded),
             PlanKind::Cell { binding, cut } => {
                 for &leaf in &binding.perm {
-                    mark(binding.operand(cut, leaf));
+                    mark(binding.operand(cut, usize::from(leaf)));
                 }
             }
         }
@@ -679,7 +729,11 @@ impl Cover<'_> {
         };
         for i in 0..cut.leaves.len() {
             let mut child = self.leaf_plan(binding.operand(cut, i))?;
-            let pin = binding.perm.iter().position(|leaf| *leaf == i).unwrap();
+            let pin = binding
+                .perm
+                .iter()
+                .position(|&leaf| usize::from(leaf) == i)
+                .unwrap();
             plan.arrival = plan
                 .arrival
                 .max(child.arrival + self.lib.cells[binding.cell].pin_delays[pin]);
@@ -828,6 +882,7 @@ pub(super) fn map_cover_candidates(
                 let mut direct: [Option<Plan>; 2] = [None, None];
                 let mut fact = None;
                 for cut in &candidates {
+                    let arrivals = std::cell::OnceCell::new();
                     let possible = cut.possible_assignments(&facts);
                     let ones = cut.tt & possible;
                     if ones == 0 || ones == possible {
@@ -878,6 +933,17 @@ pub(super) fn map_cover_candidates(
                                 .map_or(&[][..], Vec::as_slice)
                         };
                         for binding in bindings {
+                            // This bound depends only on leaf arrivals and pin
+                            // delays. The demand walk for exact area is needed
+                            // only when timing can beat or tie best.
+                            if lib.delay_first
+                                && let Some(best) = direct[p].as_ref()
+                                && arrivals
+                                    .get_or_init(|| CutArrivals::new(&cover, cut))
+                                    .misses(binding, &lib.cells[binding.cell].pin_delays, best)
+                            {
+                                continue;
+                            }
                             if let Some(plan) = cover.cell_plan(cut, binding) {
                                 cover.consider(&mut direct[p], plan);
                             }
@@ -1138,7 +1204,7 @@ impl<'a> Emitter<'a> {
                             inputs: binding.perm.len(),
                         });
                         for &i in binding.perm.iter().rev() {
-                            work.push(EmitStep::Signal(binding.operand(&cut, i)));
+                            work.push(EmitStep::Signal(binding.operand(&cut, usize::from(i))));
                         }
                     }
                 },
@@ -1381,25 +1447,38 @@ mod tests {
         mapped
     }
     #[test]
-    fn shared_input_inversion_is_emitted_once() {
+    fn shared_input_inversion_is_emitted_once() -> Result<()> {
         let (mut b, x) = builder();
-        let a = b.add_and_binary(x[0].negate(), x[1]);
-        let c = b.add_and_binary(x[0].negate(), x[2]);
+        let a = b.add_and_binary(x[0].negate(), x[1].negate());
+        let c = b.add_and_binary(x[0].negate(), x[2].negate());
         b.add_output("a".into(), a.negate().into());
         b.add_output("c".into(), c.negate().into());
-        let lib = library(&[
-            ("INV", &["A"], "!A", 1.0),
-            ("NAND2", &["A", "B"], "!(A*B)", 2.0),
-        ]);
-        let mapped = verify(&b.build(), &lib);
-        assert_eq!(
-            (
-                mapped.stats.cell_count,
-                mapped.stats.inverter_count,
-                mapped.stats.cell_area
-            ),
-            (3, 1, 5.0)
-        );
+        let aig = b.build();
+        // Both bindings arrive at 2. Two NAND2s need three inverters
+        // (area 6). Two NAND2B cells share one inverter on x[0] (area 5).
+        let lib = timing_library(&[
+            ("INV", "!A", 1.0, &[("A", 1.0)]),
+            ("NAND2", "!(A*B)", 1.5, &[("A", 1.0), ("B", 1.0)]),
+            ("NAND2B", "!(A*!B)", 2.0, &[("A", 1.0), ("B", 2.0)]),
+        ])?;
+        let delay = DelayMappingLibrary::new(
+            &lib,
+            DelayMappingOptions {
+                reference_transition: 1.0,
+                reference_load: 1.0,
+            },
+        )?;
+        for mapped in [
+            verify(&aig, &lib),
+            map_gatefn_to_delay_netlist(&aig, &delay)?,
+        ] {
+            let stats = mapped.stats;
+            assert_eq!(
+                (stats.cell_count, stats.inverter_count, stats.cell_area),
+                (3, 1, 5.0)
+            );
+        }
+        Ok(())
     }
     #[test]
     fn generated_names_do_not_collide_with_ports() {
@@ -2483,11 +2562,7 @@ endmodule
         ] {
             assert_eq!(
                 index.matches[&(3, table)],
-                vec![Binding {
-                    cell: winner,
-                    perm,
-                    phases
-                }]
+                vec![Binding::new(winner, &perm, phases)]
             );
         }
 
@@ -2512,6 +2587,63 @@ endmodule
                 assert!(!result.stats.cells_by_type.contains_key("A_EXPENSIVE"));
             }
         }
+    }
+
+    // Use a nonidentity permutation and one inverted leaf to catch wrong
+    // pin/phase lookups. An exact delay tie still needs an area comparison.
+    #[test]
+    fn arrival_bound_uses_each_eager_pin_phase_and_preserves_ties() {
+        let mut leaves = CutArrivals([[None; MAX_INPUTS]; 2]);
+        leaves.0[0][0] = Some(3.0);
+        leaves.0[1][1] = Some(5.0);
+        leaves.0[0][2] = Some(1.0);
+        let mut binding = Binding::new(0, &[2, 0, 1], 0b010);
+        // Arrivals in physical pin order: 1+2, 3+4, 5+8. A tie at
+        // 13 must still let the exact boundary-demand area break the tie.
+        let pin_delays = [2.0, 4.0, 8.0];
+        let mut incumbent = Plan {
+            arrival: 13.0,
+            area: 0.0,
+            demands: OrdSet::new(),
+            kind: PlanKind::Literal(false),
+        };
+        assert!(!leaves.misses(&binding, &pin_delays, &incumbent));
+        incumbent.arrival = 12.0;
+        assert!(leaves.misses(&binding, &pin_delays, &incumbent));
+        incumbent.arrival = 14.0;
+        assert!(!leaves.misses(&binding, &pin_delays, &incumbent));
+        binding.phases = 0;
+        assert!(leaves.misses(&binding, &pin_delays, &incumbent));
+    }
+
+    // Give equivalent cells crossing pin delays as well as a dominated
+    // option. The pruned index must keep the choices that can still win.
+    #[test]
+    fn physical_pin_pruning_keeps_the_first_winner_on_ties_and_crossing_arrivals() {
+        // D is dominated by B. A remains a possible first winner when its
+        // slower second pin is off the critical path. C is faster on the
+        // first pin but slower on the second. Pin roles are asymmetric.
+        let lib = timing_library(&[
+            ("A", "I*!J", 1.0, &[("I", 2.0), ("J", 3.0)]),
+            ("B", "I*!J", 1.0, &[("I", 2.0), ("J", 1.0)]),
+            ("C", "I*!J", 2.0, &[("I", 1.0), ("J", 4.0)]),
+            ("D", "I*!J", 2.0, &[("I", 2.0), ("J", 2.0)]),
+        ])
+        .unwrap();
+        let index = AreaMappingLibrary::new_internal(
+            &lib,
+            Some(DelayMappingOptions {
+                reference_transition: 10.0,
+                reference_load: 1.0,
+            }),
+        )
+        .unwrap();
+        let actual = index.matches[&(2, 2)]
+            .iter()
+            .filter(|b| b.phases == 0)
+            .map(|b| index.cells[b.cell].name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, ["A", "B", "C"]);
     }
 
     #[test]
