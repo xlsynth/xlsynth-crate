@@ -753,12 +753,16 @@ Generates a sequential PIR block with synchronous reset and optional load
 enables. The target shares the function fuzzer's pure operations and value
 types, including extension operations, arrays, tuples, and bit vectors from
 0 to 129 bits wide. The target also generates blocks that call a random
-function on their inputs, register the result, and output the previous result.
-These functions can invoke other generated helpers. The fuzz bytes
-determine the block, initial registers, and eight clocks of inputs. The first
-and fifth clocks assert reset using the generated polarity. On every clock the
-target compares every Lean output and next register against the independent
-PIR cycle evaluator, including outputs computed from the state before reset.
+function on their inputs and register the result. These functions can invoke
+other generated helpers. Of these blocks, 90% report whether the register
+changes on the current clock, including when reset selects zero. For a one-bit
+register, the two-bit output is 01 for a rising edge, 10 for a falling edge,
+and 00 when the value holds. The other 10% output the previous register value.
+The fuzz bytes determine the block, initial registers, and eight clocks of
+inputs. The first and fifth clocks assert reset using the generated polarity.
+On every clock the target compares every Lean output and next register against
+the independent PIR cycle evaluator, including outputs computed from the state
+before reset.
 
 ```bash
 XLSYNTH_LEAN=/path/to/lean cargo fuzz run \

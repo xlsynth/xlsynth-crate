@@ -5,7 +5,7 @@
 //! Both targets draw from the same pure PIR operations and aggregate types.
 //! Blocks can sample a generated function's result on each clock.
 
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use xlsynth_pir::ir::{Package, Type};
 use xlsynth_pir::ir_random::{
     ArrayAssumptionMode, DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming,
@@ -128,10 +128,24 @@ pub fn generate_lean_block(data: &[u8], rng: &mut impl RngCore) -> Package {
     let result = block.invoke(function, &args).unwrap();
     let zero = generate_pattern_value(&function.ret_ty, BitValuePattern::Zero);
     let reg = block
-        .register("q", function.ret_ty.clone(), Some(zero))
+        .register("q", function.ret_ty.clone(), Some(zero.clone()))
         .unwrap();
     let old = block.register_read(reg).unwrap();
-    block.output_port("out", old).unwrap();
+    let out = if rng.gen_ratio(9, 10) {
+        // The active-high synchronous reset overrides the helper's result.
+        let zero = block.literal(zero).unwrap();
+        let next = block.select(reset, &[result, zero], None).unwrap();
+        if function.ret_ty == Type::Bits(1) {
+            let falling = block.ugt(old, next).unwrap();
+            let rising = block.ult(old, next).unwrap();
+            block.concat(&[falling, rising]).unwrap()
+        } else {
+            block.ne(old, next).unwrap()
+        }
+    } else {
+        old
+    };
+    block.output_port("out", out).unwrap();
     block
         .register_write(
             reg,
@@ -155,12 +169,44 @@ mod tests {
     use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
     use xlsynth_pir::ir::NodePayload;
 
+    fn replay_package(seed: u32) -> Package {
+        let data = seed.to_le_bytes();
+        let mut rng = StdRng::from_seed(*blake3::hash(&data).as_bytes());
+        generate_lean_block(&data, &mut rng)
+    }
+
+    #[test]
+    fn one_bit_output_distinguishes_rising_falling_and_stable() {
+        // The helper returns one. Asserting reset writes zero instead.
+        let package = replay_package(9);
+        let block = package.get_top_block().unwrap();
+        let evaluator = BlockEvaluator::prepare(&package, &block.name).unwrap();
+        let mut state = evaluator
+            .initial_state(RegisterInit::Supplied(vec![IrValue::bool(false)]))
+            .unwrap();
+        for (reset, expected) in [(false, 1), (false, 0), (true, 2), (true, 0)] {
+            let cycle = evaluator.step(&state, &[IrValue::bool(reset)]).unwrap();
+            assert_eq!(cycle.outputs, [IrValue::make_ubits(2, expected).unwrap()]);
+            assert_eq!(cycle.next_state.values(), [IrValue::bool(!reset)]);
+            state = cycle.next_state;
+        }
+    }
+
+    #[test]
+    fn helper_block_can_still_output_the_previous_register() {
+        let package = replay_package(49);
+        let block = package.get_top_block().unwrap();
+        let output = block.output_value(block.get_output_port("out").unwrap());
+        assert!(matches!(
+            block.get_node(output).payload,
+            NodePayload::RegisterRead { .. }
+        ));
+    }
+
     #[test]
     fn nested_invoke_seed_registers_the_leaf_result() {
         // Replay the four bytes 0b 00 00 00 in fuzz_block_lean_eval.
-        let data = 11u32.to_le_bytes();
-        let mut rng = StdRng::from_seed(*blake3::hash(&data).as_bytes());
-        let package = generate_lean_block(&data, &mut rng);
+        let package = replay_package(11);
         let block = package.get_top_block().unwrap();
         let write_arg = block
             .nodes
@@ -179,16 +225,19 @@ mod tests {
             NodePayload::Invoke { .. }
         ));
 
-        // The leaf sign-extends p1 from 15 to 48 bits. Changing p1 must
-        // affect the committed register immediately and the output a clock
-        // later.
+        // The leaf sign-extends p1 from 15 to 48 bits. The output reports
+        // a change on the same clock as the register write.
         let evaluator = BlockEvaluator::prepare(&package, &block.name).unwrap();
         let mut state = evaluator
             .initial_state(RegisterInit::Supplied(vec![
                 IrValue::make_ubits(48, 42).unwrap(),
             ]))
             .unwrap();
-        for (p1, previous, expected) in [(0x4001, 42, 0xffff_ffff_c001), (3, 0xffff_ffff_c001, 3)] {
+        for (p1, changed, expected) in [
+            (0x4001, true, 0xffff_ffff_c001),
+            (3, true, 3),
+            (3, false, 3),
+        ] {
             let inputs: Vec<_> = block
                 .input_ports()
                 .map(|port| {
@@ -200,7 +249,7 @@ mod tests {
                 })
                 .collect();
             let cycle = evaluator.step(&state, &inputs).unwrap();
-            assert_eq!(cycle.outputs, [IrValue::make_ubits(48, previous).unwrap()]);
+            assert_eq!(cycle.outputs, [IrValue::bool(changed)]);
             assert_eq!(
                 cycle.next_state.values(),
                 [IrValue::make_ubits(48, expected).unwrap()]
