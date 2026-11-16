@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Finish a mapped netlist with fixed register masters. Recover area first,
-//! then alternate timing and area work while registered delay improves.
+//! then alternate timing and area work while registered delay improves. A
+//! characterized library may also recover leakage at the final timing and area.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +12,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::{
-    RecoveryCellMenu, RecoveryWindowCheckpoint, ResizeOptions, ResizeReport, TimingCellMenu,
+    LeakageRecoveryReport, RecoveryCellLeakage, RecoveryCellMenu, RecoveryWindowCheckpoint,
+    ResizeOptions, ResizeReport, TimingCellMenu, recover_leakage_netlist,
     resize_netlist_with_recovery_checkpoint,
 };
 use crate::liberty::Library;
@@ -110,7 +112,7 @@ pub struct AdaptiveResizeOptions {
     pub timing: StaOptions,
     /// Candidate ordering during timing search.
     pub timing_cell_menu: TimingCellMenu,
-    /// Candidate ordering during area recovery.
+    /// Candidate ordering during area and leakage recovery.
     pub recovery_cell_menu: RecoveryCellMenu,
     /// Maximum shortlisted alternatives for each recovery site.
     pub recovery_cell_limit: usize,
@@ -141,13 +143,15 @@ pub struct AdaptiveResizeResult {
     pub report: AdaptiveResizeReport,
 }
 
-/// Measurements from the two adaptive sizing phases.
+/// The terminal report is present exactly when leakage characterization was
+/// supplied.
 #[derive(Debug, Serialize)]
 pub struct AdaptiveResizeReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mapped_sha256: Option<String>,
     pub area: AdaptivePhaseReport,
     pub mixed: AdaptivePhaseReport,
+    pub terminal_leakage: Option<LeakageRecoveryReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_sha256: Option<String>,
 }
@@ -178,12 +182,14 @@ pub enum AdaptiveStopReason {
 /// The initial GV is accepted as emitted: the byte comparison that detects
 /// convergence includes the first pass's normalization of declarations. Each
 /// subsequent epoch reads exactly the preceding netlist. If multiple modules
-/// are present, only the named module is emitted.
+/// are present, only the named module is emitted. Pass `None` for leakage
+/// when no characterized per-master values exist for this library.
 pub fn finish_mapped_netlist(
     mut mapped_gv: String,
     module_name: Option<&str>,
     library: &Library,
     options: &AdaptiveResizeOptions,
+    leakage: Option<&RecoveryCellLeakage>,
 ) -> Result<AdaptiveResizeResult> {
     let hash = |gate: &str| {
         options
@@ -232,6 +238,31 @@ pub fn finish_mapped_netlist(
         Phase::Mixed,
         options.record_gate_hashes,
     )?;
+    // Leakage recovery follows the last sizing checkpoint. It uses the slack
+    // left by sizing without reopening the area budget or giving up a timing
+    // gain.
+    let mut terminal_leakage = None;
+    if let Some(table) = leakage {
+        let terminal_options = ResizeOptions {
+            max_downsize_rounds: 4,
+            timing_evaluation_budget: None,
+            recovery_evaluation_budget: Some(1_300_000),
+            ..area_options
+        };
+        let (text, report) = edit_gate(&mapped_gv, module_name, |mapped| {
+            recover_leakage_netlist(
+                &mut mapped.module,
+                &mapped.nets,
+                &mut mapped.interner,
+                library,
+                &terminal_options,
+                table,
+            )
+        })
+        .context("terminal leakage recovery")?;
+        mapped_gv = text;
+        terminal_leakage = Some(report);
+    }
     let final_sha256 = hash(&mapped_gv);
     Ok(AdaptiveResizeResult {
         gate_text: mapped_gv,
@@ -239,6 +270,7 @@ pub fn finish_mapped_netlist(
             mapped_sha256,
             area,
             mixed,
+            terminal_leakage,
             final_sha256,
         },
     })
@@ -401,6 +433,7 @@ mod tests {
                 record_gate_hashes: true,
                 ..Default::default()
             },
+            None,
         )?;
         let expected = concat!(
             "module top(clk, d, q);\n",
@@ -429,6 +462,7 @@ mod tests {
         assert_eq!(output.report.area.stop, AdaptiveStopReason::IdenticalGate);
         assert_eq!(output.report.mixed.epochs.len(), 1);
         assert_eq!(output.report.mixed.stop, AdaptiveStopReason::IdenticalGate);
+        assert!(output.report.terminal_leakage.is_none());
         Ok(())
     }
 }
