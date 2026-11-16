@@ -754,10 +754,16 @@ enables. The target shares the function fuzzer's pure operations and value
 types, including extension operations, arrays, tuples, and bit vectors from
 0 to 129 bits wide. The target also generates blocks that call a random
 function on their inputs and register the result. These functions can invoke
-other generated helpers. Of these blocks, 90% report whether the register
-changes on the current clock, including when reset selects zero. For a one-bit
-register, the two-bit output is 01 for a rising edge, 10 for a falling edge,
-and 00 when the value holds. The other 10% output the previous register value.
+other generated helpers. In 90% of helper-bearing blocks, an odd data input
+`x` enables the register write. An even `x` holds the register. Synchronous
+reset takes priority over both. The output independently computes `s + x*x`
+or `s - x*x` using the current register value `s`. For aggregate registers,
+`s` is one when the aggregate is nonzero and zero otherwise. When the helper
+result contains no bits, the register stores `(result, x)` and `s` is the
+previously stored `x`. The generator
+uses a scalar helper input of at least two bits for `x`, or adds an eight-bit
+input if none qualifies. The other 10% output the previous register value and
+write the helper result whenever reset is inactive.
 The fuzz bytes determine the block, initial registers, and eight clocks of
 inputs. The first and fifth clocks assert reset using the generated polarity.
 On every clock the target compares every Lean output and next register against
