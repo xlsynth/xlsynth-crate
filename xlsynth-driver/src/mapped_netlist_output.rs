@@ -233,6 +233,38 @@ pub(super) struct PendingOutput {
     created_path: Option<PathBuf>,
 }
 
+/// Claim all destinations before writing. Keep cleanup armed for the entire
+/// request, including files successfully written before a later failure.
+pub(super) fn write_batch_outputs<'a>(
+    netlist: (&'a Path, Vec<u8>),
+    reports: impl IntoIterator<Item = (&'a Path, Vec<u8>)>,
+) -> Result<()> {
+    let mut pending = Vec::new();
+    for (path, bytes) in std::iter::once(netlist).chain(reports) {
+        let output = PendingOutput::claim_new(path)
+            .with_context(|| format!("reserving new batch output '{}'", path.display()))?;
+        pending.push((path, bytes, output));
+    }
+    for (path, bytes, output) in &pending {
+        output
+            .handle()
+            .as_file()
+            .write_all(bytes)
+            .with_context(|| format!("writing batch output '{}'", path.display()))?;
+    }
+    for (path, _, output) in &pending {
+        anyhow::ensure!(
+            path_matches_handle(path, output.handle()),
+            "batch output '{}' changed during the request",
+            path.display()
+        );
+    }
+    for (_, _, output) in &mut pending {
+        output.created_path = None;
+    }
+    Ok(())
+}
+
 /// Starts a replacement at byte zero even when the path duplicates an open
 /// descriptor with a nonzero cursor (such as /dev/fd/N on macOS).
 pub(super) fn reset_regular_output(file: &mut File) -> io::Result<()> {
@@ -262,6 +294,17 @@ impl PendingOutput {
             }
             Err(error) => return Err(error.into()),
         };
+        Self::from_opened(file, resolved, created)
+    }
+
+    /// Reserve a new output exclusively for one batch request. Its identity
+    /// remains guarded for cleanup until all of this request's files succeed.
+    fn claim_new(path: &Path) -> Result<Self> {
+        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        Self::from_opened(file, path.to_owned(), true)
+    }
+
+    fn from_opened(file: File, resolved: PathBuf, created: bool) -> Result<Self> {
         let handle = match same_file::Handle::from_file(file) {
             Ok(handle) => handle,
             Err(error) => {

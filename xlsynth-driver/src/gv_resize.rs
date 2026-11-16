@@ -145,6 +145,25 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
             load_library_with_timing_data_from_path(library_path).map_err(|e| e.to_string())?;
         (library, None)
     };
+    let output = resize_text(matches, &library, leakage)?;
+    if let Some((path, bytes)) = output.report {
+        write_report(matches, path, &bytes).map_err(|e| format!("writing resizing report: {e}"))?;
+    }
+    print!("{}", output.verilog);
+    Ok(())
+}
+
+/// Serialized results of one resize request, ready to write together.
+pub(crate) struct ResizeOutput<'a> {
+    pub verilog: String,
+    pub report: Option<(&'a Path, Vec<u8>)>,
+}
+
+pub(crate) fn resize_text<'a>(
+    matches: &'a ArgMatches,
+    library: &Library,
+    leakage: Option<RecoveryCellLeakage>,
+) -> Result<ResizeOutput<'a>, String> {
     let mut parsed = read_gv_from_path(Path::new(matches.get_one::<String>("netlist").unwrap()))
         .map_err(|e| e.to_string())?;
     let mut module = select_module(
@@ -153,7 +172,7 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?
     .clone();
-    let options = resize_options(matches, &library)?;
+    let options = resize_options(matches, library)?;
     let checkpoint = if matches.get_flag("monotone-recovery-checkpoint") {
         RecoveryWindowCheckpoint::Tightest
     } else {
@@ -170,7 +189,7 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
                 &mut module,
                 &parsed.nets,
                 &mut parsed.interner,
-                &library,
+                library,
                 &options,
                 checkpoint,
             )
@@ -191,7 +210,7 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
                 &mut module,
                 &parsed.nets,
                 &mut parsed.interner,
-                &library,
+                library,
                 &terminal_options,
                 &table,
             )
@@ -202,20 +221,21 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
     };
     let verilog = emit_module_as_netlist_text(&module, &parsed.nets, &parsed.interner)
         .map_err(|e| e.to_string())?;
-    if let Some(path) = matches.get_one::<String>("report-json") {
-        let json = match terminal {
-            Some(terminal_leakage) => serde_json::to_string_pretty(&TerminalReport {
+    let report = if let Some(path) = matches.get_one::<String>("report-json") {
+        let mut json = match terminal {
+            Some(terminal_leakage) => serde_json::to_vec_pretty(&TerminalReport {
                 resize,
                 terminal_leakage,
             }),
-            None => serde_json::to_string_pretty(&resize),
+            None => serde_json::to_vec_pretty(&resize),
         }
         .map_err(|e| e.to_string())?;
-        write_report(matches, Path::new(path), format!("{json}\n").as_bytes())
-            .map_err(|e| format!("writing resizing report: {e}"))?;
-    }
-    print!("{verilog}");
-    Ok(())
+        json.push(b'\n');
+        Some((Path::new(path), json))
+    } else {
+        None
+    };
+    Ok(ResizeOutput { verilog, report })
 }
 
 /// Applies only explicit CLI overrides to library-owned search defaults.

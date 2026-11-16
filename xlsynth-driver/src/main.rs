@@ -68,6 +68,7 @@ mod fn_eval;
 mod fn_type_arg;
 mod g8r2blif;
 mod g8r2gv;
+mod g8r2gv_batch;
 mod g8r2ir_block;
 mod g8r2ir_fn;
 mod g8r2ugv;
@@ -89,6 +90,7 @@ mod gv_instance_csv;
 mod gv_proto;
 mod gv_read_stats;
 mod gv_resize;
+mod gv_resize_batch;
 mod gv_sta;
 mod gv_stats;
 mod ir2combo;
@@ -2716,12 +2718,14 @@ fn main() {
                 ),
         )
         .subcommand(g8r2gv::command())
+        .subcommand(g8r2gv_batch::command())
         .subcommand(g8r_lean::prepare_command())
         .subcommand(ir_fn_to_lean::command())
         .subcommand(g8r_lean::check_command("g8r-lean-check"))
         .subcommand(ir_fn_to_lean::prepare_command())
         .subcommand(g8r_lean::check_command("ir-fn-lean-check"))
         .subcommand(gv_resize::command())
+        .subcommand(gv_resize_batch::command())
         .subcommand(
             clap::Command::new("g8r2ugv")
                 .about("Converts a .g8r or .g8rbin sequential design to a .ugv netlist on stdout, emitting stored registers and optionally adding boundary registers.")
@@ -4326,6 +4330,15 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("gv-dump-cone", subm)) => {
             gv_dump_cone::handle_gv_dump_cone(subm);
         }
+        Some(("g8r2gv-batch", subm)) => {
+            if let Err(e) = g8r2gv_batch::handle(subm) {
+                report_cli_error::report_cli_error_and_exit(
+                    &format!("{e:#}"),
+                    Some("g8r2gv"),
+                    vec![],
+                );
+            }
+        }
         Some(("g8r2gv", subm)) => {
             if let Err(e) = g8r2gv::handle(subm) {
                 report_cli_error::report_cli_error_and_exit(&e, Some("g8r2gv"), vec![]);
@@ -4349,6 +4362,15 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some((name @ ("g8r-lean-check" | "ir-fn-lean-check"), subm)) => {
             if let Err(e) = g8r_lean::handle_check(subm, name == "ir-fn-lean-check") {
                 report_cli_error::report_cli_error_and_exit(&e, Some(name), vec![]);
+            }
+        }
+        Some(("gv-resize-batch", subm)) => {
+            if let Err(e) = gv_resize_batch::handle(subm) {
+                report_cli_error::report_cli_error_and_exit(
+                    &format!("{e:#}"),
+                    Some("gv-resize-batch"),
+                    vec![],
+                );
             }
         }
         Some(("gv-resize", subm)) => {

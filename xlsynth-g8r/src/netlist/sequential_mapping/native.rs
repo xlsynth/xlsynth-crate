@@ -28,8 +28,10 @@ use crate::netlist::resize::timing::ElectricalGuard;
 use crate::netlist::resize::{ResizeOptions, resize_netlist};
 use crate::netlist::sta::StaOptions;
 use crate::techmap::area::AreaMappedNetlist;
-use crate::techmap::delay::{DelayMappingLibrary, map_gatefn_to_delay_candidates};
-use crate::techmap::postprocess::{CoverStrategy, PostMappingOptions, map_and_optimize_cover};
+use crate::techmap::delay::map_gatefn_to_delay_candidates;
+use crate::techmap::postprocess::{
+    CoverStrategy, NativeCoverLibrary, PostMappingOptions, map_with_native_cover,
+};
 
 /// Select registered topology proposals and the optional buffer-tree pass.
 #[derive(Clone, Copy, Debug, Default)]
@@ -83,7 +85,7 @@ pub fn map_sequential_to_native_netlist(
 ) -> Result<ParsedNetlist> {
     Ok(map_sequential_with_policy(
         design,
-        library,
+        &mut NativeCoverLibrary::new(library),
         options,
         strategy,
         post,
@@ -95,15 +97,18 @@ pub fn map_sequential_to_native_netlist(
 
 /// Evaluate covers with their actual launch drivers and capture pin loads.
 /// Optionally size the assembled netlist and refine its buffer trees.
+/// Reuse the cover library across designs to share physical cell bindings.
+/// All graph, optimization and output state is per call.
 pub fn map_sequential_with_policy(
     design: &SequentialGateFn,
-    library: &Library,
+    cover_library: &mut NativeCoverLibrary,
     options: &SequentialMappingOptions,
     strategy: CoverStrategy,
     post: &PostMappingOptions,
     final_resize: Option<&ResizeOptions>,
     mapping: NativeMappingSchedule,
 ) -> Result<NativeMappingResult> {
+    let library = cover_library.library();
     let NativeMappingSchedule {
         refine_buffer_trees,
         candidate_selection,
@@ -127,7 +132,7 @@ pub fn map_sequential_with_policy(
         Ok(netlist)
     };
     if prepared.design.registers.is_empty() {
-        let (cover, _) = map_and_optimize_cover(graph, library, strategy, post)?;
+        let (cover, _) = map_with_native_cover(graph, cover_library, strategy, post)?;
         let mut mapped = assemble(cover)?;
         if let Some(resize) = final_resize {
             let [module] = mapped.modules.as_mut_slice() else {
@@ -160,7 +165,7 @@ pub fn map_sequential_with_policy(
         },
         (None, None) => {
             return Ok(NativeMappingResult {
-                netlist: assemble(map_and_optimize_cover(graph, library, strategy, post)?.0)?,
+                netlist: assemble(map_with_native_cover(graph, cover_library, strategy, post)?.0)?,
                 refinement: None,
             });
         }
@@ -226,13 +231,17 @@ pub fn map_sequential_with_policy(
     };
     match strategy {
         CoverStrategy::Area => {
-            let (cover, _) =
-                map_and_optimize_cover(graph, library, strategy, &PostMappingOptions::default())?;
+            let (cover, _) = map_with_native_cover(
+                graph,
+                cover_library,
+                strategy,
+                &PostMappingOptions::default(),
+            )?;
             Ok(finish(cover, "area")?.1)
         }
         CoverStrategy::Delay(delay) => {
-            let cells = DelayMappingLibrary::new(library, delay)?;
-            let candidates = map_gatefn_to_delay_candidates(graph, &cells)?;
+            let cells = cover_library.delay_index(delay)?;
+            let candidates = map_gatefn_to_delay_candidates(graph, cells)?;
             let Some(local) = candidates.local else {
                 return Ok(finish(candidates.demanded, "demanded")?.1);
             };
@@ -282,7 +291,7 @@ mod tests {
         let design = add_output_registers(&launched, clock).map_err(Error::msg)?;
         let mapped = map_sequential_with_policy(
             &design,
-            &library,
+            &mut NativeCoverLibrary::new(&library),
             &SequentialMappingOptions {
                 register_selection: RegisterCellSelection::FixedCell("DFF4".into()),
                 ..Default::default()

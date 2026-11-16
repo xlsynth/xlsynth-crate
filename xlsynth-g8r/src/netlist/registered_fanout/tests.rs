@@ -17,7 +17,7 @@ use crate::netlist::sequential_mapping::{
     map_sequential_with_policy,
 };
 use crate::netlist::sta::{PreparedStaLibrary, StaOptions, analyze_register_boundary_max_arrival};
-use crate::techmap::postprocess::{CoverStrategy, PostMappingOptions};
+use crate::techmap::postprocess::{CoverStrategy, NativeCoverLibrary, PostMappingOptions};
 use anyhow::{Error, Result};
 use xlsynth_pir::IrBits;
 
@@ -547,7 +547,7 @@ fn tree_refinement_receives_buffers_inserted_by_the_registered_optimizer() -> Re
     };
     let result = map_sequential_with_policy(
         &design,
-        &lib,
+        &mut NativeCoverLibrary::new(&lib),
         &SequentialMappingOptions::default(),
         CoverStrategy::Area,
         &post,
@@ -583,7 +583,7 @@ fn tree_refinement_respects_fanout_area_policy() -> Result<()> {
         };
         let result = map_sequential_with_policy(
             &design,
-            lib,
+            &mut NativeCoverLibrary::new(lib),
             &SequentialMappingOptions::default(),
             CoverStrategy::Area,
             &post,

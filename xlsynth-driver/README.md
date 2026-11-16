@@ -1763,6 +1763,37 @@ xlsynth-driver gv-resize --netlist resized.gv \
   --report-json terminal.json > recovered.gv
 ```
 
+### `gv-resize-batch`: Resize multiple netlists with one decoded library
+
+Read one JSON request per line on stdin. Each request supplies `args`, the arguments for an ordinary `gv-resize` invocation, and `output`, the path that receives the resulting netlist. The netlist and optional report each need a distinct, fresh output path. Relative paths resolve against the working directory. Every request initializes fresh netlist and timing state. The worker writes both files before flushing one JSON object on stdout. A later request can use an acknowledged netlist as its input. A reservation or write error triggers cleanup of the current request's files. The first invalid or failed request exits with an error identifying its line. EOF finishes the batch.
+
+- `--liberty-proto PATH` selects the timing library decoded once for the batch. Each request must supply this same path through `--liberty_proto`. Keep the file immutable for the duration of the batch. A new batch can use a different library. Each request can select its own `--terminal-leakage-table`, checked against the library as in standalone resizing.
+- `--report-process-cpu` includes cumulative process CPU seconds in each acknowledgement on Unix. Without the flag each acknowledgement is `{}`.
+
+```sh
+xlsynth-driver gv-resize-batch --liberty-proto slow.proto <<'EOF'
+{"args":["--netlist","first.gv","--liberty_proto","slow.proto","--report-json","first.json"],"output":"first-sized.gv"}
+{"args":["--netlist","first-sized.gv","--liberty_proto","slow.proto","--upsize-rounds","0"],"output":"area.gv"}
+EOF
+```
+
+### `g8r2gv-batch`: Reuse native mapping bindings across independent circuits
+
+This experimental command accepts one JSON request per line. At startup it
+loads the timing-enabled Liberty proto at the supplied absolute path and checks
+its SHA-256. Use immutable input files for the duration of the batch. A request
+contains an `argv` array starting with `g8r2gv` and its ordinary arguments,
+including `--mapper native`, the same Liberty path, an absolute G8R input path,
+and fresh, distinct absolute paths for gate and optional report output.
+`--report-process-cpu` adds cumulative worker CPU seconds to each JSON
+acknowledgement. A mapping error ends the worker after a failure acknowledgement.
+Changing either reference slew or load rebuilds the cell index. Close standard
+input after the last request to release the resident library.
+
+```sh
+xlsynth-driver g8r2gv-batch --liberty-proto "$LIB" --liberty-sha256 "$LIB_SHA" < requests.jsonl
+```
+
 ### `g8r2gv`: G8R to mapped gate-level netlist
 
 Registered native delay mapping runs the complete adaptive sizing flow in this command. The [registered fixture example](../docs/registered-native.md) shows the clock, boundary registers, timing library and leakage table used to map a circuit with boundary registers.

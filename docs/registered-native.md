@@ -1,6 +1,6 @@
 # Running the registered native mapper
 
-Use `xlsynth-driver g8r2gv` to map a G8R design and write its final sized gates. The command runs the optimization in-process. The mapper selects library cells, attaches the physical registers, and optimizes the assembled stage. It then sizes the selected netlist and, when a matching leakage table is available, swaps in equal-area cells with lower leakage.
+Use `xlsynth-driver g8r2gv` to map a G8R design and write its final sized gates. The same arguments work inside a `g8r2gv-batch` request. Both run the optimization in-process. The mapper selects library cells, attaches the physical registers, and optimizes the assembled stage. It then sizes the selected netlist and, when a matching leakage table is available, swaps in equal-area cells with lower leakage.
 
 ## Map a circuit with boundary registers
 

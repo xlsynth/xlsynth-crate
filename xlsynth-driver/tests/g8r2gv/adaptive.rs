@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Result, ensure};
 use prost::Message;
@@ -26,7 +27,7 @@ use xlsynth_g8r::netlist::sequential_mapping::{
 };
 use xlsynth_g8r::netlist::sta::StaOptions;
 use xlsynth_g8r::techmap::delay::DelayMappingOptions;
-use xlsynth_g8r::techmap::postprocess::{CoverStrategy, PostMappingOptions};
+use xlsynth_g8r::techmap::postprocess::{CoverStrategy, NativeCoverLibrary, PostMappingOptions};
 
 const DRIVER: &str = env!("CARGO_BIN_EXE_xlsynth-driver");
 
@@ -69,8 +70,11 @@ fn default_registered_mapping_matches_separate_resize_commands() -> Result<()> {
     Ok(())
 }
 
+// One worker sees a priced request, an unpriced request, a replacement
+// table, and a wrong-library table. Verify that changing prices changes
+// the selected masters and that a bad request leaves no reserved files.
 #[test]
-fn uses_the_requested_leakage_characterization() -> Result<()> {
+fn single_and_batch_use_the_requested_leakage_characterization() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let dir = temp.path();
     let digest = write_fixture(dir)?;
@@ -124,6 +128,82 @@ fn uses_the_requested_leakage_characterization() -> Result<()> {
         priced
     );
 
+    // Process all four requests in one worker. Replacing the file after its
+    // preceding response exercises the resident worker's characterization
+    // lookup.
+    // Each new destination is writable only through its creation handle.
+    let mut worker = Command::new("sh")
+        .args(["-c", "umask 0222; exec \"$@\"", "sh", DRIVER])
+        .arg("g8r2gv-batch")
+        .arg("--liberty-proto")
+        .arg(dir.join("cells.proto"))
+        .args(["--liberty-sha256", &digest])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut requests = worker.stdin.take().unwrap();
+    let mut replies = BufReader::new(worker.stdout.take().unwrap());
+    let mut reversed = table.clone();
+    reversed["cell_leakage_nw"] = json!({(cells[0]): 1.0, (alternative): 2.0});
+    let mut wrong = table.clone();
+    wrong["liberty_proto_sha256"] = json!("0".repeat(64));
+    for (name, prices, wanted) in [
+        ("priced", Some(&table), Some(&priced)),
+        ("unpriced", None, Some(&expected)),
+        ("replaced", Some(&reversed), Some(&expected)),
+        ("wrong-library", Some(&wrong), None),
+    ] {
+        let output = dir.join(format!("{name}.gv"));
+        let report = dir.join(format!("{name}.json"));
+        let mut request = native_map(dir);
+        request
+            .arg("-o")
+            .arg(&output)
+            .arg("--adaptive-resize-report")
+            .arg(&report);
+        let mut table_digest = None;
+        if let Some(prices) = prices {
+            let bytes = serde_json::to_vec(prices)?;
+            table_digest = Some(format!("{:x}", Sha256::digest(&bytes)));
+            let replacement = dir.join("replacement.tmp");
+            fs::write(&replacement, bytes)?;
+            fs::rename(replacement, &price_path)?;
+            request.arg("--terminal-leakage-table").arg(&price_path);
+        }
+        let argv: Vec<_> = request.get_args().map(|a| a.to_str().unwrap()).collect();
+        writeln!(requests, "{}", json!({"argv": argv}))?;
+        requests.flush()?;
+        let mut line = String::new();
+        replies.read_line(&mut line)?;
+        let reply: Value = serde_json::from_str(&line)?;
+        if let Some(wanted) = wanted {
+            assert_eq!(reply, json!({"ok": true}), "{name}");
+            assert_eq!(fs::read(output)?, *wanted);
+            let receipt: Value = serde_json::from_slice(&fs::read(report)?)?;
+            assert_eq!(
+                receipt["terminal_leakage_table_sha256"],
+                json!(table_digest)
+            );
+            assert_eq!(
+                receipt["output_sha256"],
+                format!("{:x}", Sha256::digest(wanted))
+            );
+        } else {
+            assert_eq!(reply["ok"], false);
+            assert!(
+                reply["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("does not match timing library")
+            );
+            assert!(!output.exists());
+            assert!(!report.exists());
+        }
+    }
+    drop(requests);
+    assert!(!worker.wait_with_output()?.status.success());
+
     let auto = dir.join("sidecars");
     fs::create_dir(&auto)?;
     let auto = auto.join(format!("{digest}.json"));
@@ -139,9 +219,6 @@ fn uses_the_requested_leakage_characterization() -> Result<()> {
         Path::new(receipt["terminal_leakage_table"].as_str().unwrap()),
         auto
     );
-    let mut wrong = table;
-    wrong["liberty_proto_sha256"] = json!("0".repeat(64));
-    fs::write(&price_path, serde_json::to_vec(&wrong)?)?;
     let target = dir.join("bad.gv");
     let refused = native_map(dir)
         .arg("--terminal-leakage-table")
@@ -209,7 +286,7 @@ fn map_before_adaptive_sizing(dir: &Path) -> Result<(Vec<u8>, Value)> {
     };
     let result = map_sequential_with_policy(
         &design,
-        &library,
+        &mut NativeCoverLibrary::new(&library),
         &SequentialMappingOptions {
             cleanup_registers: true,
             clock_gating: None,

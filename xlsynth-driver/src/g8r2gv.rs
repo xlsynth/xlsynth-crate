@@ -34,14 +34,15 @@ use xlsynth_g8r::netlist::sequential_mapping::{
 };
 use xlsynth_g8r::netlist::sta::StaOptions;
 use xlsynth_g8r::techmap::delay::DelayMappingOptions;
-use xlsynth_g8r::techmap::postprocess::{CoverStrategy, PostMappingOptions};
+use xlsynth_g8r::techmap::postprocess::{CoverStrategy, NativeCoverLibrary, PostMappingOptions};
 
 use crate::gv_resize::{recovery_cell_args, recovery_cell_options};
 #[cfg(unix)]
 use crate::mapped_netlist_output::same_unix_file;
 use crate::mapped_netlist_output::{
     Format, PendingOutput, ensure_pb_handle_distinct_from_stderr, format_arg, metadata_if_exists,
-    output_arg, output_paths_alias, path_aliases_stream, reset_regular_output, write_stdout,
+    output_arg, output_paths_alias, path_aliases_stream, reset_regular_output, write_batch_outputs,
+    write_stdout,
 };
 
 /// CLI spelling of the netlist library's registered topology selector.
@@ -350,7 +351,18 @@ pub(crate) fn map_design(
     matches: &ArgMatches,
     load_design: impl FnOnce() -> anyhow::Result<SequentialGateFn>,
 ) -> anyhow::Result<()> {
+    map_design_with_library(matches, load_design, None)
+}
+
+/// A batch worker supplies its library and requires fresh output files for
+/// each request.
+pub(crate) fn map_design_with_library(
+    matches: &ArgMatches,
+    load_design: impl FnOnce() -> anyhow::Result<SequentialGateFn>,
+    cache: Option<(&mut NativeCoverLibrary, &str)>,
+) -> anyhow::Result<()> {
     let output_path = matches.get_one::<PathBuf>("output").unwrap();
+    let batch = cache.is_some();
     let format = Format::from_matches(matches, output_path);
     let pb_stderr = format.check_output_stderr(output_path)?;
     let native = matches.get_one::<String>("mapper").unwrap() == "native";
@@ -411,21 +423,35 @@ pub(crate) fn map_design(
         .map_err(anyhow::Error::msg)?;
     let (adaptive, refine_trees) = adaptive::select(matches, &design, delay && resize, fanout)?;
     let library_path = Path::new(matches.get_one::<String>("liberty-proto").unwrap());
-    let (owned_library, owned_digest) = if adaptive {
+    let (owned_library, owned_digest) = if cache.is_some() {
+        anyhow::ensure!(
+            native,
+            "a prepared native library requires the native mapper"
+        );
+        (None, None)
+    } else if adaptive {
         let snapshot = TimingLibrarySnapshot::from_path(library_path)
             .context("mapping/resizing requires a timing-enabled --liberty-proto")?;
-        (snapshot.library, Some(snapshot.sha256))
+        (Some(snapshot.library), Some(snapshot.sha256))
     } else if needs_timing {
         (
-            load_library_with_timing_data_from_path(library_path)
-                .context("mapping/resizing requires a timing-enabled --liberty-proto")?,
+            Some(
+                load_library_with_timing_data_from_path(library_path)
+                    .context("mapping/resizing requires a timing-enabled --liberty-proto")?,
+            ),
             None,
         )
     } else {
-        (load_library_from_path(library_path)?, None)
+        (Some(load_library_from_path(library_path)?), None)
     };
-    let library = &owned_library;
-    let digest = owned_digest.as_deref();
+    let library = match cache.as_ref() {
+        Some((prepared, _)) => prepared.library(),
+        None => owned_library.as_ref().expect("loaded standalone library"),
+    };
+    let digest = cache
+        .as_ref()
+        .map(|(_, hash)| *hash)
+        .or(owned_digest.as_deref());
     let timing = if needs_timing {
         let defaults = StaOptions::default();
         let transition = matches
@@ -530,21 +556,32 @@ pub(crate) fn map_design(
             refine_buffer_trees: refine_trees,
             candidate_selection,
         };
-        let result = map_sequential_with_policy(
-            &design,
-            library,
-            &sequential_options,
-            strategy,
-            &post,
-            sizing.as_ref(),
-            schedule,
-        )?;
+        let map = |prepared: &mut NativeCoverLibrary| {
+            map_sequential_with_policy(
+                &design,
+                prepared,
+                &sequential_options,
+                strategy,
+                &post,
+                sizing.as_ref(),
+                schedule,
+            )
+        };
+        let result = match cache {
+            Some((prepared, _)) => map(prepared),
+            None => map(&mut NativeCoverLibrary::new(library)),
+        }?;
         (result.netlist, None, result.refinement, library)
     } else {
         let mapped;
-        (mapped, abc_context) =
-            map_with_abc(matches, &design, owned_library, &sequential_options, format)
-                .map_err(anyhow::Error::msg)?;
+        (mapped, abc_context) = map_with_abc(
+            matches,
+            &design,
+            owned_library.expect("ABC always owns its library"),
+            &sequential_options,
+            format,
+        )
+        .map_err(anyhow::Error::msg)?;
         (
             mapped.netlist,
             Some(mapped.diagnostics),
@@ -570,9 +607,7 @@ pub(crate) fn map_design(
     } else {
         (format.encode(&mapped)?, None)
     };
-    let netlist = NetlistOutput::open(output_path, pb_stderr.as_ref())
-        .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))?;
-    check_sidecar_outputs(matches, output_path, &netlist)?;
+    let mut reports = Vec::new();
     if let Some(path) = matches.get_one::<String>("refinement-report") {
         let mut json = match native_report {
             Some(report) => serde_json::to_vec_pretty(&report)?,
@@ -581,15 +616,26 @@ pub(crate) fn map_design(
             )?,
         };
         json.push(b'\n');
-        write_sidecar(Path::new(path), &json, "refinement-report", &netlist)
-            .with_context(|| format!("writing native refinement report '{path}'"))?;
+        reports.push(("refinement-report", Path::new(path), json));
     }
     if let (Some(path), Some(json)) = (
         matches.get_one::<String>("adaptive-resize-report"),
         adaptive_report,
     ) {
-        write_sidecar(Path::new(path), &json, "adaptive-resize-report", &netlist)
-            .with_context(|| format!("writing adaptive resize report '{path}'"))?;
+        reports.push(("adaptive-resize-report", Path::new(path), json));
+    }
+    if batch {
+        return write_batch_outputs(
+            (output_path, bytes),
+            reports.into_iter().map(|(_, path, json)| (path, json)),
+        );
+    }
+    let netlist = NetlistOutput::open(output_path, pb_stderr.as_ref())
+        .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))?;
+    check_sidecar_outputs(matches, output_path, &netlist)?;
+    for (flag, path, json) in reports {
+        write_sidecar(path, &json, flag, &netlist)
+            .with_context(|| format!("writing --{flag} '{}'", path.display()))?;
     }
     if let Some(diagnostics) = diagnostics {
         write_abc_sidecars(matches, &netlist, &diagnostics)?;

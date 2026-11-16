@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     LeakageRecoveryReport, RecoveryCellLeakage, RecoveryCellMenu, RecoveryWindowCheckpoint,
-    ResizeOptions, ResizeReport, TimingCellMenu, recover_leakage_netlist,
-    resize_netlist_with_recovery_checkpoint,
+    ResizeOptions, ResizeReport, SizingLibrary, TimingCellMenu, recover_leakage_netlist,
+    resize_with_recovery_cost,
 };
 use crate::liberty::Library;
 use crate::liberty_model::Cell;
@@ -213,10 +213,11 @@ pub fn finish_mapped_netlist(
         recovery_evaluation_budget: None,
         ..ResizeOptions::default()
     };
+    let mut sizing = SizingLibrary::new(library, None);
     let area = run_epochs(
         &mut mapped_gv,
         module_name,
-        library,
+        &mut sizing,
         &area_options,
         Phase::Area,
         options.record_gate_hashes,
@@ -233,11 +234,12 @@ pub fn finish_mapped_netlist(
     let mixed = run_epochs(
         &mut mapped_gv,
         module_name,
-        library,
+        &mut sizing,
         &mixed_options,
         Phase::Mixed,
         options.record_gate_hashes,
     )?;
+    drop(sizing);
     // Leakage recovery follows the last sizing checkpoint. It uses the slack
     // left by sizing without reopening the area budget or giving up a timing
     // gain.
@@ -285,7 +287,7 @@ enum Phase {
 fn run_epochs(
     gate: &mut String,
     module_name: Option<&str>,
-    library: &Library,
+    sizing: &mut SizingLibrary<'_>,
     options: &ResizeOptions,
     phase: Phase,
     record_gate_hashes: bool,
@@ -299,12 +301,12 @@ fn run_epochs(
     let mut stop = AdaptiveStopReason::EpochCap;
     for epoch in 1..=cap {
         let (next_gate, report) = edit_gate(gate, module_name, |mapped| {
-            resize_netlist_with_recovery_checkpoint(
+            resize_with_recovery_cost(
                 &mut mapped.module,
                 &mapped.nets,
                 &mut mapped.interner,
-                library,
-                options,
+                sizing,
+                &mut options.clone(),
                 RecoveryWindowCheckpoint::Tightest,
             )
         })

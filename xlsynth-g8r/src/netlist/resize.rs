@@ -6,6 +6,7 @@
 //! deliberately separate transformations.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use serde::Serialize;
@@ -15,12 +16,12 @@ use crate::liberty::Library;
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty_model::{Cell, PinDirection, Sequential};
 use crate::netlist::parse::{Net, NetlistModule};
-use crate::netlist::sta::StaOptions;
 pub use crate::netlist::sta::incremental::{BoundaryDelays, measure_boundary_delays};
 use crate::netlist::sta::incremental::{
     IncrementalSta, STA_VERIFICATION_TOLERANCE, TIMING_COMPARISON_TOLERANCE, TrialOutcome,
     measure_boundary_delays_with_library,
 };
+use crate::netlist::sta::{PreparedStaLibrary, StaOptions};
 
 pub mod adaptive;
 mod leakage;
@@ -783,7 +784,42 @@ pub(crate) fn resize_netlist_with_remaining_budget(
     options: &mut ResizeOptions,
     checkpoint: RecoveryWindowCheckpoint,
 ) -> Result<ResizeReport> {
-    resize_with_recovery_cost(module, nets, interner, library, options, checkpoint, None)
+    resize_with_recovery_cost(
+        module,
+        nets,
+        interner,
+        &mut SizingLibrary::new(library, None),
+        options,
+        checkpoint,
+    )
+}
+
+/// Reuses the same cell families and STA metadata while sizing successively
+/// emitted netlists with one immutable library and recovery objective.
+struct SizingLibrary<'a> {
+    library: &'a Library,
+    leakage: Option<&'a RecoveryCellLeakage>,
+    prepared: Option<(CellFamilies, Arc<PreparedStaLibrary<'a>>)>,
+}
+
+impl<'a> SizingLibrary<'a> {
+    fn new(library: &'a Library, leakage: Option<&'a RecoveryCellLeakage>) -> Self {
+        Self {
+            library,
+            leakage,
+            prepared: None,
+        }
+    }
+
+    fn prepare(&mut self) -> Result<&(CellFamilies, Arc<PreparedStaLibrary<'a>>)> {
+        if self.prepared.is_none() {
+            self.prepared = Some((
+                CellFamilies::with_recovery_cost(self.library, self.leakage),
+                Arc::new(PreparedStaLibrary::new(self.library)?),
+            ));
+        }
+        Ok(self.prepared.as_ref().expect("prepared sizing library"))
+    }
 }
 
 /// Area and leakage recovery share the same STA edits, candidate selection,
@@ -793,10 +829,9 @@ fn resize_with_recovery_cost(
     module: &mut NetlistModule,
     nets: &[Net],
     interner: &mut StringInterner<StringBackend<SymbolU32>>,
-    library: &Library,
+    sizing: &mut SizingLibrary<'_>,
     options: &mut ResizeOptions,
     checkpoint: RecoveryWindowCheckpoint,
-    leakage: Option<&RecoveryCellLeakage>,
 ) -> Result<ResizeReport> {
     if !options.max_area_growth.is_finite() || options.max_area_growth < 0.0 {
         return Err(anyhow!("max_area_growth must be finite and nonnegative"));
@@ -808,8 +843,15 @@ fn resize_with_recovery_cost(
     {
         return Err(anyhow!("candidate limits must be positive"));
     }
-    let families = CellFamilies::with_recovery_cost(library, leakage);
-    let mut sta = IncrementalSta::new(module, nets, interner, library, options.timing)?;
+    let library = sizing.library;
+    let (families, prepared) = sizing.prepare()?;
+    let mut sta = IncrementalSta::with_registered_library(
+        module,
+        nets,
+        interner,
+        Arc::clone(prepared),
+        options.timing,
+    )?;
     let registered = (0..sta.instance_count()).any(|i| sta.is_register(i));
     let recovery_window = (registered && options.recovery_evaluation_budget.is_none())
         .then_some(work_limits.recovery_evaluations);
@@ -840,7 +882,7 @@ fn resize_with_recovery_cost(
         electrical_guard: ElectricalGuard::Absolute,
         library,
         options,
-        families: &families,
+        families,
         area_weight: 0.5,
         initial_delay,
         timing_checkpoint: initial_delay,
@@ -885,7 +927,7 @@ fn resize_with_recovery_cost(
         .iter()
         .map(|i| library.cells[*i].area)
         .sum();
-    if leakage.is_some() && final_area != initial_area {
+    if families.fixed_area && final_area != initial_area {
         return Err(anyhow!("terminal leakage recovery changed cell area"));
     }
     if !final_area.is_finite() || final_area > area_limit + AREA_COMPARISON_TOLERANCE {
@@ -976,10 +1018,9 @@ pub fn recover_leakage_netlist(
         module,
         nets,
         interner,
-        library,
+        &mut SizingLibrary::new(library, Some(leakage)),
         &mut options,
         RecoveryWindowCheckpoint::Entry,
-        Some(leakage),
     )?;
     let (final_characterized_leakage_nw, _) = inventory(module, interner);
     Ok(LeakageRecoveryReport {

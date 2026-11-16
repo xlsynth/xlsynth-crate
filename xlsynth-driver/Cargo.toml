@@ -56,6 +56,9 @@ xlsynth-vastly = { path = "../xlsynth-vastly", version = "0.85.0" }
 test-case = "3.3.1"
 pretty_assertions = "1.4.1"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["resource"] }
+
 [features]
 default = []
 iverilog-tests = []
