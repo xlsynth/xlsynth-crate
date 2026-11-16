@@ -634,6 +634,17 @@ impl IncrementalSta<'_> {
         Ok(order.len())
     }
 
+    /// Restore the fresh constructor's instance-ID tie break once on a winning
+    /// topology. Later sizing traversals may use that order to break objective
+    /// ties; rejected trial prices depend only on the timing graph.
+    pub(crate) fn canonicalize_registered_order(&mut self) -> Result<()> {
+        let order = canonical_order(&self.instances, &self.drivers, &self.consumers)?;
+        self.positions = positions_for_order(&order);
+        self.topological = order;
+        self.traversal_dirty = false;
+        Ok(())
+    }
+
     /// Rewiring the D pin leaves the launch boundary and all other bindings in
     /// place. In particular, do not disconnect and reconnect every clock sink.
     fn rewire_registered_input(

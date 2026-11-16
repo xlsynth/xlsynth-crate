@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{OwnedBuffers, buffer_choices, edit, graph, plan, severity};
+use super::proposal::TopologyProposal;
+use super::{buffer_choices, edit, graph, plan, severity};
 use crate::liberty_model::Library;
 use crate::netlist::fanout_opt::FanoutOptimizationOptions;
 use crate::netlist::mapped::MappedNetlist;
 use crate::netlist::sta::incremental::IncrementalSta;
 use crate::netlist::sta::{PreparedStaLibrary, StaOptions};
 use anyhow::Result;
-use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TopologyTrial {
@@ -32,25 +32,6 @@ impl TopologyTrial {
     }
 }
 
-/// Borrow the editor's exact plan until pricing selects a candidate. No ledger
-/// is cloned or built for rejected proposals or for a caller without tracking.
-pub(crate) struct TopologyOwnership<'a> {
-    roots: &'a [graph::Root],
-    plans: &'a [(usize, Vec<edit::Branch>)],
-}
-
-impl TopologyOwnership<'_> {
-    pub(crate) fn record(self, trial: &MappedNetlist, first: usize, owned: &mut OwnedBuffers) {
-        let mut start = first;
-        for (i, branches) in self.plans {
-            let end = start + branches.len();
-            owned.record(trial, &self.roots[*i], start..end);
-            start = end;
-        }
-        debug_assert_eq!(start, trial.module.instances.len());
-    }
-}
-
 /// A buffer-tree candidate that would be acceptable if the listed existing
 /// output pins were also repaired.
 pub(crate) struct ForestRetry {
@@ -61,17 +42,18 @@ pub(crate) struct ForestRetry {
 /// Generate wiring candidates for the registered stage. The caller evaluates
 /// timing and electrical limits and selects a winner. Each candidate starts
 /// from `original`; the count includes every candidate passed to the caller.
-pub(crate) fn visit_topology_candidates(
+pub(crate) fn visit_topology_candidates<'lib>(
     original: &MappedNetlist,
     library: &Library,
     prepared: &PreparedStaLibrary<'_>,
     timing: StaOptions,
     options: &FanoutOptimizationOptions,
-    timing_cones: Option<(&IncrementalSta<'_>, usize)>,
+    sta: &mut IncrementalSta<'lib>,
+    timing_cones: Option<usize>,
     mut visit: impl FnMut(
-        MappedNetlist,
+        &mut IncrementalSta<'lib>,
         TopologyTrial,
-        TopologyOwnership<'_>,
+        TopologyProposal<'_>,
     ) -> Result<Option<ForestRetry>>,
 ) -> Result<usize> {
     if options.drivers_per_round == 0 {
@@ -121,7 +103,7 @@ pub(crate) fn visit_topology_candidates(
             .then(i.cmp(&j))
     });
     let cones = match timing_cones {
-        Some((sta, boundary)) => {
+        Some(boundary) => {
             super::selection::TimingCones::prepare(sta, &roots, &cone_eligible, boundary)?
         }
         None => None,
@@ -129,6 +111,10 @@ pub(crate) fn visit_topology_candidates(
     if ranked.is_empty() && cones.is_none() {
         return Ok(0);
     }
+    const WIDTHS: [usize; 2] = [16, 64];
+    let buffers = graph::buffers(library, prepared);
+    let choices = buffer_choices(&buffers, library);
+    let cones = super::selection::plan_windows(cones, &roots, &choices, &WIDTHS, timing);
     // A single proposal can repair equally critical paths. Bound the number
     // of individual alternatives separately from the width of that batch.
     const MAX_SINGLE: usize = 8;
@@ -153,26 +139,17 @@ pub(crate) fn visit_topology_candidates(
     };
     let mut retry = None;
     let mut visited = 0;
-    let buffers = graph::buffers(library, prepared);
-    for buffer in buffer_choices(&buffers, library) {
+    for buffer in choices {
         let mut previous = Vec::new();
-        for width in [16, 64] {
+        for width in WIDTHS {
             let plans: Vec<_> = drivers
                 .iter()
                 .filter_map(|&i| plan::tree(&roots[i], buffer, width, timing).map(|p| (i, p)))
                 .collect();
             let mut emit = |p: &[(usize, Vec<edit::Branch>)], kind: TopologyTrial| -> Result<()> {
                 if !p.is_empty() && !previous.iter().any(|old: &Vec<_>| old.as_slice() == p) {
-                    let mut trial = original.clone();
-                    edit::apply_forest(&mut trial, library, buffer, &roots, p)?;
-                    if let Some(request) = visit(
-                        trial,
-                        kind,
-                        TopologyOwnership {
-                            roots: &roots,
-                            plans: p,
-                        },
-                    )? {
+                    let proposal = TopologyProposal::forest(&roots, buffer, p);
+                    if let Some(request) = visit(sta, kind, proposal)? {
                         let priority = (request.outputs.len(), request.rank);
                         if retry
                             .as_ref()
@@ -210,40 +187,21 @@ pub(crate) fn visit_topology_candidates(
                 emit(std::slice::from_ref(p), TopologyTrial::Forest)?;
             }
             emit(&plans, TopologyTrial::Forest)?;
-            if let Some(cones) = &cones {
-                // Cache the actual tree per offered geometry while walking the
-                // cone. An unbuildable tree cannot conceal its editable fanin.
-                let mut cache = HashMap::new();
-                let groups = cones.groups(|id| {
-                    cache
-                        .entry(id)
-                        .or_insert_with(|| plan::tree(&roots[id], buffer, width, timing))
-                        .is_some()
-                });
-                for (window, group) in groups.iter().enumerate() {
+            if let Some(windows) = cones.get(&(buffer.cell, width)) {
+                for (window, cone) in windows.iter().enumerate() {
                     // The ordinary forest may already have evaluated this group
                     // in a different instance order. Preserve its generated
                     // names and score.
-                    if group.is_empty()
-                        || (group.len() == plans.len()
-                            && plans.iter().all(|(i, _)| group.binary_search(i).is_ok()))
+                    if cone.is_empty()
+                        || (cone.len() == plans.len()
+                            && plans
+                                .iter()
+                                .all(|(i, _)| cone.binary_search_by_key(i, |(id, _)| *id).is_ok()))
                     {
                         continue;
                     }
-                    let cone: Vec<_> = group
-                        .iter()
-                        .map(|&id| {
-                            (
-                                id,
-                                cache[&id]
-                                    .as_ref()
-                                    .expect("selected buildable tree")
-                                    .clone(),
-                            )
-                        })
-                        .collect();
                     emit(
-                        &cone,
+                        cone,
                         TopologyTrial::TimingCone(TimingConeTrial {
                             window,
                             roots: cone.len(),
@@ -256,15 +214,10 @@ pub(crate) fn visit_topology_candidates(
     // Evaluate at most one additional repair proposal. Prefer repairing fewer
     // other outputs, then use the original delay and area ranking.
     if let Some((_, buffer, plans, parent)) = retry {
-        let mut trial = original.clone();
-        edit::apply_forest(&mut trial, library, buffer, &roots, &plans)?;
         visit(
-            trial,
+            sta,
             TopologyTrial::ElectricalRetry(parent),
-            TopologyOwnership {
-                roots: &roots,
-                plans: &plans,
-            },
+            TopologyProposal::forest(&roots, buffer, &plans),
         )?;
         visited += 1;
     }

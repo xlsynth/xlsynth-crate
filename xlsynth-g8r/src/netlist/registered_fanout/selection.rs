@@ -4,11 +4,62 @@
 //! require far more edited roots than the number of affordable STA trials.
 
 use super::coordination::{editable_sites, select_endpoint_roots};
-use super::graph::Root;
+use super::edit::Branch;
+use super::graph::{Buffer, Root};
+use super::plan;
+use crate::netlist::sta::StaOptions;
 use crate::netlist::sta::incremental::urgency::PinTimingUrgency;
 use crate::netlist::sta::incremental::{IncrementalSta, TIMING_COMPARISON_TOLERANCE};
 use anyhow::Result;
 use std::collections::HashMap;
+
+/// Buildable buffer trees for each timing window, sorted by the original
+/// driver ID.
+pub(super) type ConeWindows = [Vec<(usize, Vec<Branch>)>; 2];
+
+/// Choose candidate drivers and build their trees before trial edits mutate
+/// STA state. Keep the order of buffer choices, widths, and timing windows.
+pub(super) fn plan_windows(
+    cones: Option<TimingCones<'_, '_>>,
+    roots: &[Root],
+    buffers: &[&Buffer],
+    widths: &[usize],
+    timing: StaOptions,
+) -> HashMap<(usize, usize), ConeWindows> {
+    let mut plans = HashMap::new();
+    let Some(cones) = cones else {
+        return plans;
+    };
+    for buffer in buffers {
+        for &width in widths {
+            // Cache both successful and unbuildable roots. The two windows can
+            // visit the same sink and must use the same geometry.
+            let mut trees = HashMap::new();
+            let groups = cones.groups(|id| {
+                trees
+                    .entry(id)
+                    .or_insert_with(|| plan::tree(&roots[id], buffer, width, timing))
+                    .is_some()
+            });
+            let windows = groups.map(|group| {
+                group
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            id,
+                            trees[&id]
+                                .as_ref()
+                                .expect("selected buildable tree")
+                                .clone(),
+                        )
+                    })
+                    .collect()
+            });
+            plans.insert((buffer.cell, width), windows);
+        }
+    }
+    plans
+}
 
 /// Timing and editable pin identities shared by each buffer choice and width
 /// on this registered snapshot. No arrival or required time is recomputed for

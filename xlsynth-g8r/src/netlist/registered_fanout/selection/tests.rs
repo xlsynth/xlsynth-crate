@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::TimingCones;
-use crate::netlist::registered_fanout::graph::collect_roots;
+use super::{TimingCones, plan_windows};
+use crate::netlist::registered_fanout::graph::{buffer_model, collect_roots};
 use crate::netlist::registered_fanout::tests::read_mapped_netlist;
 use crate::netlist::resize::tests::library;
 use crate::netlist::sta::incremental::IncrementalSta;
@@ -54,6 +54,8 @@ fn nominated_with_unavailable_plans(
     }))
 }
 
+// Many equal-delay launches feed one capture. A fixed root-count cap
+// can omit a competing path and leave the stage delay unchanged.
 #[test]
 fn one_capture_can_require_more_than_sixty_four_launch_drivers() -> Result<()> {
     const LANES: usize = 128;
@@ -93,6 +95,8 @@ fn one_capture_can_require_more_than_sixty_four_launch_drivers() -> Result<()> {
     Ok(())
 }
 
+// Two arcs tie for worst. A third is one gate shorter. Widening the
+// timing window should admit the third without admitting a far-off arc.
 #[test]
 fn widening_includes_an_internal_driver_on_a_competing_arc_to_the_same_capture() -> Result<()> {
     let mut source = String::from("module top(input clk, input d, output y);\n");
@@ -136,6 +140,8 @@ fn widening_includes_an_internal_driver_on_a_competing_arc_to_the_same_capture()
     Ok(())
 }
 
+// Make the nearest candidate unavailable for this tree geometry.
+// Traversal must keep the feasible upstream launch on the same arc.
 #[test]
 fn an_unplannable_downstream_driver_does_not_hide_a_launch_repair() -> Result<()> {
     // Two identical paths tie at the same capture. Both a launch and a
@@ -163,6 +169,60 @@ fn an_unplannable_downstream_driver_does_not_hide_a_launch_repair() -> Result<()
     ] {
         let [tight, _] = nominated_with_unavailable_plans(source, &unavailable)?;
         assert_eq!(tight, expected);
+    }
+    Ok(())
+}
+
+// Feasibility depends on the chosen buffer master and tree width.
+// Freezing arrivals across trials must keep each geometry's own plan.
+#[test]
+fn frozen_cone_windows_keep_each_buffer_geometry() -> Result<()> {
+    let library = library()?;
+    let timing = StaOptions::default();
+    let prepared = Arc::new(PreparedStaLibrary::new(&library)?);
+    let mut source = String::from("module t(input clk, input d, output [7:0] y);");
+    for lane in 0..2 {
+        writeln!(
+            source,
+            "wire q{lane}; DFF1 launch{lane}(.CLK(clk),.D(d),.Q(q{lane}));"
+        )?;
+        for sink in 0..4 {
+            let bit = lane * 4 + sink;
+            writeln!(source, "DFF1 cap{bit}(.CLK(clk),.D(q{lane}),.Q(y[{bit}]));")?;
+        }
+    }
+    source.push_str("endmodule");
+    let netlist = read_mapped_netlist(&source)?;
+    let sta = IncrementalSta::with_registered_library(
+        &netlist.module,
+        &netlist.nets,
+        &netlist.interner,
+        prepared,
+        timing,
+    )?;
+    let roots = collect_roots(&netlist, &library, timing.module_output_load, Some(2))?;
+    let eligible: Vec<_> = (0..roots.len()).collect();
+    assert_eq!(eligible.len(), 2);
+    let cell = library
+        .cells
+        .iter()
+        .position(|cell| cell.name == "BUF1")
+        .unwrap();
+    let buffer = buffer_model(&library, cell).unwrap();
+    let cones = TimingCones::prepare(&sta, &roots, &eligible, 3)?;
+    let windows = plan_windows(cones, &roots, &[&buffer], &[2, 16], timing);
+    for (width, branch_count) in [(2, 2), (16, 1)] {
+        let [tight, wide] = &windows[&(cell, width)];
+        assert_eq!(
+            tight.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            eligible
+        );
+        assert!(
+            tight
+                .iter()
+                .all(|(_, branches)| branches.len() == branch_count)
+        );
+        assert!(wide.is_empty());
     }
     Ok(())
 }

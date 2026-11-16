@@ -4,6 +4,10 @@
 //! Compare buffering and cell substitutions from the same
 //! starting circuit, using timing that includes launch and capture arcs.
 
+mod pricing;
+mod proposal_check;
+
+use self::pricing::{Decision, EndpointShape, TopologyPricing};
 use std::sync::Arc;
 
 use super::timing::{ElectricalGuard, ResizeTimingPolicy, TimingTieBreak};
@@ -15,10 +19,10 @@ use crate::netlist::fanout_opt::FanoutOptimizationOptions;
 use crate::netlist::io::ParsedNetlist;
 use crate::netlist::mapped::MappedNetlist;
 use crate::netlist::registered_fanout::{
-    ForestRetry, OwnedBuffers, TopologyTrial, visit_topology_candidates,
+    ForestRetry, OwnedBuffers, TopologyProposal, TopologyTrial, visit_topology_candidates,
 };
 use crate::netlist::sta::incremental::{
-    IncrementalSta, TIMING_COMPARISON_TOLERANCE, TimingEndpoint,
+    IncrementalSta, TIMING_COMPARISON_TOLERANCE, TimingEdit, TrialOptions, TrialOutcome,
     measure_boundary_delays_with_library,
 };
 use crate::netlist::sta::{PreparedStaLibrary, StaOptions};
@@ -174,6 +178,24 @@ pub(crate) fn optimize_registered_stage(
             options.timing,
         )
     };
+    let fanout = options.fanout.as_ref();
+    if let Some(f) = fanout {
+        f.validate_sta_mode()?;
+    }
+    // Respect an explicit library timing mode when diagnostics are enabled
+    // for the process as a whole.
+    let force_full = fanout.is_some_and(|f| f.full_sta);
+    let verify_proposals = !force_full
+        && (fanout.is_some_and(|f| f.verify_incremental)
+            || std::env::var_os("XLSYNTH_VERIFY_REGISTERED_TOPOLOGY").as_deref()
+                == Some(std::ffi::OsStr::new("1")));
+    // Keep the full query-by-query trace for ordinary diagnostic runs. The
+    // separate topology verifier deliberately exercises both timing engines.
+    let price_in_full =
+        force_full || (!verify_proposals && crate::netlist::sta::sta_trace_enabled());
+    if verify_proposals {
+        log::info!("registered_topology_verify begin");
+    }
     let mut sta = analyze(&current)?;
     let mut objective = sta.objective();
     let mut score = Score::measure(&sta, library, objective)?;
@@ -233,10 +255,12 @@ pub(crate) fn optimize_registered_stage(
     while topology_rounds > 0 || timing_rounds > 0 || recovery_rounds > 0 {
         if objective != sta.objective() {
             objective = sta.objective();
-            score = Score::measure(&sta, library, objective)?;
+            score = Score::measure_with_area(&sta, objective, score.area)?;
         }
         let mut topology = None;
+        let mut materialized_winner = None;
         let mut best_rank = None;
+        let mut best_ordinal = None;
         let mut round = RegisteredOptimizationRound {
             topology_trials: 0,
             electrical_retry_trials: 0,
@@ -258,15 +282,18 @@ pub(crate) fn optimize_registered_stage(
             && topology_rounds > 0
         {
             topology_rounds -= 1;
+            let endpoints = EndpointShape::new(&sta);
+            let full_incumbent = verify_proposals.then(|| analyze(&current)).transpose()?;
+            let round_index = report.rounds.len() + 1;
             visit_topology_candidates(
                 &current,
                 library,
                 &prepared,
                 options.timing,
                 fanout,
-                (selection == RegisteredCandidateSelection::TimingCones)
-                    .then_some((&sta, objective)),
-                |candidate, kind, edits| {
+                &mut sta,
+                (selection == RegisteredCandidateSelection::TimingCones).then_some(objective),
+                |sta, kind, proposal| {
                     if let TopologyTrial::TimingCone(cone) = kind {
                         round.timing_cone_trials += 1;
                         round.timing_cone_root_counts[cone.window] =
@@ -275,44 +302,92 @@ pub(crate) fn optimize_registered_stage(
                     round.topology_trials += 1;
                     round.electrical_retry_trials +=
                         usize::from(matches!(kind, TopologyTrial::ElectricalRetry(_)));
-                    let trial = match analyze(&candidate) {
-                        Ok(trial) => trial,
-                        Err(error) => {
-                            log::debug!("unpriced topology: {error:#}");
-                            report.unpriced_topologies += 1;
-                            return Ok(None);
-                        }
+                    let pricing = TopologyPricing {
+                        score,
+                        initial_delay: report.initial_delay,
+                        weight,
+                        area_limit: topology_area_limit,
+                        guard: electrical_guard,
+                        output_budget: if matches!(
+                            kind,
+                            TopologyTrial::Forest | TopologyTrial::TimingCone(_)
+                        ) {
+                            fanout.drivers_per_round
+                        } else {
+                            0
+                        },
+                        best_rank,
                     };
-                    let next = Score::measure(&trial, library, objective)?;
-                    if let Some(rank) = next.rank(score, weight)
-                        && next.boundaries.within(report.initial_delay)
-                        && best_rank.is_none_or(|best| rank < best)
-                        && preserves_endpoints(&sta, &trial)
-                        && let Some((improved, worse_outputs)) = electrical_progress(
-                            &sta,
-                            &trial,
-                            electrical_guard,
-                            if matches!(kind, TopologyTrial::Forest | TopologyTrial::TimingCone(_))
-                            {
-                                fanout.drivers_per_round
-                            } else {
-                                0
-                            },
+                    let priced = if price_in_full {
+                        let candidate = proposal.materialize(&current, library)?;
+                        price_materialized(
+                            sta,
+                            analyze(&candidate),
+                            library,
+                            objective,
+                            &pricing,
+                            Some(&mut materialized_winner),
+                        )?
+                    } else {
+                        price_proposal(
+                            sta,
+                            &current,
+                            &proposal,
+                            library,
+                            objective,
+                            &pricing,
+                            &endpoints,
+                            full_incumbent.as_ref(),
+                            &analyze,
                         )
-                        && (next.area <= topology_area_limit || improved)
-                    {
-                        if !worse_outputs.is_empty() {
-                            return Ok(Some(ForestRetry {
-                                rank,
-                                outputs: worse_outputs,
-                            }));
+                        .map_err(|error| {
+                            if verify_proposals {
+                                error.context(format!(
+                                    "pricing registered topology in round {round_index}, proposal {}",
+                                    round.topology_trials
+                                ))
+                            } else {
+                                error
+                            }
+                        })?
+                    };
+                    if verify_proposals {
+                        let family = match kind {
+                            TopologyTrial::Forest => "forest",
+                            TopologyTrial::ElectricalRetry(_) => "retry",
+                            TopologyTrial::TimingCone(_) => "cone",
+                        };
+                        log::info!(
+                            "registered_topology_verify proposal round={} ordinal={} mode={} result=matched kind={family}",
+                            round_index,
+                            round.topology_trials,
+                            priced.path
+                        );
+                    }
+                    match priced.decision {
+                        None => report.unpriced_topologies += 1,
+                        Some(Decision::Skip) => {
+                            // The current best wiring proposal stays selected.
                         }
-                        let mut candidate_owned = current_owned.clone();
-                        if let Some(ref mut owned) = candidate_owned {
-                            edits.record(&candidate, current.module.instances.len(), owned);
+                        Some(Decision::Retry { rank, outputs }) => {
+                            return Ok(Some(ForestRetry { rank, outputs }));
                         }
-                        topology = Some((candidate, trial, next, candidate_owned, kind));
-                        best_rank = Some(rank);
+                        Some(Decision::Keep { rank, score: next }) => {
+                            let candidate = proposal.materialize(&current, library)?;
+                            let mut candidate_owned = current_owned.clone();
+                            if let Some(ref mut owned) = candidate_owned {
+                                proposal.record(&candidate, current.module.instances.len(), owned);
+                            }
+                            topology = Some(WinningTopology {
+                                netlist: candidate,
+                                edit: priced.edit,
+                                score: next,
+                                owned: candidate_owned,
+                                kind,
+                            });
+                            best_rank = Some(rank);
+                            best_ordinal = Some(round.topology_trials);
+                        }
                     }
                     Ok(None)
                 },
@@ -357,18 +432,45 @@ pub(crate) fn optimize_registered_stage(
             round.accepted = "cell_substitutions";
             timing_rounds -= 1;
             score = next;
-        } else if let Some((candidate, timing, accepted, candidate_owned, kind)) = topology {
-            sizing_area_limit += accepted.area - score.area;
-            round.added_cells = candidate.module.instances.len() - current.module.instances.len();
+        } else if let Some(winner) = topology {
+            sizing_area_limit += winner.score.area - score.area;
+            round.added_cells =
+                winner.netlist.module.instances.len() - current.module.instances.len();
             round.accepted = "topology";
-            let cone = kind.timing_cone();
+            let cone = winner.kind.timing_cone();
             round.accepted_timing_cone = cone.is_some();
             round.accepted_timing_cone_window = cone.map(|c| c.window);
             round.accepted_timing_cone_roots = cone.map(|c| c.roots);
-            current = candidate;
-            current_owned = candidate_owned;
-            sta = timing;
-            score = accepted;
+            if let Some(edit) = winner.edit {
+                if timing_changes > 0 {
+                    // Sizing already changed its own contender. Restore the
+                    // exact netlist on which the winning wiring edit was
+                    // proposed.
+                    sta = analyze(&current)?;
+                }
+                let result = sta.trial_edit(&edit, TrialOptions::default(), |_, _| Ok(true))?;
+                ensure!(
+                    result.outcome == TrialOutcome::Accepted,
+                    "could not commit selected topology"
+                );
+                // Future budgeted sizing depends on traversal tie ordering.
+                sta.canonicalize_registered_order()?;
+                if verify_proposals {
+                    let full_winner = analyze(&winner.netlist)?;
+                    proposal_check::compare_rollback(&sta, &full_winner, library, objective)
+                        .context(
+                            "checking the committed wiring edit against the selected netlist",
+                        )?;
+                }
+            } else if let Some(trial) = materialized_winner {
+                // Full pricing already computed timing for the winning netlist.
+                sta = *trial;
+            } else {
+                sta = analyze(&winner.netlist)?;
+            }
+            current = winner.netlist;
+            current_owned = winner.owned;
+            score = winner.score;
         } else if timing_changes > 0 {
             sta = analyze(&current)?;
         }
@@ -417,6 +519,19 @@ pub(crate) fn optimize_registered_stage(
                 inst.type_name = master;
             }
         }
+        if verify_proposals {
+            let winner = if round.accepted == "topology" {
+                best_ordinal
+            } else {
+                None
+            };
+            log::info!(
+                "registered_topology_verify round={} winner={} topology_ordinal={}",
+                report.rounds.len() + 1,
+                round.accepted,
+                winner.unwrap_or(0)
+            );
+        }
         if round.accepted == "none" {
             report.rounds.push(round);
             break;
@@ -438,6 +553,13 @@ pub(crate) fn optimize_registered_stage(
         full.within(report.initial_delay),
         "assembled winner regresses a timing boundary"
     );
+    if verify_proposals {
+        log::info!(
+            "registered_topology_verify end trials={} rounds={}",
+            report.topology_trials,
+            report.rounds.len()
+        );
+    }
     report.final_area = score.area;
     report.final_delay = full;
     report.objective_delay = full.values()[sta.objective()];
@@ -448,7 +570,132 @@ pub(crate) fn optimize_registered_stage(
     Ok(report)
 }
 
-#[derive(Clone, Copy)]
+/// Best wiring proposal seen so far, retained until it competes with gate
+/// sizing.
+struct WinningTopology {
+    netlist: MappedNetlist,
+    edit: Option<TimingEdit>,
+    score: Score,
+    owned: Option<OwnedBuffers>,
+    kind: TopologyTrial,
+}
+
+/// Result of evaluating a proposed wiring change.
+struct ProposalResult {
+    decision: Option<Decision>,
+    path: &'static str,
+    edit: Option<TimingEdit>,
+}
+
+/// Evaluate a temporary wiring edit. Fall back to full STA for edits that
+/// incremental STA cannot represent, using the same acceptance checks.
+fn price_proposal<'lib>(
+    sta: &mut IncrementalSta<'lib>,
+    current: &MappedNetlist,
+    proposal: &TopologyProposal<'_>,
+    library: &Library,
+    objective: usize,
+    pricing: &TopologyPricing,
+    endpoints: &EndpointShape,
+    full_incumbent: Option<&IncrementalSta<'lib>>,
+    analyze: &impl Fn(&MappedNetlist) -> Result<IncrementalSta<'lib>>,
+) -> Result<ProposalResult> {
+    let full_trial = || -> Result<Result<IncrementalSta<'lib>>> {
+        Ok(analyze(&proposal.materialize(current, library)?))
+    };
+    let oracle = full_incumbent.map(|_| full_trial()).transpose()?;
+    let incumbent_count = sta.instance_count();
+    let mut decision = None;
+    let mut retained_edit = None;
+    // Measure the temporary edit, then reject it so STA restores the starting
+    // circuit before the next trial. Apply only the final winner permanently.
+    let attempted = proposal.timing_edit(current, library, sta).and_then(|edit| {
+        let work = sta.trial_edit(&edit, TrialOptions::default(), |trial, affected| {
+            // Keep callback/oracle errors distinct from an unsupported edit.
+            // An unsupported edit can fall back. A scoring mismatch must fail.
+            decision = Some((|| -> Result<Decision> {
+                if let Some(reference) = &oracle {
+                    let reference = reference.as_ref().map_err(|e| anyhow::anyhow!(
+                        "incremental pricing succeeded but full analysis rejected the proposal: {e:#}"
+                    ))?;
+                    proposal_check::compare_state(trial, reference, library, objective)?;
+                }
+                pricing.incremental(trial, affected, incumbent_count, endpoints, library, objective)
+            })());
+            Ok(false)
+        });
+        if matches!(decision, Some(Ok(Decision::Keep { .. }))) {
+            retained_edit = Some(edit);
+        }
+        work
+    });
+    if let Some(original) = full_incumbent {
+        proposal_check::compare_rollback(sta, original, library, objective)?;
+    }
+    if let Some(result) = decision {
+        attempted?;
+        let decision = result?;
+        if let (Some(original), Some(Ok(reference))) = (full_incumbent, &oracle) {
+            let expected = pricing.full(original, reference, library, objective)?;
+            ensure!(
+                decision == expected,
+                "proposal decision differs: incremental {decision:?}, full {expected:?}"
+            );
+        }
+        return Ok(ProposalResult {
+            decision: Some(decision),
+            path: "incremental",
+            edit: retained_edit,
+        });
+    }
+    if let Err(error) = attempted {
+        log::debug!("using full timing for a wiring edit: {error:#}");
+    }
+    // If incremental STA could not evaluate the edit, build the candidate
+    // netlist and use full STA with the same scoring and acceptance rules.
+    let fresh = match oracle {
+        Some(reference) => reference,
+        None => full_trial()?,
+    };
+    price_materialized(sta, fresh, library, objective, pricing, None)
+}
+
+/// Evaluate a rebuilt candidate and optionally retain its timing state for
+/// a diagnostic trace.
+fn price_materialized<'lib>(
+    sta: &IncrementalSta<'lib>,
+    fresh: Result<IncrementalSta<'lib>>,
+    library: &Library,
+    objective: usize,
+    pricing: &TopologyPricing,
+    materialized_winner: Option<&mut Option<Box<IncrementalSta<'lib>>>>,
+) -> Result<ProposalResult> {
+    match fresh {
+        Ok(trial) => {
+            let decision = pricing.full(sta, &trial, library, objective)?;
+            if matches!(decision, Decision::Keep { .. })
+                && let Some(winner) = materialized_winner
+            {
+                *winner = Some(Box::new(trial));
+            }
+            Ok(ProposalResult {
+                decision: Some(decision),
+                path: "fallback",
+                edit: None,
+            })
+        }
+        Err(error) => {
+            log::debug!("unpriced topology: {error:#}");
+            Ok(ProposalResult {
+                decision: None,
+                path: "unpriced",
+                edit: None,
+            })
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Score {
     boundaries: BoundaryDelays,
     pub(crate) delay: f64,
@@ -467,6 +714,12 @@ impl Score {
             .iter()
             .map(|&cell| library.cells[cell].area)
             .sum();
+        Self::measure_with_area(sta, objective, area)
+    }
+
+    /// Score the current timing with the exact ordered sum of its library cell
+    /// areas.
+    fn measure_with_area(sta: &IncrementalSta<'_>, objective: usize, area: f64) -> Result<Self> {
         let boundaries = sta.score();
         // Compare near-critical sums on the same class throughout a round.
         // Its maximum can fall below another boundary's delay during a trial.
@@ -535,67 +788,9 @@ impl Score {
 /// Register cells and ports retain their indices in an append-only topology
 /// edit.
 pub(crate) fn preserves_endpoints(old: &IncrementalSta<'_>, new: &IncrementalSta<'_>) -> bool {
-    let key = |(endpoint, arrivals): (TimingEndpoint, [Option<f64>; 2])| {
-        let id = match endpoint {
-            TimingEndpoint::Output(i) => (false, i),
-            TimingEndpoint::Capture(i) => (true, i),
-        };
-        (id, arrivals.map(|a| a.is_some()))
-    };
-    old.endpoint_values()
-        .map(key)
-        .eq(new.endpoint_values().map(key))
+    pricing::EndpointShape::preserved_between(old, new)
 }
 
-/// Existing pins may shed violations; a newly inserted pin must satisfy each
-/// characterized limit. Comparisons use the same pin order on unchanged
-/// masters. A positive output budget collects eligible retry sites without
-/// accepting the trial. The retry itself has a zero budget.
-fn electrical_progress(
-    old: &IncrementalSta<'_>,
-    new: &IncrementalSta<'_>,
-    guard: ElectricalGuard,
-    output_budget: usize,
-) -> Option<(bool, Vec<(usize, String)>)> {
-    let mut improved = false;
-    let mut worse_outputs = Vec::new();
-    for instance in 0..new.instance_count() {
-        let before = (instance < old.instance_count())
-            .then(|| old.cached_electrical_violations(instance))
-            .unwrap_or(&[]);
-        for (pin, &next) in new
-            .cached_electrical_violations(instance)
-            .iter()
-            .enumerate()
-        {
-            let previous = before.get(pin).map_or_else(Default::default, |&v| {
-                guard.excess(old, old.cell_indices()[instance], pin, v)
-            });
-            let next = guard.excess(new, new.cell_indices()[instance], pin, next);
-            if guard.worsens(next, previous) {
-                if output_budget == 0 || instance >= old.instance_count() {
-                    return None;
-                }
-                // One net's transition can exceed limits at its driver and
-                // at many receivers. Nominate that driver once, using trial
-                // connectivity. The expanded trial must pass every pin check
-                // with no retries.
-                let (driver, name) = new.electrical_driver(instance, pin)?;
-                if driver >= old.instance_count() {
-                    return None;
-                }
-                if !worse_outputs.iter().any(|(d, n)| *d == driver && n == name) {
-                    if worse_outputs.len() == output_budget {
-                        return None;
-                    }
-                    worse_outputs.push((driver, name.to_owned()));
-                }
-            }
-            improved |= guard.worsens(previous, next);
-        }
-    }
-    Some((improved, worse_outputs))
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,12 +830,24 @@ mod tests {
         };
         let old = analyze("aaaabb")?;
         let trial = analyze("aaabbb")?;
-        assert!(trial.score().register_to_register < old.score().register_to_register);
-        let progress =
-            |budget| electrical_progress(&old, &trial, ElectricalGuard::Relative, budget);
-        let (_, outputs) = progress(1).expect("expected a retry");
+        let objective = old.objective();
+        let score = Score::measure(&old, &lib, objective)?;
+        let mut pricing = TopologyPricing {
+            score,
+            initial_delay: old.score(),
+            weight: 0.5,
+            area_limit: score.area,
+            guard: ElectricalGuard::Relative,
+            output_budget: 1,
+            best_rank: None,
+        };
+        let decision = pricing.full(&old, &trial, &lib, objective)?;
+        let Decision::Retry { outputs, .. } = decision else {
+            panic!("expected a retry, got {decision:?}");
+        };
         assert_eq!(outputs, [(1, "Q".into())]);
-        assert!(progress(0).is_none());
+        pricing.output_budget = 0;
+        assert_eq!(pricing.full(&old, &trial, &lib, objective)?, Decision::Skip);
         Ok(())
     }
 
@@ -714,6 +921,25 @@ mod tests {
                 .count(),
             35
         );
+        // Compare all three timing modes on a search that accepted a wiring
+        // edit.
+        let mut opts = opts;
+        let expected = crate::netlist::emit::emit_netlist_as_text(&net)?;
+        for full_sta in [true, false] {
+            let fanout = opts.fanout.as_mut().unwrap();
+            fanout.full_sta = full_sta;
+            fanout.verify_incremental = !full_sta;
+            let mut candidate = read_gv_from_str(&gv)?;
+            let report = optimize_registered_netlist(&mut candidate, &lib, &opts)?;
+            assert_eq!(serde_json::to_value(report)?, serde_json::to_value(&r)?);
+            assert_eq!(
+                crate::netlist::emit::emit_netlist_as_text(&candidate)?,
+                expected
+            );
+        }
+        opts.fanout.as_mut().unwrap().full_sta = true;
+        let error = optimize_registered_netlist(&mut net, &lib, &opts).unwrap_err();
+        assert!(error.to_string().contains("mutually exclusive"));
         Ok(())
     }
 

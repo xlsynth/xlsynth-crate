@@ -15,6 +15,7 @@ mod edit;
 mod graph;
 mod owned;
 mod plan;
+mod proposal;
 mod refine;
 mod selection;
 pub use self::owned::OwnedBuffers;
@@ -25,6 +26,7 @@ mod tests;
 
 pub(crate) use self::candidates::{ForestRetry, TopologyTrial, visit_topology_candidates};
 use self::graph::{Buffer, Root};
+pub(crate) use self::proposal::TopologyProposal;
 use crate::liberty_model::Library;
 use crate::netlist::sta::StaOptions;
 

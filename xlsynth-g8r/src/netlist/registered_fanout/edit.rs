@@ -229,13 +229,22 @@ fn fresh_names(
     netlist: &mut MappedNetlist,
     ordinal: &mut usize,
 ) -> (crate::netlist::parse::PortId, crate::netlist::parse::PortId) {
-    let interner = &mut netlist.interner;
+    let (wire, cell) = next_names(ordinal, |name| netlist.interner.get(name).is_some());
+    (
+        netlist.interner.get_or_intern(wire),
+        netlist.interner.get_or_intern(cell),
+    )
+}
+
+/// Select the same emitted wire and cell names for either view of a proposal.
+/// Advancing the ordinal also reserves the pair against later inserts.
+pub(super) fn next_names(ordinal: &mut usize, occupied: impl Fn(&str) -> bool) -> (String, String) {
     loop {
         let wire = format!("g8r_data_fanout_wire_{ordinal}");
         let cell = format!("g8r_data_fanout_buf_{ordinal}");
         *ordinal += 1;
-        if interner.get(&wire).is_none() && interner.get(&cell).is_none() {
-            return (interner.get_or_intern(wire), interner.get_or_intern(cell));
+        if !occupied(&wire) && !occupied(&cell) {
+            return (wire, cell);
         }
     }
 }
@@ -244,9 +253,16 @@ fn fresh_names(
 mod tests {
     use super::super::{
         graph::roots,
+        proposal::TopologyProposal,
         tests::{library, read_mapped_netlist},
     };
     use super::*;
+    use crate::netlist::normalized::BitSource;
+    use crate::netlist::sta::incremental::{
+        IncrementalSta, TimingMutation, UnsupportedRegisteredEdit,
+    };
+    use crate::netlist::sta::{PreparedStaLibrary, StaOptions};
+    use std::sync::Arc;
 
     fn example() -> Result<(MappedNetlist, Library, Root, Buffer)> {
         let lib = library()?;
@@ -274,6 +290,82 @@ mod tests {
         let index = lib.cells.iter().position(|c| c.name == "BUF4").unwrap();
         let buffer = buffer_model(&lib, index).expect("ordinary buffer");
         Ok((netlist, lib, root, buffer))
+    }
+
+    // Compare the timing projection with reparsed emitted Verilog. Exercise
+    // grouped insertion and rewiring so numeric IDs and physical pins agree.
+    #[test]
+    fn timing_edit_matches_emitted_cells_pins_and_normalized_bit_ids() -> Result<()> {
+        let (mut netlist, lib, root, buffer) = example()?;
+        let prepared = Arc::new(PreparedStaLibrary::new(&lib)?);
+        let analyze = |netlist: &MappedNetlist| {
+            IncrementalSta::with_registered_library(
+                &netlist.module,
+                &netlist.nets,
+                &netlist.interner,
+                prepared.clone(),
+                StaOptions::default(),
+            )
+        };
+        let plans = vec![(
+            0,
+            vec![
+                Branch {
+                    parent: None,
+                    sinks: vec![0, 1],
+                },
+                Branch {
+                    parent: Some(0),
+                    sinks: vec![2],
+                },
+            ],
+        )];
+        let proposal = TopologyProposal::forest(std::slice::from_ref(&root), &buffer, &plans);
+        let multiple_modules = analyze(&netlist)?;
+        let error = proposal
+            .timing_edit(&netlist, &lib, &multiple_modules)
+            .unwrap_err();
+        assert!(error.is::<UnsupportedRegisteredEdit>());
+        // Drop the unreferenced sibling declarations to exercise append-only
+        // normalization with the same bus, pin aliases and emitted-name
+        // collision.
+        netlist.nets.truncate(netlist.module.net_index_range.end);
+        let initial = analyze(&netlist)?;
+        let timing = proposal.timing_edit(&netlist, &lib, &initial)?;
+        let emitted = proposal.materialize(&netlist, &lib)?;
+        let oracle = analyze(&emitted)?;
+        assert_eq!(initial.bit_count() + timing.new_bits, oracle.bit_count());
+        let mut index = initial.instance_count();
+        let mut rewires = 0;
+        for mutation in timing.mutations {
+            match mutation {
+                TimingMutation::Insert(added) => {
+                    let instance = oracle.instance(index).unwrap();
+                    assert_eq!(added.name, instance.name);
+                    assert_eq!(added.cell, instance.cell);
+                    assert_eq!(added.connections.len(), instance.pin_order.len());
+                    for ((pin, source), name) in added.connections.iter().zip(instance.pin_order) {
+                        assert_eq!(pin, name);
+                        assert_eq!(&instance.pins[name], std::slice::from_ref(source));
+                    }
+                    index += 1;
+                }
+                TimingMutation::Rewire {
+                    instance,
+                    pin,
+                    source,
+                } => {
+                    let sink = oracle.instance(instance).unwrap();
+                    assert!(matches!(source, BitSource::Bit(_)));
+                    assert_eq!(&sink.pins[&pin], std::slice::from_ref(&source));
+                    rewires += 1;
+                }
+                other => panic!("unexpected registered buffer mutation: {other:?}"),
+            }
+        }
+        assert_eq!(index, oracle.instance_count());
+        assert_eq!(rewires, 3);
+        Ok(())
     }
 
     // Aliases share the load seen by the driver. Rewiring one selected data pin

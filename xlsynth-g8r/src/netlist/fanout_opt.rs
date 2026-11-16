@@ -29,7 +29,10 @@ use std::time::Instant;
 /// units.
 #[derive(Clone, Debug, Serialize)]
 pub struct FanoutOptimizationOptions {
+    /// Materialize each wiring proposal and recompute its timing from scratch.
     pub full_sta: bool,
+    /// Check incremental proposal timing against a full recomputation.
+    /// Mutually exclusive with `full_sta`.
     pub verify_incremental: bool,
     pub max_rounds: usize,
     pub drivers_per_round: usize,
@@ -41,6 +44,17 @@ pub struct FanoutOptimizationOptions {
     /// Affine wire capacitance shared by ranking, full STA and incremental STA.
     pub wire_load: WireLoadModel,
 }
+
+impl FanoutOptimizationOptions {
+    pub(crate) fn validate_sta_mode(&self) -> Result<()> {
+        ensure!(
+            !(self.full_sta && self.verify_incremental),
+            "full STA and incremental oracle modes are mutually exclusive"
+        );
+        Ok(())
+    }
+}
+
 impl Default for FanoutOptimizationOptions {
     fn default() -> Self {
         Self {
@@ -834,10 +848,7 @@ pub fn optimize_fanout(
     options: FanoutOptimizationOptions,
 ) -> Result<FanoutOptimizationReport> {
     options.wire_load.validate()?;
-    ensure!(
-        !(options.full_sta && options.verify_incremental),
-        "full STA and incremental oracle modes are mutually exclusive"
-    );
+    options.validate_sta_mode()?;
     ensure!(
         options.max_rounds <= 32 && (1..=8).contains(&options.drivers_per_round),
         "search bounds exceeded"

@@ -376,6 +376,9 @@ fn check_registered_buffer_trial(next_state: &str) -> Result<()> {
         );
         compare_registered(&sta, if accept { &buffered } else { &original }, &registers)?;
     }
+    // Both buffers become ready when the launch register is visited. The
+    // sparse insertion can place the new buffer immediately after the launch,
+    // while a fresh traversal visits the lower-indexed receiver first.
     let fresh = IncrementalSta::new(
         &buffered.modules[0],
         &buffered.nets,
@@ -383,6 +386,8 @@ fn check_registered_buffer_trial(next_state: &str) -> Result<()> {
         &lib,
         options(),
     )?;
+    sta.canonicalize_registered_order()?;
+    assert_eq!(sta.topological_instances(), fresh.topological_instances());
     assert_eq!(sta.timing, fresh.timing);
     assert_eq!(sta.endpoint_values, fresh.endpoint_values);
     assert_eq!(sta.score(), fresh.score());

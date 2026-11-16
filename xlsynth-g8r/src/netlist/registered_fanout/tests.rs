@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::{ForestRetry, TopologyTrial};
 use crate::aig::{
     AigBitVector, ClockPort, GateBuilder, GateBuilderOptions, SequentialGateFn,
     add_input_registers, add_output_registers,
@@ -16,9 +17,11 @@ use crate::netlist::sequential_mapping::{
     NativeMappingSchedule, SequentialMappingOptions, map_sequential_to_native_netlist,
     map_sequential_with_policy,
 };
+use crate::netlist::sta::incremental::IncrementalSta;
 use crate::netlist::sta::{PreparedStaLibrary, StaOptions, analyze_register_boundary_max_arrival};
 use crate::techmap::postprocess::{CoverStrategy, PostMappingOptions};
 use anyhow::{Error, Result};
+use std::sync::Arc;
 use xlsynth_pir::IrBits;
 
 /// Reads the first module of a fixture while retaining its full net table and
@@ -299,6 +302,35 @@ fn ordinary_optimizer_tracks_only_buffers_in_the_accepted_topology() -> Result<(
     Ok(())
 }
 
+/// Exercise the same proposal generator as the optimizer while inspecting each
+/// candidate as a concrete netlist or running sequential simulation on it.
+fn visit_materialized_candidates(
+    original: &MappedNetlist,
+    library: &Library,
+    timing: StaOptions,
+    options: &FanoutOptimizationOptions,
+    mut visit: impl FnMut(MappedNetlist, TopologyTrial) -> Result<Option<ForestRetry>>,
+) -> Result<usize> {
+    let prepared = Arc::new(PreparedStaLibrary::new(library)?);
+    let mut sta = IncrementalSta::with_registered_library(
+        &original.module,
+        &original.nets,
+        &original.interner,
+        Arc::clone(&prepared),
+        timing,
+    )?;
+    super::visit_topology_candidates(
+        original,
+        library,
+        &prepared,
+        timing,
+        options,
+        &mut sta,
+        None,
+        |_, kind, proposal| visit(proposal.materialize(original, library)?, kind),
+    )
+}
+
 /// Two independent electrical bottlenecks share a stage; the third broadcast
 /// is also an aliased generated clock, so every tap of that net stays fixed.
 // Exercise a mixed forest with a flip-flop Q and a gate driven by primary inputs.
@@ -335,17 +367,15 @@ fn joint_candidates_can_buffer_launch_and_internal_data_together() -> Result<()>
     assert!(roots.iter().any(|r| r.instance_name == "launch"));
     assert!(roots.iter().any(|r| r.instance_name == "shared_gate"));
     assert!(roots.iter().all(|r| r.instance_name != "phase"));
-    let total = super::visit_topology_candidates(
+    let total = visit_materialized_candidates(
         &original,
         &lib,
-        &PreparedStaLibrary::new(&lib)?,
         timing,
         &FanoutOptimizationOptions {
             fanout_trigger: 8,
             ..Default::default()
         },
-        None,
-        |trial, _, _| {
+        |trial, _| {
             // First four instances include both driver types and the
             // generated-clock capture.
             let moved = |i: usize| {
@@ -412,28 +442,20 @@ fn buffering_preserves_registered_logic_and_external_alias() -> Result<()> {
         module_output_load: 0.01,
         ..Default::default()
     };
-    super::visit_topology_candidates(
-        &original,
-        &lib,
-        &PreparedStaLibrary::new(&lib)?,
-        timing,
-        &options,
-        None,
-        |trial, _, _| {
-            let added = &trial.module.instances[original.module.instances.len()..];
-            assert!(!added.is_empty());
-            assert!(
-                added
-                    .iter()
-                    .all(|i| trial.interner.resolve(i.type_name) == Some("BUF4"))
-            );
-            assert_eq!(trial.module.assigns, original.module.assigns);
-            assert_eq!(trial.module.instances[..2], original.module.instances[..2]);
-            assert_eq!(run(&trial)?, expected);
-            buffered += 1;
-            Ok(None)
-        },
-    )?;
+    visit_materialized_candidates(&original, &lib, timing, &options, |trial, _| {
+        let added = &trial.module.instances[original.module.instances.len()..];
+        assert!(!added.is_empty());
+        assert!(
+            added
+                .iter()
+                .all(|i| trial.interner.resolve(i.type_name) == Some("BUF4"))
+        );
+        assert_eq!(trial.module.assigns, original.module.assigns);
+        assert_eq!(trial.module.instances[..2], original.module.instances[..2]);
+        assert_eq!(run(&trial)?, expected);
+        buffered += 1;
+        Ok(None)
+    })?;
     assert!(buffered > 0);
     Ok(())
 }
@@ -442,7 +464,6 @@ fn buffering_preserves_registered_logic_and_external_alias() -> Result<()> {
 // Check which wires move and simulate the resulting registered circuit.
 #[test]
 fn a_forest_retries_only_a_named_driver_output_and_keeps_registered_values() -> Result<()> {
-    use super::{ForestRetry, TopologyTrial};
     use std::fmt::Write;
 
     // Leave a launch outside the high-fanout batch so a trial can identify
@@ -489,14 +510,12 @@ fn a_forest_retries_only_a_named_driver_output_and_keeps_registered_values() -> 
     for output in ["D", "Q"] {
         let mut retries = 0;
         let mut requested = 0;
-        super::visit_topology_candidates(
+        visit_materialized_candidates(
             &original,
             &lib,
-            &PreparedStaLibrary::new(&lib)?,
             StaOptions::default(),
             &FanoutOptimizationOptions::default(),
-            None,
-            |trial, kind, _| {
+            |trial, kind| {
                 let direct = |bank: usize| {
                     let first_sink = bank * (sinks + 1) + 1;
                     original.module.instances[first_sink].connections
