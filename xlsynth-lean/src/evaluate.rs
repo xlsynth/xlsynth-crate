@@ -20,6 +20,9 @@ use crate::{
     LeanCircuitBundle, LeanError, LeanExportOptions, LeanFunction, LeanModuleName, export_gate_fn,
 };
 
+mod block;
+pub use block::BlockCycleResult;
+
 /// Reusable evaluator that compiles the companion Lean support modules once.
 ///
 /// Each evaluation batch runs in a separate temporary directory. The supplied

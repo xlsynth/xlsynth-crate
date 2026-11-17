@@ -442,4 +442,19 @@ XLSYNTH_LEAN=/path/to/lean/bin/lean \
     -- -max_total_time=300
 ```
 
+For a stateful block, `LeanEvaluator::eval_block_trace` takes an initial register
+state and one input vector per clock. Each result contains the outputs observed
+on that clock and the register values carried into the next clock. Ports and
+registers use declaration order. Each value has its declared XLS type, including
+arrays, tuples, and bit vectors of any supported width (even `bits[0]`).
+
+To compare generated block traces against the PIR interpreter, run:
+
+```sh
+XLSYNTH_LEAN=/path/to/lean/bin/lean \
+  cargo fuzz run --fuzz-dir xlsynth-lean/fuzz \
+    --features external-lean --sanitizer none fuzz_block_lean_eval \
+    -- -max_total_time=300
+```
+
 See the repository's `FUZZ.md` for the target's coverage and failure diagnostics.
