@@ -1,223 +1,102 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact combinational-dependency analysis across block instantiations.
+//! Combinational-cycle validation for the emission hierarchy.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-
-use xlsynth_pir::ir::{Block, NodePayload};
-use xlsynth_pir::ir_utils::operands;
+use xlsynth_pir::BuilderError;
+use xlsynth_pir::ir::{Block, NodeRef, Package, node_textual_id};
+use xlsynth_pir::ir_builder::verify_block_combinational_cycles;
 
 use crate::BlockCodegenError;
 
-type OutputDependencies = BTreeMap<String, BTreeSet<String>>;
-
-/// Rejects combinational cycles without treating registered child paths as
-/// feedback.
-pub(crate) fn verify_hierarchy(ordered_blocks: &[&Block]) -> Result<(), BlockCodegenError> {
-    let mut dependencies = BTreeMap::<&str, OutputDependencies>::new();
-
-    for &block in ordered_blocks {
-        let mut successors = vec![BTreeSet::new(); block.nodes.len()];
-        let mut incoming_counts = vec![0usize; block.nodes.len()];
-        let mut instance_inputs = BTreeMap::<(&str, &str), usize>::new();
-        let mut instance_outputs = Vec::<(&str, &str, usize)>::new();
-
-        for (index, node) in block.nodes.iter().enumerate() {
-            for operand in operands(&node.payload) {
-                add_edge(&mut successors, &mut incoming_counts, operand.index, index);
-            }
-
-            match &node.payload {
-                NodePayload::InstantiationInput {
-                    instantiation,
-                    port_name,
-                    ..
-                } => {
-                    instance_inputs.insert((instantiation.as_str(), port_name.as_str()), index);
-                }
-                NodePayload::InstantiationOutput {
-                    instantiation,
-                    port_name,
-                } => {
-                    instance_outputs.push((instantiation.as_str(), port_name.as_str(), index));
-                }
-                _ => {
-                    // Explicit operands completely describe ordinary node
-                    // dependencies.
-                }
-            }
+/// Reports a PIR cycle witness using the emitted block's node names.
+pub(crate) fn verify_hierarchy(top: &Block, package: &Package) -> Result<(), BlockCodegenError> {
+    verify_block_combinational_cycles(top, package).map_err(|error| {
+        if let BuilderError::CombinationalCycle { block, steps } = &error
+            && let Some(source) = package.get_block(block)
+            && let Some(first) = steps.first()
+            && let Some(index) = source.nodes.iter().position(|n| n.text_id == first.node_id)
+        {
+            let name = node_textual_id(source, NodeRef { index });
+            return BlockCodegenError::InvalidBlock(format!(
+                "block `{block}` contains a combinational cycle through its block hierarchy at node `{name}`"
+            ));
         }
-
-        for (instance_name, output_name, output_node) in instance_outputs {
-            let instance = block
-                .instantiations
-                .iter()
-                .find(|instance| instance.name == instance_name)
-                .ok_or_else(|| {
-                    BlockCodegenError::InvalidBlock(format!(
-                        "block `{}` references undeclared instance `{instance_name}`",
-                        block.name
-                    ))
-                })?;
-            let Some(child_name) = instance.referenced_block() else {
-                // Opaque external modules and foreign functions provide no
-                // internal connectivity for this cycle check.
-                continue;
-            };
-
-            let child_dependencies = dependencies.get(child_name).ok_or_else(|| {
-                BlockCodegenError::InvalidBlock(format!(
-                    "block `{}` instantiates child `{}` before its dependencies are available",
-                    block.name, instance.block
-                ))
-            })?;
-            let output_dependencies = child_dependencies.get(output_name).ok_or_else(|| {
-                BlockCodegenError::InvalidBlock(format!(
-                    "instance `{instance_name}` of block `{}` has no output `{output_name}`",
-                    instance.block
-                ))
-            })?;
-
-            for input_name in output_dependencies {
-                let input_node = instance_inputs
-                    .get(&(instance_name, input_name.as_str()))
-                    .copied()
-                    .ok_or_else(|| {
-                        BlockCodegenError::InvalidBlock(format!(
-                            "instance `{instance_name}` of block `{}` has no connected input \
-                             `{input_name}`",
-                            instance.block
-                        ))
-                    })?;
-                add_edge(
-                    &mut successors,
-                    &mut incoming_counts,
-                    input_node,
-                    output_node,
-                );
-            }
-        }
-
-        let input_names = block
-            .input_ports()
-            .map(|node| (node.index, block.port_name(node)))
-            .collect::<BTreeMap<_, _>>();
-        let mut node_dependencies = vec![BTreeSet::<usize>::new(); block.nodes.len()];
-        let mut ready = incoming_counts
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &count)| (count == 0).then_some(index))
-            .collect::<VecDeque<_>>();
-        let mut visited = 0usize;
-
-        while let Some(index) = ready.pop_front() {
-            visited += 1;
-            if input_names.contains_key(&index) {
-                node_dependencies[index].insert(index);
-            }
-
-            let inherited = std::mem::take(&mut node_dependencies[index]);
-            for &successor in &successors[index] {
-                node_dependencies[successor].extend(inherited.iter().copied());
-                incoming_counts[successor] -= 1;
-                if incoming_counts[successor] == 0 {
-                    ready.push_back(successor);
-                }
-            }
-            node_dependencies[index] = inherited;
-        }
-
-        if visited != block.nodes.len() {
-            let index = incoming_counts
-                .iter()
-                .enumerate()
-                .find(|&(index, &count)| {
-                    count != 0
-                        && matches!(
-                            block.nodes[index].payload,
-                            NodePayload::InstantiationInput { .. }
-                                | NodePayload::InstantiationOutput { .. }
-                        )
-                })
-                .or_else(|| {
-                    incoming_counts
-                        .iter()
-                        .enumerate()
-                        .find(|&(_, &count)| count != 0)
-                })
-                .map(|(index, _)| index)
-                .expect("an unvisited node has a nonzero incoming count");
-            let node = &block.nodes[index];
-            let node_name = node
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("{}.{}", node.payload.get_operator(), node.text_id));
-            return Err(BlockCodegenError::InvalidBlock(format!(
-                "block `{}` contains a combinational cycle through its block hierarchy \
-                 at node `{node_name}`",
-                block.name
-            )));
-        }
-
-        let mut outputs = OutputDependencies::new();
-        for port in block.output_ports() {
-            let node = block.output_value(port);
-            outputs.insert(
-                block.port_name(port).to_string(),
-                node_dependencies[node.index]
-                    .iter()
-                    .map(|&index| input_names[&index].to_string())
-                    .collect(),
-            );
-        }
-        dependencies.insert(block.name.as_str(), outputs);
-    }
-
-    Ok(())
-}
-
-/// Adds one unique zero-delay edge and updates its destination's indegree.
-fn add_edge(
-    successors: &mut [BTreeSet<usize>],
-    incoming_counts: &mut [usize],
-    source: usize,
-    destination: usize,
-) {
-    if successors[source].insert(destination) {
-        incoming_counts[destination] += 1;
-    }
+        BlockCodegenError::InvalidBlock(error.to_string())
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use xlsynth_pir::ir::{Block, Package, PackageMember};
+    use xlsynth_pir::ir::Package;
     use xlsynth_pir::ir_parser::Parser;
 
-    use super::verify_hierarchy;
     use crate::BlockCodegenError;
 
-    /// Parses public synthetic IR and preserves dependency-before-parent order.
-    fn parse_blocks(source: &str) -> Package {
+    /// Parses and verifies the complete hierarchy used by a test.
+    fn parse_package(source: &str) -> Package {
         Parser::new(source)
             .parse_and_verify_package()
             .unwrap_or_else(|error| panic!("invalid public test package:\n{source}\n{error}"))
     }
 
-    /// Collects package blocks in their already-verified declaration order.
-    fn ordered_blocks(package: &Package) -> Vec<&Block> {
-        package
-            .members
-            .iter()
-            .filter_map(|member| match member {
-                PackageMember::Block(block) => Some(block),
-                PackageMember::Function(_) => None,
-            })
-            .collect()
+    fn verify_hierarchy(package: &Package) -> Result<(), BlockCodegenError> {
+        super::verify_hierarchy(package.get_top_block().unwrap(), package)
     }
 
     #[test]
-    fn direct_child_feedback_is_rejected_for_internal_and_external_blocks() {
-        let source = r#"package public_direct_cycle
+    fn helper_name_preserves_feedback_verdict_and_sv_emission() {
+        for helper in ["amount", "wrapper"] {
+            for shift in [0, 1] {
+                // The first node in each graph holds a different literal. The
+                // shifter must read the helper's return, even for equal names.
+                let source = format!(
+                    r#"package control
+fn {helper}() -> bits[2] {{
+  ret offset: bits[2] = literal(value={shift}, id=1)
+}}
+block shifter(data: bits[3], amount: bits[2], result: bits[3]) {{
+  data: bits[3] = input_port(name=data, id=2)
+  amount: bits[2] = input_port(name=amount, id=3)
+  y: bits[3] = shll(data, amount, id=4)
+  result: () = output_port(y, name=result, id=5)
+}}
+top block wrapper(result: bits[3]) {{
+  instantiation u(block=shifter, kind=block)
+  marker: bits[2] = literal(value={marker}, id=6)
+  amount: bits[2] = invoke(to_apply={helper}, id=7)
+  q: bits[3] = instantiation_output(instantiation=u, port_name=result, id=8)
+  d: () = instantiation_input(q, instantiation=u, port_name=data, id=9)
+  n: () = instantiation_input(amount, instantiation=u, port_name=amount, id=10)
+  result: () = output_port(q, name=result, id=11)
+}}"#,
+                    marker = 1 - shift
+                );
+                let package = parse_package(&source);
+                let checked = verify_hierarchy(&package);
+                let sv = crate::emit_system_verilog(&package, &Default::default());
+                if shift == 0 {
+                    for error in [checked.unwrap_err(), sv.unwrap_err()] {
+                        assert!(matches!(error, BlockCodegenError::InvalidBlock(message)
+                            if message.contains("combinational cycle")));
+                    }
+                } else {
+                    checked.unwrap();
+                    sv.unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_child_feedback_before_expanding_a_downstream_call() {
+        let package = parse_package(
+            r#"package public_direct_cycle
+
+#[ffi_proto("""code_template: "external_cell {fn} (.x({x}), .out({return}));"
+""")]
+fn external_cell(x: bits[8] id=6) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=6)
+}
 
 block passthrough(value: bits[8], result: bits[8]) {
   value: bits[8] = input_port(name=value, id=1)
@@ -228,26 +107,27 @@ top block feedback(result: bits[8]) {
   instantiation component(block=passthrough, kind=block)
   fed: bits[8] = instantiation_output(instantiation=component, port_name=result, id=3)
   connected: () = instantiation_input(fed, instantiation=component, port_name=value, id=4)
-  result: () = output_port(fed, name=result, id=5)
+  called: bits[8] = invoke(fed, to_apply=external_cell, id=7)
+  result: () = output_port(called, name=result, id=5)
 }
 "#;
         let external = source.replace(
             "kind=block",
             "module_name=external_rtl, kind=behavioral_extern_block",
         );
-        for source in [source, external.as_str()] {
-            let package = parse_blocks(source);
-            assert!(matches!(
-                verify_hierarchy(&ordered_blocks(&package)),
-                Err(BlockCodegenError::InvalidBlock(message))
-                    if message.contains("block `feedback` contains a combinational cycle")
-            ));
-        }
+
+        // Reaching expansion would report the non-inlineable foreign call.
+        let result = crate::emit_system_verilog(&package, &Default::default());
+        assert!(matches!(
+            result,
+            Err(BlockCodegenError::InvalidBlock(message))
+                if message.contains("block `feedback` contains a combinational cycle")
+        ));
     }
 
     #[test]
     fn nested_child_feedback_is_rejected_transitively() {
-        let package = parse_blocks(
+        let package = parse_package(
             r#"package public_nested_cycle
 
 block inner(value: bits[8], result: bits[8]) {
@@ -273,7 +153,7 @@ top block feedback(result: bits[8]) {
         );
 
         assert!(matches!(
-            verify_hierarchy(&ordered_blocks(&package)),
+            verify_hierarchy(&package),
             Err(BlockCodegenError::InvalidBlock(message))
                 if message.contains("block `feedback` contains a combinational cycle")
         ));
@@ -281,7 +161,7 @@ top block feedback(result: bits[8]) {
 
     #[test]
     fn registered_child_legally_breaks_the_feedback_path() {
-        let package = parse_blocks(
+        let package = parse_package(
             r#"package public_registered_feedback
 
 block delayed(clk: clock, value: bits[8], result: bits[8]) {
@@ -301,12 +181,12 @@ top block feedback(clk: clock, result: bits[8]) {
 "#,
         );
 
-        assert_eq!(verify_hierarchy(&ordered_blocks(&package)), Ok(()));
+        assert_eq!(verify_hierarchy(&package), Ok(()));
     }
 
     #[test]
     fn unrelated_child_input_and_output_do_not_create_false_feedback() {
-        let package = parse_blocks(
+        let package = parse_package(
             r#"package public_independent_ports
 
 block independent(left: bits[8], right: bits[8], first: bits[8], second: bits[8]) {
@@ -328,12 +208,12 @@ top block connected(value: bits[8], result: bits[8]) {
 "#,
         );
 
-        assert_eq!(verify_hierarchy(&ordered_blocks(&package)), Ok(()));
+        assert_eq!(verify_hierarchy(&package), Ok(()));
     }
 
     #[test]
     fn registered_output_breaks_feedback_even_with_a_combinational_sibling() {
-        let package = parse_blocks(
+        let package = parse_package(
             r#"package public_mixed_output_feedback
 
 block mixed(clk: clock, value: bits[8], direct: bits[8], delayed: bits[8]) {
@@ -356,12 +236,12 @@ top block feedback(clk: clock, direct: bits[8], delayed: bits[8]) {
 "#,
         );
 
-        assert_eq!(verify_hierarchy(&ordered_blocks(&package)), Ok(()));
+        assert_eq!(verify_hierarchy(&package), Ok(()));
     }
 
     #[test]
     fn combinational_output_remains_cyclic_with_a_registered_sibling() {
-        let package = parse_blocks(
+        let package = parse_package(
             r#"package public_mixed_output_cycle
 
 block mixed(clk: clock, value: bits[8], direct: bits[8], delayed: bits[8]) {
@@ -385,7 +265,7 @@ top block feedback(clk: clock, direct: bits[8], delayed: bits[8]) {
         );
 
         assert!(matches!(
-            verify_hierarchy(&ordered_blocks(&package)),
+            verify_hierarchy(&package),
             Err(BlockCodegenError::InvalidBlock(message))
                 if message.contains("block `feedback` contains a combinational cycle")
         ));
@@ -393,7 +273,7 @@ top block feedback(clk: clock, direct: bits[8], delayed: bits[8]) {
 
     #[test]
     fn forwarded_clock_reset_and_zero_width_ports_preserve_registered_feedback() {
-        let package = parse_blocks(
+        let package = parse_package(
             r#"package public_empty_reset_feedback
 
 block delayed(clk: clock, rst: bits[1], empty: bits[0], value: bits[8], empty_result: bits[0], result: bits[8]) {
@@ -423,7 +303,7 @@ top block feedback(clk: clock, rst: bits[1], empty: bits[0], empty_result: bits[
 "#,
         );
 
-        assert_eq!(verify_hierarchy(&ordered_blocks(&package)), Ok(()));
+        assert_eq!(verify_hierarchy(&package), Ok(()));
     }
 
     #[test]
@@ -445,7 +325,7 @@ top block feedback(result: bits[8]) {
 
     #[test]
     fn foreign_instances_remain_opaque_to_cycle_verification() {
-        let package = parse_blocks(
+        let package = parse_package(
             r#"package public_external_feedback
 
 #[ffi_proto("""code_template: "external_cell {fn} (.value({value}), .result({return}));"
@@ -463,6 +343,6 @@ top block feedback(result: bits[8]) {
 "#,
         );
 
-        assert_eq!(verify_hierarchy(&ordered_blocks(&package)), Ok(()));
+        assert_eq!(verify_hierarchy(&package), Ok(()));
     }
 }

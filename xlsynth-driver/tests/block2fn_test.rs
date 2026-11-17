@@ -6,13 +6,23 @@ use xlsynth_pir::ir::PackageMember;
 use xlsynth_pir::ir_parser::Parser;
 
 #[test]
-fn block2fn_emits_ir_package_with_top_fn() {
+fn block2fn_emits_top_and_its_transitive_callees() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let block_ir = r#"package test_pkg
 
+fn inner(x: bits[8] id=3) -> bits[8] {
+  ret n: bits[8] = not(x, id=4)
+}
+fn outer(x: bits[8] id=5) -> bits[8] {
+  ret n: bits[8] = invoke(x, to_apply=inner, id=6)
+}
+fn unrelated(x: bits[8] id=7) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=7)
+}
 top block top(a: bits[8], out: bits[8]) {
   a: bits[8] = input_port(name=a, id=1)
-  out: () = output_port(a, name=out, id=2)
+  result: bits[8] = invoke(a, to_apply=outer, id=8)
+  out: () = output_port(result, name=out, id=2)
 }
 "#;
 
@@ -43,15 +53,18 @@ top block top(a: bits[8], out: bits[8]) {
     );
 
     let mut parser = Parser::new(&stdout);
-    let package = parser.parse_package().expect("parse package output");
+    let package = parser
+        .parse_and_verify_package()
+        .expect("valid standalone package");
     let top_fn = package.get_top_fn().expect("top function should exist");
     assert_eq!(top_fn.name, "top");
+    assert!(package.get_fn("unrelated").is_none());
     assert_eq!(
         package
             .members
             .iter()
             .filter(|m| matches!(m, PackageMember::Function(_)))
             .count(),
-        1
+        3
     );
 }

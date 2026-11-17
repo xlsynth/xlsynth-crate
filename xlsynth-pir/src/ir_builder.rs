@@ -23,6 +23,7 @@ pub use block::{
     BInoutNet, BInstantiation, BRegister, BlockBuilder, BlockState, RegisterWriteOptions,
     ResetBehavior,
 };
+pub use block_cycles::verify_block_combinational_cycles;
 pub use ops::{NaryAddOptions, NaryAddTerm, NormalizeLeftOptions};
 
 static NEXT_BUILDER_ID: AtomicUsize = AtomicUsize::new(1);
