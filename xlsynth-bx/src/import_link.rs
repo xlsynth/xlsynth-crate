@@ -11,17 +11,20 @@ use xlsynth_pir::ir_verify::verify_package;
 
 use crate::lower::check_function_purity;
 
-/// Appends a checked import snapshot and returns the destination indices of its
-/// roots. All allocation and validation take place before changing the
+/// Append the imported functions and return their destination identities.
+///
+/// Root indices follow the order in `roots`, including repeats. The map covers
+/// every imported function, including private callees that were renamed to
+/// avoid collisions. Allocation and validation precede changes to the
 /// destination.
 pub(crate) fn link_imported_functions(
     destination: &mut Package,
     mut imported: Package,
     roots: &[String],
     reserved_names: &[String],
-) -> Result<Vec<usize>, String> {
+) -> Result<(Vec<usize>, BTreeMap<String, Symbol>), String> {
     if roots.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), BTreeMap::new()));
     }
     let symbols = allocate_symbols(destination, &imported, reserved_names);
     let files = allocate_files(destination, &imported)?;
@@ -65,7 +68,10 @@ pub(crate) fn link_imported_functions(
     verify_package(&imported).map_err(|error| format!("invalid imported DSLX IR: {error}"))?;
     destination.file_table.id_to_path.extend(files.additions);
     destination.members.extend(imported.members);
-    Ok(roots.iter().map(|root| symbols[root].index).collect())
+    Ok((
+        roots.iter().map(|root| symbols[root].index).collect(),
+        symbols,
+    ))
 }
 
 /// Selects and checks the IR bodies reachable from the requested
@@ -98,8 +104,8 @@ pub(crate) fn retain_reachable_functions(
 }
 
 /// The destination identity of an imported function.
-struct Symbol {
-    name: String,
+pub(crate) struct Symbol {
+    pub(crate) name: String,
     index: usize,
 }
 
@@ -214,6 +220,8 @@ mod tests {
     use super::*;
     use xlsynth_pir::ir_parser::Parser;
 
+    // Verifies: Calls, roots, and positions survive name and file ID clashes.
+    // Catches: Renaming a function without fixing callers and source positions.
     #[test]
     fn reachable_functions_keep_their_calls_and_source_files_across_collisions() {
         let mut destination = Parser::new(
@@ -260,7 +268,7 @@ fn unused() -> bits[8] {
         let top = destination.top.clone();
         let roots = ["main".into(), "piece__bx_1".into(), "main".into()];
         retain_reachable_functions(&mut imported, &roots).unwrap();
-        let indices =
+        let (indices, _) =
             link_imported_functions(&mut destination, imported, &roots, &["main".into()]).unwrap();
         assert_eq!(indices[0], indices[2]);
         assert_eq!(destination.members[indices[0]].graph().name, "main__bx_1");

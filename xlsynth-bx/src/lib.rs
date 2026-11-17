@@ -20,8 +20,10 @@ mod test_runner;
 mod typed;
 mod warnings;
 
+pub use bx_import::library_item;
 pub use check::{CheckedModule, check_module, check_module_with_options};
 pub use dslx_import::ImportedCall;
+pub use import_structs::ImportNames;
 pub use lower::lower_module;
 pub use parser::outline::{
     DslxOutline, OutlineDecl, OutlineFunctionParametric, OutlineKind, OutlineShape, OutlineType,
@@ -41,7 +43,12 @@ pub use typed::BoundParametricValue;
 pub use warnings::{BxWarning, BxWarningKind};
 pub use xlsynth_pir::ir_builder::ResetBehavior;
 
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    rc::Rc,
+};
+use xlsynth::dslx;
 use xlsynth_pir::ir::{FileTable, Package};
 
 /// Search paths for BX and DSLX imports and their dependencies.
@@ -131,4 +138,103 @@ pub fn empty_package(name: impl Into<String>) -> Package {
         members: Vec::new(),
         top: None,
     }
+}
+
+/// One batch of DSLX functions linked into a BX package.
+///
+/// The synthetic entry module calls the selected DSLX specializations. Its
+/// type information retains their declarations even if the files on disk
+/// change.
+pub struct LinkedImport {
+    /// Checked entry module for looking up the selected calls and their
+    /// callees.
+    pub module: dslx::TypecheckedModule,
+    /// Restores the source spellings used as keys in `symbols` from native IR
+    /// names.
+    pub module_names: ImportNames,
+    /// Each original IR function symbol and its actual destination symbol.
+    pub symbols: BTreeMap<String, String>,
+}
+
+/// A written DSLX struct reference resolved by the same import graph as BX.
+pub struct LinkedStruct {
+    /// Checked probe containing the parameter whose type was written in BX.
+    pub module: dslx::TypecheckedModule,
+    /// Maps modules referenced by the annotation back to their source names.
+    pub module_names: ImportNames,
+    /// Parameter annotation, including any alias or concrete type arguments.
+    pub annotation: dslx::TypeAnnotation,
+}
+
+/// The checked source and its linked hardware, with the import graphs that
+/// produced its callable IR functions.
+pub struct CompiledModule {
+    /// Written annotations before type checking erases transparent aliases.
+    /// BX library declarations and references use the linker's qualified names.
+    pub source: ast::Module,
+    /// Checked BX declarations with concrete layouts and diagnostics.
+    pub checked: CheckedModule,
+    /// Destination package containing the lowered hardware and its callees.
+    pub package: Package,
+    /// Checked modules and destination symbols for imports that supplied
+    /// functions.
+    pub imports: Vec<LinkedImport>,
+    /// Original module subjects in the frozen DSLX import graph, including
+    /// unused imports.
+    pub imported_modules: BTreeSet<String>,
+    /// Indexed by the spelling used in BX, including unqualified use bindings.
+    pub imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
+}
+
+/// Compile BX while retaining the source graph for each linked DSLX import.
+///
+/// The result preserves written type names for ports and keeps the logical
+/// subjects of all imported DSLX modules, even those with no linked calls.
+pub fn compile_with_source(
+    source: &str,
+    package: Package,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+) -> Result<CompiledModule, String> {
+    let mut modules = Vec::new();
+    let mut sources = import_structs::CapturedSources::default();
+    let (source, libraries) = bx_import::read(source, options)?;
+    let linked_source = libraries
+        .libraries
+        .as_ref()
+        .map(|linked| linked.module.clone());
+    let checked = check::check_sources_with_tests(
+        &source,
+        libraries,
+        options,
+        None,
+        |m| modules.push(m),
+        Some(&mut sources),
+    )
+    .map_err(bx_import::diagnostic)?;
+    let mut modules = modules.into_iter();
+    let mut imports = Vec::new();
+    let package = lower::lower_with_imports(&checked, package, reset, |linked| {
+        let module = modules.next().expect("one checked module per linked batch");
+        let symbols: BTreeMap<_, _> = linked
+            .into_iter()
+            .map(|(old, new)| (old, new.name))
+            .collect();
+        imports.push(LinkedImport {
+            module,
+            symbols,
+            module_names: sources
+                .names
+                .clone()
+                .expect("linked DSLX batch has a snapshot"),
+        });
+    })?;
+    Ok(CompiledModule {
+        source: linked_source.unwrap_or(source),
+        checked,
+        package,
+        imports,
+        imported_structs: sources.types,
+        imported_modules: sources.modules,
+    })
 }
