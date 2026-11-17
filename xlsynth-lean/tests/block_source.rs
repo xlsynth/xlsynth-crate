@@ -5,6 +5,10 @@
 use xlsynth_lean::block::{CompiledBx, compile_bx, emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
 
+#[path = "common/bundle_source.rs"]
+mod bundle_source;
+use bundle_source::bundle_file;
+
 #[cfg(feature = "lean-tests")]
 #[path = "common/lean_bundle.rs"]
 mod lean_bundle;
@@ -73,7 +77,7 @@ fn compile(source: &str) -> CompiledBx {
     .unwrap()
 }
 
-// Verifies: The BX bundle and reparsed counter IR emit identical raw Lean.
+// Verifies: Without DSLX helpers the BX and saved-IR counter equations match.
 // Catches: Raw equations that depend on BX metadata absent from saved IR.
 #[test]
 fn checked_bx_and_saved_ir_emit_identical_raw_equations() {
@@ -83,7 +87,8 @@ fn checked_bx_and_saved_ir_emit_identical_raw_equations() {
         .parse_and_validate_package()
         .unwrap();
     let raw = emit(&saved, select_block(&saved, None).unwrap()).unwrap();
-    assert_eq!(bundle.files[0], ("Generated.lean".into(), raw));
+    let checked = bundle_file(&bundle, "Generated.lean");
+    assert_eq!(checked.replace("import ReadableTypes\n", ""), raw);
 }
 
 // Verifies: Only used structs appear, in dependency order.
@@ -99,7 +104,7 @@ block show(clk, value: Packet) -> (Packet,) { (value,) }
 "#,
     );
     let bundle = compiled.emit_readable(None).unwrap();
-    let types = &bundle.files[1].1;
+    let types = bundle_file(&bundle, "ReadableTypes.lean");
     assert!(types.find("structure «Word»").unwrap() < types.find("structure «Packet»").unwrap());
     assert!(!types.contains("Unused"));
 }
@@ -130,7 +135,7 @@ fn readable_interface_uses_linked_bx_library_structs() {
         .emit_readable(Some("demo"))
     };
     let bundle = emit("design").unwrap();
-    let types = &bundle.files[1].1;
+    let types = bundle_file(&bundle, "ReadableTypes.lean");
     assert!(
         types.contains("-- Source struct lib::Packet { payload }"),
         "{types}"
@@ -289,9 +294,9 @@ block accumulate(clk, value: u8) -> u6 {
     compiled.emit_readable(None).unwrap();
 }
 
-// Verifies: A checked function keeps its declared result and its named physical
-// locals. Catches: Inferring a nominal type for an indexed slot inside the
-// computation.
+// Verifies: The source-typed helper itself computes the physical array read.
+// Catches: A wrapper around a raw helper, a duplicated array read, or an
+// indexed slot annotated with the wrong type.
 #[test]
 fn checked_array_helper_uses_physical_locals() {
     let dir = tempfile::tempdir().unwrap();
@@ -320,8 +325,12 @@ fn checked_array_helper_uses_physical_locals() {
     )
     .unwrap();
     let bundle = compiled.emit_readable(None).unwrap();
-    let raw = &bundle.files[0].1;
-    let indexed = raw
+    let model = bundle_file(&bundle, "Generated.lean");
+    let (_, read) = model.split_once("def _root_.XLS.«slots».«read» ").unwrap();
+    let (read, _) = read.split_once("\n\n").unwrap();
+    let (signature, body) = read.split_once('\n').unwrap();
+    assert!(signature.contains("XLS.«slots».«Slot»"), "{signature}");
+    let indexed = body
         .lines()
         .find(|line| line.trim_start().starts_with("let ") && line.contains("_slot :"))
         .unwrap();
@@ -330,11 +339,11 @@ fn checked_array_helper_uses_physical_locals() {
         "{indexed}"
     );
     assert!(indexed.contains("arrayIndex"), "{indexed}");
-    let checked = &bundle.files[2].1;
-    let signature = checked
-        .lines()
-        .find(|line| line.starts_with("def _root_.XLS.«slots».«read» "))
-        .unwrap();
-    assert!(signature.contains("XLS.«slots».«Slot»"), "{signature}");
-    assert!(!checked.contains("let «slot» :"), "{checked}");
+    let indexed_reads = bundle
+        .files
+        .iter()
+        .flat_map(|(_, module)| module.lines())
+        .filter(|line| line.trim_start().starts_with("let ") && line.contains("arrayIndex"))
+        .count();
+    assert_eq!(indexed_reads, 1, "expected one executable array read");
 }

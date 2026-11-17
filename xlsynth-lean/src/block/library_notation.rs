@@ -87,7 +87,6 @@ const DECLARATION_NAMES: &[&str] = &[
     "List.map_toArray",
     "Nat.fold_zero",
     "Repr",
-    "Vector.append",
     "Vector.back_eq_getElem",
     "Vector.map_append",
     "Vector.map_id'",

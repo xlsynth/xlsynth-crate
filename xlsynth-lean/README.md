@@ -137,8 +137,9 @@ example, importing `left.bus` and `right.bus` gives the proof author distinct
 types `XLS.left.bus.Packet` and `XLS.right.bus.Packet`. Readable DSLX functions
 use the same rule, including concrete specializations such as
 `XLS.left.bus.«choose<5>»`. Compiler-generated loop bodies take physical XLS
-values. If a loop body calls a source-declared function, the checked model
-applies that function at the call site through a generated adapter.
+values. If a loop body calls a source-declared function, its Lean definition
+calls that function by name. The called function contains the IR operations
+that compute its result.
 
 Supply the BX module name as the first argument to `compile_bx`. For block
 `controller` in `common.bx`, `XLS.common.controller q x` evaluates the block
@@ -175,12 +176,16 @@ parameter and result types from the checked DSLX import, including concrete
 parametric calls. The BX linker records each function's final IR symbol.
 For example, if the destination package already has a function with the
 import's IR name, the renamed import still gets its own DSLX parameter names.
-At a checked call, the caller decodes its physical arguments into the callee's
-declared types, calls the named function, and encodes the returned value for
-the next IR operation. Thus a proof about a helper returning a packet can use
-`packet.valid` even when the helper computed that bit by selecting a tuple
-position. Helpers whose source signature cannot be represented and loop
-callbacks created during compilation take physical arguments.
+Lean uses `_root_` and `XlsCodec` to resolve generated references. The
+emitter spells those two parameter names `«xls argument _root_»` and
+`«xls argument XlsCodec»` in a public Lean signature.
+At a checked call, the caller converts physical arguments to the callee's
+declared types and converts its result to the representation the caller uses.
+An argument already represented by the same bitvector type passes directly.
+Both clock interfaces call the same functions. A proof can read
+`packet.valid` from a helper's result even when the helper computed that
+bit by selecting a tuple position. Helpers whose source signature cannot be
+represented and loop callbacks created during compilation take physical arguments.
 
 For large blocks the generator puts up to 160 graph computations in each
 leaf function. Each leaf reads the wires it needs and returns the values
@@ -190,11 +195,12 @@ assertions for both forms of the clock step.
 
 `LeanBlockBundle::files` contains these five files in dependency order:
 
-1. `Generated.lean` - the exact raw emission of the lowered block.
 1. `ReadableTypes.lean` - source types and total physical codecs.
-1. `ReadableGenerated.lean` - the typed clock-step interface and named helper calls.
+1. `Generated.lean` - helper definitions and the clock equations. Checked
+   helpers have source-typed parameters and results.
+1. `ReadableGenerated.lean` - the typed clock-step interface.
 1. `ReadableRepresentation.lean` - state and result conversions.
-1. `ReadableCorrespondence.lean` - proofs relating both models and their traces.
+1. `ReadableCorrespondence.lean` - proofs relating both clock interfaces and their traces.
 
 Callers choose where to write the files and compile them in the listed order
 to check the correspondence proofs. The proof establishes that converting the
@@ -202,10 +208,15 @@ result of one interface gives the result of the other. Both use the same
 physical computations. Comparing execution with XLS checks the translation
 itself, and application-specific properties need their own proofs.
 
-For a block equation, look for its IR node ID in `Generated.lean`. For a
-checked signature or a call across a typed boundary, start in
-`ReadableGenerated.lean`. `ReadableTypes.lean` defines the encoders and
-decoders for Boolean values and named source types.
+To follow a computation, open `Generated.lean` at its public function
+definition or search for the IR node ID. To inspect the public state, inputs,
+outputs, or `step`, open `ReadableGenerated.lean`. For a standalone export
+that uses only saved block IR, use `ir-block-to-lean`.
+
+When migrating a proof that referred to a checked helper through
+`XlsBlock.Helpers` or `XlsReadable.Calls`, call its declaration under
+`XLS.<module>` with the source argument types. Scripts that build individual
+files must now compile `ReadableTypes.lean` before `Generated.lean`.
 
 ## GateFn interface and graph contract
 

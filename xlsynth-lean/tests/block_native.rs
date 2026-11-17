@@ -8,6 +8,10 @@ use anyhow::{Context, Result};
 use xlsynth_lean::block::{LeanBlockBundle, compile_bx, emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
 
+#[path = "common/bundle_source.rs"]
+mod bundle_source;
+use bundle_source::bundle_file;
+
 #[path = "common/lean_bundle.rs"]
 mod lean_bundle;
 
@@ -127,12 +131,7 @@ fn bx_preserves_each_imported_struct_spelling_in_either_port_order() -> Result<(
             },
         )?
         .emit_readable(None)?;
-        let generated = &bundle
-            .files
-            .iter()
-            .find(|(p, _)| p == "ReadableGenerated.lean")
-            .unwrap()
-            .1;
+        let generated = bundle_file(&bundle, "ReadableGenerated.lean");
         for (field, ty) in [
             ("direct", "Packet"),
             ("message", "Message"),
@@ -251,7 +250,7 @@ block hold(clk, src: Envelope) -> (ops::Alias, u8) {
         },
     )?
     .emit_readable(None)?;
-    let types = &bundle.files[1].1;
+    let types = bundle_file(&bundle, "ReadableTypes.lean");
     assert!(types.contains("«item» : XLS.«ops».«Alias»"), "{types}");
     bundle.files.push((
         "PublicInterface.lean".into(),
@@ -305,7 +304,7 @@ block monitor(clk, p: field0::Packet, other: Packet, report: Report) -> Result {
         },
     )?;
     let mut bundle = compiled.emit_readable(None)?;
-    let types = &bundle.files[1].1;
+    let types = bundle_file(&bundle, "ReadableTypes.lean");
     assert!(types.contains("«result» : «Outputs»"), "{types}");
     bundle.files.push((
         "SourceFields.lean".into(),
@@ -509,6 +508,8 @@ example (x : BitVec 8) : _root_.XLS.pkg.«_root_».id x = x := rfl
 example (q : XlsReadable.State) (x : XlsReadable.Input) :
     XLS.pkg.a.controller q x = XlsReadable.eval q x := rfl
 example : _root_.XLS.pkg.a.controller.eq_unfold 7 = 7 := rfl
+example : (XlsReadable.observe {} {x := 7}).1 = 10 := rfl
+example : (XlsBlock.observe {} {x := 7}).out_0 = 10 := rfl
 "#
         .into(),
     ));
@@ -647,8 +648,8 @@ fn module_owner_cannot_supply_declarations_under_a_source_type() -> Result<()> {
     Ok(())
 }
 
-// Verifies: two imports may reach the same DSLX module from one checked graph.
-// Catches: treating a shared transitive import as a second independent module.
+// Verifies: both arms of a diamond call the same public DSLX helper.
+// Catches: emitting an independent copy of bus.get for the second import.
 #[test]
 fn module_owner_is_shared_by_transitive_imports() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -672,7 +673,25 @@ fn module_owner_is_shared_by_transitive_imports() -> Result<()> {
             Default::default(),
             &options,
         )?;
-        compiled.emit_readable(None)?;
+        let bundle = compiled.emit_readable(None)?;
+        let generated = bundle_file(&bundle, "Generated.lean");
+        let getter = "_root_.XLS.«bus».«get»";
+        for arm in ["left", "right"] {
+            let declaration = format!("def _root_.XLS.«{arm}».«get» ");
+            let body = generated
+                .split_once(&declaration)
+                .with_context(|| format!("missing {arm}.get"))?
+                .1
+                .split("\n\n")
+                .next()
+                .unwrap();
+            assert!(
+                body.contains(getter),
+                "{arm}.get should call {getter}: {body}"
+            );
+        }
+        // The only source functions are bus.get and its two callers.
+        assert_eq!(generated.matches("def _root_.").count(), 3);
     }
     Ok(())
 }
@@ -816,28 +835,15 @@ block probe(clk, packet: picker::Packet, flag: bool) -> (u8, bool) {
     )?;
     fs::write(path, "the original source is no longer available")?;
     let mut bundle = compiled.emit_readable(None)?;
-    let executable = &bundle
-        .files
-        .iter()
-        .find(|(file, _)| file == "ReadableGenerated.lean")
-        .unwrap()
-        .1;
-    for (name, parameter) in [
-        ("pick", "actual"),
-        ("first", "original"),
-        ("id<8>", "argument"),
-        ("id<1>", "argument"),
-    ] {
-        assert!(
-            executable.contains(&format!("def _root_.XLS.«picker».«{name}» («{parameter}»")),
-            "{executable}"
-        );
-    }
     bundle.files.push((
         "PublicInterface.lean".into(),
         r#"
 import ReadableCorrespondence
 open XlsReadable
+example (p : XLS.picker.Packet) :
+    XLS.picker.pick (actual := p) = XLS.picker.first (original := p) := rfl
+#check fun v => XLS.picker.«id<8>» (argument := v)
+#check fun v => XLS.picker.«id<1>» (argument := v)
 example (q : State) (x : Input) : observe q x = (x.packet.zebra, x.flag) := by
   rcases x with ⟨packet, flag⟩
   cases flag <;> rfl
@@ -867,7 +873,7 @@ fn bx_segmented_eval_projects_a_wide_positional_tuple() {
     }
     writeln!(bx, "{previous}\n}}").unwrap();
     let bundle = bx_bundle(&bx);
-    let physical = &bundle.files[0].1;
+    let physical = bundle_file(&bundle, "Generated.lean");
     // Each tuple_index reads one word. Rebuilding the entire tuple at every
     // read emits a tuple constructor (and its commas) in every binding.
     let direct_reads = physical
@@ -958,12 +964,12 @@ fn bx_segmented_boolean_chain_splits_after_160_operations_and_composes_halves() 
         (641, "  xls_segment_2_5 (xls_segment_0_2 w)"),
     ] {
         let bundle = boolean_chain(operations, "&");
-        let (_, physical) = &bundle.files[0];
+        let physical = bundle_file(&bundle, "Generated.lean");
         let last_join = physical
             .lines()
             .rfind(|line| line.starts_with("  xls_segment_"));
         assert_eq!(last_join, Some(root_body), "{operations} operations");
-        assert!(!bundle.files[2].1.contains("def xls_segment_"));
+        assert!(!bundle_file(&bundle, "ReadableGenerated.lean").contains("def xls_segment_"));
         #[cfg(feature = "lean-tests")]
         if operations == 641 {
             check_bundle(bundle, "Boolean chain with a partial fifth leaf");
@@ -1322,12 +1328,7 @@ block pipeline(clk, left: u8, right: u8) -> u8 {
     .unwrap()
     .emit_readable(None)
     .unwrap();
-    let model = &bundle
-        .files
-        .iter()
-        .find(|(name, _)| name == "Generated.lean")
-        .unwrap()
-        .1;
+    let model = bundle_file(&bundle, "Generated.lean");
     for helper in ["__machine__sum_fields", "__machine__advance"] {
         assert!(
             model.contains(&format!("_root_.XlsBlock.Helpers.«{helper}»")),
@@ -1364,7 +1365,7 @@ fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<Lean
 }
 
 // Verifies: Both models return 74 with counted-loop calls in separate leaves.
-// Catches: A leaf proof that cannot use the loop helper's correspondence lemma.
+// Catches: A cut that drops a helper call or passes the wrong argument.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn segmented_block_calls_a_counted_loop_helper() -> Result<()> {
@@ -1435,9 +1436,9 @@ example (q : State) (x : Input) :
     );
 }
 
-// Verifies: A physical loop calls the named typed helper on each iteration.
-// Catches: Falling back to an entirely raw graph inside a compiler-generated
-// callback.
+// Verifies: Both clocks reach the same named helper through an outlined loop.
+// Catches: An independent raw copy, or a compiler-generated callback that
+// bypasses the checked DSLX helper.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn nested_helper_calls() {
@@ -1487,24 +1488,19 @@ private def initial : State := { count := 7 }
 #guard (XLS.left_side.advance (command := { base := 13, delta := 5 })).base == 18
 #guard observe initial stimulus == 7
 #guard (step initial stimulus).count == 30
+#guard (XlsBlock.step { count := 7 } { rst := 0, packet := (13, 5, ()) }).count == 30
 "#
         .into(),
     ));
     lean_bundle::check_bundle(&bundle).unwrap();
 
-    // Substitute the identity for the innermost typed helper. Starting from
-    // the public clock step now gives 13 + 7, while the raw model still gives
-    // (13 + 5 + 5) + 7. Dead typed wrappers cannot change this observation.
-    bundle.files.retain(|(name, _)| {
-        matches!(
-            name.as_str(),
-            "Generated.lean" | "ReadableTypes.lean" | "ReadableGenerated.lean"
-        )
-    });
+    // Substitute the identity for the innermost typed helper. Both clocks
+    // should now compute 13 + 7 instead of (13 + 5 + 5) + 7.
+    bundle.files.pop().unwrap();
     let (_, model) = bundle
         .files
         .iter_mut()
-        .find(|(name, _)| name == "ReadableGenerated.lean")
+        .find(|(name, _)| name == "Generated.lean")
         .unwrap();
     let declaration = "def _root_.XLS.«left_side».«advance» ";
     let substituted =
@@ -1514,10 +1510,10 @@ def _root_.XLS.«left_side».«originalAdvance» ";
     *model = model.replacen(declaration, substituted, 1);
     bundle.files.push((
         "CallPath.lean".into(),
-        r#"import ReadableGenerated
+        r#"import ReadableCorrespondence
 open XlsReadable
 #guard (step { count := 7 } { rst := false, packet := ⟨13, 5⟩ }).count == 20
-#guard (XlsBlock.step { count := 7 } { rst := 0, packet := (13, 5, ()) }).count == 30
+#guard (XlsBlock.step { count := 7 } { rst := 0, packet := (13, 5, ()) }).count == 20
 "#
         .into(),
     ));
@@ -2043,6 +2039,38 @@ private def pickAt (index : BitVec 8) :=
     check_bundle(bundle, "library calls and a source projection on L");
 }
 
+// Verifies: L remains a named argument when its Vector.append field is live.
+// Catches: A large vector literal or concat applying the field as a function.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn checked_helper_parameter_does_not_shadow_vector_append() -> Result<()> {
+    let source = r#"
+struct Inner { append: u8 }
+struct Outer { Vector: Inner }
+fn append_tail(L: Outer, tail: u8[1]) -> u8[66] {
+    u8[65]:[L.Vector.append, ...] ++ tail
+}
+"#;
+    let bx = r#"
+struct Inner { append: u8 }
+struct Outer { Vector: Inner }
+extern fn machine::append_tail(L: Outer, tail: u8[1]) -> u8[66];
+block join(clk, L: Outer, tail: u8[1]) -> u8[66] {
+    machine::append_tail(L, tail)
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[])?;
+    bundle.files.push((
+        "CheckAppend.lean".into(),
+        r#"import Generated
+private def joined := XLS.machine.append_tail (L := ⟨⟨7⟩⟩) #v[19]
+#guard joined[0] == 7 && joined[64] == 7 && joined[65] == 19
+"#
+        .into(),
+    ));
+    lean_bundle::check_bundle(&bundle)
+}
+
 // Verifies: Nested fields survive, reads clamp, and writes respect bounds.
 // Catches: A helper update changing the last slot for an out-of-range index.
 #[test]
@@ -2215,14 +2243,9 @@ block changed(clk, mask: u8) -> u3 {
 "#;
     let (mut bundle, machine) =
         compile_lean_and_xls_machine(bx, source).expect("changed-bit mask fixture (machine.x)");
-    assert!(
-        bundle.files[2]
-            .1
-            .contains("def _root_.XLS.«machine».«encode_mask» («List»"),
-        "{}",
-        bundle.files[2].1
+    let mut checks = String::from(
+        "import ReadableCorrespondence\nopen XlsReadable\n#check fun (v : BitVec 8) => XLS.machine.encode_mask (List := v)\n",
     );
-    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
     let previous = 0b0000_0100;
     // No change, clear bit 2, set bit 4, then flip both bits relative to
     // previous.

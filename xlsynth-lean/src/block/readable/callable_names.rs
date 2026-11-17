@@ -7,7 +7,7 @@
 //! `XLS.a.f.eq_1`. In that case the implementation lives in a separate
 //! namespace and an `export` exposes it as `XLS.a.f`. Lean resolves that
 //! alias by name but cannot use it in a `_root_` reference. Generated calls
-//! and proofs therefore use the rooted implementation path.
+//! therefore use the rooted implementation path.
 
 use std::collections::BTreeMap;
 
@@ -16,13 +16,14 @@ use super::*;
 /// Stores the Lean paths used to define and reference helpers and the block,
 /// along with the public aliases that expose their source names when needed.
 pub(super) struct CallableNames<'a> {
-    /// Rooted declaration paths keyed by the helper symbols used in the IR.
-    pub(super) helpers: BTreeMap<&'a str, String>,
+    /// Rooted paths keyed by declaring module and specialized source name.
+    pub(super) helpers: BTreeMap<&'a (String, String), String>,
     /// Rooted path for the selected block's abbreviation of the evaluator.
     pub(super) block: String,
-    /// Lean commands exposing source names after the backing declarations
-    /// exist.
-    pub(super) aliases: String,
+    /// Lean commands exposing helper names in the module defining them.
+    pub(super) helper_aliases: String,
+    /// Lean command exposing the block after its evaluator has been defined.
+    pub(super) block_alias: String,
 }
 
 /// How a declaration under a callable's source name could collide in Lean.
@@ -62,13 +63,13 @@ impl<'a> CallableNames<'a> {
     /// A child declaration can appear after its parent in emission order. A
     /// helper with no source declaration keeps its generated helper name.
     pub(super) fn new(
-        block: &'a BlockContext<'_>,
+        block: &BlockContext<'_>,
         declarations: &[TypeDecl],
-        interface: &StatefulInterface,
+        interface: &'a StatefulInterface,
         bx_namespace: &str,
     ) -> Result<Self> {
         let names = block.helpers.iter().filter_map(|f| {
-            let (module, local) = interface.helpers.get(&f.name)?.source_name.as_ref()?;
+            let (module, local) = &interface.helpers.get(&f.name)?.source_name;
             Some((module.as_str(), local.as_str()))
         });
         let (block_module, block_name) = declaring_name(bx_namespace, &interface.block_name);
@@ -93,46 +94,44 @@ impl<'a> CallableNames<'a> {
                 }
             }
         }
-        let mut aliases = String::new();
-        let mut path = |module: &str, local: &str, has_body: bool| -> Result<String> {
-            let child = children.get(&(module, local));
-            let role = if has_body { "function" } else { "block" };
-            let local = source_names::declaration_identifier(module, local, role)?;
-            let module = module_identifier(module)?;
-            let backing = format!("{module}.«xls:implementation».{local}");
-            match child {
-                Some(ChildName::Reserved) => writeln!(
-                    aliases,
-                    "\nnamespace {module}\nexport «xls:implementation» ({local})\nend {module}"
-                )?,
-                // Nontrivial proofs inside a body (e.g. a vector literal's
-                // length proof) can create _proof_N. Keep those in the backing
-                // definition, leaving a real transparent constant at the source name.
-                Some(ChildName::AuxiliaryProof) if has_body => {
-                    writeln!(aliases, "\nabbrev {module}.{local} := _root_.{backing}")?
+        let path =
+            |module: &str, local: &str, has_body: bool, aliases: &mut String| -> Result<String> {
+                let child = children.get(&(module, local));
+                let role = if has_body { "function" } else { "block" };
+                let local = source_names::declaration_identifier(module, local, role)?;
+                let module = module_identifier(module)?;
+                let backing = format!("{module}.«xls:implementation».{local}");
+                match child {
+                    Some(ChildName::Reserved) => writeln!(
+                        aliases,
+                        "\nnamespace {module}\nexport «xls:implementation» ({local})\nend {module}"
+                    )?,
+                    // Nontrivial proofs inside a body (e.g. a vector literal's
+                    // length proof) can create _proof_N. Keep those in the backing
+                    // definition, leaving a real transparent constant at the source name.
+                    Some(ChildName::AuxiliaryProof) if has_body => {
+                        writeln!(aliases, "\nabbrev {module}.{local} := _root_.{backing}")?
+                    }
+                    _ => return Ok(format!("_root_.{module}.{local}")),
                 }
-                _ => return Ok(format!("_root_.{module}.{local}")),
-            }
-            Ok(format!("_root_.{backing}"))
-        };
+                Ok(format!("_root_.{backing}"))
+            };
         let mut helpers = BTreeMap::new();
+        let mut helper_aliases = String::new();
         for f in &block.helpers {
             if let Some(signature) = interface.helpers.get(&f.name) {
-                let name = match &signature.source_name {
-                    Some((module, local)) => path(module, local, true)?,
-                    None => format!(
-                        "_root_.XlsReadable.Helpers.{}",
-                        lean::helper_identifier(&f.name)?
-                    ),
-                };
-                helpers.insert(f.name.as_str(), name);
+                let (module, local) = &signature.source_name;
+                let name = path(module, local, true, &mut helper_aliases)?;
+                helpers.insert(&signature.source_name, name);
             }
         }
-        let block = path(block_module, block_name, false)?;
+        let mut block_alias = String::new();
+        let block = path(block_module, block_name, false, &mut block_alias)?;
         Ok(Self {
             helpers,
             block,
-            aliases,
+            helper_aliases,
+            block_alias,
         })
     }
 }

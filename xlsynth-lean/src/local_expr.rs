@@ -182,7 +182,6 @@ impl LocalRenderer {
     /// `Array.toVector` avoids unfolding computed elements to prove a literal's
     /// size. Balanced appends with explicit lengths keep those proofs small.
     pub(crate) fn vector_literal(self, fields: &[String]) -> String {
-        let root = self.root();
         if fields.len() <= 64 {
             let fields = fields.join(", ");
             return match self {
@@ -191,8 +190,14 @@ impl LocalRenderer {
             };
         }
         let (left, right) = fields.split_at(fields.len() / 2);
+        // The explicit application requires a declaration name. A source
+        // parameter named L could shadow an alias such as L.Vector.append.
+        let append = match self {
+            Self::Function => "Vector.append",
+            Self::Block => "_root_.Vector.append",
+        };
         format!(
-            "(@{root}Vector.append _ {} {} {} {})",
+            "(@{append} _ {} {} {} {})",
             left.len(),
             right.len(),
             self.vector_literal(left),
@@ -346,7 +351,7 @@ impl LocalRenderer {
             P::Array(rs) => self.vector_literal(&names(rs)?),
             P::ArrayConcat(rs) => match self {
                 Self::Function => balanced(&names(rs)?, "", " ++ "),
-                Self::Block => balanced(&names(rs)?, "L.Vector.append ", " "),
+                Self::Block => balanced(&names(rs)?, "_root_.Vector.append ", " "),
             },
             P::TupleIndex { tuple, index } => format!("{}{}.1", name(*tuple)?, ".2".repeat(*index)),
             P::ArrayIndex { array, indices, .. } => {

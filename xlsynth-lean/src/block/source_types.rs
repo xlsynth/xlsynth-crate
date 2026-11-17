@@ -104,11 +104,8 @@ pub(super) struct StatefulInterface {
 /// Source names and types used to render a linked IR function in readable Lean.
 pub(super) struct HelperSignature {
     /// Public declaring module and local name, including specialization
-    /// arguments.
-    ///
-    /// Additional linked copies of the same specialization retain their IR
-    /// symbol. Compiler-generated loop bodies have no checked signature.
-    pub(super) source_name: Option<(String, String)>,
+    /// arguments. Linked copies of the same specialization share this name.
+    pub(super) source_name: (String, String),
     pub(super) params: Vec<(String, SourceType)>,
     pub(super) result: SourceType,
 }

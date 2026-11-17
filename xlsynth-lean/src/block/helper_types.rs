@@ -109,7 +109,7 @@ impl DslxLink {
                 catalogue
                     .helpers
                     .values()
-                    .filter_map(|sig| sig.source_name.as_ref().map(|(owner, _)| owner.as_str())),
+                    .map(|sig| sig.source_name.0.as_str()),
             )
         {
             observe_owner(owner)?;
@@ -1003,7 +1003,7 @@ impl Catalogue<'_> {
             },
         };
         Ok(HelperSignature {
-            source_name: Some((self.source_qualifier().to_owned(), name.to_owned())),
+            source_name: (self.source_qualifier().to_owned(), name.to_owned()),
             params,
             result,
         })

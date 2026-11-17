@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Checked BX and DSLX declarations select representations at block and
-//! function boundaries. Both interfaces instantiate the same physical IR
-//! equations. Correspondence checks the codecs and call adapters; agreement
-//! with XLS execution is checked separately.
+//! function boundaries. The physical and readable interfaces run the same
+//! clock equations and checked helpers. Correspondence checks conversions
+//! between the two interfaces. Agreement with XLS execution is checked
+//! separately.
 
 use std::{borrow::Cow, collections::BTreeSet, fmt::Write};
 
@@ -21,8 +22,9 @@ use crate::block::{
     source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
 };
 use callable_names::CallableNames;
-use calls::Calls;
 use source_names::{declaring_name, module_identifier, source_type_in, write_struct};
+
+const BLOCK_NAMESPACE: &str = "XlsBlock";
 
 /// Project an element from a physical XLS tuple, whose final pair ends in unit.
 fn tuple_element(tuple: &str, index: usize) -> String {
@@ -62,15 +64,15 @@ fn type_identifier(key: &str) -> Result<String> {
     identifier(&type_name(key))
 }
 
-/// The first module is the ordinary standalone IR export. Later modules add
-/// checked call adapters, the block interface, and its representation laws.
+/// Emit source types before the clock equations that call the checked helpers.
+/// Later modules expose the readable block interface and prove its relation to
+/// physical execution.
 pub(super) fn emit(
     block: &BlockContext<'_>,
     declarations: &[TypeDecl],
     interface: &StatefulInterface,
 ) -> Result<LeanBlockBundle> {
     source_names::check_type_namespaces(declarations, interface)?;
-    let raw = lean::emit_with_context(block, "XlsBlock")?;
     let bx_namespace = if interface.bx_module.contains(':') {
         format!("file:{}", interface.bx_module)
     } else {
@@ -90,17 +92,15 @@ pub(super) fn emit(
             .map(|r| identifier(&r.name))
             .collect::<Result<_>>()?,
     };
-    let calls = Calls::new(&presentation)?;
+    let mut generated = lean::emit_checked(block, BLOCK_NAMESPACE, &presentation)?;
+    generated.push_str(&callables.helper_aliases);
     let mut bundle = LeanBlockBundle {
         files: vec![
-            ("Generated.lean".into(), raw),
             ("ReadableTypes.lean".into(), presentation.types_module()?),
-            (
-                "ReadableGenerated.lean".into(),
-                presentation.executable(&calls)?,
-            ),
+            ("Generated.lean".into(), generated),
+            ("ReadableGenerated.lean".into(), presentation.executable()?),
             ("ReadableRepresentation.lean".into(), representation_laws()),
-            ("ReadableCorrespondence.lean".into(), calls.correspondence()),
+            ("ReadableCorrespondence.lean".into(), CORRESPONDENCE.into()),
         ],
     };
     for (_, module) in &mut bundle.files {
@@ -455,11 +455,9 @@ impl<'a> Presentation<'a> {
         Ok(out)
     }
 
-    fn executable(&self, calls: &Calls) -> Result<String> {
+    fn executable(&self) -> Result<String> {
         let block = self.block;
-        let mut out =
-            String::from("import Generated\nimport ReadableTypes\n\nnamespace XlsReadable\n\n");
-        out.push_str(&calls.declarations);
+        let mut out = String::from("import Generated\n\nnamespace XlsReadable\n\n");
         let mut fields = Vec::new();
         let mut preceding = BTreeSet::new();
         for (field, register) in self.register_fields.iter().zip(&block.graph.registers) {
@@ -504,8 +502,7 @@ impl<'a> Presentation<'a> {
         );
 
         self.write_representation(&mut out)?;
-        let encoded_args = "(encodeState q) (encodeInput x)";
-        let decoded = format!("decodeEvaluation ({} {encoded_args})", calls.eval);
+        let decoded = "decodeEvaluation (_root_.XlsBlock.eval (encodeState q) (encodeInput x))";
         let forwarded = self.forwarded_evaluation()?;
         if forwarded.is_some() {
             out.push_str(forwarding::LEAN_SUPPORT);
@@ -561,7 +558,7 @@ impl<'a> Presentation<'a> {
             "\nabbrev {} := _root_.XlsReadable.eval",
             self.callables.block.trim_start_matches("_root_.")
         )?;
-        out.push_str(&self.callables.aliases);
+        out.push_str(&self.callables.block_alias);
         Ok(out)
     }
 
@@ -801,7 +798,15 @@ theorem two_bit_cases (b : L.BitVec 2) : b = 0 ∨ b = 1 ∨ b = 2 ∨ b = 3 := 
 "#;
 /// Step, reset, and trace proof source derived from the generated evaluation
 /// theorem.
-const CORRESPONDENCE: &str = r#"theorem decoded_eval (q : XlsBlock.State) (x : XlsBlock.Input) :
+const CORRESPONDENCE: &str = r#"import ReadableRepresentation
+
+namespace XlsReadable
+
+theorem encoded_eval (q : State) (x : Input) :
+    encodeEvaluation (eval q x) = XlsBlock.eval (encodeState q) (encodeInput x) := by
+  simp only [eval_eq_decoded, encode_decode_evaluation]
+
+theorem decoded_eval (q : XlsBlock.State) (x : XlsBlock.Input) :
     decodeEvaluation (XlsBlock.eval q x) = eval (decodeState q) (decodeInput x) := by
   have h := L.congrArg decodeEvaluation (encoded_eval (decodeState q) (decodeInput x))
   simpa using L.Eq.symm h
@@ -888,4 +893,6 @@ theorem clock_relation_iff (q : L.Nat → State) (x : L.Nat → Input) :
   · intro run t
     have h := L.congrArg decodeState (run t)
     simpa [decoded_step] using h
+
+end XlsReadable
 "#;

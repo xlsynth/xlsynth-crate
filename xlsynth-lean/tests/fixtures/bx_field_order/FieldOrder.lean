@@ -11,4 +11,7 @@ example : (observe {} { left := 1, right := 0 }).pair = (1#1, 0#1, ()) ∧
 -- Check every pair against its scalar inputs independently of any encoder.
 example (q : State) (x : Input) :
     (observe q x).pair = (x.left, x.right, ()) ∧
-    (observe q x).selected = x.left := ⟨rfl, rfl⟩
+    (observe q x).selected = x.left := by
+  refine ⟨rfl, ?_⟩
+  rcases x with ⟨left, right⟩
+  rcases BitVec.eq_zero_or_eq_one left with rfl | rfl <;> rfl
