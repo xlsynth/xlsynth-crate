@@ -652,6 +652,8 @@ impl AppExt for clap::Command {
     }
 }
 
+/// Parse the driver's global and command-specific options and dispatch to the
+/// selected handler.
 fn main() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
         .format_timestamp(None)
@@ -952,6 +954,7 @@ fn main() {
                 )
         )
         .subcommand(bx::bx2ir_command())
+        .subcommand(bx::bx_to_lean_command())
         .subcommand(bx::bx2gv_command())
         .subcommand(bx::bx_test_command())
         .subcommand(bx::bx_prove_quickcheck_command())
@@ -4129,6 +4132,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("bx2ir", subm)) => {
             if let Err(error) = bx::bx2ir(subm, &config) {
                 report_cli_error_and_exit(&format!("{error:#}"), Some("bx2ir"), vec![]);
+            }
+        }
+        Some(("bx-to-lean", subm)) => {
+            if let Err(error) = bx::bx_to_lean(subm, &config) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("bx-to-lean"), vec![]);
             }
         }
         Some(("ir-block-to-lean", subm)) => {

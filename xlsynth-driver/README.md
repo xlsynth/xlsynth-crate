@@ -602,6 +602,48 @@ checked. Three runnable examples compare DSLX state machines using the same
 input stream and show the effect of induction depth and a checked helper lemma.
 [Observational equivalence case studies](examples/bx-observational-equivalence/README.md)
 
+### `bx-to-lean`: BX to raw and readable Lean
+
+Generate a clock-step model from a BX block. Proofs can use its declared
+register, input, and output field names. For example, this block outputs the
+old value of `count`, then captures `x` on the clock edge unless reset is active.
+
+```text
+struct Outputs { seen: u8, valid: bool }
+block counter(clk, x: u8) -> Outputs {
+    reg count: u8 = 0;
+    count := x;
+    Outputs { seen: count, valid: true }
+}
+```
+
+```shell
+xlsynth-driver bx-to-lean counter.bx --output-dir lean
+```
+
+- `--output-dir <NEW_DIR>` is required. Its parent must exist and the directory
+  itself must be new. The command generates the complete model before creating
+  the directory. It writes `Generated.lean`, `ReadableTypes.lean`,
+  `ReadableGenerated.lean`, `ReadableRepresentation.lean`, and
+  `ReadableCorrespondence.lean`. To check the generated correspondence proof,
+  build the repository module `XlsynthLean.IR` in your Lean project, add its build output to the module search path, and compile these files in order.
+- `--top <BLOCK>` selects a BX-defined block. The default is the sole block or
+  the unique public block. If several blocks qualify, specify the name.
+- `--link-ir`, `--dslx-path`, and `--dslx-stdlib-path` resolve externs and
+  DSLX imports as in [`bx2ir`](#bx2ir-bx-to-block-ir). The selected block
+  and the functions it calls must use operations supported by the Lean emitter.
+- `--link-dslx <MODULE.x>` takes a DSLX source file in place of `--link-ir`.
+  It compiles the module to implement BX extern functions. When a helper's
+  declared signature is supported, readable Lean uses its DSLX parameter
+  names and types, including types declared in imports. Other helpers use
+  their IR types. For example, a block declaring
+  `extern fn arithmetic::twice(x: u8) -> u8;` can link the implementation
+  with `--link-dslx arithmetic.x`.
+- BX warnings stop generation by default. Use `--warnings-as-errors=false`
+  to print them to stderr and continue.
+- Reset defaults to synchronous and active-high. Use `--reset-active-low` to
+  change polarity. The clock-step model rejects asynchronous register resets.
+
 ### `ir-block-to-lean`: Block IR to Lean
 
 Generate a raw Lean clock-step model for a block in a saved XLS IR package. The model imports the project module `XlsynthLean.IR`.
