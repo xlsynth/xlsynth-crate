@@ -125,7 +125,9 @@ pub(super) fn source_type_in(
                 .collect::<Result<Vec<_>>>()?,
             true,
         )),
-        SourceType::Struct { name } => nominal_reference(bx_namespace, name, current, shadowed),
+        SourceType::Enum { name } | SourceType::Struct { name } | SourceType::Alias { name } => {
+            nominal_reference(bx_namespace, name, current, shadowed)
+        }
     }
 }
 

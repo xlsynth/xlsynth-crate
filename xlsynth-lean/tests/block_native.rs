@@ -4,8 +4,9 @@
 
 #[cfg(feature = "lean-tests")]
 use std::fmt::Write as _;
-use std::path::Path;
+use std::{fs, path::Path};
 
+use anyhow::Result;
 use xlsynth_lean::block::{LeanBlockBundle, compile_bx, emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
 
@@ -24,6 +25,131 @@ fn bx_bundle(source: &str) -> LeanBlockBundle {
     .unwrap()
     .emit_readable(None)
     .unwrap()
+}
+
+// Verifies: Each port retains its record or alias name in either order.
+// Catches: reusing the first type spelling for every port with the same layout.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_preserves_each_imported_struct_spelling_in_either_port_order() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::create_dir(dir.path().join("left"))?;
+    fs::write(
+        dir.path().join("left/ops.x"),
+        "pub struct Packet { data: u8 } pub type Message = Packet; pub type Data = Packet;
+         pub struct Other { data: u8 }",
+    )?;
+    // The checked BX type is identical for direct, message and data. Their
+    // Lean annotations must still reflect the type named at each source site.
+    for params in [
+        "direct: ops::Packet, message: Message, data: ops::Data",
+        "data: ops::Data, message: Message, direct: ops::Packet",
+    ] {
+        let source = format!(
+            "use left::ops; use left::ops::Message;
+            block inspect(clk, {params}, other: ops::Other) -> (u8, u8, u8, u8) {{
+                (direct.data, message.data, data.data, other.data)
+            }}"
+        );
+        let mut bundle = compile_bx(
+            "design",
+            &source,
+            xlsynth_bx::empty_package("example"),
+            Default::default(),
+            &xlsynth_bx::ImportOptions {
+                additional_search_paths: vec![dir.path()],
+                ..Default::default()
+            },
+        )?
+        .emit_readable(None)?;
+        let generated = &bundle
+            .files
+            .iter()
+            .find(|(p, _)| p == "ReadableGenerated.lean")
+            .unwrap()
+            .1;
+        for (field, ty) in [
+            ("direct", "Packet"),
+            ("message", "Message"),
+            ("data", "Data"),
+            ("other", "Other"),
+        ] {
+            assert!(
+                generated.contains(&format!("«{field}» : XLS.«left».«ops».«{ty}»")),
+                "{generated}"
+            );
+        }
+        bundle.files.push((
+            "AliasPorts.lean".into(),
+            r#"import ReadableCorrespondence
+open XlsReadable
+example : XLS.left.ops.Data = XLS.left.ops.Packet := rfl
+example : XLS.left.ops.Message = XLS.left.ops.Packet := rfl
+#check_failure fun (x : Input) => (show XLS.left.ops.Other from x.direct)
+example (q : State) (x : Input) :
+  observe q x = (x.direct.data, x.message.data, x.data.data, x.other.data) := rfl
+"#
+            .into(),
+        ));
+        check_bundle(
+            bundle,
+            "BX ports retaining direct and aliased DSLX type names",
+        );
+    }
+    Ok(())
+}
+
+// Verifies: BX state and ports retain both 4-bit and 8-bit Packet types.
+// Catches: assigning a nested field or register the wrong specialization.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_parametric_structs_preserve_bx_interface_types() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ops.x"),
+        "pub struct Packet<N: u32> { zebra: uN[N], apple: uN[N] }",
+    )?;
+    let compiled = compile_bx(
+        "design",
+        r#"
+use ops;
+struct Envelope { narrow: ops::Packet<4> }
+block direct(clk, p: ops::Packet<8>) -> ops::Packet<8> { p }
+block pair(clk, p: ops::Packet<8>, src: Envelope) -> (ops::Packet<8>, ops::Packet<4>) {
+    reg stored: ops::Packet<8>;
+    stored := p;
+    (stored, src.narrow)
+}
+"#,
+        xlsynth_bx::empty_package("example"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?;
+    for (block, proof) in [
+        (
+            "direct",
+            "example (q : State) (x : Input) : observe q x = (x.p.zebra, x.p.apple) := rfl",
+        ),
+        (
+            "pair",
+            r#"
+example (q : State) (x : Input) : (step q x).stored = x.p := rfl
+example (q : State) (x : Input) : (XLS.ops.«Packet<8>» × XLS.ops.«Packet<4>») := observe q x
+example (q : State) (x : Input) : observe q x = (q.stored, x.src.narrow) := rfl
+"#,
+        ),
+    ] {
+        let mut bundle = compiled.emit_readable(Some(block))?;
+        bundle.files.push((
+            "Check.lean".into(),
+            format!("import ReadableCorrespondence\nopen XlsReadable\n{proof}\n"),
+        ));
+        check_bundle(bundle, block);
+    }
+    Ok(())
 }
 
 // Verifies: Forwarded Boolean fields reduce by reflexivity. The step and

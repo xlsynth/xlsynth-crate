@@ -2,9 +2,9 @@
 
 //! Keep BX declarations paired with the package produced by lowering them.
 //!
-//! The checked BX module supplies concrete dimensions. Its written declarations
-//! name records, while the linked graph fixes port order and the equations used
-//! for both Lean models.
+//! The written annotations distinguish aliases that share a physical layout.
+//! The checked BX module supplies concrete dimensions, and the linked graph
+//! fixes the port order and the equations used for both Lean models.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::{
@@ -18,13 +18,15 @@ use xlsynth_bx::{
 };
 use xlsynth_pir::ir;
 
-use super::source_types::{SourceType, StatefulInterface, StructField, TypeDecl, source_shape};
+use super::source_types::{
+    SourceType, StatefulInterface, StructField, TypeDecl, resolve_aliases, source_shape,
+};
 use super::{BlockContext, LeanBlockBundle, readable, select_block};
 
 /// A checked BX module and its linked block IR, from the same compilation.
 ///
-/// Retains the written BX annotations so readable emission can recover record
-/// names without reopening the source files.
+/// Retains the written BX annotations and checked DSLX imports so readable
+/// emission can recover names without reopening the source files.
 pub struct CompiledBx {
     checked: CheckedModule,
     block_symbols: xlsynth_bx::BlockSymbols,
@@ -69,7 +71,8 @@ pub fn compile_bx(
 }
 
 impl CompiledBx {
-    /// Follow transparent BX aliases back to their written declaration.
+    /// Follow transparent BX aliases back to the spelling used at their
+    /// declaration. Distinct DSLX aliases can share one checked BX layout.
     fn written_type<'a>(&'a self, mut ty: &'a Type) -> &'a Type {
         while let Type::Named(name) = ty
             && let Some(alias) = self.source.type_aliases.iter().find(|a| a.name == *name)
@@ -112,7 +115,9 @@ impl CompiledBx {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
         let (declarations, interface) = self.readable_interface(&block)?;
-        // Root and imported BX libraries can use the same logical module name.
+        // Root and library BX keys are distinct from qualified DSLX keys,
+        // but both languages can declare the same name in the same Lean
+        // namespace.
         let mut bx_names = BTreeSet::new();
         for (owner, local) in declarations
             .iter()
@@ -124,6 +129,16 @@ impl CompiledBx {
             ensure!(
                 bx_names.insert((owner, local)),
                 "duplicate BX source declaration '{owner}::{local}' in the root and an imported library"
+            );
+        }
+        for (owner, local) in declarations
+            .iter()
+            .map(TypeDecl::name)
+            .filter_map(|name| name.split_once("::"))
+        {
+            ensure!(
+                !bx_names.contains(&(owner, local)),
+                "duplicate source declaration '{owner}::{local}' in BX '{owner}.bx' and DSLX '{owner}.x'; rename one declaration"
             );
         }
         readable::emit(&block, &declarations, &interface)
@@ -255,11 +270,23 @@ impl CompiledBx {
         .into_iter()
         .collect();
         let written_result = self.written_type(&source.result);
-        ensure!(
-            self.imported_struct(written_result).is_none(),
-            "imported DSLX result type {written_result} is unsupported by readable Lean"
-        );
-        let outputs = {
+        let outputs = if let Some(import) = self.imported_struct(written_result) {
+            let ty = super::helper_types::imported_struct(import, &mut declarations)?;
+            let SourceType::Struct { name } = resolve_aliases(&ty, &declarations)? else {
+                bail!("expected imported BX result struct {}", source.result);
+            };
+            let fields = declarations
+                .iter()
+                .find_map(|d| match d {
+                    TypeDecl::Struct { name: n, fields } if *n == name => Some(fields),
+                    _ => None,
+                })
+                .with_context(|| format!("missing imported BX result struct {name}"))?;
+            fields
+                .iter()
+                .map(|f| (f.name.clone(), f.source_type.clone()))
+                .collect()
+        } else {
             let fields = self.written_fields(written_result);
             checked
                 .output_ports
@@ -316,8 +343,8 @@ impl CompiledBx {
 
 /// The checked type supplies concrete dimensions and specialized BX layouts.
 ///
-/// Follow the written annotation to identify records in fields, tuple members
-/// and array elements.
+/// Follow the written annotation alongside it to retain the DSLX declaration
+/// at each imported field, tuple member, or array element.
 fn bx_type(
     ty: &Type,
     written: &Type,
@@ -325,10 +352,9 @@ fn bx_type(
     declarations: &mut Vec<TypeDecl>,
 ) -> Result<SourceType> {
     let written = module.written_type(written);
-    ensure!(
-        module.imported_struct(written).is_none(),
-        "imported DSLX type {written} is unsupported by readable Lean"
-    );
+    if let Some(import) = module.imported_struct(written) {
+        return super::helper_types::imported_struct(import, declarations);
+    }
     Ok(match ty {
         Type::Bool
         | Type::Bits {
@@ -397,7 +423,7 @@ fn bx_type(
                         })
                     })
                     .collect::<Result<_>>()?;
-                declarations.push(TypeDecl {
+                declarations.push(TypeDecl::Struct {
                     name: key.clone(),
                     fields,
                 });
@@ -438,6 +464,57 @@ block nested(clk, x: Wrap<Byte>) -> (Byte, Wrap<Byte>) {
         for block in ["scalar", "sized", "packet", "nested"] {
             compiled.emit_readable(Some(block)).with_context(|| block)?;
         }
+        Ok(())
+    }
+
+    // Verifies: Nested arrays and output ports retain each written DSLX alias.
+    // Catches: collapsing two aliases because their checked BX layouts match.
+    #[test]
+    fn checked_bx_layout_preserves_each_written_dslx_alias() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("ops.x"),
+            "pub struct Packet { data: u8 } pub type First = Packet; pub type Second = Packet;",
+        )?;
+        let compiled = compile_bx(
+            "example",
+            r#"
+use ops;
+const COUNT = u32:2;
+type Pair = (ops::First, ops::Second);
+struct Envelope { items: Pair[COUNT] }
+block demo(clk, p: Envelope) -> Pair { p.items[u32:0] }
+"#,
+            xlsynth_bx::empty_package("example"),
+            Default::default(),
+            &ImportOptions {
+                additional_search_paths: vec![dir.path()],
+                ..Default::default()
+            },
+        )?;
+        let graph = select_block(compiled.package(), Some("demo"))?;
+        let (declarations, interface) =
+            compiled.readable_interface(&BlockContext::new(compiled.package(), graph)?)?;
+        let aliases =
+            ["ops::First", "ops::Second"].map(|name| SourceType::Alias { name: name.into() });
+        assert_eq!(interface.outputs, aliases);
+        let envelope = declarations
+            .iter()
+            .find(|d| d.name() == "Envelope")
+            .unwrap();
+        let TypeDecl::Struct { fields, .. } = envelope else {
+            panic!("expected Envelope struct");
+        };
+        assert_eq!(
+            fields[0].source_type,
+            SourceType::Array {
+                element: Box::new(SourceType::Tuple {
+                    members: aliases.to_vec()
+                }),
+                size: 2,
+            }
+        );
+        compiled.emit_readable(Some("demo"))?;
         Ok(())
     }
 

@@ -10,6 +10,7 @@ use xlsynth_pir::ir_inline::reachable_functions_in_dependency_order;
 use xlsynth_pir::ir_utils::direct_function_references;
 
 mod bx;
+mod helper_types;
 pub(crate) mod library_notation;
 mod raw;
 mod readable;

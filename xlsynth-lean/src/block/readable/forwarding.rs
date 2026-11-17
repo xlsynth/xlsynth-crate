@@ -3,7 +3,10 @@
 //! Preserve definitional reduction for source fields wired directly to a
 //! result.
 
-use super::{Presentation, SourceType, identifier, lean, product_element, product_value};
+use super::{
+    Presentation, SourceType, TypeDecl, identifier, lean, product_element, product_value,
+    resolve_aliases,
+};
 use anyhow::{Context, Result};
 use xlsynth_pir::ir::{NodePayload, NodeRef};
 
@@ -54,13 +57,16 @@ impl Presentation<'_> {
             }
         };
         for index in indices.into_iter().rev() {
-            match ty {
+            match self.unalias(ty)? {
                 SourceType::Tuple { members } => {
                     field = product_element(&field, index, members.len(), true);
                     ty = &members[index];
                 }
                 SourceType::Struct { name } => {
-                    let member = &self.declaration(name)?.fields[index];
+                    let TypeDecl::Struct { fields, .. } = self.declaration(name)? else {
+                        unreachable!("validated struct declaration")
+                    };
+                    let member = &fields[index];
                     field = format!("({field}).{}", identifier(&member.name)?);
                     ty = &member.source_type;
                 }
@@ -78,13 +84,16 @@ impl Presentation<'_> {
         decoded: &str,
     ) -> Result<Option<String>> {
         // Ordinary bits already reduce through the identity codec.
-        if matches!(target, SourceType::Bits { .. }) {
+        if matches!(self.unalias(target)?, SourceType::Bits { .. }) {
             return Ok(None);
         }
         let Some((field, ty)) = self.interface_field(wire)? else {
             return Ok(None);
         };
-        if ty != target {
+        if ty != target
+            && resolve_aliases(ty, self.declarations)?
+                != resolve_aliases(target, self.declarations)?
+        {
             return Ok(None);
         }
         let encoded = self.convert(Some(target), &field, true)?;
