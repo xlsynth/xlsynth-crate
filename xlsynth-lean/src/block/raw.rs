@@ -113,6 +113,12 @@ pub(super) fn emit_checked(
     emit_with_calls(block, namespace, Some(calls))
 }
 
+/// Selects how emitted block and helper bodies call their callees.
+///
+/// With `checked: None`, standalone bodies receive a callback parameter for
+/// each distinct direct callee. With `checked: Some(_)`, bodies call checked
+/// source declarations directly. If `CheckedCalls::call` returns `None` for
+/// a physical-only helper, they call that helper in `namespace.Helpers`.
 #[derive(Clone, Copy)]
 struct CallTargets<'a> {
     namespace: &'a str,
