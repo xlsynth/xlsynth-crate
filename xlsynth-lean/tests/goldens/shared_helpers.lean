@@ -1,6 +1,8 @@
 -- SPDX-License-Identifier: Apache-2.0
 import XlsynthLean.IR
 
+local notation "L.BitVec.toNat" => _root_.BitVec.toNat
+
 namespace Example
 
 def Helpers.«widen» (n1 : BitVec 4) : BitVec 8 :=
@@ -23,7 +25,7 @@ def observe (x : BitVec 4) : BitVec 8 := Helpers.«scalar» (x + 1)
 abbrev Rows := Vector (Vector (BitVec 8) 2) 2
 
 def update (rows : Rows) (outer v0 : BitVec 1) (value : BitVec 8) : Rows :=
-  _root_.XlsynthLean.IR.arrayModify rows outer.toNat (_root_.XlsynthLean.IR.arrayModify · v0.toNat (fun _ => value))
+  _root_.XlsynthLean.IR.arrayModify rows (L.BitVec.toNat outer) (_root_.XlsynthLean.IR.arrayModify · (L.BitVec.toNat v0) (fun _ => value))
 
 def rows : Rows := #[#[1, 2].toVector, #[3, 4].toVector].toVector
 #guard update rows 0 0 9 == #[#[9, 2].toVector, #[3, 4].toVector].toVector

@@ -95,8 +95,26 @@ returns source in the `XlsBlock` namespace with the same import.
 The generated clock step preserves old-state outputs, simultaneous register
 writes, reset precedence and source assertions. Blocks use the function
 emitter's translation of PIR types, literals and local operations, including
-one-hot selection over tuples and arrays. Block emission reports an error for
-unsupported operations, including function calls, and for asynchronous resets.
+one-hot selection over tuples and arrays. Calls to pure functions and fixed-trip-count loops remain explicit. Unsupported operations and asynchronous resets return contextual errors.
+
+When starting from saved IR text, call PIR's `Parser::parse_and_validate_package`
+before selecting the block, as in the `export_block` example.
+
+Generated block files use `L.` for Lean library declarations. For example,
+`L.Vector (L.BitVec 8) 2` is an array of two eight-bit words. Each file
+defines its own short spellings. A proof importing the model can use Lean's
+usual library names, and source fields such as `p.Vector` keep their spelling.
+
+The generated `eval` takes arbitrary old registers and current inputs and
+returns outputs, next registers, and assertion results. Outputs read old
+registers; all register writes commit together. For example, if `a` is written
+from `b` and `b` from `a`, an old state `(a = 1, b = 2)` produces next state
+`(a = 2, b = 1)`. An output driven by `a` still observes `1` on that edge.
+`reset` activates the declared reset input for one ordinary clock edge. It
+does not invent initial values for registers without reset values.
+
+Every assertion remains an observable result, including disconnected ones;
+assertions never constrain the model's input or old-state domain.
 
 ## Evaluate through Lean
 
