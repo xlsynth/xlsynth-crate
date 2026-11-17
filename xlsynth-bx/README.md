@@ -1270,7 +1270,7 @@ When `en` is low, `q` holds its previous value and the sum still responds to
 `r`. A stage annotation checks alignment in the datapath. The block's enable
 and valid signals determine which transactions actually advance.
 
-The checker follows names, unary and binary operators, casts, `if`
+The checker follows names, unary and binary operators, casts, `if` and `match`
 expressions, and struct and tuple construction and field reads. A scalar
 literal such as `u8:7` can be used at any stage. With `const A = [u8:7];`,
 `A` can also be used at any stage because BX evaluates the constant before
@@ -1302,6 +1302,48 @@ arguments. A child without an output annotation supplies no stage to its
 caller, even if its inputs are annotated. An extern block also supplies no stage.
 Register feedback such as `q := q + x;` is legal BX. Following a timed
 output back through that feedback currently produces a diagnostic.
+
+#### Output stages by case
+
+An output can name a pure BX function that returns the expected stage for
+each combination of control inputs. The checker evaluates the function at
+compile time and checks each case separately:
+
+```text
+enum Op : u1 { Fast = 0, Slow = 1 }
+
+fn stage(op: Op) -> u32 {
+    match op {
+        Op::Fast => u32:1,
+        Op::Slow => u32:2,
+    }
+}
+
+block pulse(clk, op: Op) -> bool @stage(op) {
+    reg fast_q: bool;
+    reg slow_q: bool;
+    reg slow_qq: bool;
+    fast_q := op == Op::Fast;
+    slow_q := op == Op::Slow;
+    slow_qq := slow_q;
+    fast_q | slow_qq
+}
+```
+
+For Fast, `fast_q` is true at stage 1, so the OR is true at stage 1.
+For Slow, `slow_qq` is true at stage 2, so it is true at stage 2.
+This example allows pulses from different operations to overlap.
+
+A `match` or `if` selecting data still requires its selector and selected
+data to align. A stage-0 opcode cannot select stage-1 data. A guarded register
+keeps its stage when disabled, but the checker cannot assume what bits it
+holds. Resettable registers likewise have no exact case value when reset
+could override the write. As with fixed stages, the annotation does not promise
+freshness, validity, or exclusive use of an output.
+
+Controls must be block input ports of Boolean, enum, or small unsigned bit
+type. The checker limits their combined domain to 64 cases. Case-dependent
+child outputs do not yet expose a timing interface to their callers.
 
 #### Related work
 
