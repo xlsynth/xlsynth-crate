@@ -74,6 +74,17 @@ impl Value {
         }
     }
 
+    /// Returns the indexable signal with this IR array's packed dimensions.
+    pub(crate) fn packed_array(&self) -> Result<IndexableExpr, BlockCodegenError> {
+        self.indexable
+            .filter(|_| self.array_rank != 0)
+            .ok_or_else(|| {
+                BlockCodegenError::InvalidBlock(
+                    "expected a materialized packed-array signal".to_owned(),
+                )
+            })
+    }
+
     /// Records a known packed width for scalar-index and slice legalization.
     pub(crate) fn with_width(mut self, bit_width: usize) -> Self {
         self.bit_width = Some(bit_width);
@@ -108,6 +119,7 @@ pub(crate) struct BlockEmitter<'a, 'file> {
     pub(crate) ports: BTreeMap<String, LogicRef>,
     pub(crate) register_refs: BTreeMap<String, LogicRef>,
     pub(crate) users: Vec<Vec<NodeRef>>,
+    extern_instances: BTreeSet<&'a str>,
     pub(crate) names: BTreeSet<String>,
     pub(crate) genvar_names: BTreeMap<usize, String>,
     pub(crate) priority_helpers: BTreeMap<crate::priority::PriorityHelper, String>,
@@ -350,6 +362,12 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             ports: BTreeMap::new(),
             register_refs: BTreeMap::new(),
             users,
+            extern_instances: block
+                .instantiations
+                .iter()
+                .filter(|instance| instance.kind == InstantiationKind::Extern)
+                .map(|instance| instance.name.as_str())
+                .collect(),
             names: BTreeSet::new(),
             genvar_names: BTreeMap::new(),
             priority_helpers: BTreeMap::new(),
@@ -475,26 +493,13 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             };
             self.ports.insert(name, signal);
         }
-
-        for (index, node) in self.block.nodes.iter().enumerate() {
-            if let NodePayload::InputPort { name, sv_type } = &node.payload {
-                if let Some(signal) = self.ports.get(name).copied() {
-                    let value = Value::signal(signal).with_width(node.ty.bit_count());
-                    self.values[index] = Some(if self.options.emit_sv_types && sv_type.is_some() {
-                        value
-                    } else {
-                        value.with_type(&node.ty)
-                    });
-                }
-            }
-        }
         Ok(())
     }
 
     /// Emits existing register state and ordinary dependency-ordered logic.
     fn emit_flat(&mut self) -> Result<(), BlockCodegenError> {
         let start = self.file.module_member_count(self.module);
-        self.emit_input_array_views()?;
+        self.bind_input_ports()?;
         for register in &self.block.registers {
             self.declare_register(register)?;
         }
@@ -558,7 +563,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         }
         let start = self.file.module_member_count(self.module);
         if stage_index == 0 {
-            self.emit_input_array_views()?;
+            self.bind_input_ports()?;
         }
         for &node_ref in &stage.combinational_nodes {
             self.emit_node(node_ref)?;
@@ -948,20 +953,50 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         }
     }
 
-    /// Gives custom-typed array input ports shaped views without changing
-    /// their explicitly requested SystemVerilog types.
-    fn emit_input_array_views(&mut self) -> Result<(), BlockCodegenError> {
-        for (index, node) in self.block.nodes.iter().enumerate() {
-            if matches!(node.payload, NodePayload::InputPort { .. })
-                && matches!(node.ty, Type::Array(_))
-                && let Some(value) = self.values[index]
-                && value.array_rank == 0
-            {
-                let view = self.assign_node(NodeRef { index }, value.expr)?;
-                self.values[index] = Some(view);
-            }
+    /// Binds inputs to IR values. A custom SV type can have different packed
+    /// dimensions or bit numbering, so give it a signal with the IR shape.
+    fn bind_input_ports(&mut self) -> Result<(), BlockCodegenError> {
+        for input in self.block.input_ports() {
+            let node = self.block.get_node(input);
+            let NodePayload::InputPort { name, sv_type } = &node.payload else {
+                unreachable!("verified block input")
+            };
+            let Some(&signal) = self.ports.get(name) else {
+                continue; // Zero-width ports have no SV signal.
+            };
+            let expr = signal.to_expr();
+            self.values[input.index] = Some(if self.options.emit_sv_types && sv_type.is_some() {
+                let needs_view = self.users[input.index].iter().any(|&user| {
+                    match &self.block.get_node(user).payload {
+                        NodePayload::OutputPort { .. } => false,
+                        NodePayload::InstantiationInput { instantiation, .. } => {
+                            self.is_extern_array_argument(instantiation, input)
+                        }
+                        _ => true,
+                    }
+                });
+                if needs_view {
+                    // Preserve the port's declared type for whole-value uses.
+                    // Index through the signal with the IR dimensions.
+                    Value {
+                        expr,
+                        ..self.assign_node(input, expr)?
+                    }
+                } else {
+                    Value::expression(expr, 0).with_width(node.ty.bit_count())
+                }
+            } else {
+                Value::signal(signal).with_type(&node.ty)
+            });
         }
         Ok(())
+    }
+
+    /// An extern template may subscript an array placeholder using its IR
+    /// dimensions.
+    pub(crate) fn is_extern_array_argument(&self, instance: &str, arg: NodeRef) -> bool {
+        matches!(self.block.get_node_ty(arg), Type::Array(_))
+            && self.extern_instances.contains(instance)
     }
 
     /// Returns the represented expression for a node with nonzero bit width.

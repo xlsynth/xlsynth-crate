@@ -45,8 +45,13 @@ impl BlockEmitter<'_, '_> {
                 arg,
             } => {
                 if let Some(value) = self.values[arg.index] {
+                    let expr = if self.is_extern_array_argument(instantiation, *arg) {
+                        value.packed_array()?.to_expr()
+                    } else {
+                        value.expr
+                    };
                     self.instance_inputs
-                        .insert((instantiation.clone(), port_name.clone()), value.expr);
+                        .insert((instantiation.clone(), port_name.clone()), expr);
                 }
                 None
             }
@@ -767,14 +772,7 @@ impl BlockEmitter<'_, '_> {
         index: Expr,
         element_type: &Type,
     ) -> Result<Value, BlockCodegenError> {
-        let source = value
-            .indexable
-            .filter(|_| value.array_rank != 0)
-            .ok_or_else(|| {
-                BlockCodegenError::InvalidBlock(
-                    "array elements require a materialized packed-array signal".to_owned(),
-                )
-            })?;
+        let source = value.packed_array()?;
         let selected = self.file.make_index_expr(&source, &index);
         let indexable = selected.to_indexable_expr();
         Ok(Value {

@@ -126,6 +126,43 @@ module tb;
 endmodule
 "#,
         ),
+        (
+            "extern/custom_typed_array_argument.golden.ir",
+            r#"
+module tb;
+  logic [7:0] data, forwarded;
+  logic [3:0] upper;
+  typed_array_argument dut(.*);
+  initial begin
+    for (int i = 0; i < 256; i++) begin
+      data = i; #1;
+      if (upper !== data[7:4] || forwarded !== data)
+        $fatal(1, "data=%h upper=%h forwarded=%h", data, upper, forwarded);
+    end
+    $finish;
+  end
+endmodule
+"#,
+        ),
+        (
+            "structure/custom_typed_bit_slices.golden.ir",
+            r#"
+module tb;
+  logic [7:0] data, forwarded;
+  logic selected;
+  logic [2:0] window;
+  typed_bit_slices dut(.*);
+  initial begin
+    for (int i = 0; i < 256; i++) begin
+      data = i; #1;
+      if (selected !== data[1] || window !== data[5:3] || forwarded !== data)
+        $fatal(1, "data=%h", data);
+    end
+    $finish;
+  end
+endmodule
+"#,
+        ),
     ];
     let temporary = tempfile::tempdir().unwrap();
     let source_path = temporary.path().join("packed.sv");
@@ -133,24 +170,33 @@ endmodule
         let path = directory.join(relative);
         let fixture = parse_golden_fixture(&path, &fs::read_to_string(&path).unwrap()).unwrap();
         let generated = execute_golden_fixture(&fixture).unwrap();
-        let support = "package types; typedef logic [7:0] input_t; typedef logic [7:0] output_t; endpackage\n";
-        fs::write(&source_path, format!("{support}{generated}{testbench}")).unwrap();
-        let binary_path = tools
-            .compile(
-                source_path.parent().unwrap(),
-                &[&source_path],
-                "tb",
-                &[],
-                Duration::from_secs(60),
-            )
-            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
-        tools
-            .run(
-                source_path.parent().unwrap(),
-                &binary_path,
-                Duration::from_secs(60),
-            )
-            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        for input_type in [
+            "logic [7:0]",
+            "logic [1:0][3:0]",
+            "logic [4:11]",
+            "enum logic [7:0] { FIRST, LAST }",
+        ] {
+            let support = format!(
+                "package types; typedef {input_type} input_t; typedef logic [7:0] output_t; endpackage\n"
+            );
+            fs::write(&source_path, format!("{support}{generated}{testbench}")).unwrap();
+            let binary_path = tools
+                .compile(
+                    source_path.parent().unwrap(),
+                    &[&source_path],
+                    "tb",
+                    &[],
+                    Duration::from_secs(60),
+                )
+                .unwrap_or_else(|error| panic!("{relative} ({input_type}): {error}"));
+            tools
+                .run(
+                    source_path.parent().unwrap(),
+                    &binary_path,
+                    Duration::from_secs(60),
+                )
+                .unwrap_or_else(|error| panic!("{relative} ({input_type}): {error}"));
+        }
     }
 }
 

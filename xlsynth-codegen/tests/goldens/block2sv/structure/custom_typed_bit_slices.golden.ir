@@ -1,0 +1,23 @@
+package typed_slices
+
+top block typed_bit_slices(data: bits[8], selected: bits[1], window: bits[3], forwarded: bits[8]) {
+  data: bits[8] = input_port(name=data, sv_type="types::input_t", id=1)
+  bit_slice.2: bits[1] = bit_slice(data, start=1, width=1, id=2)
+  bit_slice.3: bits[3] = bit_slice(data, start=3, width=3, id=3)
+  selected: () = output_port(bit_slice.2, name=selected, id=4)
+  window: () = output_port(bit_slice.3, name=window, id=5)
+  forwarded: () = output_port(data, name=forwarded, sv_type="types::input_t", id=6)
+}
+
+// EXPECT-SV: module typed_bit_slices(
+// EXPECT-SV:   input types::input_t data,
+// EXPECT-SV:   output logic selected,
+// EXPECT-SV:   output logic [2:0] window,
+// EXPECT-SV:   output types::input_t forwarded
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] data__1;
+// EXPECT-SV:   assign data__1 = data;
+// EXPECT-SV:   assign selected = data__1[1];
+// EXPECT-SV:   assign window = data__1[5:3];
+// EXPECT-SV:   assign forwarded = data;
+// EXPECT-SV: endmodule

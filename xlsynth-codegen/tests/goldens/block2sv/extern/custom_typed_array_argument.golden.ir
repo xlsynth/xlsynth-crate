@@ -1,0 +1,30 @@
+package extern_array
+
+#[ffi_proto("""code_template: "assign {return} = {lanes}[1];"
+""")]
+fn upper_lane(lanes: bits[4][2] id=1) -> bits[4] {
+  literal.2: bits[1] = literal(value=1, id=2)
+  ret array_index.3: bits[4] = array_index(lanes, indices=[literal.2], id=3)
+}
+
+top block typed_array_argument(data: bits[4][2], upper: bits[4], forwarded: bits[4][2]) {
+  instantiation extract(foreign_function=upper_lane, kind=extern)
+  data: bits[4][2] = input_port(name=data, sv_type="types::input_t", id=4)
+  instantiation_input.5: () = instantiation_input(data, instantiation=extract, port_name=lanes, id=5)
+  lane: bits[4] = instantiation_output(instantiation=extract, port_name=return, id=6)
+  upper: () = output_port(lane, name=upper, id=7)
+  forwarded: () = output_port(data, name=forwarded, sv_type="types::input_t", id=8)
+}
+
+// EXPECT-SV: module typed_array_argument(
+// EXPECT-SV:   input types::input_t data,
+// EXPECT-SV:   output logic [3:0] upper,
+// EXPECT-SV:   output types::input_t forwarded
+// EXPECT-SV: );
+// EXPECT-SV:   logic [1:0][3:0] data__1;
+// EXPECT-SV:   logic [3:0] lane;
+// EXPECT-SV:   assign data__1 = data;
+// EXPECT-SV:   assign upper = lane;
+// EXPECT-SV:   assign forwarded = data;
+// EXPECT-SV:   assign lane = data__1[1];
+// EXPECT-SV: endmodule
