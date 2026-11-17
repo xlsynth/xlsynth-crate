@@ -124,29 +124,18 @@ pub(crate) fn emit_package(
     options: &BlockCodegenOptions,
     mut top_register_names: Option<&mut BTreeMap<String, String>>,
 ) -> Result<BlockCodegenOutput, BlockCodegenError> {
-    let top = select_top(package, options.top.as_deref())?;
+    let top_block = select_top(package, options.top.as_deref())?;
+    let top = top_block.name.as_str();
     let mut inliner = BlockInvokeInliner::new(package).map_err(BlockCodegenError::InvalidBlock)?;
 
     let mut ordered = Vec::new();
     let mut visited = BTreeSet::new();
     let mut visiting = BTreeSet::new();
     collect_dependencies(package, top, &mut ordered, &mut visited, &mut visiting)?;
-    // Hierarchy and pipeline layout must see the same data dependencies as
-    // emission, including when a function ignores one of its arguments.
-    let expanded = ordered
-        .into_iter()
-        .map(|block| {
-            inliner
-                .inline_block(&block.name)
-                .map_err(BlockCodegenError::Unsupported)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let ordered: Vec<&Block> = expanded.iter().map(|block| block.as_ref()).collect();
-    let blocks = ordered.iter().map(|&b| (b.name.as_str(), b)).collect();
     for &block in &ordered {
         validate_single_register_writes(block)?;
     }
-    crate::hierarchy::verify_hierarchy(&ordered)?;
+    crate::hierarchy::verify_hierarchy(top_block, package)?;
     if let Some(module_name) = options.module_name.as_deref()
         && ordered
             .iter()
@@ -158,9 +147,22 @@ pub(crate) fn emit_package(
         )));
     }
 
+    // Layout and emission both use the expanded function bodies.
+    let expanded = ordered
+        .into_iter()
+        .map(|block| {
+            inliner
+                .inline_block(&block.name)
+                .map_err(BlockCodegenError::Unsupported)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let blocks = expanded
+        .iter()
+        .map(|block| (block.name.as_str(), block.as_ref()))
+        .collect();
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut child_timings = ChildTimings::new();
-    for block in ordered {
+    for block in &expanded {
         let module_name = if block.name == top {
             options.module_name.as_deref().unwrap_or(&block.name)
         } else {
@@ -239,38 +241,28 @@ fn validate_supported_nodes(block: &Block) -> Result<(), BlockCodegenError> {
 fn select_top<'a>(
     package: &'a Package,
     explicit_top: Option<&str>,
-) -> Result<&'a str, BlockCodegenError> {
-    let blocks = package
+) -> Result<&'a Block, BlockCodegenError> {
+    if let Some(requested) = explicit_top {
+        return package.get_block(requested).ok_or_else(|| {
+            BlockCodegenError::TopSelection(format!(
+                "requested top block `{requested}` does not exist"
+            ))
+        });
+    }
+    if let Some((name, MemberType::Block)) = &package.top {
+        return package.get_block(name).ok_or_else(|| {
+            BlockCodegenError::TopSelection(format!("package top block `{name}` does not exist"))
+        });
+    }
+
+    let blocks: Vec<_> = package
         .members
         .iter()
         .filter_map(|member| match member {
-            PackageMember::Block(block) => Some(block.name.as_str()),
+            PackageMember::Block(block) => Some(block),
             PackageMember::Function(_) => None,
         })
-        .collect::<Vec<_>>();
-
-    if let Some(requested) = explicit_top {
-        return blocks
-            .into_iter()
-            .find(|name| *name == requested)
-            .ok_or_else(|| {
-                BlockCodegenError::TopSelection(format!(
-                    "requested top block `{requested}` does not exist"
-                ))
-            });
-    }
-
-    if let Some((name, MemberType::Block)) = &package.top {
-        return blocks
-            .into_iter()
-            .find(|candidate| candidate == &name.as_str())
-            .ok_or_else(|| {
-                BlockCodegenError::TopSelection(format!(
-                    "package top block `{name}` does not exist"
-                ))
-            });
-    }
-
+        .collect();
     match blocks.as_slice() {
         [only] => Ok(only),
         [] => Err(BlockCodegenError::TopSelection(
@@ -278,7 +270,11 @@ fn select_top<'a>(
         )),
         _ => Err(BlockCodegenError::TopSelection(format!(
             "package contains multiple blocks ({}) without a block top; specify --top",
-            blocks.join(", ")
+            blocks
+                .iter()
+                .map(|block| block.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
     }
 }

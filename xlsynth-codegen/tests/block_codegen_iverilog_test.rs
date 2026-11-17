@@ -12,10 +12,151 @@ use snapshots::assert_golden_sv;
 use std::collections::BTreeMap;
 use support::{ClockedInputs, CycleInputs, TestRtl, run_icarus_cycles};
 use xlsynth_codegen::{BlockCodegenOptions, Layout};
+use xlsynth_pir::block2fn::{Block2FnOptions, block_package_to_fn};
+use xlsynth_pir::ir_builder::verify_block_combinational_cycles;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::math::ceil_log2;
 use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_test_helpers::rtl_sim::LogicValue;
+
+#[test]
+fn disjoint_feedback_lanes_agree_in_sv_and_block2fn() {
+    let ir = r#"package lanes
+block leaf(data: bits[4], result: bits[4]) {
+  data: bits[4] = input_port(name=data, id=1)
+  result: () = output_port(data, name=result, id=2)
+}
+top block wrapper(seed: bits[2], result: bits[2]) {
+  instantiation u(block=leaf, kind=block)
+  seed: bits[2] = input_port(name=seed, id=3)
+  q: bits[4] = instantiation_output(instantiation=u, port_name=result, id=4)
+  lo: bits[2] = bit_slice(q, start=0, width=2, id=5)
+  hi: bits[2] = bit_slice(q, start=2, width=2, id=6)
+  packed_data: bits[4] = concat(lo, seed, id=7)
+  drive: () = instantiation_input(packed_data, instantiation=u, port_name=data, id=8)
+  result: () = output_port(hi, name=result, id=9)
+}
+"#;
+    let cyclic = ir.replace("bit_slice(q, start=0", "bit_slice(q, start=2");
+    check_feedback(ir, &cyclic, 2);
+
+    // The nested call returns its second argument and ignores its first.
+    // The two invokes exercise range translation through both call frames.
+    let called = ir.replace("block leaf(", r#"fn second(x: bits[4] id=20, y: bits[4] id=21) -> bits[4] {
+  ret y: bits[4] = param(name=y, id=21)
+}
+fn pass(x: bits[4] id=22) -> bits[4] {
+  ignored: bits[4] = literal(value=0, id=23)
+  ret forwarded: bits[4] = invoke(ignored, x, to_apply=second, id=24)
+}
+block leaf("#).replace("result: () = output_port(data,", "called: bits[4] = invoke(data, to_apply=pass, id=25)\n  result: () = output_port(called,");
+    check_feedback(
+        &called,
+        &called.replace("bit_slice(q, start=0", "bit_slice(q, start=2"),
+        2,
+    );
+}
+
+#[test]
+fn empty_slice_contributes_no_feedback() {
+    let ir = r#"package empty
+block leaf(data: bits[1], result: bits[1]) {
+  data: bits[1] = input_port(name=data, id=1)
+  result: () = output_port(data, name=result, id=2)
+}
+top block wrapper(seed: bits[1], result: bits[1]) {
+  instantiation u(block=leaf, kind=block)
+  seed: bits[1] = input_port(name=seed, id=3)
+  q: bits[1] = instantiation_output(instantiation=u, port_name=result, id=4)
+  empty: bits[0] = bit_slice(q, start=0, width=0, id=5)
+  data: bits[1] = concat(empty, seed, id=6)
+  drive: () = instantiation_input(data, instantiation=u, port_name=data, id=7)
+  result: () = output_port(q, name=result, id=8)
+}
+"#;
+    check_feedback(
+        ir,
+        &ir.replace("concat(empty, seed,", "concat(empty, q,"),
+        1,
+    );
+}
+
+#[test]
+fn ignored_call_argument_does_not_close_a_loop() {
+    let ir = r#"package unused_arg
+fn second(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
+  ret y: bits[1] = param(name=y, id=2)
+}
+block leaf(data: bits[1], seed: bits[1], result: bits[1]) {
+  data: bits[1] = input_port(name=data, id=3)
+  seed: bits[1] = input_port(name=seed, id=4)
+  called: bits[1] = invoke(data, seed, to_apply=second, id=5)
+  result: () = output_port(called, name=result, id=6)
+}
+top block wrapper(seed: bits[1], result: bits[1]) {
+  instantiation u(block=leaf, kind=block)
+  seed: bits[1] = input_port(name=seed, id=7)
+  q: bits[1] = instantiation_output(instantiation=u, port_name=result, id=8)
+  drive: () = instantiation_input(q, instantiation=u, port_name=data, id=9)
+  feed: () = instantiation_input(seed, instantiation=u, port_name=seed, id=10)
+  result: () = output_port(q, name=result, id=11)
+}
+"#;
+    check_feedback(
+        ir,
+        &ir.replace("invoke(data, seed,", "invoke(seed, data,"),
+        1,
+    );
+}
+
+/// Checks all seed values and requires all three native paths to reject real
+/// feedback.
+fn check_feedback(ir: &str, cyclic: &str, width: usize) {
+    let design = package(ir);
+    verify_block_combinational_cycles(design.get_top_block().unwrap(), &design).unwrap();
+    let projected = block_package_to_fn(&design, &Block2FnOptions::default()).unwrap();
+    xlsynth_pir::ir_verify::verify_function(&projected.function).unwrap();
+    for layout in [Layout::None, Layout::Pipeline] {
+        let rtl = TestRtl::emit(
+            &design,
+            &BlockCodegenOptions {
+                layout,
+                ..Default::default()
+            },
+        );
+        for seed in 0..1 << width {
+            let input = IrValue::make_ubits(width, seed).unwrap();
+            let FnEvalResult::Success(result) =
+                eval_fn_in_package(&design, &projected.function, &[input])
+            else {
+                panic!("projected function failed for seed={seed}");
+            };
+            let simulated = output(
+                &evaluate(&rtl, &[("seed", u32::try_from(width).unwrap(), seed)]),
+                "result",
+            );
+            assert_eq!(simulated, seed);
+            assert_eq!(result.value, IrValue::make_ubits(width, simulated).unwrap());
+        }
+    }
+
+    let cyclic = package(cyclic);
+    assert!(matches!(
+        verify_block_combinational_cycles(cyclic.get_top_block().unwrap(), &cyclic),
+        Err(xlsynth_pir::BuilderError::CombinationalCycle { .. })
+    ));
+    assert!(
+        block_package_to_fn(&cyclic, &Block2FnOptions::default())
+            .unwrap_err()
+            .contains("cycle")
+    );
+    assert!(
+        xlsynth_codegen::emit_system_verilog(&cyclic, &BlockCodegenOptions::default())
+            .unwrap_err()
+            .to_string()
+            .contains("cycle")
+    );
+}
 
 #[test]
 fn reserved_internal_names_are_legalized_without_changing_behavior() {

@@ -2,35 +2,53 @@
 
 //! Hierarchical combinational dependencies without cloning or expanding blocks.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+mod slices;
 
 use super::{BlockCycleConnection, BlockCycleStep, BuilderError};
-use crate::ir::{Block, BlockPort, InstantiationKind, NodePayload, NodeRef, Package};
+use crate::block_feedback::InstanceConnections;
+use crate::ir::{Block, InstantiationKind, NodeGraph, NodePayload, NodeRef, Package};
 use crate::ir_utils::operands;
 
 type InputDependencies = BTreeSet<String>;
 type OutputDependencies = BTreeMap<String, InputDependencies>;
 
+/// Local feedback candidates and the child instances that contain others.
+#[derive(Default)]
+struct Candidates {
+    roots: Vec<usize>,
+    children: Vec<usize>,
+}
+
+/// Definition-level whole-port summaries and candidate paths from the root.
 #[derive(Default)]
 struct Hierarchy {
     summaries: BTreeMap<String, OutputDependencies>,
     active: BTreeSet<String>,
+    candidates: BTreeMap<String, Candidates>,
 }
 
 /// Checks implicit instance connections as well as explicit graph edges.
 ///
-/// Each distinct child block is checked once and summarized by the input ports
-/// reaching each output. Registers cut dependencies, so sequential feedback is
-/// permitted. Traversal stops at extern boundaries because the foreign
-/// function body can be a placeholder for separately supplied RTL.
-pub(super) fn verify_block_combinational_cycles(
+/// Each distinct child block is summarized by the input ports reaching each
+/// output. Registers and opaque externs cut same-cycle dependencies.
+/// Suspected cycles follow selected bits and aggregate elements through block
+/// ports and local calls under the literal bindings supplied by the root.
+/// Operations with runtime offsets conservatively depend on their operands.
+///
+/// The block can be under construction. Its children and local callees must
+/// belong to a verified package, and its ports and nodes must be well typed.
+pub fn verify_block_combinational_cycles(
     block: &Block,
     package: &Package,
 ) -> Result<(), BuilderError> {
-    // Only children need interface summaries; nobody consumes the root's.
-    Hierarchy::default()
-        .verify_graph(block, package)
-        .map(|_| ())
+    let mut hierarchy = Hierarchy::default();
+    hierarchy.verify_graph(block, package)?;
+    if !hierarchy.candidates.is_empty() {
+        slices::Checker::new(package).check(block, &hierarchy.candidates)?;
+    }
+    Ok(())
 }
 
 impl Hierarchy {
@@ -40,12 +58,13 @@ impl Hierarchy {
             return Ok(());
         }
         let dependencies = self.verify_graph(block, package)?;
-        let summary = graph_output_dependencies(block, &dependencies)?;
+        let summary = graph_output_dependencies(block, &dependencies);
         self.summaries.insert(block.name.clone(), summary);
         Ok(())
     }
 
-    /// Checks the hierarchy and returns cycle-free, instance-aware graph edges.
+    /// Checks the hierarchy and returns its conservative whole-node
+    /// dependencies.
     fn verify_graph(
         &mut self,
         block: &Block,
@@ -57,7 +76,8 @@ impl Hierarchy {
                 block.name
             )));
         }
-        for instance in &block.instantiations {
+        let mut candidates = Candidates::default();
+        for (index, instance) in block.instantiations.iter().enumerate() {
             if instance.kind == InstantiationKind::Block {
                 let child = package
                     .get_block(&instance.block)
@@ -72,27 +92,12 @@ impl Hierarchy {
                 // internal combinational logic can still
                 // contain an invalid cycle.
                 self.summarize(child, package)?;
+                if self.candidates.contains_key(&child.name) {
+                    candidates.children.push(index);
+                }
             }
         }
-        let mut input_connections: BTreeMap<&str, BTreeMap<&str, NodeRef>> = BTreeMap::new();
-        for (index, node) in block.nodes.iter().enumerate() {
-            if let NodePayload::InstantiationInput {
-                instantiation,
-                port_name,
-                ..
-            } = &node.payload
-            {
-                input_connections
-                    .entry(instantiation)
-                    .or_default()
-                    .insert(port_name, NodeRef { index });
-            }
-        }
-        let definitions: BTreeMap<_, _> = block
-            .instantiations
-            .iter()
-            .map(|instance| (instance.name.as_str(), instance))
-            .collect();
+        let connections = InstanceConnections::new(block);
         let mut dependencies = Vec::with_capacity(block.nodes.len());
         for node in &block.nodes {
             let mut edges = operands(&node.payload);
@@ -101,16 +106,19 @@ impl Hierarchy {
                 port_name,
             } = &node.payload
             {
-                let definition = definitions.get(instantiation.as_str()).ok_or_else(|| {
-                    invalid(format!(
-                        "unknown instance '{instantiation}' in block '{}'",
-                        block.name
-                    ))
-                })?;
+                let definition = connections
+                    .definitions
+                    .get(instantiation.as_str())
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "unknown instance '{instantiation}' in block '{}'",
+                            block.name
+                        ))
+                    })?;
                 // Follow the input sink node so a cycle can name the
                 // connection. Its explicit operand already
                 // points to the driving value.
-                let connected = input_connections.get(instantiation.as_str());
+                let connected = connections.inputs.get(instantiation.as_str());
                 match definition.kind {
                     InstantiationKind::Block => {
                         let summary = &self.summaries[&definition.block];
@@ -140,62 +148,76 @@ impl Hierarchy {
             }
             dependencies.push(edges);
         }
-        verify_graph_acyclic(block, &dependencies)?;
+        candidates.roots = feedback_roots(block, &dependencies)?;
+        if !candidates.roots.is_empty() || !candidates.children.is_empty() {
+            self.candidates.insert(block.name.clone(), candidates);
+        }
         self.active.remove(&block.name);
         Ok(dependencies)
     }
 }
 
-/// Checks even unobserved nodes in O(nodes + edges) time and O(nodes) space.
-fn verify_graph_acyclic(block: &Block, dependencies: &[Vec<NodeRef>]) -> Result<(), BuilderError> {
-    let mut colors = vec![0u8; block.nodes.len()];
-    for root in 0..block.nodes.len() {
-        if colors[root] == 2 {
-            continue;
+/// Every whole-value cycle contains a DFS back edge. Start range refinement
+/// at each distinct target, including feedback inside disconnected logic.
+fn feedback_roots(
+    block: &Block,
+    dependencies: &[Vec<NodeRef>],
+) -> Result<Vec<usize>, BuilderError> {
+    let missing = |i| {
+        invalid(format!(
+            "block '{}' references missing node {i}",
+            block.name
+        ))
+    };
+    let mut roots = BTreeSet::new();
+    crate::block_feedback::walk_dependencies(
+        dependencies.len(),
+        |i| &dependencies[i],
+        missing,
+        |path| {
+            roots.insert(path[0].node);
+            Ok(())
+        },
+        |_| {},
+    )?;
+    // An explicit operand cycle is invalid PIR even when some other path
+    // between the same nodes crosses an instance. In a topologically stored
+    // block every explicit edge already points to an earlier node.
+    let explicit = |i: usize| -> &[NodeRef] {
+        if matches!(
+            block.nodes[i].payload,
+            NodePayload::InstantiationOutput { .. }
+        ) {
+            &[]
+        } else {
+            &dependencies[i]
         }
-        colors[root] = 1;
-        let mut pending = vec![(root, 0usize)];
-        while let Some((node, next_edge)) = pending.last_mut() {
-            if let Some(dependency) = dependencies[*node].get(*next_edge) {
-                *next_edge += 1;
-                let index = dependency.index;
-                let color = colors.get(index).ok_or_else(|| {
-                    invalid(format!(
-                        "block '{}' references missing node {index}",
-                        block.name
-                    ))
-                })?;
-                match color {
-                    1 => {
-                        let start = pending
-                            .iter()
-                            .position(|(node, _)| *node == index)
-                            .expect("active node is on the DFS path");
-                        return Err(cycle_error(block, &pending[start..]));
-                    }
-                    0 => {
-                        colors[index] = 1;
-                        pending.push((index, 0));
-                    }
-                    _ => {
-                        // This dependency's subgraph has already been checked.
-                    }
-                }
-            } else {
-                let (node, _) = pending.pop().expect("DFS frame exists");
-                colors[node] = 2;
-            }
-        }
+    };
+    if !roots.is_empty()
+        && (0..dependencies.len()).any(|i| explicit(i).iter().any(|arg| arg.index >= i))
+    {
+        crate::block_feedback::walk_dependencies(
+            dependencies.len(),
+            explicit,
+            missing,
+            |path| {
+                Err(cycle_error(
+                    block,
+                    &path.iter().map(|f| f.node).collect::<Vec<_>>(),
+                ))
+            },
+            |_| {},
+        )?;
     }
-    Ok(())
+    Ok(roots.into_iter().collect())
 }
 
 /// Converts the cyclic segment of the DFS path into block-local text IDs.
-fn cycle_error(block: &Block, path: &[(usize, usize)]) -> BuilderError {
+fn cycle_error(block: &NodeGraph, path: &[usize]) -> BuilderError {
     let steps = path
         .iter()
         .zip(path.iter().cycle().skip(1))
-        .map(|(&(index, _), &(next, _))| {
+        .map(|(&index, &next)| {
             let node = &block.nodes[index];
             let dependency = &block.nodes[next];
             let connection = match (&node.payload, &dependency.payload) {
@@ -228,47 +250,159 @@ fn cycle_error(block: &Block, path: &[(usize, usize)]) -> BuilderError {
     }
 }
 
-/// Traces each output cone in a checked graph, retaining only interface sets.
-///
-/// Each output visits a reachable node/edge at most once. The scratch storage
-/// is O(nodes), independent of transitive dependency sizes at interior nodes;
-/// only the output-to-input relation itself can require quadratic storage.
-fn graph_output_dependencies(
-    block: &Block,
-    dependencies: &[Vec<NodeRef>],
-) -> Result<OutputDependencies, BuilderError> {
-    // Tag visits by output instead of clearing O(nodes) storage for each cone.
-    let mut visited = vec![None; block.nodes.len()];
-    let mut pending = Vec::new();
-    let mut summary = BTreeMap::new();
-    for port in &block.ports {
-        let BlockPort::Output(reference) = port else {
-            continue;
+/// Collects the reachable input/output pairs without expanding any data bits.
+/// Give the smaller interface the first pass. If many groups traverse shared
+/// logic, let the opposite direction advance too, resuming at group boundaries.
+fn graph_output_dependencies(block: &Block, dependencies: &[Vec<NodeRef>]) -> OutputDependencies {
+    let inputs: Vec<_> = block.input_ports().collect();
+    let outputs: Vec<_> = block.output_ports().collect();
+    if inputs.is_empty() || outputs.is_empty() {
+        return outputs
+            .into_iter()
+            .map(|port| (block.port_name(port).to_owned(), BTreeSet::new()))
+            .collect();
+    }
+    // Index only the interface pairs we actually find. Build the named sets
+    // once, after the traversal, without allocating names in its inner loop.
+    let mut drivers = vec![Vec::new(); outputs.len()];
+    let mut output_index = vec![usize::MAX; dependencies.len()];
+    for (i, output) in outputs.iter().enumerate() {
+        output_index[output.index] = i;
+    }
+
+    let mut from_inputs = inputs.len() < outputs.len();
+    let mut input_groups = inputs.chunks(u64::BITS as usize);
+    let mut output_groups = outputs.chunks(u64::BITS as usize);
+    let mut users = None;
+    let mut search = PortCones::new(dependencies.len());
+    let quantum = dependencies.len() + dependencies.iter().map(Vec::len).sum::<usize>();
+    while input_groups.len() != 0 && output_groups.len() != 0 {
+        let (groups, edges) = if from_inputs {
+            let edges = users.get_or_insert_with(|| {
+                let mut users = vec![Vec::new(); dependencies.len()];
+                for (index, args) in dependencies.iter().enumerate() {
+                    for arg in args {
+                        users[arg.index].push(NodeRef { index });
+                    }
+                }
+                users
+            });
+            (&mut input_groups, edges.as_slice())
+        } else {
+            (&mut output_groups, dependencies)
         };
-        let node = block
-            .nodes
-            .get(reference.index)
-            .ok_or_else(|| invalid("block output references a missing node"))?;
-        let NodePayload::OutputPort { name, .. } = &node.payload else {
-            return Err(invalid("block output does not reference an output_port"));
-        };
-        let mut inputs = BTreeSet::new();
-        visited[reference.index] = Some(*reference);
-        pending.push(*reference);
-        while let Some(node) = pending.pop() {
-            if let NodePayload::InputPort { name, .. } = &block.nodes[node.index].payload {
-                inputs.insert(name.clone());
-            }
-            for dependency in &dependencies[node.index] {
-                if visited[dependency.index] != Some(*reference) {
-                    visited[dependency.index] = Some(*reference);
-                    pending.push(*dependency);
+        search.advance(groups, edges, quantum, |dest, sources, ports| {
+            if from_inputs {
+                let row = output_index[dest.index];
+                if row != usize::MAX {
+                    drivers[row].extend(reached_ports(sources, ports));
+                }
+            } else if matches!(block.get_node(dest).payload, NodePayload::InputPort { .. }) {
+                for output in reached_ports(sources, ports) {
+                    drivers[output_index[output.index]].push(dest);
                 }
             }
-        }
-        summary.insert(name.clone(), inputs);
+        });
+        from_inputs = !from_inputs;
     }
-    Ok(summary)
+    outputs
+        .into_iter()
+        .zip(drivers)
+        .map(|(output, inputs)| {
+            (
+                block.port_name(output).to_owned(),
+                inputs
+                    .into_iter()
+                    .map(|n| block.port_name(n).to_owned())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Enumerates the starting ports whose paths reached a common destination.
+fn reached_ports(mut mask: u64, ports: &[NodeRef]) -> impl Iterator<Item = NodeRef> {
+    std::iter::from_fn(move || {
+        if mask == 0 {
+            return None;
+        }
+        let index = mask.trailing_zeros() as usize;
+        mask &= mask - 1;
+        Some(ports[index])
+    })
+}
+
+/// Each bit identifies one starting port in the current group. Propagating
+/// newly reached ports together coalesces shared paths. Propagating each bit
+/// at most once per edge also handles cycles in the whole-node graph.
+struct PortCones {
+    // Per node: all sources seen, and sources still to propagate.
+    masks: Vec<(u64, u64)>,
+    completed_ports: Vec<bool>,
+    ready: VecDeque<NodeRef>,
+    touched: Vec<NodeRef>,
+}
+
+impl PortCones {
+    fn new(nodes: usize) -> Self {
+        Self {
+            masks: vec![(0, 0); nodes],
+            completed_ports: vec![false; nodes],
+            ready: VecDeque::new(),
+            touched: Vec::new(),
+        }
+    }
+
+    /// Switches at a group boundary once the work reaches a full graph scan.
+    /// Only nodes reached by the group need their scratch masks cleared.
+    fn advance(
+        &mut self,
+        groups: &mut std::slice::Chunks<'_, NodeRef>,
+        edges: &[Vec<NodeRef>],
+        mut budget: usize,
+        mut visit: impl FnMut(NodeRef, u64, &[NodeRef]),
+    ) {
+        while let Some(ports) = groups.next() {
+            for (bit, &node) in ports.iter().enumerate() {
+                self.masks[node.index] = (1 << bit, 1 << bit);
+                self.ready.push_back(node);
+                self.touched.push(node);
+            }
+            while let Some(node) = self.ready.pop_front() {
+                let delta = std::mem::take(&mut self.masks[node.index].1);
+                budget = budget.saturating_sub(1 + edges[node.index].len());
+                for &next in &edges[node.index] {
+                    let (seen, pending) = &mut self.masks[next.index];
+                    let new = delta & !*seen;
+                    if new == 0 {
+                        continue;
+                    }
+                    if *seen == 0 {
+                        self.touched.push(next);
+                    }
+                    if *pending == 0 {
+                        self.ready.push_back(next);
+                    }
+                    *seen |= new;
+                    *pending |= new;
+                }
+            }
+            for dest in self.touched.drain(..) {
+                let (sources, _) = std::mem::take(&mut self.masks[dest.index]);
+                // The opposite traversal has already emitted every pair for
+                // a completed destination. It still participates in routing.
+                if !self.completed_ports[dest.index] {
+                    visit(dest, sources, ports);
+                }
+            }
+            for port in ports {
+                self.completed_ports[port.index] = true;
+            }
+            if budget == 0 {
+                break;
+            }
+        }
+    }
 }
 
 fn invalid(reason: impl Into<String>) -> BuilderError {
@@ -288,9 +422,194 @@ mod tests {
     }
 
     #[test]
+    fn whole_port_summary_preserves_independent_shared_cones() {
+        // Each independent group spans more than one batch of ports.
+        for (input_count, output_count) in [(65, 66), (66, 65)] {
+            let mut child = BlockBuilder::new("child");
+            let mut expected = OutputDependencies::new();
+            let mut groups = Vec::new();
+            let mut all_inputs = BTreeSet::new();
+            for group in ["a", "b"] {
+                let mut ports = Vec::new();
+                let mut names = BTreeSet::new();
+                for i in 0..input_count {
+                    let name = format!("{group}_in_{i}");
+                    ports.push(child.input_port(&name, Type::Bits(1)).unwrap());
+                    names.insert(name);
+                }
+                let packed = child.concat(&ports).unwrap();
+                let mut shared = child.xor_reduce(packed).unwrap();
+                for _ in 0..128 {
+                    shared = child.not(shared).unwrap();
+                }
+                for i in 0..output_count {
+                    let name = format!("{group}_out_{i}");
+                    child.output_port(&name, shared).unwrap();
+                    expected.insert(name, names.clone());
+                }
+                groups.push(shared);
+                all_inputs.extend(names);
+            }
+            let both = child.concat(&groups).unwrap();
+            child.output_port("both", both).unwrap();
+            expected.insert("both".into(), all_inputs);
+            // This pair comes after both shared cones in either port order.
+            let tail = child.input_port("tail", Type::Bits(1)).unwrap();
+            child.output_port("last", tail).unwrap();
+            expected.insert("last".into(), BTreeSet::from(["tail".into()]));
+
+            let package = child.build_package("cones").unwrap();
+            let block = package.get_top_block().unwrap();
+            let edges: Vec<_> = block
+                .nodes
+                .iter()
+                .map(|node| operands(&node.payload))
+                .collect();
+            assert_eq!(graph_output_dependencies(block, &edges), expected);
+        }
+    }
+
+    #[test]
+    fn child_feedback_uses_only_the_bound_control_field() {
+        let source = r#"package bound_field
+block shifter(data: bits[3], amount: bits[2], result: bits[3]) {
+  data: bits[3] = input_port(name=data, id=1)
+  amount: bits[2] = input_port(name=amount, id=2)
+  shifted: bits[3] = shll(data, amount, id=3)
+  result: () = output_port(shifted, name=result, id=4)
+}
+block feedback(config: bits[132], result: bits[3]) {
+  instantiation shift(block=shifter, kind=block)
+  config: bits[132] = input_port(name=config, id=5)
+  offset: bits[2] = bit_slice(config, start=128, width=2, id=6)
+  q: bits[3] = instantiation_output(instantiation=shift, port_name=result, id=7)
+  drive_data: () = instantiation_input(q, instantiation=shift, port_name=data, id=8)
+  drive_amount: () = instantiation_input(offset, instantiation=shift, port_name=amount, id=9)
+  result: () = output_port(q, name=result, id=10)
+}
+top block configured(high: bits[2], low: bits[128], result: bits[3]) {
+  instantiation inner(block=feedback, kind=block)
+  high: bits[2] = input_port(name=high, id=11)
+  low: bits[128] = input_port(name=low, id=12)
+  amount: bits[2] = literal(value=1, id=13)
+  config: bits[132] = concat(high, amount, low, id=14)
+  drive: () = instantiation_input(config, instantiation=inner, port_name=config, id=15)
+  q: bits[3] = instantiation_output(instantiation=inner, port_name=result, id=16)
+  result: () = output_port(q, name=result, id=17)
+}
+"#;
+        check(source).unwrap();
+        for cyclic in [
+            source.replace("value=1", "value=0"),
+            source.replace("high, amount, low", "high, high, low"),
+        ] {
+            assert!(matches!(
+                check(&cyclic),
+                Err(BuilderError::CombinationalCycle { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn one_feedback_cone_binds_all_independent_controls() {
+        let source = r#"package split_cone
+block combine(data: bits[3], a: bits[1], b: bits[1], q: bits[3]) {
+  data: bits[3] = input_port(name=data, id=1)
+  a: bits[1] = input_port(name=a, id=2)
+  b: bits[1] = input_port(name=b, id=3)
+  left: bits[3] = shll(data, a, id=4)
+  right: bits[3] = shll(data, b, id=5)
+  both: bits[3] = or(left, right, id=6)
+  q: () = output_port(both, name=q, id=7)
+}
+top block root(q: bits[3]) {
+  instantiation u(block=combine, kind=block)
+  value: bits[3] = instantiation_output(instantiation=u, port_name=q, id=8)
+  one: bits[1] = literal(value=1, id=9)
+  zero: bits[1] = literal(value=0, id=10)
+  left: () = instantiation_input(one, instantiation=u, port_name=a, id=11)
+  right: () = instantiation_input(one, instantiation=u, port_name=b, id=12)
+  feedback: () = instantiation_input(value, instantiation=u, port_name=data, id=13)
+  q: () = output_port(value, name=q, id=14)
+}"#;
+        check(source).unwrap();
+        for port in ["a", "b"] {
+            let binding = format!("one, instantiation=u, port_name={port}");
+            let cyclic = source.replace(&binding, &binding.replace("one", "zero"));
+            assert!(matches!(
+                check(&cyclic),
+                Err(BuilderError::CombinationalCycle { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn deep_local_calls_preserve_the_cycle_verdict_on_a_small_stack() {
+        use std::fmt::Write;
+
+        let depth = 2048;
+        let mut source = String::from("package deep_calls\n");
+        for level in 0..depth {
+            let arg_id = 2 * level + 1;
+            let expr = if level == 0 {
+                format!("identity(arg, id={})", arg_id + 1)
+            } else {
+                format!("invoke(arg, to_apply=f{}, id={})", level - 1, arg_id + 1)
+            };
+            writeln!(
+                source,
+                "fn f{level}(arg: bits[3] id={arg_id}) -> bits[3] {{ ret y: bits[3] = {expr} }}"
+            )
+            .unwrap();
+        }
+        let last = depth - 1;
+        writeln!(
+            source,
+            r#"block child(d: bits[3], q: bits[3]) {{
+  d: bits[3] = input_port(name=d, id=5001)
+  y: bits[3] = invoke(d, to_apply=f{last}, id=5002)
+  q: () = output_port(y, name=q, id=5003)
+}}
+top block root(q: bits[3]) {{
+  instantiation u(block=child, kind=block)
+  value: bits[3] = instantiation_output(instantiation=u, port_name=q, id=5004)
+  amount: bits[1] = literal(value=1, id=5005)
+  shifted: bits[3] = shll(value, amount, id=5006)
+  feedback: () = instantiation_input(shifted, instantiation=u, port_name=d, id=5007)
+  q: () = output_port(value, name=q, id=5008)
+}}"#
+        )
+        .unwrap();
+
+        for (amount, valid) in [(1, true), (0, false)] {
+            let source = source.replace("literal(value=1", &format!("literal(value={amount}"));
+            let package = Parser::new(&source).parse_and_verify_package().unwrap();
+            std::thread::Builder::new()
+                .stack_size(512 * 1024)
+                .spawn(move || {
+                    let result = verify_block_combinational_cycles(
+                        package.get_top_block().unwrap(),
+                        &package,
+                    );
+                    if valid {
+                        result.unwrap();
+                    } else {
+                        assert!(matches!(
+                            result,
+                            Err(BuilderError::CombinationalCycle { .. })
+                        ));
+                    }
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn summaries_keep_shared_and_independent_output_cones_separate() {
         let source = r#"package shared_cones
-top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8], direct: bits[8]) {
+top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8], direct: bits[8], fixed: bits[8]) {
   x: bits[8] = input_port(name=x, id=1)
   y: bits[8] = input_port(name=y, id=2)
   z: bits[8] = input_port(name=z, id=3)
@@ -300,6 +619,8 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
   left: () = output_port(diamond, name=left, id=7)
   right: () = output_port(combined, name=right, id=8)
   direct: () = output_port(z, name=direct, id=9)
+  zero: bits[8] = literal(value=0, id=10)
+  fixed: () = output_port(zero, name=fixed, id=11)
 }
 "#;
         let package = Parser::new(source).parse_and_verify_package().unwrap();
@@ -314,6 +635,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
                 BTreeSet::from(["x".into(), "y".into(), "z".into()]),
             ),
             ("direct".into(), BTreeSet::from(["z".into()])),
+            ("fixed".into(), BTreeSet::new()),
         ]);
         assert_eq!(hierarchy.summaries["child"], expected);
 
@@ -341,6 +663,39 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
             .summarize(package.get_top_block().unwrap(), &package)
             .unwrap();
         assert_eq!(hierarchy.summaries["disjoint"], expected);
+    }
+
+    #[test]
+    fn explicit_operand_cycle_remains_invalid_inside_a_refinable_component() {
+        let source = r#"package mixed
+block pass(d: bits[1], q: bits[1]) {
+  d: bits[1] = input_port(name=d, id=1)
+  q: () = output_port(d, name=q, id=2)
+}
+top block wrapper(seed: bits[1], result: bits[3]) {
+  instantiation u(block=pass, kind=block)
+  seed: bits[1] = input_port(name=seed, id=3)
+  word: bits[3] = zero_ext(seed, new_bit_count=3, id=4)
+  q: bits[1] = instantiation_output(instantiation=u, port_name=q, id=5)
+  lo: bits[1] = bit_slice(word, start=0, width=1, id=6)
+  drive: () = instantiation_input(lo, instantiation=u, port_name=d, id=7)
+  result: () = output_port(word, name=result, id=8)
+}"#;
+        let package = Parser::new(source).parse_and_verify_package().unwrap();
+        let mut root = package.get_top_block().unwrap().clone();
+        let word = crate::ir_utils::find_node_by_name(&root, "word").unwrap();
+        let args = ["q", "lo", "seed"]
+            .map(|name| crate::ir_utils::find_node_by_name(&root, name).unwrap());
+        root.get_node_mut(word).payload =
+            NodePayload::Nary(crate::ir::NaryOp::Concat, args.to_vec());
+        // The low bit always comes from seed. The explicit word -> lo -> word
+        // reference cycle still violates the PIR graph invariant.
+        let Err(BuilderError::CombinationalCycle { steps, .. }) =
+            verify_block_combinational_cycles(&root, &package)
+        else {
+            panic!("expected an explicit operand cycle");
+        };
+        assert_eq!(steps.iter().map(|s| s.node_id).collect::<Vec<_>>(), [4, 6]);
     }
 
     #[test]

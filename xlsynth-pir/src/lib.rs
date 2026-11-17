@@ -9,6 +9,7 @@ mod analysis_utils;
 pub mod array_alias_rewrite;
 pub mod block2fn;
 pub mod block_eval;
+mod block_feedback;
 pub mod block_inline;
 pub mod block_invoke_inline;
 pub mod block_transition;

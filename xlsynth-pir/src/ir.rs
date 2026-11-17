@@ -992,6 +992,30 @@ pub struct Node {
 }
 
 impl Node {
+    /// Returns the user-assigned name, excluding an explicit spelling of the
+    /// generated operator and numeric ID.
+    pub(crate) fn assigned_name(&self) -> Option<&str> {
+        let name = self.name.as_deref()?;
+        if let Some((op, digits)) = name.rsplit_once('.')
+            && op == self.payload.get_operator()
+            && !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && digits.parse::<usize>().ok() == Some(self.text_id)
+        {
+            return None;
+        }
+        Some(name)
+    }
+
+    /// Keeps a user-assigned name while letting an automatic name follow the
+    /// replacement operation.
+    pub(crate) fn replace_payload(&mut self, payload: NodePayload) {
+        if self.assigned_name().is_none() {
+            self.name = None;
+        }
+        self.payload = payload;
+    }
+
     /// Returns a parameter's required name from its canonical graph node.
     pub fn param_name(&self) -> &str {
         assert!(

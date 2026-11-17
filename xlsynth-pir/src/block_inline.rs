@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+mod aggregates;
+mod slices;
+mod wiring;
 
-use crate::ir::{
-    self, Block, InstantiationKind, MemberType, NodePayload, NodeRef, PackageMember, Register,
-};
-use crate::ir_utils::{get_topological, remap_payload_with};
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+
+use crate::ir::{self, Block, InstantiationKind, MemberType, NodePayload, PackageMember};
 
 /// Blocks and functions occupy separate namespaces in a PIR package.
 fn member_key(member: &PackageMember) -> (&str, MemberType) {
@@ -79,361 +81,201 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
     Ok(hierarchy)
 }
 
-// Inlines all block instantiations in the package. All blocks are removed after
-// inlining except for the top block.
+/// Wires each instance into its parent and removes all blocks except the top.
+/// Whole-value feedback may become acyclic once the enclosing instances bind
+/// their inputs. Keep intermediate definitions as wiring graphs until then.
 pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String> {
-    loop {
-        let mut progress = false;
-        let mut has_instantiations = false;
-        let block_names: Vec<String> = pkg
-            .members
-            .iter()
-            .filter_map(|m| match m {
-                PackageMember::Block(block) => Some(block.name.clone()),
-                _ => None,
-            })
-            .collect();
-        for name in block_names {
-            let mut block = match pkg.get_block(&name) {
-                Some(block) => block.clone(),
-                _ => continue,
-            };
-            if block.instantiations.is_empty() {
-                continue;
-            }
-            has_instantiations = true;
-            let inlined = inline_block_instantiations(pkg, &mut block)?;
-            if inlined {
-                pkg.replace_block(&name, block)?;
-                progress = true;
-            }
-        }
-        if !has_instantiations {
-            break;
-        }
-        if !progress {
-            return Err(
-                "block_inline: could not inline remaining instantiations (cycle?)".to_string(),
-            );
-        }
-    }
-    prune_to_single_top_block(pkg)?;
-    Ok(())
+    inline_blocks_with_top_bindings(pkg, |_| Ok(()))
 }
 
-fn inline_block_instantiations(pkg: &ir::Package, block: &mut Block) -> Result<bool, String> {
-    let mut inlined_any = false;
-    loop {
-        let instantiations = block.instantiations.clone();
-        let mut did_inline = false;
-        for inst in instantiations {
-            let callee = match pkg.get_block(&inst.block) {
-                Some(block) => block.clone(),
-                _ => {
-                    return Err(format!(
-                        "block_inline: instantiation '{}' references missing block '{}'",
-                        inst.name, inst.block
-                    ));
-                }
-            };
-            if !callee.instantiations.is_empty() {
-                continue;
-            }
-            let package_max_id = pkg
-                .members
-                .iter()
-                .flat_map(|member| &member.graph().nodes)
-                .map(|node| node.text_id)
-                .max()
-                .unwrap_or(0);
-            inline_single_instantiation(block, &inst.name, &callee, package_max_id)?;
-            did_inline = true;
-            inlined_any = true;
-            break;
-        }
-        if !did_inline {
-            break;
-        }
-    }
-    Ok(inlined_any)
-}
-
-fn inline_single_instantiation(
-    caller: &mut Block,
-    inst_name: &str,
-    callee: &Block,
-    package_max_id: usize,
+/// Applies the selected root's external bindings after wiring all instances and
+/// before deciding whether any combinational feedback remains.
+pub(crate) fn inline_blocks_with_top_bindings(
+    pkg: &mut ir::Package,
+    bind_top: impl Fn(&mut Block) -> Result<(), String>,
 ) -> Result<(), String> {
-    let input_map = collect_instantiation_inputs(caller, inst_name)?;
-    let output_map = collect_callee_outputs(callee)?;
-    if !callee.registers.is_empty() && caller.clock_port_name().is_none() {
-        return Err(format!(
-            "block_inline: instantiation '{inst_name}' has registers but the parent has no clock port"
-        ));
-    }
-    let reset = merge_inlined_reset(caller, callee, &input_map, inst_name)?;
-
-    let mut register_name_map: HashMap<String, String> = HashMap::new();
-    let mut used_register_names: HashMap<String, usize> = caller
-        .registers
+    let blocks: Vec<_> = pkg
+        .members
         .iter()
-        .map(|r| (r.name.clone(), 1))
+        .filter_map(|m| match m {
+            PackageMember::Block(block) => Some(block),
+            PackageMember::Function(_) => None,
+        })
         .collect();
-    for reg in callee.registers.iter() {
-        let base_name = format!("{}__{}", inst_name, reg.name);
-        let unique_name = uniquify_register_name(&base_name, &mut used_register_names);
-        register_name_map.insert(reg.name.clone(), unique_name.clone());
-        caller.registers.push(Register {
-            name: unique_name,
-            ty: reg.ty.clone(),
-            reset_value: reg.reset_value.clone(),
-        });
-    }
-
-    let mut max_text_id = caller
-        .nodes
-        .iter()
-        .map(|n| n.text_id)
-        .max()
-        .unwrap_or(0)
-        .max(package_max_id);
-    let mut used_node_names: HashMap<String, usize> = caller
-        .nodes
-        .iter()
-        .filter_map(|n| n.name.clone())
-        .map(|name| (name, 1))
-        .collect();
-    let mut mapping: HashMap<usize, NodeRef> = HashMap::new();
-    let topo = get_topological(callee);
-    for nr in topo {
-        if nr.index == 0 {
-            continue;
+    if blocks.iter().all(|block| block.instantiations.is_empty()) {
+        if let Some(top) = pkg.get_top_block_mut() {
+            bind_top(top)?;
         }
-        let node = callee.get_node(nr);
-        match &node.payload {
-            NodePayload::InputPort { name, .. } => {
-                let arg = input_map.get(name).ok_or_else(|| {
-                    format!(
-                        "block_inline: instantiation '{}' missing input '{}'",
-                        inst_name, name
-                    )
-                })?;
-                mapping.insert(nr.index, *arg);
-            }
-            NodePayload::OutputPort { .. } => {
-                // Output sinks are unit-valued and may have ordinary unit
-                // users. The external output wiring still uses
-                // their data operands.
-                max_text_id = max_text_id
-                    .checked_add(1)
-                    .ok_or("block_inline: node IDs overflow usize")?;
-                let new_ref = NodeRef {
-                    index: caller.nodes.len(),
-                };
-                caller.nodes.push(ir::Node {
-                    text_id: max_text_id,
-                    name: None,
-                    ty: ir::Type::nil(),
-                    payload: NodePayload::Tuple(Vec::new()),
-                    pos: node.pos.clone(),
-                });
-                mapping.insert(nr.index, new_ref);
-            }
-            NodePayload::InstantiationInput { .. } | NodePayload::InstantiationOutput { .. } => {
+        return prune_to_single_top_block(pkg);
+    }
+    let indices: HashMap<_, _> = blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.name.as_str(), i))
+        .collect();
+    let mut parents = vec![Vec::new(); blocks.len()];
+    let mut pending = Vec::with_capacity(blocks.len());
+    let mut ready = Vec::new();
+    for (i, block) in blocks.iter().enumerate() {
+        crate::ir_verify::verify_graph_operand_indices_in_bounds(block)?;
+        for instance in &block.instantiations {
+            if instance.kind != InstantiationKind::Block {
                 return Err(format!(
-                    "block_inline: callee '{}' still has instantiation nodes",
-                    callee.name
+                    "cannot inline external instance '{}'",
+                    instance.name
                 ));
             }
-            _ => {
-                let new_payload =
-                    remap_payload_with(&node.payload, |(_, dep): (usize, NodeRef)| {
-                        mapping.get(&dep.index).copied().unwrap_or_else(|| {
-                            panic!("block_inline: missing mapping for {}", dep.index)
-                        })
-                    });
-                let new_payload = rewrite_register_payload(new_payload, &register_name_map);
-                max_text_id = max_text_id
-                    .checked_add(1)
-                    .ok_or("block_inline: node IDs overflow usize")?;
-                let new_node = ir::Node {
-                    text_id: max_text_id,
-                    name: node.name.as_ref().map(|n| {
-                        let base = format!("{}__{}", inst_name, n);
-                        uniquify_node_name(&base, &mut used_node_names)
-                    }),
-                    ty: node.ty.clone(),
-                    payload: new_payload,
-                    pos: node.pos.clone(),
-                };
-                let new_ref = NodeRef {
-                    index: caller.nodes.len(),
-                };
-                caller.nodes.push(new_node);
-                mapping.insert(nr.index, new_ref);
-            }
+            let child = indices.get(instance.block.as_str()).ok_or_else(|| {
+                format!(
+                    "block_inline: instantiation '{}' references missing block '{}'",
+                    instance.name, instance.block
+                )
+            })?;
+            parents[*child].push(i);
+        }
+        pending.push(block.instantiations.len());
+        if block.instantiations.is_empty() {
+            ready.push(i);
         }
     }
 
-    let mut output_replacements: Vec<(NodeRef, NodeRef)> = Vec::new();
-    let mut input_sinks: Vec<NodeRef> = Vec::new();
-    for (idx, node) in caller.nodes.iter().enumerate() {
-        match &node.payload {
-            NodePayload::InstantiationOutput {
-                instantiation,
-                port_name,
-            } if instantiation == inst_name => {
-                let callee_out = output_map.get(port_name).ok_or_else(|| {
-                    format!(
-                        "block_inline: instantiation '{}' missing output '{}'",
-                        inst_name, port_name
-                    )
-                })?;
-                let mapped = mapping.get(&callee_out.index).copied().ok_or_else(|| {
-                    format!("block_inline: missing mapping for output '{}'", port_name)
-                })?;
-                output_replacements.push((NodeRef { index: idx }, mapped));
+    let top = pkg
+        .get_top_block()
+        .ok_or("block_inline: missing top block")?
+        .name
+        .clone();
+    let top_index = indices[top.as_str()];
+    let mut last_id = crate::ir_rebase_ids::package_max_emitted_node_id(pkg);
+    let mut bodies: Vec<_> = parents
+        .iter()
+        .map(|uses| CachedBody {
+            expanded: None,
+            remaining_uses: uses.len(),
+        })
+        .collect();
+    // The selected top is also a result when an unrelated root instantiates it.
+    bodies[top_index].remaining_uses += 1;
+    let mut finished = 0;
+    while let Some(i) = ready.pop() {
+        let source = blocks[i];
+        if !source.instantiations.is_empty() {
+            let mut block = source.clone();
+            let mut wiring = wiring::Wiring::new(source)?;
+            for instance in &source.instantiations {
+                let child = indices[instance.block.as_str()];
+                let body = bodies[child].for_instance(blocks[child]);
+                wiring.copy_instance(&mut block, instance, &body, &mut last_id)?;
             }
-            NodePayload::InstantiationInput { instantiation, .. } if instantiation == inst_name => {
-                input_sinks.push(NodeRef { index: idx });
+            wiring.finish(&mut block)?;
+            bodies[i].expanded = Some(block);
+        }
+        finished += 1;
+        for &parent in &parents[i] {
+            pending[parent] -= 1;
+            if pending[parent] == 0 {
+                ready.push(parent);
             }
-            _ => {}
         }
     }
-
-    for (target, replacement) in output_replacements {
-        crate::ir_utils::replace_graph_node_with_ref(caller, target, replacement)
-            .map_err(|e| format!("block_inline: replace output failed: {e}"))?;
-    }
-    for target in input_sinks {
-        // The connection is gone, but ordinary users still observe its unit
-        // value.
-        caller.nodes[target.index].payload = NodePayload::Tuple(Vec::new());
-        caller.nodes[target.index].name = None;
+    if finished != blocks.len() {
+        return Err("block_inline: recursive block instantiation".to_string());
     }
 
-    caller.instantiations.retain(|inst| inst.name != inst_name);
-    caller.reset = reset;
-
-    caller
-        .compact_and_toposort()
-        .map_err(|e| format!("block_inline: compaction failed: {e}"))?;
-    Ok(())
-}
-
-/// Carries a child's one reset domain into the parent without changing wiring.
-fn merge_inlined_reset(
-    caller: &Block,
-    callee: &Block,
-    inputs: &BTreeMap<String, NodeRef>,
-    instance: &str,
-) -> Result<Option<ir::BlockReset>, String> {
-    let Some(child_reset) = &callee.reset else {
-        return Ok(caller.reset.clone());
-    };
-    let child_name = callee.port_name(child_reset.port);
-    let port = inputs.get(child_name).copied().ok_or_else(|| {
-        format!("block_inline: instantiation '{instance}' is missing reset input '{child_name}'")
-    })?;
-    if !caller.input_ports().any(|input| input == port) {
-        return Err(format!(
-            "block_inline: instantiation '{instance}' reset must connect directly to a parent input port"
-        ));
-    }
-    let mapped = ir::BlockReset {
-        port,
-        asynchronous: child_reset.asynchronous,
-        active_low: child_reset.active_low,
-    };
-    if let Some(parent_reset) = &caller.reset {
-        if parent_reset != &mapped {
-            return Err(format!(
-                "block_inline: instantiation '{instance}' has an incompatible reset port, polarity, or timing"
-            ));
-        }
-    }
-    Ok(Some(mapped))
-}
-
-fn collect_instantiation_inputs(
-    caller: &Block,
-    inst_name: &str,
-) -> Result<BTreeMap<String, NodeRef>, String> {
-    let mut inputs = BTreeMap::new();
-    for node in caller.nodes.iter() {
-        if let NodePayload::InstantiationInput {
-            instantiation,
-            port_name,
-            arg,
-        } = &node.payload
+    bind_top(
+        bodies[top_index]
+            .expanded
+            .get_or_insert_with(|| blocks[top_index].clone()),
+    )?;
+    let mut calls = crate::block_invoke_inline::FeedbackInvokes::new(pkg);
+    // A disconnected hierarchy has its own root and must still be checked.
+    for (i, body) in bodies.iter_mut().enumerate() {
+        if (parents[i].is_empty() || i == top_index)
+            && let Some(block) = &mut body.expanded
+            && let Err(error) = block.compact_and_toposort()
         {
-            if instantiation == inst_name {
-                if inputs.insert(port_name.clone(), *arg).is_some() {
-                    return Err(format!(
-                        "block_inline: duplicate input '{}' for instantiation '{}'",
-                        port_name, inst_name
-                    ));
-                }
+            let mut original = Cow::Borrowed(blocks[i]);
+            if i == top_index {
+                bind_top(original.to_mut())?;
             }
+            crate::ir_builder::verify_block_combinational_cycles(&original, pkg)
+                .map_err(|e| e.to_string())?;
+            if !slices::resolve_slices(block, pkg, &mut calls, last_id)? {
+                return Err(format!("block_inline: compaction failed: {error}"));
+            }
+            block
+                .compact_and_toposort()
+                .map_err(|e| format!("block_inline: compaction failed: {e}"))?;
         }
     }
-    Ok(inputs)
+    if let Some(block) = bodies[top_index].expanded.take() {
+        pkg.replace_block(&top, block)?;
+    }
+    prune_to_single_top_block(pkg)
 }
 
-fn collect_callee_outputs(callee: &Block) -> Result<BTreeMap<String, NodeRef>, String> {
-    let mut outputs = BTreeMap::new();
-    for port in callee.output_ports() {
-        let name = callee.port_name(port).to_string();
-        if outputs
-            .insert(name.clone(), callee.output_value(port))
-            .is_some()
+/// Expressions staged against a single graph snapshot. References into the
+/// staged nodes become ordinary node indices when the batch is appended.
+struct PendingNodes {
+    nodes: Vec<ir::Node>,
+    last_id: usize,
+}
+
+impl PendingNodes {
+    fn new(last_id: usize) -> Self {
+        Self {
+            nodes: Vec::new(),
+            last_id,
+        }
+    }
+
+    /// Allocates a package-wide fresh ID and copies the original source
+    /// position.
+    fn push(
+        &mut self,
+        graph: &ir::NodeGraph,
+        source: ir::NodeRef,
+        ty: ir::Type,
+        payload: NodePayload,
+    ) -> Result<ir::NodeRef, String> {
+        self.last_id = self
+            .last_id
+            .checked_add(1)
+            .ok_or("block_inline: node IDs overflow usize")?;
+        let index = graph.nodes.len() + self.nodes.len();
+        self.nodes.push(ir::Node {
+            text_id: self.last_id,
+            name: None,
+            pos: graph.get_node(source).pos.clone(),
+            ty,
+            payload,
+        });
+        Ok(ir::NodeRef { index })
+    }
+}
+
+/// Shares an assembled body across its parents and releases it after its last
+/// instance. Leaf bodies are borrowed directly from the input package.
+struct CachedBody {
+    expanded: Option<Block>,
+    remaining_uses: usize,
+}
+
+impl CachedBody {
+    /// Borrows a shared definition or moves the final cached copy to its
+    /// consumer.
+    fn for_instance<'a>(&'a mut self, source: &'a Block) -> Cow<'a, Block> {
+        self.remaining_uses -= 1;
+        if self.remaining_uses == 0
+            && let Some(last) = self.expanded.take()
         {
-            return Err(format!("block_inline: duplicate output '{name}'"));
+            return Cow::Owned(last);
         }
-    }
-    Ok(outputs)
-}
-
-fn rewrite_register_payload(
-    payload: NodePayload,
-    reg_map: &HashMap<String, String>,
-) -> NodePayload {
-    match payload {
-        NodePayload::RegisterRead { register } => NodePayload::RegisterRead {
-            register: reg_map.get(&register).cloned().unwrap_or(register),
-        },
-        NodePayload::RegisterWrite {
-            arg,
-            register,
-            load_enable,
-            reset,
-        } => NodePayload::RegisterWrite {
-            arg,
-            register: reg_map.get(&register).cloned().unwrap_or(register),
-            load_enable,
-            reset,
-        },
-        _ => payload,
+        Cow::Borrowed(self.expanded.as_ref().unwrap_or(source))
     }
 }
 
-fn uniquify_register_name(base: &str, used: &mut HashMap<String, usize>) -> String {
-    if !used.contains_key(base) {
-        used.insert(base.to_string(), 1);
-        return base.to_string();
-    }
-    let mut counter = *used.get(base).unwrap_or(&1);
-    loop {
-        let candidate = format!("{}__{}", base, counter);
-        if !used.contains_key(&candidate) {
-            used.insert(base.to_string(), counter + 1);
-            used.insert(candidate.clone(), 1);
-            return candidate;
-        }
-        counter += 1;
-    }
-}
-
+/// Reserves a name in a module or function, appending a numeric suffix on
+/// collision.
 pub(crate) fn uniquify_node_name(base: &str, used: &mut HashMap<String, usize>) -> String {
     if !used.contains_key(base) {
         used.insert(base.to_string(), 1);
@@ -476,6 +318,7 @@ fn prune_to_single_top_block(pkg: &mut ir::Package) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::NodeRef;
     use crate::ir_parser::Parser;
     use crate::ir_query::{matches_node, parse_query};
 
@@ -495,6 +338,121 @@ mod tests {
                 }
                 _ => {}
             }
+        }
+    }
+
+    #[test]
+    fn expanded_definition_is_shared_until_the_last_instance() {
+        let source = Block::new("source");
+        let mut cache = CachedBody {
+            expanded: Some(Block::new("expanded")),
+            remaining_uses: 2,
+        };
+        assert!(
+            matches!(cache.for_instance(&source), Cow::Borrowed(block) if block.name == "expanded")
+        );
+        assert!(
+            matches!(cache.for_instance(&source), Cow::Owned(block) if block.name == "expanded")
+        );
+        assert!(cache.expanded.is_none());
+    }
+
+    #[test]
+    fn shifted_feedback_preserves_bitwise_operations() {
+        let mut design = parse_pkg(
+            r#"package shifted
+block leaf(d: bits[4], q: bits[4]) {
+  d: bits[4] = input_port(name=d, id=1)
+  mask: bits[4] = literal(value=5, id=2)
+  masked: bits[4] = xor(d, mask, id=3)
+  inverted: bits[4] = not(masked, id=4)
+  q: () = output_port(inverted, name=q, id=5)
+}
+top block wrapper(seed: bits[1], result: bits[4]) {
+  instantiation u(block=leaf, kind=block)
+  seed: bits[1] = input_port(name=seed, id=6)
+  q: bits[4] = instantiation_output(instantiation=u, port_name=q, id=7)
+  lo: bits[3] = bit_slice(q, start=0, width=3, id=8)
+  packed_d: bits[4] = concat(lo, seed, id=9)
+  drive: () = instantiation_input(packed_d, instantiation=u, port_name=d, id=10)
+  result: () = output_port(q, name=result, id=11)
+}
+"#,
+        );
+        // Native clients may explicitly store canonical names. These must
+        // follow both the copied child's fresh IDs and the projected operator.
+        for member in &mut design.members {
+            if let PackageMember::Block(block) = member {
+                for node in &mut block.nodes {
+                    if matches!(node.text_id, 3 | 8 | 10) {
+                        node.name =
+                            Some(format!("{}.{}", node.payload.get_operator(), node.text_id));
+                    }
+                }
+            }
+        }
+        crate::ir_verify::verify_package(&design).unwrap();
+        let flat = flatten_block_hierarchy(&design, "wrapper").unwrap();
+        crate::ir_verify::verify_package(&flat).unwrap();
+        let top = flat.get_top_block().unwrap();
+        for name in ["packed_d", "u__inverted"] {
+            assert!(
+                top.nodes
+                    .iter()
+                    .any(|node| node.name.as_deref() == Some(name))
+            );
+        }
+        let f = crate::block2fn::combinational_block_to_fn(flat.get_top_block().unwrap()).unwrap();
+        // At each lane the previous bit is inverted exactly when its mask bit
+        // is zero.
+        for (seed, expected) in [(0, 0b0110), (1, 0b1001)] {
+            let arg = crate::IrValue::make_ubits(1, seed).unwrap();
+            let actual = crate::ir_eval::eval_fn_in_package_value(&flat, &f, &[arg]);
+            assert_eq!(actual, crate::IrValue::make_ubits(4, expected).unwrap());
+        }
+    }
+
+    #[test]
+    fn passthrough_outputs_can_drive_other_inputs_of_the_same_instance() {
+        let source = r#"package chain
+block leaf(x: bits[1], y: bits[1], a: bits[1], b: bits[1]) {
+  x: bits[1] = input_port(name=x, id=1)
+  y: bits[1] = input_port(name=y, id=2)
+  a: () = output_port(x, name=a, id=3)
+  b: () = output_port(y, name=b, id=4)
+}
+top block wrapper(seed: bits[1], result: bits[1]) {
+  instantiation u(block=leaf, kind=block)
+  seed: bits[1] = input_port(name=seed, id=5)
+  a: bits[1] = instantiation_output(instantiation=u, port_name=a, id=6)
+  b: bits[1] = instantiation_output(instantiation=u, port_name=b, id=7)
+  first: () = instantiation_input(seed, instantiation=u, port_name=x, id=8)
+  second: () = instantiation_input(a, instantiation=u, port_name=y, id=9)
+  result: () = output_port(b, name=result, id=10)
+}
+"#;
+        let flat = flatten_block_hierarchy(&parse_pkg(source), "wrapper").unwrap();
+        crate::ir_verify::verify_package(&flat).unwrap();
+        let f = crate::block2fn::combinational_block_to_fn(flat.get_top_block().unwrap()).unwrap();
+        for seed in 0..2 {
+            let arg = crate::IrValue::make_ubits(1, seed).unwrap();
+            assert_eq!(
+                crate::ir_eval::eval_fn_in_package_value(&flat, &f, std::slice::from_ref(&arg)),
+                arg
+            );
+        }
+        // Closing the chain or wiring the first output straight back to itself
+        // is a real loop.
+        for feedback in ["a", "b"] {
+            let cyclic = parse_pkg(&source.replace(
+                "instantiation_input(seed,",
+                &format!("instantiation_input({feedback},"),
+            ));
+            assert!(
+                flatten_block_hierarchy(&cyclic, "wrapper")
+                    .unwrap_err()
+                    .contains("cycle")
+            );
         }
     }
 
@@ -661,6 +619,50 @@ top block caller(clk: clock, reset_n: bits[1], other: bits[1], data: bits[8], re
             block.registers[0].reset_value,
             Some(crate::IrValue::make_ubits(8, 7).unwrap())
         );
+    }
+
+    #[test]
+    fn sibling_reset_passthrough_is_independent_of_instance_order() {
+        let passthrough = r#"block forward(a: bits[1], b: bits[1]) {
+  a: bits[1] = input_port(name=a, id=21)
+  b: () = output_port(a, name=b, id=22)
+}
+
+"#;
+        let storage = "  instantiation child(block=leaf, kind=block)";
+        let route = "  instantiation wire_rst(block=forward, kind=block)";
+        for instances in [format!("{storage}\n{route}"), format!("{route}\n{storage}")] {
+            let text = RESET_HIERARCHY
+                .replace("block leaf(", &format!("{passthrough}block leaf("))
+                .replace(storage, &instances)
+                .replace("  reset_write: () = instantiation_input(reset_n,", r#"  source: () = instantiation_input(reset_n, instantiation=wire_rst, port_name=a, id=23)
+  routed: bits[1] = instantiation_output(instantiation=wire_rst, port_name=b, id=24)
+  reset_write: () = instantiation_input(routed,"#);
+            let mut package = parse_pkg(&text);
+            inline_all_blocks_in_package(&mut package).unwrap();
+            crate::ir_verify::verify_package(&package).unwrap();
+            let top = package.get_top_block().unwrap();
+            assert_eq!(
+                top.reset.as_ref().unwrap().port,
+                top.get_input_port("reset_n").unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_child_operand_returns_error_before_changing_the_package() {
+        let mut package = parse_pkg(RESET_HIERARCHY);
+        let mut child = package.get_block("leaf").unwrap().clone();
+        let output = child.get_output_port("result").unwrap();
+        let NodePayload::OutputPort { arg, .. } = &mut child.get_node_mut(output).payload else {
+            unreachable!()
+        };
+        *arg = NodeRef { index: usize::MAX };
+        package.replace_block("leaf", child).unwrap();
+        let original = format!("{package:?}");
+        let error = inline_all_blocks_in_package(&mut package).unwrap_err();
+        assert!(error.contains("out of bounds"), "{error}");
+        assert_eq!(format!("{package:?}"), original);
     }
 
     #[test]

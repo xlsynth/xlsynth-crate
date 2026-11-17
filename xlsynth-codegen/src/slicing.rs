@@ -3,6 +3,7 @@
 //! Width-specialized dynamic slicing with explicit range and sizing boundaries.
 
 use xlsynth_pir::ir::{Node, NodeGraph, NodePayload, NodeRef, Type};
+use xlsynth_pir::ir_utils::literal_offset;
 use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_vast::Expr;
 
@@ -51,14 +52,28 @@ impl BlockEmitter<'_, '_> {
         Ok(())
     }
 
-    /// Calls a typed helper, folding empty operands without zero-width SV
-    /// types.
+    /// Emits constant offsets as continuous wiring. Runtime offsets use a
+    /// width-specialized helper.
     pub(crate) fn emit_slice_call(&mut self, node_ref: NodeRef) -> Result<Expr, BlockCodegenError> {
         let node = self.block.get_node(node_ref);
         let operands = match node.payload {
             NodePayload::DynamicBitSlice { arg, start, width } => {
-                if self.block.get_node_ty(arg).bit_count() == 0 {
+                let operand_width = self.block.get_node_ty(arg).bit_count();
+                if operand_width == 0 {
                     return self.zero(width);
+                }
+                if let Some(offset) = literal_offset(self.block, start) {
+                    let live = width.min(operand_width.saturating_sub(offset));
+                    if live == 0 {
+                        return self.zero(width);
+                    }
+                    let operand = self.required_value(arg)?;
+                    let slice = self.static_slice(operand, offset, live);
+                    return self.resize_unsigned(
+                        Value::expression(slice, operand.depth),
+                        live,
+                        width,
+                    );
                 }
                 vec![arg, start]
             }
@@ -67,8 +82,28 @@ impl BlockEmitter<'_, '_> {
                 start,
                 update_value,
             } => {
-                if self.block.get_node_ty(update_value).bit_count() == 0 {
+                let update_width = self.block.get_node_ty(update_value).bit_count();
+                if update_width == 0 {
                     return Ok(self.required_value(arg)?.expr);
+                }
+                if let Some(offset) = literal_offset(self.block, start) {
+                    let width = node.ty.bit_count();
+                    let written = update_width.min(width.saturating_sub(offset));
+                    let original = self.required_value(arg)?;
+                    if written == 0 {
+                        return Ok(original.expr);
+                    }
+                    let update = self.required_value(update_value)?;
+                    let mut parts = Vec::with_capacity(3);
+                    let end = offset + written;
+                    if end < width {
+                        parts.push(self.static_slice(original, end, width - end));
+                    }
+                    parts.push(self.static_slice(update, 0, written));
+                    if offset != 0 {
+                        parts.push(self.static_slice(original, 0, offset));
+                    }
+                    return Ok(self.concat_or_only(&parts).expect("nonempty update"));
                 }
                 vec![arg, start, update_value]
             }
@@ -185,9 +220,16 @@ impl BlockEmitter<'_, '_> {
 }
 
 impl SliceHelper {
-    /// Omits operations whose empty result or operand requires no helper.
+    /// Only nonempty slices with runtime offsets need helper declarations.
     fn for_node(function: &NodeGraph, node: &Node) -> Option<Self> {
-        if node.ty.bit_count() == 0 {
+        let (NodePayload::DynamicBitSlice { start, .. }
+        | NodePayload::BitSliceUpdate { start, .. }) = node.payload
+        else {
+            return None;
+        };
+        if node.ty.bit_count() == 0
+            || matches!(function.get_node(start).payload, NodePayload::Literal(_))
+        {
             return None;
         }
         match node.payload {
