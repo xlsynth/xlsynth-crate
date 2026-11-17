@@ -600,6 +600,22 @@ checked. Three runnable examples compare DSLX state machines using the same
 input stream and show the effect of induction depth and a checked helper lemma.
 [Observational equivalence case studies](examples/bx-observational-equivalence/README.md)
 
+### `ir-block-to-lean`: Block IR to Lean
+
+Generate a raw Lean clock-step model for a block in a saved XLS IR package. The model imports the project module `XlsynthLean.IR`.
+Like `ir-fn-to-lean`, this command parses and verifies the input package with PIR.
+The model evaluates outputs and simultaneous register updates from current
+inputs and old register values. Assertions are reported as results.
+
+```shell
+xlsynth-driver ir-block-to-lean counter.ir --top counter --output Generated.lean
+```
+
+- `--top <NAME>` selects a block, overriding the declared package top. Without
+  a top, a package containing exactly one block selects it automatically.
+- `--output <FILE>` writes the model to a file after successful generation.
+  The default is stdout.
+
 ### `bx2gv`: BX to mapped gate-level netlist
 
 Maps a `.bx` design to Liberty cells. The command compiles the selected BX
