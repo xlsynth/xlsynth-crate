@@ -501,6 +501,8 @@ struct FunctionalTimingCheck {
     function_values: Vec<bool>,
     input_names: Vec<String>,
     unconditionally_complete: bool,
+    // Every formula input had both output edges with no known arc controls.
+    complete_with_unknown_controls: OnceLock<()>,
 }
 
 /// Rise/fall timing coverage for one input that can affect a simple output.
@@ -705,6 +707,7 @@ fn functional_timing_check(
         function_values,
         input_names,
         unconditionally_complete: false,
+        complete_with_unknown_controls: OnceLock::new(),
     };
     let mut all_inputs = check.required_inputs(&HashMap::new(), &HashMap::new());
     for arc in &pin.timing_arcs {
@@ -806,6 +809,10 @@ fn validate_instance_functional_timing_coverage(
         if check.unconditionally_complete {
             continue;
         }
+        let unknown_controls = known_pin_values.is_empty() && !sta_trace_enabled();
+        if unknown_controls && check.complete_with_unknown_controls.get().is_some() {
+            continue;
+        }
         let mut coverage = check.required_inputs(coverage_known_pin_values, pin_sources);
         if let Some(timing) = launched_timing {
             coverage.retain(|input| {
@@ -838,6 +845,13 @@ fn validate_instance_functional_timing_coverage(
             }
         }
         validate_functional_timing_coverage(&coverage, instance_name, &cell.name, pin_name)?;
+        // With no known control values, this check validated both edges for
+        // every functional input. Later checks under the same control
+        // assumptions can reuse it when they require only a subset of those
+        // inputs.
+        if unknown_controls && coverage.len() == check.input_names.len() {
+            let _ = check.complete_with_unknown_controls.set(());
+        }
     }
     Ok(())
 }
@@ -898,6 +912,19 @@ impl<'a> PreparedStaLibrary<'a> {
     /// Screens a combinational replacement with independent dynamic inputs.
     /// Optimizers still validate each actual instance context when trialing it.
     pub(crate) fn validate_independent_combinational_cell(&self, cell_idx: usize) -> Result<()> {
+        self.validate_independent_cell_with_context(
+            cell_idx,
+            &mut TimingEvaluationContext::new(self.library),
+        )
+    }
+
+    /// A fixed-pin estimate can reuse the immutable tables prepared by its own
+    /// input check.
+    fn validate_independent_cell_with_context(
+        &self,
+        cell_idx: usize,
+        evaluation: &mut TimingEvaluationContext<'_>,
+    ) -> Result<()> {
         let cell = self
             .library
             .cells
@@ -931,7 +958,6 @@ impl<'a> PreparedStaLibrary<'a> {
             .map(|p| (p.direction == PinDirection::Input as i32).then(|| signal.clone()))
             .collect::<Vec<_>>();
         let known = HashMap::new();
-        let mut evaluation = TimingEvaluationContext::new(self.library);
         validate_instance_functional_timing_coverage(
             InstanceCoverageInputs {
                 lib: self,
@@ -943,7 +969,7 @@ impl<'a> PreparedStaLibrary<'a> {
                 instance_name: "independent inputs",
                 launched_timing: None,
             },
-            &mut evaluation,
+            evaluation,
         )?;
         evaluate_instance_outputs(
             InstanceTimingInputs {
@@ -967,7 +993,7 @@ impl<'a> PreparedStaLibrary<'a> {
             ],
             &mut timing,
             &signal,
-            &mut evaluation,
+            evaluation,
         )
     }
 
@@ -2038,6 +2064,72 @@ struct InstanceTimingInputs<'a, 'lib> {
     launch_register: bool,
 }
 
+/// The two extrema retained by the timing envelope at a gate output.
+/// The latest path supplies its breakdown. The slowest edge supplies its slew.
+struct EdgeTimingEnvelope {
+    latest: EdgeTimingCandidate,
+    slowest: EdgeTiming,
+}
+
+/// Reduce already evaluated arc frontiers without building a sorted output
+/// frontier that would immediately be discarded. An absent edge stays absent.
+#[derive(Default)]
+struct GateTimingEnvelope {
+    rise: Option<EdgeTimingEnvelope>,
+    fall: Option<EdgeTimingEnvelope>,
+}
+
+impl GateTimingEnvelope {
+    fn include(&mut self, arc: &SignalTimingSet) {
+        Self::include_edge(&mut self.rise, &arc.rise);
+        Self::include_edge(&mut self.fall, &arc.fall);
+    }
+
+    // Keep independent witnesses for arrival and slew on each output edge.
+    //
+    //     arc A -> arrival 12, slew 3   (supplies path and arrival)
+    //     arc B -> arrival  9, slew 8   (supplies slew for downstream LUTs)
+    //
+    // Merging these extrema in one pass preserves the envelope used by STA.
+    fn include_edge(envelope: &mut Option<EdgeTimingEnvelope>, edges: &EdgeTimingSet) {
+        for candidate in edges.iter() {
+            if let Some(bounds) = envelope {
+                bounds.latest =
+                    choose_worse_edge_timing_candidate_by_arrival(bounds.latest, candidate);
+                let timing = candidate.timing;
+                // Among equal slews the latest arrival dominates. Taking its
+                // actual slew also preserves the sign of a zero transition.
+                if timing.transition > bounds.slowest.transition
+                    || (timing.transition == bounds.slowest.transition
+                        && timing.arrival > bounds.slowest.arrival)
+                {
+                    bounds.slowest = timing;
+                }
+            } else {
+                *envelope = Some(EdgeTimingEnvelope {
+                    latest: candidate,
+                    slowest: candidate.timing,
+                });
+            }
+        }
+    }
+
+    fn finish(self) -> SignalTimingSet {
+        fn finish_edge(bounds: Option<EdgeTimingEnvelope>) -> EdgeTimingSet {
+            let mut edge = EdgeTimingSet::default();
+            if let Some(mut bounds) = bounds {
+                bounds.latest.timing.transition = bounds.slowest.transition;
+                edge.values.push(bounds.latest);
+            }
+            edge
+        }
+        SignalTimingSet {
+            rise: finish_edge(self.rise),
+            fall: finish_edge(self.fall),
+        }
+    }
+}
+
 /// Evaluates one instance using the same kernel in full and incremental STA.
 fn evaluate_instance_outputs(
     inputs: InstanceTimingInputs<'_, '_>,
@@ -2158,7 +2250,7 @@ fn evaluate_instance_outputs(
         let output_load = output_bit_idx
             .map(|output_bit_idx| bit_load_capacitance[output_bit_idx])
             .unwrap_or_default();
-        let mut accumulated: Option<SignalTimingSet> = None;
+        let mut accumulated: Option<GateTimingEnvelope> = None;
 
         for arc in combinational_arcs {
             let arc_context = format_args!(
@@ -2306,15 +2398,14 @@ fn evaluate_instance_outputs(
                             format_optional_edge_timing(candidate.fall.max_arrival_edge()),
                         )
                     });
-                    accumulated = Some(match accumulated {
-                        Some(prev) => prev.merge(&candidate),
-                        None => candidate,
-                    });
+                    accumulated
+                        .get_or_insert_with(GateTimingEnvelope::default)
+                        .include(&candidate);
                 }
             }
         }
 
-        let Some(mut out_timing_set) = accumulated else {
+        let Some(envelope) = accumulated else {
             if register_boundaries {
                 continue;
             }
@@ -2327,7 +2418,7 @@ fn evaluate_instance_outputs(
         };
         // Use a conservative per-edge envelope: max arrival and max
         // transition may come from different source candidates.
-        collapse_signal_timing_set_to_envelope(&mut out_timing_set);
+        let out_timing_set = envelope.finish();
         sta_trace(|| {
             format!(
                 "inst={} cell={} out_pin={} out_net={} envelope_rise={} envelope_fall={} envelope_rise_pick={} envelope_fall_pick={}",
@@ -3088,7 +3179,14 @@ pub(crate) fn fixed_pin_delays(
     load: f64,
 ) -> Result<Vec<(String, f64)>> {
     let library = prepared.library;
-    prepared.validate_independent_combinational_cell(cell_idx)?;
+    let mut evaluation = TimingEvaluationContext::new(library);
+    if sta_trace_enabled() {
+        // Keep the independent-input and fixed-load trace streams exactly as in
+        // separate analyses.
+        prepared.validate_independent_combinational_cell(cell_idx)?;
+    } else {
+        prepared.validate_independent_cell_with_context(cell_idx, &mut evaluation)?;
+    }
     let cell = &library.cells[cell_idx];
     let output = cell
         .pins
@@ -3105,7 +3203,6 @@ pub(crate) fn fixed_pin_delays(
             transition,
         },
     });
-    let mut evaluation = TimingEvaluationContext::new(library);
     let mut result = Vec::new();
     for pin in cell
         .pins
@@ -4733,6 +4830,80 @@ mod tests {
             let mut table = TimingTable::default();
             table.kind = kind.as_wire();
             assert_eq!(table.kind_str(), kind.as_raw());
+        }
+    }
+
+    // Supply the latest path and the worst slew on separate arcs. Reverse
+    // arc order and compare with the full frontier reduction.
+    #[test]
+    fn gate_envelope_keeps_the_latest_path_and_the_slowest_slew_from_distinct_arcs() {
+        let latest = EdgeTimingCandidate::from_register_launch(EdgeTiming {
+            arrival: 8.0,
+            transition: 2.0,
+        });
+        let same_arrival = EdgeTimingCandidate::from_timing(EdgeTiming {
+            arrival: 8.0,
+            transition: 1.0,
+        });
+        let slowest = EdgeTimingCandidate::from_timing(EdgeTiming {
+            arrival: 3.0,
+            transition: 5.0,
+        });
+        for arcs in [
+            [same_arrival, slowest, latest],
+            [latest, slowest, same_arrival],
+        ] {
+            let mut envelope = GateTimingEnvelope::default();
+            for edge in arcs {
+                let mut arc = SignalTimingSet::default();
+                arc.rise.insert(edge);
+                envelope.include(&arc);
+            }
+
+            let output = envelope.finish();
+            let expected = EdgeTimingCandidate {
+                timing: EdgeTiming {
+                    transition: slowest.timing.transition,
+                    ..latest.timing
+                },
+                ..latest
+            };
+            assert_eq!(output.rise.values.as_slice(), &[expected]);
+            assert!(output.fall.values.is_empty());
+        }
+    }
+
+    // Equal arrivals exercise the stable path choice. Equal slews with
+    // opposite zero signs exercise the latest-arrival slew tie break.
+    #[test]
+    fn gate_envelope_preserves_signed_zero_and_path_provenance_on_ties() {
+        let edge = |arrival, transition| EdgeTiming {
+            arrival,
+            transition,
+        };
+        let early = SignalTimingSet::from_primary_input_launch(SignalTiming {
+            rise: edge(-0.0, 0.0),
+            fall: edge(0.0, 0.0),
+        });
+        let late = SignalTimingSet::from_single(SignalTiming {
+            rise: edge(0.0, -0.0),
+            fall: edge(2.0, -0.0),
+        });
+        for (first, second) in [(&early, &late), (&late, &early)] {
+            let mut envelope = GateTimingEnvelope::default();
+            envelope.include(first);
+            envelope.include(second);
+            let output = envelope.finish();
+
+            // Equal rise coordinates keep the first path. Equal fall slews
+            // take the zero sign of the later-arriving path.
+            for (actual, expected) in [(&output.rise, &first.rise), (&output.fall, &late.fall)] {
+                assert_eq!(actual, expected);
+                let actual = actual.values[0].timing;
+                let expected = expected.values[0].timing;
+                assert_eq!(actual.arrival.to_bits(), expected.arrival.to_bits());
+                assert_eq!(actual.transition.to_bits(), expected.transition.to_bits());
+            }
         }
     }
 
@@ -7112,14 +7283,6 @@ endmodule
 
     #[test]
     fn sta_does_not_count_known_false_conditional_arcs_as_coverage() {
-        let src = r#"
-module top (a, b, y);
-  input a, b;
-  output y;
-  NAND2 u0 (.A(a), .B(b), .EN(1'b0), .Y(y));
-endmodule
-"#;
-        let (module, nets, interner) = parse_single_module(src);
         let mut builder = LibraryBuilder::new();
         let a_arc = scalar_arc(
             &mut builder,
@@ -7158,14 +7321,22 @@ endmodule
             pins: vec![a, b, en, y],
             ..Default::default()
         }];
-        let error = analyze_combinational_max_arrival_proto(
-            &module,
-            &nets,
-            &interner,
-            &builder.finish(),
-            StaOptions::default(),
-        )
-        .expect_err("a provably disabled B arc is not timing coverage");
+        let library = builder.finish();
+        let prepared = PreparedStaLibrary::new(&library).unwrap();
+        let analyze = |en: &str| {
+            let (module, nets, interner) = parse_single_module(&format!(
+                "module top(input a, input b, input en, output y);
+                 NAND2 u0 (.A(a), .B(b), .EN({en}), .Y(y)); endmodule"
+            ));
+            prepared.analyze_combinational_max_arrival(
+                &module,
+                &nets,
+                &interner,
+                StaOptions::default(),
+            )
+        };
+        assert_close(analyze("en").unwrap().worst_output_arrival, 5.0);
+        let error = analyze("1'b0").expect_err("a provably disabled B arc is not timing coverage");
         assert!(
             error.to_string().contains("functional input 'B'"),
             "{error:#}"
