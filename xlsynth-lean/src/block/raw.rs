@@ -27,6 +27,18 @@ use crate::block::segments::{Segments, Stage, bundle_value, is_interface_project
 use crate::local_expr::{LeanOperand, LocalRenderer, RenderError, write_body_elaboration_limits};
 use crate::support::write_file;
 
+/// Five Lean source files relating readable execution to the raw block model.
+///
+/// Emission does not run Lean; callers must elaborate the generated proofs.
+pub struct LeanBlockBundle {
+    /// File names and UTF-8 source in dependency order.
+    ///
+    /// The order is `Generated.lean`, `ReadableTypes.lean`,
+    /// `ReadableGenerated.lean`, `ReadableRepresentation.lean`, then
+    /// `ReadableCorrespondence.lean`.
+    pub files: Vec<(String, String)>,
+}
+
 /// Emit a verified XLS block in the `XlsBlock` namespace.
 ///
 /// The returned source imports `XlsynthLean.IR`. Use [`write_to`] to
@@ -665,6 +677,13 @@ pub(super) fn generated_member(field: &str) -> bool {
 /// name `mk`.
 pub(super) fn structure_header(name: &str) -> String {
     format!("structure {name} where\n  Constructors.mk ::\n")
+}
+
+/// Declare a record in `XlsReadable` with source-named fields and
+/// root-qualified `Repr` deriving.
+pub(super) fn source_record(name: &str, fields: &[(String, String)]) -> Result<String> {
+    // Source modules may declare their own type named Repr.
+    record_declaration("XlsReadable", name, fields, Some("L.Repr"), &[])
 }
 
 /// Return the structure that owns the actual fields and constructor for this
