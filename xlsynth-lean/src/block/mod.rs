@@ -16,7 +16,7 @@ mod raw;
 mod readable;
 mod segments;
 mod source_types;
-pub use bx::{CompiledBx, compile_bx};
+pub use bx::{CompiledBx, compile_bx, compile_bx_with_dslx};
 
 pub use raw::{LeanBlockBundle, emit, write_to};
 pub(crate) use raw::{identifier, source_record_value};

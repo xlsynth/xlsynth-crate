@@ -152,6 +152,127 @@ example (q : State) (x : Input) : observe q x = (q.stored, x.src.narrow) := rfl
     Ok(())
 }
 
+// Negative test: Reject duplicate unused modules on either DSLX import path.
+#[test]
+fn module_owner_cannot_come_from_independent_dslx_inputs() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("common.x"), "pub fn get() -> u8 { u8:3 }")?;
+    fs::write(
+        dir.path().join("wrapper.x"),
+        "import common; pub fn get() -> u8 { common::get() }",
+    )?;
+    let options = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    for (name, source, import) in [
+        ("common", "pub fn unrelated() -> u8 { u8:1 }", "use common;"),
+        (
+            "external",
+            "import common; pub fn unrelated() -> u8 { u8:1 }",
+            "use wrapper::get;",
+        ),
+    ] {
+        let mut imports = xlsynth::dslx::ImportData::new(None, &[dir.path()]);
+        let module =
+            xlsynth::dslx::parse_and_typecheck(source, &format!("{name}.x"), name, &mut imports)?;
+        let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+            "design",
+            &format!("{import} block demo(clk, x: u8) -> u8 {{ x }}"),
+            module,
+            Default::default(),
+            &options,
+        )?;
+        let err = compiled.emit_readable(None).err().unwrap().to_string();
+        assert!(
+            err.contains("DSLX module 'common' was checked independently"),
+            "{err}"
+        );
+        assert!(err.contains("remove the redundant BX use"), "{err}");
+    }
+    Ok(())
+}
+
+// Verifies: Renamed IR callees keep their checked parameters and projections.
+// Catches: Using the occupied IR name or reopening an import after compilation.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_imports_keep_source_fields_through_linker_renames() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("picker.x");
+    fs::write(
+        &path,
+        r#"
+pub type Byte = u8;
+pub struct Packet { zebra: Byte, apple: u8 }
+fn first(original: Packet) -> u8 {
+    let result = for (_i, carry): (u32, Packet) in u32:0..u32:2 {
+        Packet { zebra: carry.zebra, apple: carry.apple + u8:1 }
+    }(original);
+    result.zebra
+}
+pub fn pick(actual: Packet) -> u8 { first(actual) }
+pub fn id<N: u32>(argument: uN[N]) -> uN[N] { argument }
+"#,
+    )?;
+    // Preoccupy the names of both the entry and its private callee. Matching
+    // either declaration to its original symbol would type the wrong graph.
+    let linked = Parser::new(
+        r#"package chips
+fn __picker__pick(other: bits[8] id=1) -> bits[8] { ret c: bits[8] = not(other, id=2) }
+fn __picker__first(other: bits[8] id=3) -> bits[8] { ret c: bits[8] = not(other, id=4) }
+"#,
+    )
+    .parse_and_validate_package()?;
+    let compiled = compile_bx(
+        "design",
+        r#"
+use picker;
+block probe(clk, packet: picker::Packet, flag: bool) -> (u8, bool) {
+    (picker::id(picker::pick(packet)), picker::id(flag))
+}
+"#,
+        linked,
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?;
+    fs::write(path, "the original source is no longer available")?;
+    let mut bundle = compiled.emit_readable(None)?;
+    let executable = &bundle
+        .files
+        .iter()
+        .find(|(file, _)| file == "ReadableGenerated.lean")
+        .unwrap()
+        .1;
+    for (name, parameter) in [
+        ("pick", "actual"),
+        ("first", "original"),
+        ("id<8>", "argument"),
+        ("id<1>", "argument"),
+    ] {
+        assert!(
+            executable.contains(&format!("def _root_.XLS.«picker».«{name}» («{parameter}»")),
+            "{executable}"
+        );
+    }
+    bundle.files.push((
+        "PublicInterface.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+example (q : State) (x : Input) : observe q x = (x.packet.zebra, x.flag) := by
+  rcases x with ⟨packet, flag⟩
+  cases flag <;> rfl
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "ordinary BX imports and renamed linked functions");
+    Ok(())
+}
+
 // Verifies: Forwarded Boolean fields reduce by reflexivity. The step and
 // empty assertions proofs both project the public evaluation theorem.
 // Catches: A codec blocking reduction or simplification erasing that
@@ -406,7 +527,257 @@ private def initial : State := { count := 7 }
     check_bundle(bundle, "nested prelinked calls across a register update");
 }
 
+/// Link the BX fixture to the checked `machine` module and its DSLX import
+/// paths.
+fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<LeanBlockBundle> {
+    let mut imports = xlsynth::dslx::ImportData::new(None, paths);
+    let module = xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports)?;
+    xlsynth_lean::block::compile_bx_with_dslx(
+        "design",
+        bx,
+        module,
+        Default::default(),
+        &Default::default(),
+    )?
+    .emit_readable(None)
+}
+
+// Verifies: A checked DSLX helper reads the intended equal-width BX field.
+// Catches: reversing the source fields across the unoptimized helper call.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn linked_field_order_uses_the_checked_helper() {
+    let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+    let module = xlsynth::dslx::parse_and_typecheck(
+        include_str!("fixtures/bx_field_order/picker.x"),
+        "picker.x",
+        "picker",
+        &mut imports,
+    )
+    .unwrap();
+    let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+        "design",
+        include_str!("fixtures/bx_field_order/field_order.bx"),
+        module,
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    let mut bundle = compiled.emit_readable(None).unwrap();
+    bundle.files.push((
+        "FieldOrder.lean".into(),
+        include_str!("fixtures/bx_field_order/FieldOrder.lean").into(),
+    ));
+    bundle.files.push((
+        "NamedFields.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+example (q : State) (x : Input) :
+    (observe q x).1.zebra = x.left ∧ (observe q x).1.apple = x.right ∧
+    (observe q x).2 = x.left := by
+  rcases x with ⟨left, right⟩
+  cases left <;> cases right <;> exact ⟨rfl, rfl, rfl⟩
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "BX fields and an unoptimized linked DSLX projection",
+    );
+}
+
+// Verifies: A physical loop calls the named typed helper on each iteration.
+// Catches: Falling back to an entirely raw graph inside a compiler-generated
+// callback.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn nested_helper_calls() {
+    let modules = tempfile::tempdir().unwrap();
+    fs::write(
+        modules.path().join("left_side.x"),
+        r#"
+pub struct Packet { base: u8, delta: u4 }
+pub fn advance(command: Packet) -> Packet {
+    Packet { base: command.base + signex(command.delta, command.base), ..command }
+}
+"#,
+    )
+    .unwrap();
+    let source = r#"
+import left_side as foreign;
+struct Packet { left: u8, right: u4 }
+fn advance(request: foreign::Packet, previous: u8) -> u8 {
+    let final_packet = for (_, carry): (u32, foreign::Packet) in u32:0..u32:2 {
+        foreign::advance(carry)
+    }(request);
+    final_packet.base + previous
+}
+fn machine(packet: Packet, count: u8) -> (u8, u8) {
+    let request = foreign::Packet { base: packet.left, delta: packet.right };
+    (count, advance(request, count))
+}
+"#;
+    let bx = r#"
+struct Packet { left: u8, right: u4 }
+extern fn machine::machine(packet: Packet, count: u8) -> (u8, u8);
+block pipeline(clk, packet: Packet) -> u8 {
+    reg count: u8 = 0;
+    let result = machine::machine(packet, count);
+    count := result.1;
+    result.0
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[modules.path()]).unwrap();
+    bundle.files.push((
+        "CheckCalls.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+private def stimulus : Input := { rst := false, packet := { left := 13, right := 5 } }
+private def initial : State := { count := 7 }
+#guard (XLS.left_side.advance (command := { base := 13, delta := 5 })).base == 18
+#guard observe initial stimulus == 7
+#guard (step initial stimulus).count == 30
+"#
+        .into(),
+    ));
+    lean_bundle::check_bundle(&bundle).unwrap();
+
+    // Substitute the identity for the innermost typed helper. Starting from
+    // the public clock step now gives 13 + 7, while the raw model still gives
+    // (13 + 5 + 5) + 7. Dead typed wrappers cannot change this observation.
+    bundle.files.retain(|(name, _)| {
+        matches!(
+            name.as_str(),
+            "Generated.lean" | "ReadableTypes.lean" | "ReadableGenerated.lean"
+        )
+    });
+    let (_, model) = bundle
+        .files
+        .iter_mut()
+        .find(|(name, _)| name == "ReadableGenerated.lean")
+        .unwrap();
+    let declaration = "def _root_.XLS.«left_side».«advance» ";
+    let substituted =
+        "def _root_.XLS.«left_side».«advance» (command : _root_.XLS.left_side.Packet) := command
+def _root_.XLS.«left_side».«originalAdvance» ";
+    assert_eq!(model.matches(declaration).count(), 1);
+    *model = model.replacen(declaration, substituted, 1);
+    bundle.files.push((
+        "CallPath.lean".into(),
+        r#"import ReadableGenerated
+open XlsReadable
+#guard (step { count := 7 } { rst := false, packet := ⟨13, 5⟩ }).count == 20
+#guard (XlsBlock.step { count := 7 } { rst := 0, packet := (13, 5, ()) }).count == 30
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "typed helper reached by a nested invocation");
+}
+
+// Verifies: Each imported helper computes at its concrete specialization.
+// Catches: Merging different value arguments or erasing nominal types.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_parametric_helpers_preserve_instances() {
+    let modules = tempfile::tempdir().unwrap();
+    let packets = r#"
+#![feature(generics)]
+pub struct Packet<N: u32> { value: bits[N], enabled: bool }
+pub struct Fallback<N: u32> { value: bits[N], enabled: bool }
+pub fn choose<N: u32>(packet: Packet<N>, fallback: bits[N]) -> Packet<N> {
+    Packet<N> { value: if packet.enabled { packet.value } else { fallback }, ..packet }
+}
+pub fn bias<K: u32>(x: u6) -> u6 { x + (K as u6) }
+pub fn passthrough<T: type>(x: T) -> T { x }
+"#;
+    std::fs::write(modules.path().join("packets.x"), packets).unwrap();
+    let source = r#"
+import packets;
+struct Packet { current: u6 }
+fn choose_values(small: packets::Packet<u32:5>, large: packets::Packet<u32:6>,
+           fallback: packets::Fallback<u32:5>, last: u6) -> (u6, u6) {
+    let pair = packets::passthrough<(u8, bool)>((u3:0 ++ fallback.value, small.enabled));
+    let a = packets::choose<u32:5>(small, pair.0 as u5);
+    let b = packets::choose<u32:6>(large, u6:41);
+    let output = packets::passthrough<Packet>(Packet { current: last });
+    (output.current, packets::bias<u32:1>(u1:0 ++ a.value) + packets::bias<u32:2>(b.value))
+}
+fn machine(small: u5, large: u6, fallback: u5, last: u6) -> (u6, u6) {
+    choose_values(packets::Packet<5> { value: small, enabled: false },
+                  packets::Packet<6> { value: large, enabled: true },
+                  packets::Fallback<5> { value: fallback, enabled: true }, last)
+}
+"#;
+    let bx = r#"
+extern fn machine::machine(small: u5, large: u6, fallback: u5, last: u6) -> (u6, u6);
+block select_values(clk, small: u5, large: u6, fallback: u5) -> u6 {
+    reg last: u6 = 0;
+    let result = machine::machine(small, large, fallback, last);
+    last := result.1;
+    result.0
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[modules.path()]).unwrap();
+    bundle.files.push((
+        "Check.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def stimulus : Input := {rst := false, small := 3, large := 37, fallback := 17}
+private def small : XLS.packets.«Packet<5>» := {value := stimulus.small, enabled := false}
+private def large : XLS.packets.«Packet<6>» := {value := stimulus.large, enabled := true}
+private def fallback : XLS.packets.«Fallback<5>» := {value := 17, enabled := true}
+#guard (XLS.packets.«choose<5>» (packet := small) (fallback := 17)).value == 17
+#check_failure XLS.packets.«choose<5>» (packet := fallback) (fallback := 17)
+#guard (XLS.packets.«choose<6>» (packet := large) (fallback := 41)).value == 37
+#guard (XLS.packets.«bias<1>» (x := 0), XLS.packets.«bias<2>» (x := 0)) == (1, 2)
+#guard XLS.packets.«passthrough<(u8,bool)>» (x := (13, true)) == ((13 : BitVec 8), true)
+#guard (XLS.packets.«passthrough<Packet>» (x := { current := 7 })).current == 7
+#guard (step { last := 7 } stimulus).last == 57
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "parametric");
+}
+
+// Verifies: The checked call agrees with its physical body for every frame.
+// Catches: A record codec round trip stranded inside a selected, indexed array.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn checked_call_proves_correspondence_for_an_indexed_record_update() -> Result<()> {
+    let source = r#"
+pub struct Entry { word: u8, valid: bool }
+pub struct Frame { entries: Entry[2], idle: bool }
+
+fn flip(x: u8) -> u8 { !x }
+
+pub fn advance(frame: Frame, index: u1) -> (Frame, bool) {
+    let old = frame.entries[u1:1];
+    let pair = if frame.idle { [old, old] } else { frame.entries };
+    let e = frame.entries[index];
+    let entries = update(pair, index, Entry { word: flip(e.word), ..e });
+    (Frame { entries, ..frame }, frame.idle)
+}
+"#;
+    let bx = r#"
+struct Entry { word: u8, valid: u1 }
+struct Frame { entries: Entry[2], idle: u1 }
+extern fn machine::advance(frame: Frame, index: u1) -> (Frame, u1);
+block demo(clk, frame: Frame, index: u1) -> Frame {
+    reg delayed: u1 = 0;
+    delayed := index;
+    let output = machine::advance(frame, delayed);
+    output.0
+}
+"#;
+    let bundle = checked_helper_bundle(bx, source, &[])?;
+    lean_bundle::check_bundle(&bundle)
+}
+
 /// Checks the complete bundle and names the fixture in any compilation failure.
 fn check_bundle(bundle: LeanBlockBundle, fixture: &str) {
     lean_bundle::check_bundle(&bundle).unwrap_or_else(|error| panic!("{fixture}: {error:#}"));
 }
+
+#[path = "block_native/checked_extern.rs"]
+mod checked_extern;

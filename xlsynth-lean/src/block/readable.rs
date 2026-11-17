@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Checked BX declarations select representations at the block boundary.
-//! The public evaluator encodes its inputs, runs the physical IR equations,
-//! and decodes its outputs. The correspondence theorems check these
-//! conversions.
+//! Checked BX and DSLX declarations select representations at block and
+//! function boundaries. Both interfaces instantiate the same physical IR
+//! equations. Correspondence checks the codecs and call adapters; agreement
+//! with XLS execution is checked separately.
 
 use std::{borrow::Cow, collections::BTreeSet, fmt::Write};
 
 mod callable_names;
+mod calls;
 mod forwarding;
 mod source_names;
 
@@ -20,6 +21,7 @@ use crate::block::{
     source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
 };
 use callable_names::CallableNames;
+use calls::Calls;
 use source_names::{declaring_name, module_identifier, source_type_in, write_struct};
 
 /// Project an element from a physical XLS tuple, whose final pair ends in unit.
@@ -40,7 +42,7 @@ struct Presentation<'a> {
     block: &'a BlockContext<'a>,
     declarations: &'a [TypeDecl],
     bx_namespace: &'a str,
-    callables: &'a CallableNames,
+    callables: &'a CallableNames<'a>,
     interface: &'a StatefulInterface,
     register_fields: Vec<String>,
 }
@@ -61,7 +63,7 @@ fn type_identifier(key: &str) -> Result<String> {
 }
 
 /// The first module is the ordinary standalone IR export. Later modules add
-/// the checked block interface and its representation laws.
+/// checked call adapters, the block interface, and its representation laws.
 pub(super) fn emit(
     block: &BlockContext<'_>,
     declarations: &[TypeDecl],
@@ -74,7 +76,7 @@ pub(super) fn emit(
     } else {
         interface.bx_module.clone()
     };
-    let callables = CallableNames::new(&interface.block_name, declarations, &bx_namespace)?;
+    let callables = CallableNames::new(block, declarations, interface, &bx_namespace)?;
     let presentation = Presentation {
         block,
         declarations,
@@ -88,13 +90,17 @@ pub(super) fn emit(
             .map(|r| identifier(&r.name))
             .collect::<Result<_>>()?,
     };
+    let calls = Calls::new(&presentation)?;
     let mut bundle = LeanBlockBundle {
         files: vec![
             ("Generated.lean".into(), raw),
             ("ReadableTypes.lean".into(), presentation.types_module()?),
-            ("ReadableGenerated.lean".into(), presentation.executable()?),
+            (
+                "ReadableGenerated.lean".into(),
+                presentation.executable(&calls)?,
+            ),
             ("ReadableRepresentation.lean".into(), representation_laws()),
-            ("ReadableCorrespondence.lean".into(), correspondence()),
+            ("ReadableCorrespondence.lean".into(), calls.correspondence()),
         ],
     };
     for (_, module) in &mut bundle.files {
@@ -449,10 +455,11 @@ impl<'a> Presentation<'a> {
         Ok(out)
     }
 
-    fn executable(&self) -> Result<String> {
+    fn executable(&self, calls: &Calls) -> Result<String> {
         let block = self.block;
         let mut out =
             String::from("import Generated\nimport ReadableTypes\n\nnamespace XlsReadable\n\n");
+        out.push_str(&calls.declarations);
         let mut fields = Vec::new();
         let mut preceding = BTreeSet::new();
         for (field, register) in self.register_fields.iter().zip(&block.graph.registers) {
@@ -498,7 +505,7 @@ impl<'a> Presentation<'a> {
 
         self.write_representation(&mut out)?;
         let encoded_args = "(encodeState q) (encodeInput x)";
-        let decoded = format!("decodeEvaluation (_root_.XlsBlock.eval {encoded_args})");
+        let decoded = format!("decodeEvaluation ({} {encoded_args})", calls.eval);
         let forwarded = self.forwarded_evaluation()?;
         if forwarded.is_some() {
             out.push_str(forwarding::LEAN_SUPPORT);
@@ -792,12 +799,6 @@ theorem two_bit_cases (b : L.BitVec 2) : b = 0 ∨ b = 1 ∨ b = 2 ∨ b = 3 := 
   rcases one_bit_cases b with rfl | rfl <;> rfl
 
 "#;
-fn correspondence() -> String {
-    format!(
-        "import ReadableRepresentation\n\nnamespace XlsReadable\n\nattribute [local simp] L.Function.comp_def\n\ntheorem encoded_eval (q : State) (x : Input) :\n    encodeEvaluation (eval q x) = XlsBlock.eval (encodeState q) (encodeInput x) := by\n  simp only [eval_eq_decoded, encode_decode_evaluation]\n\n{CORRESPONDENCE}\nend XlsReadable\n"
-    )
-}
-
 /// Step, reset, and trace proof source derived from the generated evaluation
 /// theorem.
 const CORRESPONDENCE: &str = r#"theorem decoded_eval (q : XlsBlock.State) (x : XlsBlock.Input) :
