@@ -126,11 +126,10 @@ impl<'a> BlockInvokeInliner<'a> {
                     "expanding calls in block '{name}' exceeds the budget of {limit} additional IR nodes"
                 ));
             }
-            let replacement = if let NodePayload::Invoke { operands, .. } = &call.payload {
-                let result = copy_callee(
+            let replacement = if matches!(call.payload, NodePayload::Invoke { .. }) {
+                let result = copy_invoke_body(
                     function,
-                    operands,
-                    call.text_id,
+                    &call,
                     &mut expanded.nodes,
                     &mut names,
                     &mut last_id,
@@ -139,27 +138,133 @@ impl<'a> BlockInvokeInliner<'a> {
             } else {
                 expand_iterations(&call, function, &mut expanded.nodes, &mut last_id)?
             };
-            // Retain user-assigned names. Explicit operator.<id> spellings
-            // must follow the new operator instead.
-            let call = &mut expanded.nodes[index];
-            if call
-                .name
-                .as_deref()
-                .and_then(|name| name.strip_prefix(call.payload.get_operator()))
-                .and_then(|suffix| suffix.strip_prefix('.'))
-                .is_some_and(|digits| {
-                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
-                })
-            {
-                call.name = None;
-            }
-            call.payload = replacement;
+            expanded.nodes[index].replace_payload(replacement);
             index += 1;
         }
         expanded.compact_and_toposort()?;
         self.last_id = last_id;
         Ok(Cow::Owned(expanded))
     }
+}
+
+/// Local function definitions available during feedback refinement. The package
+/// stays immutable while working blocks are assembled and rewritten.
+pub(crate) struct FeedbackInvokes<'a> {
+    package: &'a Package,
+    functions: Option<HashMap<&'a str, &'a Fn>>,
+}
+
+impl<'a> FeedbackInvokes<'a> {
+    /// Defers function verification and indexing until a cycle crosses a local
+    /// call.
+    pub(crate) fn new(package: &'a Package) -> Self {
+        Self {
+            package,
+            functions: None,
+        }
+    }
+
+    /// Opens local calls on candidate cycles, including returned calls known
+    /// to carry the same dependencies through argument forwarding.
+    pub(crate) fn expand(
+        &mut self,
+        block: &mut Block,
+        cyclic: &[bool],
+        last_id: &mut usize,
+    ) -> Result<bool, String> {
+        let sites = cyclic
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &participates)| {
+                (participates && matches!(block.nodes[i].payload, NodePayload::Invoke { .. }))
+                    .then_some(i)
+            })
+            .collect::<Vec<_>>();
+        if sites.is_empty() {
+            return Ok(false);
+        }
+        if self.functions.is_none() {
+            verify_package(self.package).map_err(|e| e.to_string())?;
+            self.functions = Some(
+                self.package
+                    .members
+                    .iter()
+                    .filter_map(|member| match member {
+                        PackageMember::Function(f) if f.ffi_proto().is_none() => {
+                            Some((f.name.as_str(), f))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
+        let functions = self.functions.as_ref().expect("function index initialized");
+        let mut names = block_names(block);
+        let mut changed = false;
+        for mut index in sites {
+            loop {
+                let call = block.nodes[index].clone();
+                let NodePayload::Invoke { to_apply, operands } = &call.payload else {
+                    unreachable!("feedback site is an invoke");
+                };
+                let Some(function) = functions.get(to_apply.as_str()) else {
+                    break;
+                };
+                let first_new = block.nodes.len();
+                let result =
+                    copy_invoke_body(function, &call, &mut block.nodes, &mut names, last_id)?;
+                block.nodes[index].replace_payload(NodePayload::Unop(Unop::Identity, result));
+                changed = true;
+                let Some(inner) = forwarded_invoke(&block.nodes, first_new, result, operands)
+                else {
+                    break;
+                };
+                index = inner.index;
+            }
+        }
+        Ok(changed)
+    }
+}
+
+/// A returned call that receives every outer argument remains on the same
+/// candidate cycle. Follow it without rescanning the block. If the return or
+/// argument wiring changes, range refinement must identify the remaining cycle.
+fn forwarded_invoke(
+    nodes: &[Node],
+    first_new: usize,
+    result: NodeRef,
+    outer_args: &[NodeRef],
+) -> Option<NodeRef> {
+    let alias_source = |value: NodeRef| match nodes[value.index].payload {
+        NodePayload::Unop(Unop::Identity, arg) if value.index >= first_new => Some(arg),
+        _ => None,
+    };
+    let mut returned = result;
+    while let Some(source) = alias_source(returned) {
+        returned = source;
+    }
+    if returned.index < first_new {
+        return None;
+    }
+    let NodePayload::Invoke { operands, .. } = &nodes[returned.index].payload else {
+        return None;
+    };
+    if operands != outer_args {
+        // Operands can share long alias chains. Visit each source once.
+        let mut forwarded = HashSet::new();
+        for &operand in operands {
+            let mut arg = operand;
+            while forwarded.insert(arg)
+                && let Some(source) = alias_source(arg)
+            {
+                arg = source;
+            }
+        }
+        if !outer_args.iter().all(|arg| forwarded.contains(arg)) {
+            return None;
+        }
+    }
+    Some(returned)
 }
 
 fn is_expandable(payload: &NodePayload, unroll: bool) -> bool {
@@ -255,14 +360,17 @@ fn expand_iterations(
 
 /// Copies the complete body, including effects whose tokens are outside the
 /// return cone.
-fn copy_callee(
+fn copy_invoke_body(
     function: &Fn,
-    operands: &[NodeRef],
-    call_id: usize,
+    call: &Node,
     nodes: &mut Vec<Node>,
     names: &mut HashSet<String>,
     last_id: &mut usize,
 ) -> Result<NodeRef, String> {
+    let NodePayload::Invoke { operands, .. } = &call.payload else {
+        unreachable!("expected invoke");
+    };
+    let call_id = call.text_id;
     // Bind parameters first, including when the callee returns one directly.
     let mut mapping = vec![NodeRef { index: 0 }; function.nodes.len()];
     for (&parameter, &actual) in function.params.iter().zip(operands) {
@@ -288,8 +396,7 @@ fn copy_callee(
         nodes.push(Node {
             text_id: *last_id,
             name: source
-                .name
-                .as_ref()
+                .assigned_name()
                 .map(|name| call_scoped_name(names, call_id, name)),
             ty: source.ty.clone(),
             payload,
@@ -354,6 +461,76 @@ mod tests {
     use crate::block_transition::lower_block_transition;
     use crate::ir_eval::{FnEvalResult, eval_fn_in_package};
     use crate::ir_parser::Parser;
+
+    #[test]
+    fn returned_invokes_follow_forwarded_arguments_until_feedback_dependencies_change() {
+        let ir = r#"package forwarding
+fn passthrough(x: bits[3] id=1) -> bits[3] {
+  ret q: bits[3] = identity(x, id=2)
+}
+fn choose(x: bits[3] id=3, y: bits[3] id=4) -> bits[3] {
+  ret selected: bits[3] = invoke(y, to_apply=passthrough, id=5)
+}
+fn wrapper(x: bits[3] id=6, y: bits[3] id=7) -> bits[3] {
+  ok: bits[1] = literal(value=1, id=8)
+  seen: () = cover(ok, label="observed", id=9)
+  delegated: bits[3] = identity(y, id=10)
+  swapped: bits[3] = invoke(delegated, x, to_apply=choose, id=11)
+  ret q: bits[3] = identity(swapped, id=12)
+}
+block leaf(d: bits[3], q: bits[3]) {
+  d: bits[3] = input_port(name=d, id=13)
+  zero: bits[3] = literal(value=0, id=14)
+  called: bits[3] = invoke(d, zero, to_apply=wrapper, id=15)
+  q: () = output_port(called, name=q, id=16)
+}
+top block sample(seed: bits[1], q: bits[3]) {
+  instantiation u(block=leaf, kind=block)
+  seed: bits[1] = input_port(name=seed, id=17)
+  lanes: bits[3] = instantiation_output(instantiation=u, port_name=q, id=18)
+  low: bits[2] = bit_slice(lanes, start=0, width=2, id=19)
+  bus: bits[3] = concat(low, seed, id=20)
+  drive: () = instantiation_input(bus, instantiation=u, port_name=d, id=21)
+  q: () = output_port(lanes, name=q, id=22)
+}"#;
+        let package = Parser::new(ir).parse_and_verify_package().unwrap();
+        let mut leaf = package.get_block("leaf").unwrap().clone();
+        let cyclic: Vec<_> = leaf.nodes.iter().map(|node| node.text_id == 15).collect();
+        FeedbackInvokes::new(&package)
+            .expand(
+                &mut leaf,
+                &cyclic,
+                &mut package_max_emitted_node_id(&package),
+            )
+            .unwrap();
+        let remaining: Vec<_> = leaf
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.payload {
+                NodePayload::Invoke { to_apply, .. } => Some(to_apply.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(remaining, ["passthrough"]);
+        assert!(leaf.nodes.iter().any(|node| matches!(&node.payload, NodePayload::Cover { label, .. } if label == "invoke_15_observed")));
+
+        let project =
+            |package: &Package| crate::block2fn::block_package_to_fn(package, &Default::default());
+        let projected = project(&package).unwrap().function;
+        for seed in [0, 1] {
+            let FnEvalResult::Success(actual) = eval_fn_in_package(
+                &package,
+                &projected,
+                &[IrValue::make_ubits(1, seed).unwrap()],
+            ) else {
+                panic!("failed to evaluate projected forwarding calls");
+            };
+            assert_eq!(actual.value, IrValue::make_ubits(3, 7 * seed).unwrap());
+        }
+        let loop_ir = ir.replace("instantiation_input(bus,", "instantiation_input(lanes,");
+        let real_cycle = Parser::new(&loop_ir).parse_and_verify_package().unwrap();
+        assert!(project(&real_cycle).unwrap_err().contains("cycle"));
+    }
 
     #[test]
     fn unrolling_keeps_zero_trip_carry_and_strided_wide_induction() -> Result<(), String> {

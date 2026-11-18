@@ -652,14 +652,16 @@ xlsynth-driver g8r2gv mul_inc.g8r --liberty-proto cells.proto -o mul_inc.gv
 
 ### `block2fn`: Block IR to PIR function package
 
-Inlines blocks and converts the resulting Block IR into a PIR package that contains a single top function. The following steps are performed:
+Inlines the block hierarchy and emits a PIR package containing the projected top function and any functions it still calls.
 
-- Optionally removes inputs ports and ties their uses to a constant. Specified via `--tie-input-ports`.
+- Uses constants from `--tie-input-ports` when resolving feedback and removes the tied ports from the function signature.
 - Optionally removes output ports (`--drop-output-ports`).
 - Performs a trivial optimization pass handling the tied input ports. The motivation for this is to remove feedback loops caused by load-enable functionality. A common case is an `input_valid` signal muxing the register output with data to form the register input. Tying `input_valid` to 1 and optimizing cuts this cycle.
 - Collapses registers into wires. If a cycle is created after collapsing, an error is returned.
 - Removes clock port.
 - Converts the resulting combinational block into a function.
+
+Both `block2fn` and `block2sv` check feedback across instance connections. For example, on a three-bit port, wiring `q = q << 1` gives bit zero a constant driver and the other bits read successively lower lanes. Wiring `q = q << 0` creates a cycle. Runtime indices and shift amounts are treated conservatively when checking possible feedback.
 
 This is useful for converting a block generated from a netlist into a package-form function IR that can be consumed directly by package-oriented tooling such as `ir-equiv`.
 

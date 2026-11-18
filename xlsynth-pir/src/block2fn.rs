@@ -2,9 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::block_inline::inline_all_blocks_in_package;
+use crate::block_inline::inline_blocks_with_top_bindings;
 use crate::dce::remove_dead_nodes;
-use crate::ir::{self, Block, BlockPort, MemberType, NodePayload, NodeRef, PackageMember, Type};
+use crate::ir::{self, Block, BlockPort, NodePayload, NodeRef, Type};
 use crate::ir_eval::eval_pure_if_supported;
 use crate::ir_parser::Parser;
 use crate::ir_utils::{compact_and_toposort_in_place, compute_users, operands, verify_no_cycle};
@@ -22,14 +22,16 @@ pub struct Block2FnResult {
     pub function: ir::Fn,
 }
 
-// Converts the top block of the package into a function. Optionally ties off
-// inputs and drops outputs.
+/// Projects the top block of a verified package, optionally tying inputs and
+/// dropping outputs. The function can retain calls to other package members.
+/// Use [`block_package_to_fn_package`] for a standalone result.
 pub fn block_package_to_fn(
     pkg: &ir::Package,
     options: &Block2FnOptions,
 ) -> Result<Block2FnResult, String> {
     let mut pkg = pkg.clone();
-    inline_all_blocks_in_package(&mut pkg)?;
+    // The tied values can determine which bits participate in feedback.
+    inline_blocks_with_top_bindings(&mut pkg, |top| tie_input_ports(top, options))?;
     let package_name = pkg.name.clone();
     let top_block = pkg
         .get_top_block()
@@ -40,7 +42,6 @@ pub fn block_package_to_fn(
             "block2fn: block contains instantiations; run block_inlining first".to_string(),
         );
     }
-    tie_input_ports(&mut block, options)?;
     drop_output_ports(&mut block, options)?;
     let output_count = block.output_ports().count();
     if output_count != 1 {
@@ -63,28 +64,43 @@ pub fn block_package_to_fn(
     })
 }
 
+/// Projects the top block of a verified package into a standalone function
+/// package containing its reachable callees. The top keeps its block name.
+/// A callee with the same name gets a fresh name in the output package.
+pub fn block_package_to_fn_package(
+    package: &ir::Package,
+    options: &Block2FnOptions,
+) -> Result<ir::Package, String> {
+    let projected = block_package_to_fn(package, options)?;
+    crate::ir_inline::package_with_entry_from_member(
+        package,
+        &projected.function,
+        ir::MemberType::Block,
+    )
+}
+
+/// Parses block IR and projects its top with [`block_package_to_fn`].
 pub fn block_ir_to_fn(
     block_ir_text: &str,
     options: &Block2FnOptions,
 ) -> Result<Block2FnResult, String> {
-    let mut parser = Parser::new(block_ir_text);
-    let pkg = parser
-        .parse_and_validate_package()
-        .map_err(|e| format!("parse block IR: {e}"))?;
-    block_package_to_fn(&pkg, options)
+    block_package_to_fn(&parse_block_package(block_ir_text)?, options)
 }
 
+/// Parses block IR and builds a standalone package with
+/// [`block_package_to_fn_package`].
 pub fn block_ir_to_fn_package(
     block_ir_text: &str,
     options: &Block2FnOptions,
 ) -> Result<ir::Package, String> {
-    let result = block_ir_to_fn(block_ir_text, options)?;
-    Ok(ir::Package {
-        name: result.package_name,
-        file_table: ir::FileTable::new(),
-        members: vec![PackageMember::Function(result.function.clone())],
-        top: Some((result.function.name.clone(), MemberType::Function)),
-    })
+    block_package_to_fn_package(&parse_block_package(block_ir_text)?, options)
+}
+
+/// Parses the package used for block projection and local call resolution.
+fn parse_block_package(source: &str) -> Result<ir::Package, String> {
+    Parser::new(source)
+        .parse_and_verify_package()
+        .map_err(|e| format!("parse block IR: {e}"))
 }
 
 /// Projects a combinational block's ordered interface into a function
@@ -647,6 +663,7 @@ fn ir_value_ones(bit_count: usize) -> Result<IrValue, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::{MemberType, PackageMember};
     use crate::ir_parser::Parser;
     use crate::ir_query::{find_matching_nodes, matches_node, parse_query};
 

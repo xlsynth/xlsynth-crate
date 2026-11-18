@@ -681,6 +681,57 @@ fn extern_finalization_rejects_renamed_unconnected_parameters_with_identical_typ
 }
 
 #[test]
+fn hierarchical_feedback_distinguishes_shifted_from_same_lane_loops() {
+    let mut leaf = BlockBuilder::new("leaf");
+    let data = leaf.input_port("data", Type::Bits(4)).unwrap();
+    // Each half depends on the corresponding input bits. The wrapper adds
+    // another instance boundary between the slices and the leaf.
+    let inverted = leaf.not(data).unwrap();
+    leaf.output_port("result", inverted).unwrap();
+    let mut package = leaf.build_package("lanes").unwrap();
+    let mut wrapper = BlockBuilder::new("wrapper");
+    let inner = wrapper
+        .instantiate("inner", package.get_block("leaf").unwrap())
+        .unwrap();
+    let data = wrapper.input_port("data", Type::Bits(4)).unwrap();
+    wrapper.instantiation_input(inner, "data", data).unwrap();
+    let result = wrapper.instantiation_output(inner, "result").unwrap();
+    wrapper.output_port("result", result).unwrap();
+    wrapper.build_into_package(&mut package).unwrap();
+
+    // The first instance always has a false whole-port cycle. On the second,
+    // [1:0] is disjoint from [3:2], [2:1] shifts one bit per traversal, and
+    // [3:2] feeds the same bits back. Even an unobserved loop must be rejected.
+    for offset in 0..=2 {
+        let mut parent = BlockBuilder::new("parent");
+        let seed = parent.input_port("seed", Type::Bits(2)).unwrap();
+        for (name, start) in [("first", 0), ("second", offset)] {
+            let inst = parent
+                .instantiate(name, package.get_block("wrapper").unwrap())
+                .unwrap();
+            let result = parent.instantiation_output(inst, "result").unwrap();
+            let upper = parent.bit_slice(result, start, 2).unwrap();
+            let packed = parent.concat(&[upper, seed]).unwrap();
+            parent.instantiation_input(inst, "data", packed).unwrap();
+        }
+        let built = parent.build_in_package(&package);
+        if offset == 2 {
+            let Err(BuilderError::CombinationalCycle { block, steps }) = built else {
+                panic!("expected feedback through the second instance");
+            };
+            assert_eq!(block, "parent");
+            assert!(steps.iter().any(|s| {
+                s.connection
+                    .as_ref()
+                    .is_some_and(|c| c.instance == "second")
+            }));
+        } else {
+            built.unwrap();
+        }
+    }
+}
+
+#[test]
 fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() {
     for registered in [false, true] {
         let mut child = BlockBuilder::new("child");
@@ -890,4 +941,117 @@ fn stage_keyword_is_rejected_without_poisoning_block_resources() {
             .collect::<Vec<_>>(),
         (1..=4).map(|id| id + maximum).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn empty_data_feedback_is_constant_but_tokens_keep_ordering() {
+    for ty in [
+        Type::Bits(0),
+        Type::Tuple(vec![Box::new(Type::Bits(0))]),
+        Type::new_array(Type::Bits(0), 2),
+        Type::Token,
+        Type::Tuple(vec![Box::new(Type::Token)]),
+    ] {
+        let mut leaf = BlockBuilder::new("leaf");
+        let d = leaf.input_port("d", ty.clone()).unwrap();
+        leaf.output_port("q", d).unwrap();
+        let mut package = leaf.build_package("feedback").unwrap();
+        let mut top = BlockBuilder::new("wrapper");
+        let u = top
+            .instantiate("u", package.get_block("leaf").unwrap())
+            .unwrap();
+        let q = top.instantiation_output(u, "q").unwrap();
+        top.instantiation_input(u, "d", q).unwrap();
+        top.output_port("result", q).unwrap();
+        let result = top.build_into_package(&mut package);
+        if ty.contains_token() {
+            assert!(
+                matches!(result, Err(BuilderError::CombinationalCycle { .. })),
+                "{ty}"
+            );
+        } else {
+            result.unwrap();
+            package.set_top_block("wrapper").unwrap();
+            let f = xlsynth_pir::block2fn::block_package_to_fn(&package, &Default::default())
+                .unwrap()
+                .function;
+            let FnEvalResult::Success(actual) = eval_fn_in_package(&package, &f, &[]) else {
+                panic!("evaluation failed")
+            };
+            assert_eq!(
+                actual.value,
+                xlsynth_pir::ir_value_utils::zero_ir_value_for_type(&ty)
+            );
+        }
+    }
+}
+
+#[test]
+fn inlining_an_empty_output_preserves_the_child_assertion() {
+    let mut child = BlockBuilder::new("leaf");
+    let data = child.input_port("data", Type::Bits(0)).unwrap();
+    let enable = child.input_port("enable", Type::Bits(1)).unwrap();
+    let token = child.after_all(&[]).unwrap();
+    child
+        .assert(token, enable, "expected enable", "enable_check")
+        .unwrap();
+    child.output_port("q", data).unwrap();
+    let mut package = child.build_package("effects").unwrap();
+
+    let mut top = BlockBuilder::new("wrapper");
+    let enable = top.input_port("enable", Type::Bits(1)).unwrap();
+    let inst = top
+        .instantiate("u", package.get_block("leaf").unwrap())
+        .unwrap();
+    let q = top.instantiation_output(inst, "q").unwrap();
+    top.instantiation_input(inst, "data", q).unwrap();
+    top.instantiation_input(inst, "enable", enable).unwrap();
+    top.output_port("result", q).unwrap();
+    top.build_into_package(&mut package).unwrap();
+    package.set_top_block("wrapper").unwrap();
+    inline_all_blocks_in_package(&mut package).unwrap();
+    verify_package(&package).unwrap();
+    let block = package.get_top_block().unwrap();
+    let result = block.output_value(block.get_output_port("result").unwrap());
+    assert!(matches!(&block.get_node(result).payload, NodePayload::Literal(v) if *v == bits(0, 0)));
+    assert_eq!(
+        successful_value(evaluate_block(&package, "wrapper", &[bits(1, 1)])),
+        bits(0, 0)
+    );
+    let FnEvalResult::Failure(failure) = evaluate_block(&package, "wrapper", &[bits(1, 0)]) else {
+        panic!("the child's assertion must fire");
+    };
+    assert_eq!(failure.assertion_failures.len(), 1);
+}
+
+#[test]
+fn empty_internal_array_selection_cannot_close_a_nonempty_feedback_path() {
+    let mut child = BlockBuilder::new("leaf");
+    let d = child.input_port("d", Type::Bits(1)).unwrap();
+    child.output_port("q", d).unwrap();
+    let mut package = child.build_package("array_feedback").unwrap();
+
+    let mut top = BlockBuilder::new("wrapper");
+    let seed = top.input_port("seed", Type::Bits(1)).unwrap();
+    let u = top
+        .instantiate("u", package.get_block("leaf").unwrap())
+        .unwrap();
+    let q = top.instantiation_output(u, "q").unwrap();
+    let entries = top
+        .literal(IrValue::make_array(&[bits(0, 0), bits(0, 0)]).unwrap())
+        .unwrap();
+    let selected = top.array_index(entries, q).unwrap();
+    let drive = top.concat(&[selected, seed]).unwrap();
+    top.instantiation_input(u, "d", drive).unwrap();
+    top.output_port("result", q).unwrap();
+    top.build_into_package(&mut package).unwrap();
+    package.set_top_block("wrapper").unwrap();
+    inline_all_blocks_in_package(&mut package).unwrap();
+    verify_package(&package).unwrap();
+    for value in 0..2 {
+        assert_eq!(
+            successful_value(evaluate_block(&package, "wrapper", &[bits(1, value)])),
+            bits(1, value)
+        );
+    }
 }

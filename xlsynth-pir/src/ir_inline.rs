@@ -232,6 +232,16 @@ pub fn package_with_reachable_callees(
     pkg: &Package,
     entry: &crate::ir::Fn,
 ) -> Result<Package, String> {
+    package_with_entry_from_member(pkg, entry, MemberType::Function)
+}
+
+/// Retains calls in their original function namespace as the entry becomes
+/// the top function of a standalone package.
+pub(crate) fn package_with_entry_from_member(
+    pkg: &Package,
+    entry: &crate::ir::Fn,
+    origin: MemberType,
+) -> Result<Package, String> {
     let mut functions = HashMap::new();
     for member in &pkg.members {
         if let PackageMember::Function(f) = member {
@@ -243,7 +253,7 @@ pub fn package_with_reachable_callees(
     let mut reachable = BTreeSet::new();
     let mut worklist: Vec<_> = direct_callee_names(entry).into_iter().collect();
     while let Some(name) = worklist.pop() {
-        if name == entry.name {
+        if origin == MemberType::Function && name == entry.name {
             return Err(format!(
                 "entry function {name:?} is also reachable as a callee"
             ));
@@ -270,7 +280,28 @@ pub fn package_with_reachable_callees(
         })
         .collect::<Vec<_>>();
 
-    members.push(PackageMember::Function(entry.clone()));
+    let mut top = entry.clone();
+    if reachable.contains(&entry.name) {
+        // A block and a function can share a name in the source. Only the
+        // projected block owns that entry point in the output package.
+        let base = format!("{}__callee", entry.name);
+        let mut fresh = base.clone();
+        for suffix in 1.. {
+            if !reachable.contains(&fresh) {
+                break;
+            }
+            fresh = format!("{base}_{suffix}");
+        }
+        for member in &mut members {
+            let graph = member.graph_mut();
+            if graph.name == entry.name {
+                graph.name.clone_from(&fresh);
+            }
+            rename_callee_references(graph, &entry.name, &fresh);
+        }
+        rename_callee_references(&mut top, &entry.name, &fresh);
+    }
+    members.push(PackageMember::Function(top));
 
     Ok(Package {
         name: pkg.name.clone(),
@@ -278,6 +309,21 @@ pub fn package_with_reachable_callees(
         members,
         top: Some((entry.name.clone(), MemberType::Function)),
     })
+}
+
+/// Redirects all function references, including those in higher-order
+/// operations.
+fn rename_callee_references(graph: &mut crate::ir::NodeGraph, old: &str, new: &str) {
+    for node in &mut graph.nodes {
+        let callee = match &mut node.payload {
+            NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => to_apply,
+            NodePayload::CountedFor { body, .. } => body,
+            _ => continue,
+        };
+        if callee == old {
+            new.clone_into(callee);
+        }
+    }
 }
 
 #[cfg(test)]
