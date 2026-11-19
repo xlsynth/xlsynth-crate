@@ -17,11 +17,12 @@ block listener(value: bits[4], observed: bits[4]) {
 
 top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_oe: bits[1], pad: bits[4], pad_b: bits[4], spare: bits[4], seen: bits[4]) {
   ext_inout_net spare(bits[4])
+  ext_inout_net spare_pin(bits[4])
   ext_inout_net bus(bits[4])
   instantiation left(block=pad_cell, kind=block)
   instantiation right(block=pad_cell, kind=block)
   instantiation sense(block=listener, kind=block)
-  unused_pin: () = ext_inout_port(name=spare, id=140)
+  unused_pin: () = ext_inout_port(name=spare, net=spare_pin, id=140)
   port_pad_b: () = ext_inout_port(name=pad_b, net=bus, id=127)
   port_pad: () = ext_inout_port(name=pad, net=bus, id=128)
   left_data: bits[4] = input_port(name=left_data, id=7)

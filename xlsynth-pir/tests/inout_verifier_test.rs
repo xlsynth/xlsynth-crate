@@ -82,11 +82,14 @@ top block top(clk: clock, data: bits[1]) {
             Err(VerifyError::BlockInvariantViolation { block, reason })
                 if block == "top" && reason.contains("combinational cycle")
         ));
-        // An open child pin does not alias another open pin, even when
-        // both are bound in the parent and exposed again by the relay.
+        // Distinct nets inside the child keep the two parent pins independent.
         let independent = cyclic
-            .replace("ext_inout_net shorted(bits[1])", "")
-            .replace(", net=shorted", "");
+            .replace(
+                "ext_inout_net shorted(bits[1])",
+                "ext_inout_net x_pin(bits[1])\n  ext_inout_net y_pin(bits[1])",
+            )
+            .replace("name=x, net=shorted", "name=x, net=x_pin")
+            .replace("name=y, net=shorted", "name=y, net=y_pin");
         verify(&independent).unwrap();
     }
 }
@@ -210,7 +213,8 @@ top block parent() {
 fn open_child_inout_requires_one_binding_with_the_public_port_type() {
     let source = r#"package open_child
 block child(pad: bits[4]) {
-  terminal: () = ext_inout_port(name=pad, id=1)
+  ext_inout_net pin(bits[4])
+  terminal: () = ext_inout_port(name=pad, net=pin, id=1)
 }
 top block parent() {
   ext_inout_net bus(bits[4])
@@ -262,7 +266,8 @@ top block parent() {
 fn public_inout_node_shape_and_header_membership_are_verified() {
     let source = r#"package open
 top block boundary(io: bits[3]) {
-  terminal: () = ext_inout_port(name=io, id=1)
+  ext_inout_net pin(bits[3])
+  terminal: () = ext_inout_port(name=io, net=pin, id=1)
 }
 "#;
     let original = Parser::new(source).parse_and_verify_package().unwrap();
@@ -317,7 +322,7 @@ top block boundary(io: bits[3]) {
             "{error}"
         );
     }
-    let foreign_net = source.replace("name=io,", "name=io, net=remote,").replace(
+    let foreign_net = source.replace("net=pin,", "net=remote,").replace(
         "top block",
         r#"block other() {
   ext_inout_net remote(bits[3])

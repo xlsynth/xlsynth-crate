@@ -190,9 +190,7 @@ fn hash_payload_attributes(
         } => {
             update_hash_string_attribute(hasher, "port_name", name);
             update_hash_type(hasher, port_type);
-            if let Some(net) = net {
-                update_hash_string_attribute(hasher, "net", net);
-            }
+            update_hash_string_attribute(hasher, "net", net);
             if let Some(sv_type) = sv_type {
                 update_hash_string_attribute(hasher, "sv_type", sv_type);
             }
@@ -390,9 +388,7 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
         } => {
             attrs.push(format!("name={name}"));
             attrs.push(format!("port_type={port_type}"));
-            if let Some(net) = net {
-                attrs.push(format!("net={net}"));
-            }
+            attrs.push(format!("net={net}"));
             if let Some(sv_type) = sv_type {
                 attrs.push(format!("sv_type={sv_type:?}"));
             }

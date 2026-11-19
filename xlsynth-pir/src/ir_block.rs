@@ -601,8 +601,9 @@ mod tests {
     fn compaction_preserves_an_open_inout_and_rejects_its_removal() {
         let mut block = Parser::new(
             r#"block pads(pin: bits[8]) {
+  ext_inout_net isolated(bits[8])
   unused: bits[1] = literal(value=0, id=1)
-  node: () = ext_inout_port(name=pin, id=2)
+  node: () = ext_inout_port(name=pin, net=isolated, id=2)
 }"#,
         )
         .parse_block()

@@ -2557,7 +2557,9 @@ impl Parser {
                         ir::NodePayload::ExtInoutPort {
                             name,
                             port_type: port_type.clone(),
-                            net: bound_net,
+                            net: bound_net.ok_or_else(|| ParseError::new(
+                                "ext_inout_port requires a net attribute".to_string()
+                            ))?,
                             sv_type,
                         }
                     }
@@ -6040,11 +6042,12 @@ block leaf(pin: bits[3], observed: bits[3]) {
 top block top_pins(pad_a: (bits[2], bits[4][3]), oe: bits[1], pad_b: (bits[2], bits[4][3]), open_pin: bits[15], seen: bits[3]) {
   ext_inout_net bus((bits[2], bits[4][3]))
   ext_inout_net internal(bits[3])
+  ext_inout_net spare(bits[15])
   instantiation child(block=leaf, kind=block)
   pad_b: () = ext_inout_port(name=pad_b, net=bus, id=4)
   oe: bits[1] = input_port(name=oe, id=5)
   typed: () = ext_inout_port(name=pad_a, net=bus, sv_type="pkg::bus_t", id=6)
-  ext_inout_port.7: () = ext_inout_port(name=open_pin, sv_type="pkg::spare_t", id=7, pos=[(0,3,1)])
+  ext_inout_port.7: () = ext_inout_port(name=open_pin, net=spare, sv_type="pkg::spare_t", id=7, pos=[(0,3,1)])
   data: bits[3] = literal(value=3, id=8)
   drive: () = ext_inout_drive(data, oe, net=internal, id=9)
   bind_pin: () = ext_instantiation_inout(instantiation=child, port_name=pin, net=internal, id=10)
@@ -6057,11 +6060,12 @@ top block top_pins(pad_a: (bits[2], bits[4][3]), oe: bits[1], pad_b: (bits[2], b
     }
 
     #[test]
-    fn open_inout_port_requires_only_a_header_type_and_marks_the_package_as_extended() {
+    fn port_only_net_roundtrips_and_marks_the_package_as_extended() {
         let source = r#"package pins
 
 top block pads(io: bits[129]) {
-  exposed: () = ext_inout_port(name=io, id=1)
+  ext_inout_net pin(bits[129])
+  exposed: () = ext_inout_port(name=io, net=pin, id=1)
 }
 "#;
         let package = Parser::new(source).parse_and_validate_package().unwrap();
@@ -6072,6 +6076,21 @@ top block pads(io: bits[129]) {
         assert_eq!(block.port_name(pin), "io");
         assert!(package.uses_pir_extensions());
         assert_eq!(package.to_string(), source);
+    }
+
+    #[test]
+    fn public_inout_requires_an_explicit_net_even_if_a_net_matches_its_name() {
+        let source = r#"block pins(pad: bits[8]) {
+  ext_inout_net pad(bits[8])
+  pad: () = ext_inout_port(name=pad, id=1)
+}"#;
+        let error = Parser::new(source).parse_block().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("ext_inout_port requires a net attribute"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -6119,22 +6138,24 @@ top block pads(io: bits[129]) {
     #[test]
     fn inout_port_requires_a_unique_matching_header_and_well_formed_attributes() {
         for body in [
-            "a: () = ext_inout_port(name=other, id=1)",
-            "a: () = ext_inout_port(name=pin, id=1) b: () = ext_inout_port(name=pin, id=2)",
-            "a: () = ext_inout_port(name=pin, id=1) b: bits[1] = input_port(name=pin, id=2)",
-            "a: bits[1] = ext_inout_port(name=pin, id=1)",
+            "a: () = ext_inout_port(name=other, net=bus, id=1)",
+            "a: () = ext_inout_port(name=pin, net=bus, id=1) b: () = ext_inout_port(name=pin, net=bus, id=2)",
+            "a: () = ext_inout_port(name=pin, net=bus, id=1) b: bits[1] = input_port(name=pin, id=2)",
+            "a: bits[1] = ext_inout_port(name=pin, net=bus, id=1)",
             "a: () = ext_inout_port(net=bus, id=1)",
-            "a: () = ext_inout_port(name=pin, port_type=bits[1], id=1)",
+            "a: () = ext_inout_port(name=pin, net=bus, port_type=bits[1], id=1)",
             "a: () = ext_inout_port(name=pin, net=bus, net=other, id=1)",
-            r#"a: () = ext_inout_port(name=pin, sv_type="A", sv_type="B", id=1)"#,
-            "a: () = ext_inout_port(name=pin, id=1) x: bits[1] = ext_inout_read(name=pin, id=2)",
-            r#"a: () = ext_inout_port(name=pin, id=1) x: bits[1] = ext_inout_read(net=pin, sv_type="A", id=2)"#,
-            "ext_inout_net bus(bits[1]) ext_inout_net bus(bits[1]) a: () = ext_inout_port(name=pin, id=1)",
+            r#"a: () = ext_inout_port(name=pin, net=bus, sv_type="A", sv_type="B", id=1)"#,
+            "a: () = ext_inout_port(name=pin, net=bus, id=1) x: bits[1] = ext_inout_read(name=pin, id=2)",
+            r#"a: () = ext_inout_port(name=pin, net=bus, id=1) x: bits[1] = ext_inout_read(net=pin, sv_type="A", id=2)"#,
+            "ext_inout_net bus(bits[1]) a: () = ext_inout_port(name=pin, net=bus, id=1)",
         ] {
-            let block = format!("block example(pin: bits[1]) {{ {body} }}");
+            let block =
+                format!("block example(pin: bits[1]) {{ ext_inout_net bus(bits[1]) {body} }}");
             assert!(Parser::new(&block).parse_block().is_err(), "{block}");
         }
-        let function = "fn f(x: bits[1] id=1) -> () { ret a: () = ext_inout_port(name=x, id=2) }";
+        let function =
+            "fn f(x: bits[1] id=1) -> () { ret a: () = ext_inout_port(name=x, net=bus, id=2) }";
         assert!(Parser::new(function).parse_fn().is_err());
     }
 

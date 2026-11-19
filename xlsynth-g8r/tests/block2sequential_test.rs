@@ -20,7 +20,8 @@ fn lower(block_ir: &str) -> xlsynth_g8r::aig::SequentialGateFn {
 fn gate_lowering_rejects_open_ports_and_single_child_connections() {
     let source = r#"package pads
 block cell(io: bits[1]) {
-  contact: () = ext_inout_port(name=io, id=2)
+  ext_inout_net isolated(bits[1])
+  contact: () = ext_inout_port(name=io, net=isolated, id=2)
 }
 block wrapper() {
   ext_inout_net bus(bits[1])
@@ -30,7 +31,7 @@ block wrapper() {
 "#;
     let mut package = Parser::new(source).parse_and_validate_package().unwrap();
     for (name, resource) in [
-        ("cell", "ext_inout_port 'io'"),
+        ("cell", "ext_inout_net 'isolated'"),
         ("wrapper", "ext_inout_net 'bus'"),
     ] {
         package.set_top_block(name).unwrap();

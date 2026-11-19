@@ -316,11 +316,11 @@ pub enum NodePayload {
         start: NodeRef,
         update_value: NodeRef,
     },
-    /// Declares a public bidirectional port, optionally joined to a local net.
+    /// Declares a public bidirectional port bound to a whole local net.
     ExtInoutPort {
         name: String,
         port_type: Type,
-        net: Option<String>,
+        net: String,
         sv_type: Option<String>,
     },
     /// Samples the resolved value of a declared electrical net.
@@ -651,7 +651,7 @@ impl NodePayload {
             NodePayload::InputPort { name, sv_type }
             | NodePayload::ExtInoutPort { name, sv_type, .. } => {
                 let mut parts = vec![format!("name={name}")];
-                if let NodePayload::ExtInoutPort { net: Some(net), .. } = self {
+                if let NodePayload::ExtInoutPort { net, .. } = self {
                     parts.push(format!("net={net}"));
                 }
                 if let Some(sv_type) = sv_type {

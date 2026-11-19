@@ -901,9 +901,7 @@ fn inout_builder_preserves_aggregate_ports_and_rejects_invalid_connections() {
     let ty = Type::Tuple(vec![Box::new(Type::Bits(128)), Box::new(Type::Bits(3))]);
     let mut cell = BlockBuilder::new("cell");
     let contact = cell.declare_inout_net("contact", ty.clone()).unwrap();
-    let pin = cell
-        .ext_inout_port("pad", ty.clone(), Some(contact))
-        .unwrap();
+    let pin = cell.ext_inout_port("pad", ty.clone(), contact).unwrap();
     cell.set_port_sv_type(pin, Some("pkg::pad_t")).unwrap();
     let sense = cell.ext_inout_read(contact).unwrap();
     cell.output_port("observed", sense).unwrap();
@@ -920,17 +918,9 @@ fn inout_builder_preserves_aggregate_ports_and_rejects_invalid_connections() {
     let data = parent.input_port("data", ty.clone()).unwrap();
     let oe = parent.input_port("oe", Type::Bits(1)).unwrap();
     let bus = parent.declare_inout_net("bus", ty.clone()).unwrap();
-    assert!(
-        parent
-            .ext_inout_port("io", ty.clone(), Some(contact))
-            .is_err()
-    );
-    assert!(
-        parent
-            .ext_inout_port("io", Type::Bits(131), Some(bus))
-            .is_err()
-    );
-    parent.ext_inout_port("io", ty, Some(bus)).unwrap();
+    assert!(parent.ext_inout_port("io", ty.clone(), contact).is_err());
+    assert!(parent.ext_inout_port("io", Type::Bits(131), bus).is_err());
+    parent.ext_inout_port("io", ty, bus).unwrap();
     assert!(parent.ext_inout_drive(bus, data, data).is_err());
     assert!(parent.ext_inout_drive(bus, oe, oe).is_err());
     parent.ext_inout_drive(bus, data, oe).unwrap();
@@ -949,16 +939,17 @@ fn inout_builder_preserves_aggregate_ports_and_rejects_invalid_connections() {
 fn open_inout_keeps_its_interface_and_is_rejected_by_two_state_backends() {
     let mut leaf = BlockBuilder::new("leaf");
     let ty = Type::new_array(Type::Bits(8), 2);
-    let open = leaf.ext_inout_port("pad", ty.clone(), None).unwrap();
+    let pin = leaf.declare_inout_net("pin", ty.clone()).unwrap();
+    let open = leaf.ext_inout_port("pad", ty.clone(), pin).unwrap();
     leaf.set_port_sv_type(open, Some("pkg::lanes")).unwrap();
     let mut package = leaf.build_package("pins").unwrap();
     let child = package.get_block("leaf").unwrap();
-    assert!(child.inout_nets.is_empty());
+    assert_eq!(child.inout_nets.len(), 1);
     assert!(package.uses_pir_extensions());
     let port = child.get_inout_port("pad").unwrap();
     assert_eq!(child.port_type(port), &ty);
     assert!(
-        matches!(&child.get_node(port).payload, NodePayload::ExtInoutPort { net: None, sv_type: Some(sv), .. } if sv == "pkg::lanes")
+        matches!(&child.get_node(port).payload, NodePayload::ExtInoutPort { net, sv_type: Some(sv), .. } if net == "pin" && sv == "pkg::lanes")
     );
     assert_pir_package(&package);
     let mut parent = BlockBuilder::new("parent");
@@ -992,9 +983,9 @@ fn inout_net_builder_shares_private_wires_and_preserves_public_aliases() {
     let mut leaf = BlockBuilder::new("leaf");
     let ty = Type::Bits(8);
     let pin = leaf.declare_inout_net("pin", ty.clone()).unwrap();
-    leaf.ext_inout_port("a", ty.clone(), Some(pin)).unwrap();
-    assert!(leaf.ext_inout_port("a", ty.clone(), Some(pin)).is_err());
-    leaf.ext_inout_port("b", ty.clone(), Some(pin)).unwrap();
+    leaf.ext_inout_port("a", ty.clone(), pin).unwrap();
+    assert!(leaf.ext_inout_port("a", ty.clone(), pin).is_err());
+    leaf.ext_inout_port("b", ty.clone(), pin).unwrap();
     let mut package = leaf.build_package("nets").unwrap();
     let child = package.get_block("leaf").unwrap();
     assert_eq!(
@@ -1010,7 +1001,7 @@ fn inout_net_builder_shares_private_wires_and_preserves_public_aliases() {
     let bus = builder.declare_inout_net("bus", ty.clone()).unwrap();
     assert!(builder.declare_inout_net("bus", ty.clone()).is_err());
     let spare = builder.declare_inout_net("spare", ty.clone()).unwrap();
-    builder.ext_inout_port("external", ty, Some(spare)).unwrap();
+    builder.ext_inout_port("external", ty, spare).unwrap();
     for name in ["left", "right"] {
         let instance = builder.instantiate(name, child).unwrap();
         builder.bind_inout_net(instance, "a", bus).unwrap();

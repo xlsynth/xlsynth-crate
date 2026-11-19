@@ -17,8 +17,10 @@ block forward(io: bits[2][2]) {
 }
 
 block insulated(a: bits[2][2], b: bits[2][2]) {
-  left_pin: () = ext_inout_port(name=a, id=19)
-  right_pin: () = ext_inout_port(name=b, id=20)
+  ext_inout_net a_pin(bits[2][2])
+  ext_inout_net b_pin(bits[2][2])
+  left_pin: () = ext_inout_port(name=a, net=a_pin, id=19)
+  right_pin: () = ext_inout_port(name=b, net=b_pin, id=20)
 }
 
 top block host(tx: bits[2][2], oe: bits[1], rx: bits[2][2]) {

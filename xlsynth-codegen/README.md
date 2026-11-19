@@ -60,9 +60,10 @@ struct field ordering policies are exported from the same module.
 - Transitive block hierarchy and existing foreign-function instantiations.
 - A declared inout net supports any number of child pin connections and one local
   driver, emitted as `assign pad = oe ? drive : 'z;`. A private net gets one
-  module-local wire. A public `ext_inout_port` without a `net` emits an internally
-  open `inout wire`. Each port carries its own optional `sv_type`. A public net
-  uses its first connected port in header order. Additional
+  module-local wire. Each public `ext_inout_port` binds to a whole net of the
+  same PIR type and carries an optional `sv_type`. Its net uses the first
+  connected port in header order as its wire. A net connected only to one
+  public port therefore emits just the interface declaration. Additional
   aliases connect through bidirectional Verilog `tran` primitives. The emitted RTL
   preserves four-state resolution across aliases. Synthesis support depends on the tool. See the
   [shared bus](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir) and
@@ -98,7 +99,7 @@ feed-forward pipeline stages from the existing registers and adds stage and
 register comments without changing their timing. Pipeline layout requires
 consistent stage dependencies and rejects register feedback. A selected top
 or instantiated child with an inout port or net requires `Layout::None`, including
-a block containing only an open pin or a private net used only by a child pin.
+a block containing only a public pin on its own net or a private net used only by a child pin.
 Literals and pure constant-only expressions can be shared across stages without
 extra registers. They are emitted before their earliest consumer and are not
 required to have the same stage number as every consuming register write.

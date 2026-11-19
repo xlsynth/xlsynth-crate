@@ -227,34 +227,29 @@ impl Builder<BlockState> {
         })
     }
 
-    /// Adds a public inout pin, optionally connected to a local net.
+    /// Binds a public inout pin to a whole local net.
     pub fn ext_inout_port(
         &mut self,
         name: &str,
         port_type: Type,
-        net: Option<BInoutNet>,
+        net: BInoutNet,
     ) -> Result<BValue, BuilderError> {
         self.check_node_name(name, None)?;
         if checked_flat_width(&port_type)? == 0 || port_type.contains_token() {
             return Err(invalid("inout ports require a nonempty, token-free type"));
         }
-        let net_name = if let Some(net) = net {
-            let def = self.net_definition(net)?;
-            if def.ty != port_type {
-                return Err(invalid(format!(
-                    "inout port '{name}' has type {port_type}, net '{}' has type {}",
-                    def.name, def.ty
-                )));
-            }
-            Some(def.name.clone())
-        } else {
-            None
-        };
+        let def = self.net_definition(net)?;
+        if def.ty != port_type {
+            return Err(invalid(format!(
+                "inout port '{name}' has type {port_type}, net '{}' has type {}",
+                def.name, def.ty
+            )));
+        }
         let port = self.add_node(
             NodePayload::ExtInoutPort {
                 name: name.to_owned(),
                 port_type,
-                net: net_name,
+                net: def.name.clone(),
                 sv_type: None,
             },
             Some(Type::nil()),
@@ -820,11 +815,7 @@ impl Builder<BlockState> {
         }
         verify_block_structure_in_package(&block, package, package.members.len())
             .map_err(|error| invalid(error.to_string()))?;
-        if !has_wires
-            && (!block.instantiations.is_empty()
-                || !block.inout_nets.is_empty()
-                || block.inout_ports().next().is_some())
-        {
+        if !has_wires && (!block.instantiations.is_empty() || !block.inout_nets.is_empty()) {
             super::block_cycles::verify_block_combinational_cycles(&block, package)?;
         }
         Ok(block)
@@ -959,10 +950,7 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
                     {
                         return Err(invalid("invalid instance inout port type"));
                     }
-                    let representative = match net {
-                        Some(net) => *net_representatives.entry(net).or_insert(name),
-                        None => name,
-                    };
+                    let representative = *net_representatives.entry(net).or_insert(name);
                     PortSignature::Inout(name.clone(), port_type.clone(), representative.clone())
                 }
                 BlockPort::Input(port) => {

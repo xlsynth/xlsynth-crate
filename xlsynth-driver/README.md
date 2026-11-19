@@ -691,14 +691,15 @@ port overrides are preserved.
 
 Declare a resolved wire with `ext_inout_net bus(bits[4])`. A public header
 port `pad: bits[4]` connects to that wire through the block node
-`pin: () = ext_inout_port(name=pad, net=bus, id=1)`. Omitting `net` leaves
-the pin open inside the module. An optional `sv_type` on the port controls
+`pin: () = ext_inout_port(name=pad, net=bus, id=1)`. Each public port and
+each child inout binds to one whole net of the same PIR type. An optional
+`sv_type` on the public port controls
 its SystemVerilog spelling. `ext_inout_read(net=bus)` samples the wire and
 `ext_inout_drive(tx, oe, net=bus)` adds a whole-wire, active-high driver.
 Multiple child pins can share the net through `ext_instantiation_inout`.
-A single child binding may be the only use of a private net. A net connected
-to a public pin also needs a second public pin, a child binding, a read, or a
-drive. Use the default `--layout=none` for inout designs.
+Each declared net needs at least one connection. A single public or child pin
+satisfies that requirement. Give an otherwise unused pin its own net.
+Use the default `--layout=none` for inout designs.
 See the [PIR extension reference](../xlsynth-pir/docs/extensions.md).
 
 ```shell
@@ -712,7 +713,7 @@ Flags:
   package top is used; a package with exactly one block also selects that block.
 - `--layout <none|pipeline>` selects the emitted source organization. The default
   is `none`. Pipeline layout requires a feed-forward register graph and rejects
-  any inout port or net in the selected top or its transitive children, including open ports and private nets.
+  any inout port or net in the selected top or its transitive children, including nets used only by a single port.
 - `--module_name <NAME>` overrides the generated top module name.
 - `--array_index_bounds_checking <BOOL>` controls out-of-range array indexing
   (default: `true`).

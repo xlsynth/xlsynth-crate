@@ -21,7 +21,7 @@ struct BlockSummary {
     port_classes: BTreeMap<String, String>,
 }
 
-/// An open public pin or a set of locally declared nets joined by child ports.
+/// One local net or a set of local nets joined through child ports.
 #[derive(Default)]
 struct NetClass<'a> {
     public_name: Option<&'a str>,
@@ -137,18 +137,9 @@ impl<'a> DependencyGraph<'a> {
             else {
                 return Err(invalid("block inout port references an invalid node"));
             };
-            let vertex = if let Some(net) = net {
-                *local_nets
-                    .get(net.as_str())
-                    .ok_or_else(|| invalid(format!("undeclared inout net '{net}'")))?
-            } else {
-                // An open pin is its own electrical class. Binding two such
-                // pins on a child must never short their parent nets together.
-                let vertex = NodeRef { index: edges.len() };
-                edges.push(Vec::new());
-                classes.push(NetClass::default());
-                vertex
-            };
+            let vertex = *local_nets
+                .get(net.as_str())
+                .ok_or_else(|| invalid(format!("undeclared inout net '{net}'")))?;
             public_nets.insert(name.as_str(), vertex);
             classes[vertex.index - block.nodes.len()]
                 .public_name

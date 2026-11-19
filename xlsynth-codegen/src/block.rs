@@ -211,12 +211,6 @@ fn validate_supported_nodes(block: &Block, layout: Layout) -> Result<(), BlockCo
     }
     for node in &block.nodes {
         let (operation, lowering) = match &node.payload {
-            NodePayload::ExtInoutPort { name, .. } if layout == Layout::Pipeline => {
-                return Err(BlockCodegenError::NotPipeline(format!(
-                    "block `{}` cannot use layout=pipeline with inout port `{name}`; use layout=none",
-                    block.name,
-                )));
-            }
             NodePayload::Invoke { to_apply, .. } => {
                 return Err(unsupported_invoke(block, to_apply));
             }
@@ -478,9 +472,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                         NodePayload::InputPort { sv_type, .. }
                         | NodePayload::OutputPort { sv_type, .. } => sv_type.as_deref(),
                         NodePayload::ExtInoutPort { net, sv_type, .. } => {
-                            if let Some(net) = net {
-                                aliases.entry(net).or_default().push(*node);
-                            }
+                            aliases.entry(net).or_default().push(*node);
                             sv_type.as_deref()
                         }
                         _ => unreachable!("verified block data port"),

@@ -430,7 +430,8 @@ fn emission_rejects_an_open_inout_port() {
     let package = Parser::new(
         r#"package pads
 top block cell(io: bits[1]) {
-  contact: () = ext_inout_port(name=io, id=1)
+  ext_inout_net isolated(bits[1])
+  contact: () = ext_inout_port(name=io, net=isolated, id=1)
 }
 block ordinary() {}
 "#,
@@ -440,7 +441,7 @@ block ordinary() {}
     let error = emit(&package, package.get_top_block().unwrap()).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "Lean block emission: ext_inout_port 'io' in 'cell' requires block-to-Verilog codegen"
+        "Lean block emission: ext_inout_net 'isolated' in 'cell' requires block-to-Verilog codegen"
     );
     emit(&package, package.get_block("ordinary").unwrap()).unwrap();
 }

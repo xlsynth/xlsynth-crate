@@ -120,9 +120,12 @@ fn pipeline_layout_rejects_a_wiring_only_child() {
 }
 
 #[test]
-fn an_open_pin_requires_flat_layout() {
-    let ir =
-        "package pins\ntop block probe(io: bits[1]) { pin: () = ext_inout_port(name=io, id=1) }";
+fn a_port_only_net_requires_flat_layout() {
+    let ir = r#"package pins
+top block probe(io: bits[1]) {
+  ext_inout_net pin(bits[1])
+  io: () = ext_inout_port(name=io, net=pin, id=1)
+}"#;
     let package = Parser::new(ir).parse_and_validate_package().unwrap();
     let options = BlockCodegenOptions {
         layout: Layout::Pipeline,
@@ -131,35 +134,27 @@ fn an_open_pin_requires_flat_layout() {
     assert_eq!(
         emit_system_verilog(&package, &options).unwrap_err(),
         BlockCodegenError::NotPipeline(
-            "block `probe` cannot use layout=pipeline with inout port `io`; use layout=none".into()
+            "block `probe` cannot use layout=pipeline with inout net `pin`; use layout=none".into()
         ),
     );
 }
 
 #[test]
-fn flat_codegen_rejects_an_unused_net_or_a_lone_public_pin() {
-    for (header, declaration, reason) in [
-        ("", "ext_inout_net floating(bits[3])", "has no connections"),
-        (
-            "floating: bits[3]",
-            "ext_inout_net floating(bits[3]) p: () = ext_inout_port(name=floating, id=1)",
-            "has no connections",
+fn flat_codegen_rejects_an_unused_net_even_when_a_port_has_the_same_name() {
+    let ir = r#"package pins
+top block unused(floating: bits[3]) {
+  ext_inout_net floating(bits[3])
+  ext_inout_net pin(bits[3])
+  p: () = ext_inout_port(name=floating, net=pin, id=1)
+}"#;
+    let package = Parser::new(ir).parse_package().unwrap();
+    assert_eq!(
+        emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap_err(),
+        BlockCodegenError::InvalidBlock(
+            "block 'unused' violates a resource invariant: inout net 'floating' has no connections"
+                .into()
         ),
-        (
-            "pad: bits[3]",
-            "ext_inout_net floating(bits[3]) p: () = ext_inout_port(name=pad, net=floating, id=1)",
-            "is connected only to public port 'pad'. To leave the port open, omit its net attribute and remove the net declaration",
-        ),
-    ] {
-        let ir = format!("package p\ntop block unused({header}) {{ {declaration} }}");
-        let package = Parser::new(&ir).parse_package().unwrap();
-        assert_eq!(
-            emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap_err(),
-            BlockCodegenError::InvalidBlock(format!(
-                "block 'unused' violates a resource invariant: inout net 'floating' {reason}"
-            )),
-        );
-    }
+    );
 }
 
 #[test]
