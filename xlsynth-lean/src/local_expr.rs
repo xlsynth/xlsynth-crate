@@ -82,7 +82,10 @@ pub(crate) fn write_elaboration_limits<'a>(
 }
 
 /// Preserve operand order while keeping the Lean expression depth logarithmic.
-fn balanced_infix(operands: &[String], separator: &str) -> String {
+///
+/// Use an associative operator because splitting the operands changes their
+/// grouping. Empty input produces empty text rather than an identity term.
+pub(crate) fn balanced_infix(operands: &[String], separator: &str) -> String {
     fn emit(out: &mut String, operands: &[String], separator: &str) {
         match operands {
             [] => {}
