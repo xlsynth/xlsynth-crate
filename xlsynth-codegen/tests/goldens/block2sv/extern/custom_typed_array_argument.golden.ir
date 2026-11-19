@@ -25,6 +25,6 @@ top block typed_array_argument(data: bits[4][2], upper: bits[4], forwarded: bits
 // EXPECT-SV:   logic [3:0] lane;
 // EXPECT-SV:   assign data__1 = data;
 // EXPECT-SV:   assign upper = lane;
-// EXPECT-SV:   assign forwarded = data;
+// EXPECT-SV:   assign forwarded = types::input_t'(data__1);
 // EXPECT-SV:   assign lane = data__1[1];
 // EXPECT-SV: endmodule

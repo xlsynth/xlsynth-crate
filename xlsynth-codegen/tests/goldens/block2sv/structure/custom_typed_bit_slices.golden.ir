@@ -19,5 +19,5 @@ top block typed_bit_slices(data: bits[8], selected: bits[1], window: bits[3], fo
 // EXPECT-SV:   assign data__1 = data;
 // EXPECT-SV:   assign selected = data__1[1];
 // EXPECT-SV:   assign window = data__1[5:3];
-// EXPECT-SV:   assign forwarded = data;
+// EXPECT-SV:   assign forwarded = types::input_t'(data__1);
 // EXPECT-SV: endmodule

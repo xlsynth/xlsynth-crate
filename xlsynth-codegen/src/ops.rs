@@ -45,13 +45,8 @@ impl BlockEmitter<'_, '_> {
                 arg,
             } => {
                 if let Some(value) = self.values[arg.index] {
-                    let expr = if self.is_extern_array_argument(instantiation, *arg) {
-                        value.packed_array()?.to_expr()
-                    } else {
-                        value.expr
-                    };
                     self.instance_inputs
-                        .insert((instantiation.clone(), port_name.clone()), expr);
+                        .insert((instantiation.clone(), port_name.clone()), value.expr);
                 }
                 None
             }
