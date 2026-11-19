@@ -1,0 +1,46 @@
+package typed_registered
+
+top block typed_registered_compare(clk: clock, a: bits[8], b: bits[8], lt: bits[1], selected: bits[1]) {
+  reg comparison(bits[1])
+  reg bit_one(bits[1])
+  a: bits[8] = input_port(name=a, sv_type="types::signed_byte_t", id=1)
+  b: bits[8] = input_port(name=b, sv_type="types::signed_byte_t", id=2)
+  ult.3: bits[1] = ult(a, b, id=3)
+  bit_slice.4: bits[1] = bit_slice(a, start=1, width=1, id=4)
+  register_write.5: () = register_write(ult.3, register=comparison, id=5)
+  register_write.6: () = register_write(bit_slice.4, register=bit_one, id=6)
+  register_read.7: bits[1] = register_read(register=comparison, id=7)
+  register_read.8: bits[1] = register_read(register=bit_one, id=8)
+  lt: () = output_port(register_read.7, name=lt, id=9)
+  selected: () = output_port(register_read.8, name=selected, id=10)
+}
+
+// OPTIONS: layout = "pipeline"
+
+// EXPECT-SV: module typed_registered_compare(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input types::signed_byte_t a,
+// EXPECT-SV:   input types::signed_byte_t b,
+// EXPECT-SV:   output logic lt,
+// EXPECT-SV:   output logic selected
+// EXPECT-SV: );
+// EXPECT-SV:   // ===== Pipe stage 0:
+// EXPECT-SV:   logic [7:0] p0_a_comb;
+// EXPECT-SV:   logic [7:0] p0_b_comb;
+// EXPECT-SV:   logic p0_ult_3_comb;
+// EXPECT-SV:   logic p0_bit_slice_4_comb;
+// EXPECT-SV:   assign p0_a_comb = a;
+// EXPECT-SV:   assign p0_b_comb = b;
+// EXPECT-SV:   assign p0_ult_3_comb = p0_a_comb < p0_b_comb;
+// EXPECT-SV:   assign p0_bit_slice_4_comb = p0_a_comb[1];
+// EXPECT-SV:
+// EXPECT-SV:   // Registers for pipe stage 0:
+// EXPECT-SV:   logic comparison;
+// EXPECT-SV:   logic bit_one;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     comparison <= p0_ult_3_comb;
+// EXPECT-SV:     bit_one <= p0_bit_slice_4_comb;
+// EXPECT-SV:   end
+// EXPECT-SV:   assign lt = comparison;
+// EXPECT-SV:   assign selected = bit_one;
+// EXPECT-SV: endmodule

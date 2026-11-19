@@ -23,8 +23,6 @@ fn block2sv_generated_fixtures_compile_with_iverilog() {
 
     let temporary_directory = tempfile::tempdir().expect("create iverilog input directory");
     let verilog_path = temporary_directory.path().join("generated.sv");
-    let support_types =
-        "package types; typedef logic [7:0] input_t; typedef logic [7:0] output_t; endpackage\n";
     let mut failures = Vec::new();
     for path in paths {
         let contents = fs::read_to_string(&path).unwrap();
@@ -39,8 +37,11 @@ fn block2sv_generated_fixtures_compile_with_iverilog() {
                 continue;
             }
         };
-        fs::write(&verilog_path, format!("{support_types}{output}"))
-            .expect("write generated SystemVerilog");
+        fs::write(
+            &verilog_path,
+            format!("{}{output}", custom_port_types(&path)),
+        )
+        .expect("write generated SystemVerilog");
         if let Err(error) = tools.check_syntax(
             temporary_directory.path(),
             &[&verilog_path],
@@ -61,8 +62,6 @@ fn block2sv_generated_fixtures_compile_with_iverilog() {
 /// Simulates packed ports across flat connections, hierarchy, and custom types.
 #[test]
 fn packed_array_ports_connect_to_flat_vectors() {
-    let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
-        .expect("iverilog tests require iverilog and vvp");
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/block2sv");
     let cases = [
         (
@@ -126,32 +125,199 @@ module tb;
 endmodule
 "#,
         ),
+        (
+            "extern/custom_typed_array_argument.golden.ir",
+            r#"
+module tb;
+  logic [7:0] data, forwarded;
+  logic [3:0] upper;
+  typed_array_argument dut(.*);
+  initial begin
+    for (int i = 0; i < 256; i++) begin
+      data = i; #1;
+      if (upper !== data[7:4] || forwarded !== data)
+        $fatal(1, "data=%h upper=%h forwarded=%h", data, upper, forwarded);
+    end
+    $finish;
+  end
+endmodule
+"#,
+        ),
+        (
+            "extern/custom_typed_scalar_argument.golden.ir",
+            r#"
+module tb;
+  logic [7:0] data;
+  wire selected;
+  typed_scalar_argument dut(.*);
+  initial begin
+    for (int i = 0; i < 256; i++) begin
+      data = i; #1;
+      if (selected !== data[1]) $fatal(1, "extern bit 1 of %h was %b", data, selected);
+    end
+    $finish;
+  end
+endmodule
+"#,
+        ),
+        (
+            "structure/custom_typed_bit_slices.golden.ir",
+            r#"
+module tb;
+  logic [7:0] data, forwarded;
+  logic selected;
+  logic [2:0] window;
+  typed_bit_slices dut(.*);
+  initial begin
+    for (int i = 0; i < 256; i++) begin
+      data = i; #1;
+      if (selected !== data[1] || window !== data[5:3] || forwarded !== data)
+        $fatal(1, "data=%h", data);
+    end
+    $finish;
+  end
+endmodule
+"#,
+        ),
     ];
-    let temporary = tempfile::tempdir().unwrap();
-    let source_path = temporary.path().join("packed.sv");
     for (relative, testbench) in cases {
         let path = directory.join(relative);
         let fixture = parse_golden_fixture(&path, &fs::read_to_string(&path).unwrap()).unwrap();
         let generated = execute_golden_fixture(&fixture).unwrap();
-        let support = "package types; typedef logic [7:0] input_t; typedef logic [7:0] output_t; endpackage\n";
-        fs::write(&source_path, format!("{support}{generated}{testbench}")).unwrap();
-        let binary_path = tools
-            .compile(
-                source_path.parent().unwrap(),
-                &[&source_path],
-                "tb",
-                &[],
-                Duration::from_secs(60),
-            )
-            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
-        tools
-            .run(
-                source_path.parent().unwrap(),
-                &binary_path,
-                Duration::from_secs(60),
-            )
-            .unwrap_or_else(|error| panic!("{}: {error}", source_path.display()));
+        for input_type in [
+            "logic [7:0]",
+            "logic [1:0][3:0]",
+            "logic [4:11]",
+            "enum logic [7:0] { FIRST, LAST }",
+        ] {
+            let support = format!(
+                "package types; typedef {input_type} input_t; typedef logic [7:0] output_t; endpackage\n"
+            );
+            simulate_typed_ports(
+                &format!("{relative} ({input_type})"),
+                &format!("{support}{generated}{testbench}"),
+            );
+        }
     }
+}
+
+/// Checks unsigned comparisons and registered slices of signed packed inputs.
+#[test]
+fn custom_typed_inputs_follow_xls_semantics_across_registers() {
+    let testbench = r#"
+module tb;
+  logic clk = 0;
+  logic [7:0] a, b;
+  wire comb_lt, reg_lt, selected;
+  typed_unsigned_compare comb(.a(a), .b(b), .lt(comb_lt));
+  typed_registered_compare piped(.clk(clk), .a(a), .b(b), .lt(reg_lt), .selected(selected));
+
+  task check(input logic [7:0] lhs, rhs);
+    logic [1:0] previous;
+    begin
+      previous = {reg_lt, selected};
+      a = lhs; b = rhs; #1;
+      if (comb_lt !== (lhs < rhs)) $fatal(1, "unsigned compare %h < %h", lhs, rhs);
+      if ({reg_lt, selected} !== previous) $fatal(1, "outputs changed before the clock");
+      clk = 1; #1; clk = 0; #1;
+      if (reg_lt !== (lhs < rhs) || selected !== lhs[1])
+        $fatal(1, "registered compare/slice for %h, %h: got %b, %b", lhs, rhs, reg_lt, selected);
+    end
+  endtask
+
+  initial begin
+    check(8'h80, 8'h01);
+    check(8'h02, 8'h80);
+    check(8'h10, 8'h10);
+    $finish;
+  end
+endmodule
+"#;
+    for layout in [
+        xlsynth_codegen::Layout::None,
+        xlsynth_codegen::Layout::Pipeline,
+    ] {
+        for emit_sv_types in [false, true] {
+            let mut source = if emit_sv_types { CUSTOM_PORT_TYPES } else { "" }.to_owned();
+            for relative in [
+                "structure/custom_typed_unsigned_compare.golden.ir",
+                "registers/custom_typed_registered_compare.golden.ir",
+            ] {
+                let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/goldens/block2sv")
+                    .join(relative);
+                let mut fixture =
+                    parse_golden_fixture(&path, &fs::read_to_string(&path).unwrap()).unwrap();
+                fixture.options.layout = layout;
+                fixture.options.emit_sv_types = emit_sv_types;
+                source.push_str(&execute_golden_fixture(&fixture).unwrap());
+            }
+            source.push_str(testbench);
+            simulate_typed_ports(
+                &format!("{layout:?}, emit_sv_types={emit_sv_types}"),
+                &source,
+            );
+        }
+    }
+}
+
+/// Checks named enum and packed-struct ports through a child instance.
+#[test]
+fn custom_typed_hierarchy_preserves_enum_values_and_struct_fields() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/goldens/block2sv/hierarchy/custom_typed_ports.golden.ir");
+    let mut fixture = parse_golden_fixture(&path, &fs::read_to_string(&path).unwrap()).unwrap();
+    let testbench = r#"
+module tb;
+  data__1 data;
+  wire data__1 result;
+  wire types::pair_t forwarded;
+  typed_parent dut(.*);
+
+  task check(input data__1 value, expected_result);
+    begin
+      data = value; #1;
+      if (result !== expected_result || forwarded.high_bit !== value[1] || forwarded.low_bit !== value[0])
+        $fatal(1, "data=%b result=%b forwarded=%b", value, result, forwarded);
+    end
+  endtask
+
+  initial begin
+    check(ZERO, THREE);
+    check(ONE, TWO);
+    check(TWO, ONE);
+    check(THREE, ZERO);
+    $finish;
+  end
+endmodule
+"#;
+    for layout in [
+        xlsynth_codegen::Layout::None,
+        xlsynth_codegen::Layout::Pipeline,
+    ] {
+        fixture.options.layout = layout;
+        let rtl = execute_golden_fixture(&fixture).unwrap();
+        simulate_typed_ports(
+            &format!("typed hierarchy {layout:?}"),
+            &format!("{}{rtl}{testbench}", custom_port_types(&path)),
+        );
+    }
+}
+
+/// Compiles and runs a self-checking port testbench with its generated modules.
+fn simulate_typed_ports(case: &str, source: &str) {
+    let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()
+        .expect("iverilog tests require iverilog and vvp");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("typed.sv");
+    fs::write(&path, source).unwrap();
+    let timeout = Duration::from_secs(60);
+    let binary = tools
+        .compile(directory.path(), &[path], "tb", &[], timeout)
+        .unwrap_or_else(|error| panic!("{case}: {error}"));
+    tools
+        .run(directory.path(), &binary, timeout)
+        .unwrap_or_else(|error| panic!("{case}: {error}"));
 }
 
 /// Confirms both asynchronous reset polarities update state before a clock

@@ -22,5 +22,5 @@ top block custom_typed_array(data: bits[4][2], index: bits[2], replacement: bits
 // EXPECT-SV:   for (genvar __i0 = 0; __i0 < 2; __i0 = __i0 + 1) begin : gen__p0_updated_comb_0
 // EXPECT-SV:     assign p0_updated_comb[__i0] = index == __i0 ? replacement : p0_data_comb[__i0];
 // EXPECT-SV:   end
-// EXPECT-SV:   assign out = p0_updated_comb;
+// EXPECT-SV:   assign out = types::output_t'(p0_updated_comb);
 // EXPECT-SV: endmodule

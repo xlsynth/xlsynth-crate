@@ -1,0 +1,20 @@
+package typed_compare
+
+top block typed_unsigned_compare(a: bits[8], b: bits[8], lt: bits[1]) {
+  a: bits[8] = input_port(name=a, sv_type="types::signed_byte_t", id=1)
+  b: bits[8] = input_port(name=b, sv_type="types::signed_byte_t", id=2)
+  ult.3: bits[1] = ult(a, b, id=3)
+  lt: () = output_port(ult.3, name=lt, id=4)
+}
+
+// EXPECT-SV: module typed_unsigned_compare(
+// EXPECT-SV:   input types::signed_byte_t a,
+// EXPECT-SV:   input types::signed_byte_t b,
+// EXPECT-SV:   output logic lt
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] a__1;
+// EXPECT-SV:   logic [7:0] b__1;
+// EXPECT-SV:   assign a__1 = a;
+// EXPECT-SV:   assign b__1 = b;
+// EXPECT-SV:   assign lt = a__1 < b__1;
+// EXPECT-SV: endmodule

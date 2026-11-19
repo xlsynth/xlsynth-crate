@@ -74,6 +74,17 @@ impl Value {
         }
     }
 
+    /// Returns the indexable signal with this IR array's packed dimensions.
+    pub(crate) fn packed_array(&self) -> Result<IndexableExpr, BlockCodegenError> {
+        self.indexable
+            .filter(|_| self.array_rank != 0)
+            .ok_or_else(|| {
+                BlockCodegenError::InvalidBlock(
+                    "expected a materialized packed-array signal".to_owned(),
+                )
+            })
+    }
+
     /// Records a known packed width for scalar-index and slice legalization.
     pub(crate) fn with_width(mut self, bit_width: usize) -> Self {
         self.bit_width = Some(bit_width);
@@ -425,6 +436,27 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             }
         }
         self.names.extend(fixed_names.into_keys());
+        if self.options.emit_sv_types {
+            let blocks = std::iter::once(self.block).chain(
+                self.block
+                    .instantiations
+                    .iter()
+                    .filter(|instance| instance.kind == InstantiationKind::Block)
+                    .map(|instance| self.blocks[instance.block.as_str()]),
+            );
+            for block in blocks {
+                for port in block.input_ports().chain(block.output_ports()) {
+                    let sv_type = match &block.get_node(port).payload {
+                        NodePayload::InputPort { sv_type, .. }
+                        | NodePayload::OutputPort { sv_type, .. } => sv_type.as_deref(),
+                        _ => unreachable!("verified block data port"),
+                    };
+                    if let Some(root) = sv_type.and_then(named_type_root) {
+                        self.names.insert(root.to_owned());
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -455,18 +487,9 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 continue;
             }
             validate_external_identifier(&name, "port")?;
-            let data_type = if self.options.emit_sv_types {
-                if let Some(sv_type) = sv_type {
-                    if let Some((package, ty)) = sv_type.rsplit_once("::") {
-                        self.file.make_extern_package_type(package, ty)
-                    } else {
-                        self.file.make_extern_type(sv_type)
-                    }
-                } else {
-                    self.value_type(&ir_type)
-                }
-            } else {
-                self.value_type(&ir_type)
+            let data_type = match sv_type.filter(|_| self.options.emit_sv_types) {
+                Some(name) => self.external_type(name),
+                None => self.value_type(&ir_type),
             };
             let signal = if is_output {
                 self.file.add_logic_output(self.module, &name, &data_type)
@@ -475,26 +498,36 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             };
             self.ports.insert(name, signal);
         }
-
-        for (index, node) in self.block.nodes.iter().enumerate() {
-            if let NodePayload::InputPort { name, sv_type } = &node.payload {
-                if let Some(signal) = self.ports.get(name).copied() {
-                    let value = Value::signal(signal).with_width(node.ty.bit_count());
-                    self.values[index] = Some(if self.options.emit_sv_types && sv_type.is_some() {
-                        value
-                    } else {
-                        value.with_type(&node.ty)
-                    });
-                }
-            }
-        }
         Ok(())
+    }
+
+    /// Represents an external SV type named or declared by a port annotation.
+    fn external_type(&mut self, name: &str) -> VastDataType {
+        match name.rsplit_once("::") {
+            Some((package, ty)) => self.file.make_extern_package_type(package, ty),
+            None => self.file.make_extern_type(name),
+        }
+    }
+
+    /// Casts to a named destination type when SV requires an explicit
+    /// conversion.
+    fn cast_port_value(&mut self, value: Expr, sv_type: Option<&str>) -> Expr {
+        let Some(name) = sv_type.filter(|_| self.options.emit_sv_types) else {
+            return value;
+        };
+        if named_type_root(name).is_none() {
+            // Declaration fragments such as `logic [7:0]` are valid port types,
+            // but cannot be used directly as an SV casting type.
+            return value;
+        }
+        let ty = self.external_type(name);
+        self.file.make_type_cast(&ty, &value)
     }
 
     /// Emits existing register state and ordinary dependency-ordered logic.
     fn emit_flat(&mut self) -> Result<(), BlockCodegenError> {
         let start = self.file.module_member_count(self.module);
-        self.emit_input_array_views()?;
+        self.bind_input_ports()?;
         for register in &self.block.registers {
             self.declare_register(register)?;
         }
@@ -558,7 +591,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         }
         let start = self.file.module_member_count(self.module);
         if stage_index == 0 {
-            self.emit_input_array_views()?;
+            self.bind_input_ports()?;
         }
         for &node_ref in &stage.combinational_nodes {
             self.emit_node(node_ref)?;
@@ -798,9 +831,13 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 continue;
             };
             let value = self.required_value(node_ref)?;
+            let NodePayload::OutputPort { sv_type, .. } = &self.block.get_node(port).payload else {
+                unreachable!("verified block output")
+            };
+            let expr = self.cast_port_value(value.expr, sv_type.as_deref());
             let assignment = self
                 .file
-                .make_continuous_assignment(&signal.to_expr(), &value.expr);
+                .make_continuous_assignment(&signal.to_expr(), &expr);
             self.file
                 .add_member_continuous_assignment(self.module, assignment);
         }
@@ -821,6 +858,22 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
         for instance in &self.block.instantiations {
             validate_external_identifier(&instance.name, "instance")?;
+            if self.options.emit_sv_types && instance.kind == InstantiationKind::Block {
+                let child = self.blocks[instance.block.as_str()];
+                for input in child.input_ports() {
+                    let NodePayload::InputPort { name, sv_type } = &child.get_node(input).payload
+                    else {
+                        unreachable!("verified child input")
+                    };
+                    if let Some(sv_type) = sv_type.as_deref() {
+                        let key = (instance.name.clone(), name.clone());
+                        if let Some(expr) = self.instance_inputs.get(&key).copied() {
+                            let cast = self.cast_port_value(expr, Some(sv_type));
+                            self.instance_inputs.insert(key, cast);
+                        }
+                    }
+                }
+            }
             let mut connections = self
                 .instance_inputs
                 .iter()
@@ -948,18 +1001,21 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         }
     }
 
-    /// Gives custom-typed array input ports shaped views without changing
-    /// their explicitly requested SystemVerilog types.
-    fn emit_input_array_views(&mut self) -> Result<(), BlockCodegenError> {
-        for (index, node) in self.block.nodes.iter().enumerate() {
-            if matches!(node.payload, NodePayload::InputPort { .. })
-                && matches!(node.ty, Type::Array(_))
-                && let Some(value) = self.values[index]
-                && value.array_rank == 0
-            {
-                let view = self.assign_node(NodeRef { index }, value.expr)?;
-                self.values[index] = Some(view);
-            }
+    /// Assigns each custom-typed input to its XLS representation before use.
+    fn bind_input_ports(&mut self) -> Result<(), BlockCodegenError> {
+        for input in self.block.input_ports() {
+            let node = self.block.get_node(input);
+            let NodePayload::InputPort { name, sv_type } = &node.payload else {
+                unreachable!("verified block input")
+            };
+            let Some(&signal) = self.ports.get(name) else {
+                continue; // Zero-width ports have no SV signal.
+            };
+            self.values[input.index] = Some(if self.options.emit_sv_types && sv_type.is_some() {
+                self.assign_node(input, signal.to_expr())?
+            } else {
+                Value::signal(signal).with_type(&node.ty)
+            });
         }
         Ok(())
     }
@@ -1247,6 +1303,24 @@ fn substitute_external_template(
         }
     }
     Ok(output)
+}
+
+/// Returns the first identifier of a simple or scope-qualified SV type name.
+fn named_type_root(name: &str) -> Option<&str> {
+    let mut parts = name.split("::").map(str::trim);
+    let root = parts.next()?;
+    if !is_type_identifier(root) || !parts.all(is_type_identifier) {
+        return None;
+    }
+    Some(root.strip_prefix('\\').unwrap_or(root))
+}
+
+/// Recognizes ordinary and escaped identifiers in an SV type name.
+fn is_type_identifier(name: &str) -> bool {
+    match name.strip_prefix('\\') {
+        Some(escaped) => !escaped.is_empty() && !escaped.chars().any(char::is_whitespace),
+        None => sanitize_identifier(name) == name,
+    }
 }
 
 /// Rejects public interface names that SystemVerilog cannot represent safely.
