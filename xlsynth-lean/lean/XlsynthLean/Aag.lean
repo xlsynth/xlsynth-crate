@@ -10,12 +10,13 @@ private def readNatTerm (bytes : ByteArray) (start : Nat) (terminator : UInt8) :
     Except String (Nat × Nat) := do
   let mut position := start
   let mut value := 0
-  while inBounds : position < bytes.size do
-    let byte := bytes[position]
+  -- A bounded scan also reduces in the kernel when proving that parsing succeeded.
+  for inBounds : i in [start:bytes.size] do
+    let byte := bytes[i]
     if byte < 48 ∨ 57 < byte then
       break
     value := value * 10 + (byte.toNat - 48)
-    position := position + 1
+    position := i + 1
   unless start < position do
     throw s!"expected a natural number at byte {start}"
   unless bytes[position]? = some terminator do

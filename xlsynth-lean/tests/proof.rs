@@ -10,7 +10,8 @@ use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_lean::{InterfaceDirection, LeanError, prepare_equivalence_target};
 #[cfg(feature = "lean-tests")]
 use xlsynth_lean::{
-    LeanProofSources, TESTED_LEAN_VERSION, check_equivalence_proof, run_equivalence_proof,
+    LeanAxiomPolicy, LeanNamedProofSources, LeanProofSources, LeanTheoremName, TESTED_LEAN_VERSION,
+    check_equivalence_proof, run_equivalence_proof, run_gate_equivalence_proof_with_policy,
 };
 
 /// Creates `a && (b && c)` with the same interface as `common::and3`.
@@ -122,6 +123,67 @@ fn equivalent_graphs_succeed_and_return_lean_diagnostics() {
         output.stdout,
         output.stderr
     );
+}
+
+#[cfg(feature = "lean-tests")]
+#[test]
+fn audits_the_selected_gate_theorem_and_its_native_dependencies() {
+    let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let target = prepare_equivalence_target(&common::and3(), &right_associated_and3()).unwrap();
+    let replay = LeanAxiomPolicy::ReplayNativeChecks;
+    let strict = LeanAxiomPolicy::RejectNativeChecks;
+    let default_target = root.join("default_target");
+    target.write_to(&default_target).unwrap();
+    let strict_target = root.join("strict_target");
+    target.write_to_with_policy(&strict_target, strict).unwrap();
+    // Named checks verify the compiled theorem directly.
+    std::fs::remove_file(strict_target.join("Check.lean")).unwrap();
+
+    let module = root.join("Proof.lean");
+    std::fs::write(
+        &module,
+        r#"import Target
+namespace Proof
+theorem kernel : Target.Equivalent := by
+  unfold Target.Equivalent XlsynthLean.Aig.Circuit.Equivalent
+  simp only [← XlsynthLean.Aig.Circuit.eval_eq_denote]
+  decide +kernel
+theorem native : Target.Equivalent := by
+  unfold Target.Equivalent XlsynthLean.Aig.Circuit.Equivalent
+  native_decide
+theorem wrongType : True := True.intro
+theorem unfinished : Target.Equivalent := by sorry
+axiom assumed : Target.Equivalent
+theorem fromAssumption : Target.Equivalent := assumed
+end Proof
+"#,
+    )
+    .unwrap();
+    let verify = |target: &Path, name: &str, policy, work: &str| {
+        let sources = LeanNamedProofSources {
+            root: root.to_path_buf(),
+            module: module.clone(),
+            theorem: LeanTheoremName::new(name).unwrap(),
+            modules: vec![],
+        };
+        run_gate_equivalence_proof_with_policy(&lean, target, &sources, &root.join(work), policy)
+    };
+
+    let accepted = verify(&default_target, "Proof.native", replay, "replayed").unwrap();
+    assert!(accepted.native_checks_replayed.unwrap() > 0);
+    let accepted = verify(&strict_target, "Proof.kernel", strict, "kernel").unwrap();
+    assert_eq!(accepted.native_checks_replayed, Some(0));
+    for (theorem, policy, diagnostic) in [
+        ("Proof.native", strict, "native Boolean check rejected"),
+        ("Proof.wrongType", replay, "Type mismatch"),
+        ("Proof.unfinished", replay, "sorryAx"),
+        ("Proof.fromAssumption", replay, "unverified axiom"),
+    ] {
+        let failure = verify(&strict_target, theorem, policy, theorem).unwrap_err();
+        assert!(failure.to_string().contains(diagnostic), "{failure}");
+    }
 }
 
 #[cfg(feature = "lean-tests")]
