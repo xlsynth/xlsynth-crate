@@ -20,8 +20,6 @@ fn block2sv_generated_fixtures_parse_with_yosys() {
 
     let temporary_directory = tempfile::tempdir().expect("create Yosys input directory");
     let verilog_path = temporary_directory.path().join("generated.sv");
-    let support_types =
-        "package types; typedef logic [7:0] input_t; typedef logic [7:0] output_t; endpackage\n";
     let mut failures = Vec::new();
     for path in paths {
         let contents = fs::read_to_string(&path).unwrap();
@@ -36,6 +34,7 @@ fn block2sv_generated_fixtures_parse_with_yosys() {
                 continue;
             }
         };
+        let support_types = custom_port_types(&path);
         fs::write(&verilog_path, format!("{support_types}{output}"))
             .expect("write generated SystemVerilog");
         if let Err(error) = yosys.run_script(

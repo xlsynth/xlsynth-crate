@@ -12,6 +12,29 @@ pub(super) use golden_fixture::GoldenFixture;
 use xlsynth_pir::ir::Type;
 use xlsynth_pir::ir_parser::Parser;
 
+/// Common external SV types for annotated port fixtures.
+pub(super) const CUSTOM_PORT_TYPES: &str = r#"
+package types;
+  typedef logic [7:0] input_t;
+  typedef logic [7:0] output_t;
+  typedef logic signed [1:0][3:0] signed_byte_t;
+endpackage
+"#;
+
+/// Provides fixture-specific types without shadowing unrelated signals.
+pub(super) fn custom_port_types(path: &Path) -> &'static str {
+    if path.ends_with("hierarchy/custom_typed_ports.golden.ir") {
+        r#"
+typedef enum logic [1:0] { ZERO, ONE, TWO, THREE } data__1;
+package types;
+  typedef struct packed { logic high_bit; logic low_bit; } pair_t;
+endpackage
+"#
+    } else {
+        CUSTOM_PORT_TYPES
+    }
+}
+
 /// Flattens a small bits or tuple result in SystemVerilog port packing order.
 pub(super) fn flatten_reference_value(value: &xlsynth_pir::IrValue, ty: &Type) -> u64 {
     match ty {
