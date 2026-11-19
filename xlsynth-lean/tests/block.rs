@@ -56,6 +56,17 @@ fn compile_project(root: &Path, sources: impl IntoIterator<Item = PathBuf>) {
     }
 }
 
+/// Elaborate the shared renderer golden and execute its call and array-update
+/// guards.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn shared_helpers_and_caller_operands_elaborate() {
+    let directory = tempfile::tempdir().unwrap();
+    let client = directory.path().join("Example.lean");
+    std::fs::write(&client, include_str!("goldens/shared_helpers.lean")).unwrap();
+    compile_project(directory.path(), [client]);
+}
+
 fn check_block(package: &Package, client: &str) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

@@ -9,7 +9,7 @@ use crate::ir::{
     NodeRef, Package, PackageMember, Type,
 };
 use crate::ir_deduce::deduce_graph_result_type;
-use crate::ir_utils::operands;
+use crate::ir_utils::{direct_function_references, operands};
 
 /// Errors that can arise during validation of XLS IR structures.
 #[derive(Debug, PartialEq, Eq)]
@@ -776,21 +776,7 @@ fn validate_function_call_graph(
             return Ok(());
         }
         active.push(function_name.to_string());
-        let mut callees = std::collections::BTreeSet::new();
-        for node in &function.nodes {
-            match &node.payload {
-                NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
-                    callees.insert(to_apply.as_str());
-                }
-                NodePayload::CountedFor { body, .. } => {
-                    callees.insert(body.as_str());
-                }
-                _ => {
-                    // All other node kinds do not reference functions.
-                }
-            }
-        }
-        for callee in callees {
+        for callee in direct_function_references(function) {
             visit(functions, functions[callee], visited, active)?;
         }
         active.pop();

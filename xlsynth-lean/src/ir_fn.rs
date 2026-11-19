@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use xlsynth_pir::desugar_extensions::desugar_extensions_in_fn;
 use xlsynth_pir::ir::{
-    Binop, Fn, FunctionType, Node, NodePayload as P, NodeRef, Package, PackageMember, Type,
+    Binop, Fn as IrFn, FunctionType, Node, NodePayload as P, NodeRef, Package, PackageMember, Type,
 };
-use xlsynth_pir::ir_inline::package_with_reachable_callees;
-use xlsynth_pir::ir_utils::{compact_and_toposort_in_place, external_function_references};
+use xlsynth_pir::ir_inline::reachable_functions_in_dependency_order;
+use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 use xlsynth_pir::ir_verify::verify_package;
 
 use crate::local_expr::{
@@ -86,57 +85,13 @@ pub(crate) fn export_with_bindings(
         None => package.get_top_or_sole_fn(),
     }
     .map_err(LeanError::InvalidIr)?;
-    let mut reachable =
-        package_with_reachable_callees(package, entry).map_err(LeanError::InvalidIr)?;
-    for member in &mut reachable.members {
-        if let PackageMember::Function(f) = member {
-            for node in &f.nodes {
-                check_supported(f, node)?;
-            }
-            compact_and_toposort_in_place(f).map_err(LeanError::InvalidIr)?;
-        }
-    }
-    verify_package(&reachable).map_err(|e| LeanError::InvalidIr(e.to_string()))?;
-    for member in &mut reachable.members {
-        if let PackageMember::Function(f) = member
-            && f.nodes.iter().any(|n| n.payload.is_extension_op())
-        {
-            desugar_extensions_in_fn(f).map_err(|e| LeanError::InvalidIr(e.to_string()))?;
-        }
-    }
-
-    // Emit callees in postorder. Package verification has ruled out recursion.
-    let mut work = vec![(entry.name.clone(), false)];
-    let mut emitted = HashSet::new();
+    let functions = prepare_function_defs(package, &[&entry.name])?;
     let ns = module_name.lean_identifier();
     let mut source =
         format!("{MODULE_HEADER}namespace {ns}\nset_option linter.unusedVariables false\n\n");
-    let functions: HashMap<_, _> = reachable
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            PackageMember::Function(f) => Some((f.name.as_str(), f)),
-            PackageMember::Block(_) => None,
-        })
-        .collect();
-    write_elaboration_limits(&mut source, functions.values().map(|f| &f.graph));
-    while let Some((name, ready)) = work.pop() {
-        if emitted.contains(&name) {
-            continue;
-        }
-        let f = functions[name.as_str()];
-        if ready {
-            emit_function(&mut source, f, bindings)?;
-            emitted.insert(name);
-        } else {
-            work.push((name, true));
-            work.extend(
-                external_function_references(f)
-                    .into_iter()
-                    .rev()
-                    .map(|n| (n, false)),
-            );
-        }
+    write_elaboration_limits(&mut source, functions.iter().map(|f| &f.graph));
+    for f in &functions {
+        emit_function(&mut source, f, bindings, &|name| Ok(function_name(name)))?;
     }
     let signature = entry.get_type();
     let mut input_width = 0usize;
@@ -159,6 +114,53 @@ pub(crate) fn export_with_bindings(
         signature,
         source,
     })
+}
+
+/// Checks and normalizes reachable helpers in Lean declaration order. The
+/// enclosing exporter can inspect their signatures and size its module first.
+pub(crate) fn prepare_function_defs(
+    package: &Package,
+    roots: &[&str],
+) -> Result<Vec<IrFn>, LeanError> {
+    let functions =
+        reachable_functions_in_dependency_order(package, roots).map_err(LeanError::InvalidIr)?;
+    let mut reachable = Package {
+        name: package.name.clone(),
+        file_table: package.file_table.clone(),
+        members: Vec::with_capacity(functions.len()),
+        top: None,
+    };
+    for f in functions {
+        for node in &f.nodes {
+            check_supported(f, node)?;
+        }
+        let mut f = f.clone();
+        compact_and_toposort_in_place(&mut f).map_err(LeanError::InvalidIr)?;
+        reachable.members.push(PackageMember::Function(f));
+    }
+    verify_package(&reachable).map_err(|e| LeanError::InvalidIr(e.to_string()))?;
+    let mut prepared = Vec::with_capacity(reachable.members.len());
+    for member in reachable.members {
+        if let PackageMember::Function(mut f) = member {
+            if f.nodes.iter().any(|n| n.payload.is_extension_op()) {
+                desugar_extensions_in_fn(&mut f)
+                    .map_err(|e| LeanError::InvalidIr(e.to_string()))?;
+            }
+            prepared.push(f);
+        }
+    }
+    Ok(prepared)
+}
+
+/// Applies a Lean function to operands, grouping compound expressions.
+pub(crate) fn invoke_expr(
+    callee: String,
+    operands: impl IntoIterator<Item = LeanOperand>,
+) -> String {
+    std::iter::once(callee)
+        .chain(operands.into_iter().map(LeanOperand::into_argument))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn width(ty: &Type) -> Result<usize, LeanError> {
@@ -192,7 +194,7 @@ fn unsupported_type_reason(ty: &Type) -> Option<&'static str> {
 
 /// Check even unused nodes so an unsupported observation cannot silently
 /// disappear.
-fn check_supported(f: &Fn, node: &Node) -> Result<(), LeanError> {
+fn check_supported(f: &IrFn, node: &Node) -> Result<(), LeanError> {
     let reason = match &node.payload {
         P::Binop(Binop::Smulp | Binop::Umulp, ..) => "partial-product multiply",
         P::CountedFor { .. } => "loop",
@@ -217,9 +219,14 @@ fn check_supported(f: &Fn, node: &Node) -> Result<(), LeanError> {
 }
 
 /// Emits one typed binding per IR node, retaining shared operands and calls.
-fn emit_function(out: &mut String, f: &Fn, bindings: Bindings) -> Result<(), LeanError> {
+pub(crate) fn emit_function(
+    out: &mut String,
+    f: &IrFn,
+    bindings: Bindings,
+    callee_name: &dyn Fn(&str) -> Result<String, LeanError>,
+) -> Result<(), LeanError> {
     let renderer = LocalRenderer::Function;
-    let function = function_name(&f.name);
+    let function = callee_name(&f.name)?;
     let parameters: Vec<_> = f.param_nodes().collect();
     let signature = parameters
         .iter()
@@ -254,14 +261,13 @@ fn emit_function(out: &mut String, f: &Fn, bindings: Bindings) -> Result<(), Lea
             P::Map { array, to_apply } => {
                 format!(
                     "Vector.map {} {}",
-                    function_name(to_apply),
+                    callee_name(to_apply)?,
                     name(*array).into_argument()
                 )
             }
-            P::Invoke { to_apply, operands } => std::iter::once(function_name(to_apply))
-                .chain(operands.iter().map(|r| name(*r).into_argument()))
-                .collect::<Vec<_>>()
-                .join(" "),
+            P::Invoke { to_apply, operands } => {
+                invoke_expr(callee_name(to_apply)?, operands.iter().copied().map(name))
+            }
             _ => renderer
                 .local_rhs(f, NodeRef { index }, |r| {
                     Ok::<_, std::convert::Infallible>(name(r))
@@ -303,4 +309,126 @@ fn emit_function(out: &mut String, f: &Fn, bindings: Bindings) -> Result<(), Lea
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsynth_pir::ir_parser::Parser;
+    use xlsynth_pir::ir_utils::direct_function_references;
+
+    #[test]
+    fn enclosing_exporter_owns_limits_for_helpers_and_packed_wrapper() {
+        // Both signatures need elevated limits, and the caller needs more.
+        let tuple = format!("({})", vec!["bits[1]"; 128].join(", "));
+        let ir = format!(
+            r#"package limits
+fn helper(x: {tuple} id=1) -> {tuple} {{
+  ret copied: {tuple} = identity(x, id=2)
+}}
+top fn caller(x: {tuple} id=3) -> ({tuple}, {tuple}) {{
+  h: {tuple} = invoke(x, to_apply=helper, id=4)
+  ret both: ({tuple}, {tuple}) = tuple(x, h, id=5)
+}}"#
+        );
+        let pkg = Parser::new(&ir).parse_and_validate_package().unwrap();
+        let name = LeanModuleName::new("Limits").unwrap();
+        let module = export_ir_function(&pkg, None, &name).unwrap();
+        let (header, defs) = module.lean_source().split_once("def ir_helper").unwrap();
+        assert_eq!(
+            header
+                .lines()
+                .filter(|line| line.starts_with("set_option") && !line.contains("linter"))
+                .collect::<Vec<_>>(),
+            [
+                "set_option maxRecDepth 2580",
+                "set_option synthInstance.maxSize 1034"
+            ],
+        );
+        assert!(!defs.contains("set_option"));
+        assert!(defs.contains("def evalPacked"));
+    }
+
+    #[test]
+    fn block_roots_share_a_named_callee_and_use_block_operands() {
+        let ir = r#"package helpers
+fn scalar(x: bits[4] id=3) -> bits[8] {
+  ret y: bits[8] = invoke(x, to_apply=widen, id=4)
+}
+fn lanes(a: bits[4][2] id=5) -> bits[8][2] {
+  ret y: bits[8][2] = map(a, to_apply=widen, id=6)
+}
+fn widen(x: bits[4] id=1) -> bits[8] {
+  ret y: bits[8] = sign_ext(x, new_bit_count=8, id=2)
+}
+fn update(rows: bits[8][2][2] id=13, outer: bits[1] id=14, v0: bits[1] id=15, value: bits[8] id=16) -> bits[8][2][2] {
+  ret updated: bits[8][2][2] = array_update(rows, value, indices=[outer, v0], id=17)
+}
+top block consumer(x: bits[4], a: bits[4][2], y: bits[8], ys: bits[8][2]) {
+  x: bits[4] = input_port(name=x, id=7)
+  result: bits[8] = invoke(x, to_apply=scalar, id=8)
+  y: () = output_port(result, name=y, id=9)
+  a: bits[4][2] = input_port(name=a, id=10)
+  many: bits[8][2] = invoke(a, to_apply=lanes, id=11)
+  ys: () = output_port(many, name=ys, id=12)
+}"#;
+        let package = Parser::new(ir).parse_and_validate_package().unwrap();
+        let helper_name = |name: &str| Ok(format!("Helpers.«{name}»"));
+        let block = package.get_top_block().unwrap();
+        let roots: Vec<_> = direct_function_references(block).into_iter().collect();
+        let functions = prepare_function_defs(&package, &roots).unwrap();
+        let mut defs = String::new();
+        write_elaboration_limits(
+            &mut defs,
+            std::iter::once(&block.graph).chain(functions.iter().map(|f| &f.graph)),
+        );
+        for f in &functions {
+            emit_function(&mut defs, f, Bindings::LocalLets, &helper_name).unwrap();
+        }
+        let result = block.output_value(block.output_ports().next().unwrap());
+        let P::Invoke { to_apply, operands } = &block.get_node(result).payload else {
+            panic!("expected an invoke");
+        };
+        let expr = invoke_expr(
+            helper_name(to_apply).unwrap(),
+            operands.iter().map(|&r| {
+                assert!(matches!(block.get_node(r).payload, P::InputPort { .. }));
+                LeanOperand::Expression("x + 1".to_owned())
+            }),
+        );
+        // Use the caller's operand names in the shared renderer. An explicit
+        // row binder named v0 would capture the caller's inner index.
+        let update = package.get_fn("update").unwrap();
+        let rhs = LocalRenderer::Block
+            .local_rhs(update, update.ret_node_ref.unwrap(), |r| {
+                Ok::<_, std::convert::Infallible>(LeanOperand::Atom(
+                    update.get_node(r).name.clone().unwrap(),
+                ))
+            })
+            .unwrap();
+        let module = format!(
+            r#"-- SPDX-License-Identifier: Apache-2.0
+import XlsynthLean.IR
+
+namespace Example
+
+{defs}def observe (x : BitVec 4) : BitVec 8 := {expr}
+
+#guard observe 7 == 248
+#guard Helpers.«lanes» #[1, 15].toVector == #[1, 255].toVector
+
+abbrev Rows := Vector (Vector (BitVec 8) 2) 2
+
+def update (rows : Rows) (outer v0 : BitVec 1) (value : BitVec 8) : Rows :=
+  {rhs}
+
+def rows : Rows := #[#[1, 2].toVector, #[3, 4].toVector].toVector
+#guard update rows 0 0 9 == #[#[9, 2].toVector, #[3, 4].toVector].toVector
+#guard update rows 0 1 9 == #[#[1, 9].toVector, #[3, 4].toVector].toVector
+
+end Example
+"#
+        );
+        assert_eq!(module, include_str!("../tests/goldens/shared_helpers.lean"));
+    }
 }

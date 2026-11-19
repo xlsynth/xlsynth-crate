@@ -261,24 +261,21 @@ impl LocalRenderer {
                 indices,
                 ..
             } => {
-                let mut expr = name(*value)?;
-                for (depth, idx) in indices.iter().enumerate().rev() {
-                    let base = if depth == 0 {
-                        name(*array)?
-                    } else {
-                        format!("v{}", depth - 1)
-                    };
-                    let binder = if depth + 1 == indices.len() {
-                        "_".to_owned()
-                    } else {
-                        format!("v{depth}")
-                    };
-                    expr = format!(
-                        "{IR}.arrayModify {base} {}.toNat (fun {binder} => {expr})",
-                        name(*idx)?
-                    );
+                let value = name(*value)?;
+                let Some((outer, inner)) = indices.split_first() else {
+                    return Ok(value);
+                };
+                // Anonymous sections cannot shadow names in caller-supplied
+                // operands.
+                let mut update = format!("(fun _ => {value})");
+                for index in inner.iter().rev() {
+                    update = format!("({IR}.arrayModify · {}.toNat {update})", name(*index)?);
                 }
-                expr
+                format!(
+                    "{IR}.arrayModify {} {}.toNat {update}",
+                    name(*array)?,
+                    name(*outer)?
+                )
             }
             P::ArraySlice {
                 array,
