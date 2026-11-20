@@ -695,3 +695,6 @@ fn refinement_report_requires_registered_delay_with_sizing_and_fanout() -> anyho
     assert!(!report.exists());
     Ok(())
 }
+
+#[path = "g8r2gv/adaptive.rs"]
+mod adaptive;

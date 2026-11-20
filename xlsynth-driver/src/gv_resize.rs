@@ -2,14 +2,72 @@
 
 use std::path::Path;
 
-use clap::{Arg, ArgAction, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use xlsynth_g8r::liberty::Library;
 use xlsynth_g8r::liberty::io_defaults::default_output_load;
 use xlsynth_g8r::liberty::load::load_library_with_timing_data_from_path;
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::{read_gv_from_path, select_module};
-use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
+use xlsynth_g8r::netlist::resize::{
+    RecoveryCellMenu, RecoveryWindowCheckpoint, ResizeOptions, TimingCellMenu,
+    resize_netlist_with_recovery_checkpoint,
+};
 use xlsynth_g8r::netlist::sta::{StaOptions, WireLoadModel};
+
+/// CLI spellings of the compatible-cell selection policies used in area
+/// recovery.
+#[derive(Clone, Copy, ValueEnum)]
+enum CellMenu {
+    Area,
+    ElectricalMinArea,
+}
+
+/// CLI spellings of timing nomination policies.
+#[derive(Clone, Copy, ValueEnum)]
+enum TimingMenu {
+    NearestArea,
+    DelayBandsFastestFirst,
+}
+
+/// Defines the cell shortlist controls shared by standalone and final sizing.
+pub(crate) fn recovery_cell_args() -> [Arg; 3] {
+    [
+        Arg::new("timing-cell-menu")
+            .long("timing-cell-menu")
+            .value_name("POLICY")
+            .value_parser(clap::value_parser!(TimingMenu))
+            .help("How timing search shortlists compatible cells (default: nearest-area)"),
+        Arg::new("recovery-cell-menu")
+            .long("recovery-cell-menu")
+            .value_name("POLICY")
+            .value_parser(clap::value_parser!(CellMenu))
+            .help("How area recovery shortlists compatible cells (default: area)"),
+        Arg::new("recovery-cell-limit")
+            .long("recovery-cell-limit")
+            .value_name("COUNT")
+            .value_parser(clap::value_parser!(usize))
+            .help("Maximum compatible cell alternatives per site in area recovery (default: 8)"),
+    ]
+}
+
+/// Preserves library defaults unless the user explicitly selected an override.
+pub(crate) fn recovery_cell_options(matches: &ArgMatches) -> ResizeOptions {
+    let mut options = ResizeOptions::default();
+    if let Some(policy) = matches.get_one::<TimingMenu>("timing-cell-menu") {
+        options.timing_cell_menu = match policy {
+            TimingMenu::NearestArea => TimingCellMenu::NearestArea,
+            TimingMenu::DelayBandsFastestFirst => TimingCellMenu::DelayBandsFastestFirst,
+        };
+    }
+    if let Some(policy) = matches.get_one::<CellMenu>("recovery-cell-menu") {
+        options.recovery_cell_menu = match policy {
+            CellMenu::Area => RecoveryCellMenu::Area,
+            CellMenu::ElectricalMinArea => RecoveryCellMenu::ElectricalMinArea,
+        };
+    }
+    options.recovery_cell_limit = matches.get_one::<usize>("recovery-cell-limit").copied();
+    options
+}
 
 /// Exposes bounded native resizing independently of the mapping frontend.
 pub fn command() -> Command {
@@ -27,6 +85,8 @@ pub fn command() -> Command {
         .arg(Arg::new("timing-evaluation-budget").long("timing-evaluation-budget").help("Instance timing/coverage propagation evaluations across timing rounds [default: max(50000, 4 * instance count)]").value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("recovery-evaluation-budget").long("recovery-evaluation-budget").help("Hard total timing/coverage propagation visits for recovery; default starts at max(100000, 8 * instances) and renews productive registered sweeps").value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("upsize-rounds").long("upsize-rounds").help(format!("Timing-search rounds, in either size direction [default: {}]", defaults.max_upsize_rounds)).value_parser(clap::value_parser!(usize)))
+        .args(recovery_cell_args())
+        .arg(Arg::new("monotone-recovery-checkpoint").long("monotone-recovery-checkpoint").action(ArgAction::SetTrue).help("Keep each timing boundary's tightest limit when an automatic area-recovery window renews"))
         .arg(Arg::new("downsize-rounds").long("downsize-rounds").help(format!("Area-recovery rounds [default: {}]", defaults.max_downsize_rounds)).value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("no-register-resize").long("no-register-resize").action(ArgAction::SetTrue))
         .arg(Arg::new("report-json").long("report-json").help("Write deterministic before/after timing, area and search-work statistics"))
@@ -47,12 +107,18 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
     .map_err(|e| e.to_string())?
     .clone();
     let options = resize_options(matches, &library)?;
-    let report = resize_netlist(
+    let checkpoint = if matches.get_flag("monotone-recovery-checkpoint") {
+        RecoveryWindowCheckpoint::Tightest
+    } else {
+        RecoveryWindowCheckpoint::Latest
+    };
+    let report = resize_netlist_with_recovery_checkpoint(
         &mut module,
         &parsed.nets,
         &mut parsed.interner,
         &library,
         &options,
+        checkpoint,
     )
     .map_err(|e| e.to_string())?;
     let verilog = emit_module_as_netlist_text(&module, &parsed.nets, &parsed.interner)
@@ -68,7 +134,7 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
 
 /// Applies only explicit CLI overrides to library-owned search defaults.
 fn resize_options(matches: &ArgMatches, library: &Library) -> Result<ResizeOptions, String> {
-    let defaults = ResizeOptions::default();
+    let defaults = recovery_cell_options(matches);
     let output_load = match matches.get_one::<f64>("module_output_load") {
         Some(load) => *load,
         None => default_output_load(library)?,
@@ -153,6 +219,9 @@ mod tests {
         assert_eq!(options.max_downsize_rounds, defaults.max_downsize_rounds);
         assert_eq!(options.max_candidate_sites, defaults.max_candidate_sites);
         assert_eq!(options.max_cell_candidates, defaults.max_cell_candidates);
+        assert_eq!(options.timing_cell_menu, TimingCellMenu::NearestArea);
+        assert_eq!(options.recovery_cell_menu, RecoveryCellMenu::Area);
+        assert_eq!(options.recovery_cell_limit, None);
         assert_eq!(options.resize_registers, defaults.resize_registers);
 
         // An explicit output load must also work without library defaults.
@@ -178,6 +247,8 @@ mod tests {
             "0",
             "--downsize-rounds",
             "0",
+            "--recovery-cell-menu=electrical-min-area",
+            "--recovery-cell-limit=64",
             "--no-register-resize",
         ])?;
         let options = resize_options(&matches, &library).map_err(anyhow::Error::msg)?;
@@ -188,7 +259,46 @@ mod tests {
         assert_eq!(options.recovery_evaluation_budget, Some(0));
         assert_eq!(options.max_upsize_rounds, 0);
         assert_eq!(options.max_downsize_rounds, 0);
+        assert_eq!(
+            options.recovery_cell_menu,
+            RecoveryCellMenu::ElectricalMinArea
+        );
+        assert_eq!(options.recovery_cell_limit, Some(64));
+        assert_eq!(options.max_cell_candidates, defaults.max_cell_candidates);
         assert!(!options.resize_registers);
+        Ok(())
+    }
+
+    #[test]
+    fn timing_menu_selection_reaches_resize_options() -> anyhow::Result<()> {
+        for (command, input_args) in [
+            (
+                command(),
+                ["--netlist=input.gv", "--liberty_proto=cells.proto"],
+            ),
+            (
+                crate::g8r2gv::command(),
+                ["input", "--liberty-proto=cells.proto"],
+            ),
+            (
+                crate::bx::bx2gv_command(),
+                ["input", "--liberty-proto=cells.proto"],
+            ),
+        ] {
+            for (spelling, expected) in [
+                (
+                    "delay-bands-fastest-first",
+                    TimingCellMenu::DelayBandsFastestFirst,
+                ),
+                ("nearest-area", TimingCellMenu::NearestArea),
+            ] {
+                let args = std::iter::once(command.get_name())
+                    .chain(input_args)
+                    .chain(["--timing-cell-menu", spelling]);
+                let matches = command.clone().try_get_matches_from(args)?;
+                assert_eq!(recovery_cell_options(&matches).timing_cell_menu, expected);
+            }
+        }
         Ok(())
     }
 }
