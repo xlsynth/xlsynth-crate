@@ -424,7 +424,7 @@ block delay_model(clk: clock, rst: bits[1], data: bits[8], out: bits[8]) {
 
 top block top(clk: clock, rst: bits[1], data: bits[8], out: bits[8]) {
   #![reset(port="rst", asynchronous=false, active_low=true)]
-  instantiation delay(block=delay_model, module_name=external_delay_cell, kind=extern_block)
+  instantiation delay(block=delay_model, module_name=external_delay_cell, kind=behavioral_extern_block)
   rst: bits[1] = input_port(name=rst, id=11)
   data: bits[8] = input_port(name=data, id=12)
   delay_rst: () = instantiation_input(rst, instantiation=delay, port_name=rst, id=13)
@@ -451,6 +451,40 @@ top block top(clk: clock, rst: bits[1], data: bits[8], out: bits[8]) {
         &[vec![byte(255)], vec![byte(2)], vec![byte(42)]]
     );
     assert_eq!(trace.final_state().values(), &[byte(5)]);
+}
+
+#[test]
+fn sequential_lowering_rejects_only_reachable_opaque_instances() {
+    let source = r#"package opaque_lowering
+
+block opaque_child() {
+  instantiation leaf(module_name=vendor_cell, ports={}, kind=opaque_extern_block)
+}
+
+block wrapper() {
+  instantiation child(block=opaque_child, kind=block)
+}
+
+top block independent(data: bits[1], out: bits[1]) {
+  data: bits[1] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+"#;
+    let mut package = Parser::new(source).parse_and_validate_package().unwrap();
+    let options = GatifyOptions::all_opts_disabled();
+    block_package_to_sequential_gate_fn(&package, options.clone()).unwrap();
+    optimize_and_lower_bx_block(&package, options.clone()).unwrap();
+
+    package.set_top_block("wrapper").unwrap();
+    let expected = "opaque external block instance 'wrapper.child.leaf' of module 'vendor_cell' has no behavioral model";
+    assert_eq!(
+        block_package_to_sequential_gate_fn(&package, options.clone()).unwrap_err(),
+        format!("block2sequential: {expected}")
+    );
+    assert_eq!(
+        optimize_and_lower_bx_block(&package, options).unwrap_err(),
+        expected
+    );
 }
 
 #[test]

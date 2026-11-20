@@ -59,19 +59,18 @@ pub(crate) fn verify_hierarchy(ordered_blocks: &[&Block]) -> Result<(), BlockCod
                         block.name
                     ))
                 })?;
-            if !instance.kind.is_block() {
-                // XLS treats foreign-function instances as opaque during
-                // elaborated combinational-cycle verification.
+            let Some(child_name) = instance.referenced_block() else {
+                // Opaque external modules and foreign functions provide no
+                // internal connectivity for this cycle check.
                 continue;
-            }
+            };
 
-            let child_dependencies =
-                dependencies.get(instance.block.as_str()).ok_or_else(|| {
-                    BlockCodegenError::InvalidBlock(format!(
-                        "block `{}` instantiates child `{}` before its dependencies are available",
-                        block.name, instance.block
-                    ))
-                })?;
+            let child_dependencies = dependencies.get(child_name).ok_or_else(|| {
+                BlockCodegenError::InvalidBlock(format!(
+                    "block `{}` instantiates child `{}` before its dependencies are available",
+                    block.name, instance.block
+                ))
+            })?;
             let output_dependencies = child_dependencies.get(output_name).ok_or_else(|| {
                 BlockCodegenError::InvalidBlock(format!(
                     "instance `{instance_name}` of block `{}` has no output `{output_name}`",
@@ -232,7 +231,10 @@ top block feedback(result: bits[8]) {
   result: () = output_port(fed, name=result, id=5)
 }
 "#;
-        let external = source.replace("kind=block", "module_name=external_rtl, kind=extern_block");
+        let external = source.replace(
+            "kind=block",
+            "module_name=external_rtl, kind=behavioral_extern_block",
+        );
         for source in [source, external.as_str()] {
             let package = parse_blocks(source);
             assert!(matches!(
@@ -417,6 +419,23 @@ top block feedback(clk: clock, rst: bits[1], empty: bits[0], empty_result: bits[
   value_connected: () = instantiation_input(fed, instantiation=component, port_name=value, id=14)
   empty_result: () = output_port(empty_value, name=empty_result, id=15)
   result: () = output_port(fed, name=result, id=16)
+}
+"#,
+        );
+
+        assert_eq!(verify_hierarchy(&ordered_blocks(&package)), Ok(()));
+    }
+
+    #[test]
+    fn opaque_external_block_is_a_cycle_check_boundary() {
+        let package = parse_blocks(
+            r#"package opaque_feedback
+
+top block feedback(result: bits[8]) {
+  instantiation u(module_name=external_cell, ports={data:input bits[8], out:output bits[8]}, kind=opaque_extern_block)
+  received: bits[8] = instantiation_output(instantiation=u, port_name=out, id=1)
+  connected: () = instantiation_input(received, instantiation=u, port_name=data, id=2)
+  result: () = output_port(received, name=result, id=3)
 }
 "#,
         );

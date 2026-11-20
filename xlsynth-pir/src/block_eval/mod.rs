@@ -42,6 +42,7 @@ use rand_pcg::Pcg64Mcg;
 use self::observe::BlockObserver;
 use self::prepare::{Prepared, RegisterUpdate};
 use crate::IrValue;
+use crate::block_inline::reject_reachable_opaque_extern_blocks;
 use crate::ir::{NodePayload, Package, Type};
 use crate::ir_eval::{
     AssertionFailure, AssumptionFailureKind, EvalObserver, FnEvalResult, TraceMessage,
@@ -234,6 +235,8 @@ impl<'p> BlockEvaluator<'p> {
     /// Validate the package and prepare the selected block and its block
     /// instances.
     pub fn prepare(package: &'p Package, top: &str) -> Result<Self, BlockEvalError> {
+        reject_reachable_opaque_extern_blocks(package, Some(top))
+            .map_err(BlockEvalError::Preparation)?;
         verify_package(package).map_err(|err| BlockEvalError::InvalidPackage(Box::new(err)))?;
         let prepared = prepare::prepare(package, top).map_err(BlockEvalError::Preparation)?;
         let origin_by_id = prepared

@@ -10,7 +10,8 @@ use xlsynth_pir::desugar_extensions::{
     ExtensionEmitMode, desugar_extensions_in_package, emit_package_with_extension_mode,
 };
 use xlsynth_pir::ir::{
-    Block, InstantiationKind, MemberType, NodePayload, Package, PackageMember, Type,
+    Block, InstantiationKind, MemberType, NodePayload, OpaqueExternPort, OpaqueExternPortKind,
+    Package, PackageMember, Type,
 };
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
@@ -694,12 +695,12 @@ block model() {
 }
 
 top block parent() {
-  instantiation u(block=model, kind=extern_block)
+  instantiation u(block=model, kind=behavioral_extern_block)
 }
 "#;
     let explicit = canonical.replace(
-        "block=model, kind=extern_block",
-        "block=model, module_name=model, kind=extern_block",
+        "block=model, kind=behavioral_extern_block",
+        "block=model, module_name=model, kind=behavioral_extern_block",
     );
     for source in [canonical, explicit.as_str()] {
         let package = Parser::new(source).parse_and_verify_package().unwrap();
@@ -747,7 +748,7 @@ block model() {
 }
 
 top block wrapper() {
-  instantiation u(block=model, module_name=rtl, parameters={BAR:"0", WIDTH:"42"}, kind=extern_block)
+  instantiation u(block=model, module_name=rtl, parameters={BAR:"0", WIDTH:"42"}, kind=behavioral_extern_block)
 }
 "#
     );
@@ -801,9 +802,10 @@ fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() 
                 assert_eq!(instance.block, "child");
                 assert_eq!(
                     instance.kind,
-                    InstantiationKind::ExternBlock {
+                    InstantiationKind::BehavioralExternBlock {
                         module_name: "rtl_register".to_string(),
                         parameters: BTreeMap::new(),
+                        input_casts: BTreeMap::new(),
                     }
                 );
             } else {
@@ -983,6 +985,192 @@ fn stage_keyword_is_rejected_without_poisoning_block_resources() {
             .collect::<Vec<_>>(),
         (1..=4).map(|id| id + maximum).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn opaque_builder_preserves_named_parameter_overrides() {
+    let mut builder = BlockBuilder::new("wrapper");
+    for (name, value) in [("bad-name", "42"), ("WIDTH", " ")] {
+        assert!(
+            builder
+                .instantiate_opaque_extern_block_with_parameters(
+                    "u",
+                    "external_cell",
+                    Vec::new(),
+                    BTreeMap::from([(name.to_string(), value.to_string())]),
+                )
+                .is_err()
+        );
+    }
+    let parameters = BTreeMap::from([("WIDTH".to_string(), "16".to_string())]);
+    builder
+        .instantiate_opaque_extern_block_with_parameters(
+            "u",
+            "external_cell",
+            Vec::new(),
+            parameters.clone(),
+        )
+        .unwrap();
+    let package = builder.build_package("opaque").unwrap();
+    let text = package.to_string();
+    let parsed = Parser::new(&text).parse_and_verify_package().unwrap();
+    assert_eq!(
+        parsed.get_top_block().unwrap().instantiations[0].kind,
+        InstantiationKind::OpaqueExternBlock {
+            ports: Vec::new(),
+            parameters,
+            input_casts: BTreeMap::new(),
+        }
+    );
+}
+
+#[test]
+fn builder_records_input_casts_for_both_external_block_kinds() {
+    let model = leaf_block();
+    let mut package = Package {
+        name: "extern_casts".to_string(),
+        file_table: xlsynth_pir::ir::FileTable::new(),
+        members: vec![PackageMember::Block(model.clone())],
+        top: None,
+    };
+    let mut builder = BlockBuilder::new("wrapper");
+    let behavioral = builder
+        .instantiate_extern_block("behavioral", &model, "model_rtl")
+        .unwrap();
+    let opaque = builder
+        .instantiate_opaque_extern_block(
+            "opaque",
+            "opaque_rtl",
+            [
+                ("x", OpaqueExternPortKind::Input(Type::Bits(8))),
+                ("y", OpaqueExternPortKind::Output(Type::Bits(8))),
+            ]
+            .into_iter()
+            .map(|(name, kind)| OpaqueExternPort {
+                name: name.to_string(),
+                kind,
+            })
+            .collect(),
+        )
+        .unwrap();
+
+    let mut other = BlockBuilder::new("other");
+    let internal = other.instantiate("internal", &model).unwrap();
+    assert_eq!(
+        builder.set_instantiation_input_cast(internal, "x", "mode_t"),
+        Err(BuilderError::ForeignInstantiation)
+    );
+    assert!(
+        other
+            .set_instantiation_input_cast(internal, "x", "mode_t")
+            .is_err()
+    );
+
+    let value = builder.input_port("value", Type::Bits(8)).unwrap();
+    for (instance, output_name, cast) in [
+        (behavioral, "modeled_result", "mode_t"),
+        (opaque, "opaque_result", "pkg::mode_t"),
+    ] {
+        assert!(
+            builder
+                .set_instantiation_input_cast(instance, "y", cast)
+                .is_err()
+        );
+        assert!(
+            builder
+                .set_instantiation_input_cast(instance, "x", "pkg::")
+                .is_err()
+        );
+        builder
+            .set_instantiation_input_cast(instance, "x", cast)
+            .unwrap();
+        assert!(
+            builder
+                .set_instantiation_input_cast(instance, "x", "other_t")
+                .is_err()
+        );
+        builder.instantiation_input(instance, "x", value).unwrap();
+        let result = builder.instantiation_output(instance, "y").unwrap();
+        builder.output_port(output_name, result).unwrap();
+    }
+
+    builder.build_into_package(&mut package).unwrap();
+    package.set_top_block("wrapper").unwrap();
+    assert_pir_package(&package);
+    let emitted = package.to_string();
+    let parsed = Parser::new(&emitted).parse_and_verify_package().unwrap();
+    let block = parsed.get_top_block().unwrap();
+    for (instance, cast) in block.instantiations.iter().zip(["mode_t", "pkg::mode_t"]) {
+        let input_casts = match &instance.kind {
+            InstantiationKind::BehavioralExternBlock { input_casts, .. }
+            | InstantiationKind::OpaqueExternBlock { input_casts, .. } => input_casts,
+            unexpected => panic!("expected external block instance, got {unexpected:?}"),
+        };
+        assert_eq!(
+            input_casts,
+            &BTreeMap::from([("x".to_string(), cast.to_string())])
+        );
+    }
+}
+
+#[test]
+fn opaque_builder_connects_typed_pins_without_an_executable_child() {
+    let mut builder = BlockBuilder::new("wrapper");
+    let bad_interface = vec![
+        OpaqueExternPort {
+            name: "same".to_string(),
+            kind: OpaqueExternPortKind::Input(Type::Bits(1)),
+        },
+        OpaqueExternPort {
+            name: "same".to_string(),
+            kind: OpaqueExternPortKind::Output(Type::Bits(1)),
+        },
+    ];
+    assert_eq!(
+        builder.instantiate_opaque_extern_block("u", "external_cell", bad_interface),
+        Err(BuilderError::InvalidOperation(
+            "duplicate opaque extern port 'same'".to_string()
+        ))
+    );
+    let ports = [
+        ("clk_i", OpaqueExternPortKind::Clock),
+        ("data", OpaqueExternPortKind::Input(Type::Bits(1))),
+        ("result", OpaqueExternPortKind::Output(Type::Bits(1))),
+        ("left", OpaqueExternPortKind::Inout(Type::Bits(1))),
+        ("right", OpaqueExternPortKind::Inout(Type::Bits(1))),
+    ]
+    .into_iter()
+    .map(|(name, kind)| OpaqueExternPort {
+        name: name.to_string(),
+        kind,
+    })
+    .collect();
+    let instance = builder
+        .instantiate_opaque_extern_block("u", "external_cell", ports)
+        .unwrap();
+    builder.clock_port("clk").unwrap();
+    let result = builder.instantiation_output(instance, "result").unwrap();
+    assert_eq!(builder.get_type(result).unwrap(), &Type::Bits(1));
+    builder
+        .instantiation_input(instance, "data", result)
+        .unwrap();
+    builder.output_port("observed", result).unwrap();
+
+    let left = builder
+        .declare_inout_net("left_net", Type::Bits(1))
+        .unwrap();
+    let right = builder
+        .declare_inout_net("right_net", Type::Bits(1))
+        .unwrap();
+    builder.bind_inout_net(instance, "left", left).unwrap();
+    builder.bind_inout_net(instance, "right", right).unwrap();
+    // No connection is inferred between the two opaque pins.
+    let read = builder.ext_inout_read(right).unwrap();
+    builder.ext_inout_drive(left, read, result).unwrap();
+
+    let package = builder.build_package("opaque").unwrap();
+    assert_eq!(package.members.len(), 1);
+    assert_pir_package(&package);
 }
 
 #[test]

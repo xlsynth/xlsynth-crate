@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package opaque_extern
+
+top block wrapper(parent_clk: clock, data: bits[8], pin: bits[1], out: bits[8]) {
+  ext_inout_net bus(bits[1])
+  instantiation u(module_name=vendor_peripheral, ports={result:output bits[8], clk:clock, pad:inout bits[1], data:input bits[8]}, parameters={WIDTH:"1 << 3"}, kind=opaque_extern_block)
+  pin: () = ext_inout_port(name=pin, net=bus, id=1)
+  data: bits[8] = input_port(name=data, id=2)
+  connected: () = instantiation_input(data, instantiation=u, port_name=data, id=3)
+  external_pad: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=4)
+  received: bits[8] = instantiation_output(instantiation=u, port_name=result, id=5)
+  out: () = output_port(received, name=out, id=6)
+}
+
+// OPTIONS: layout = "none"
+// EXPECT-SV: module wrapper(
+// EXPECT-SV:   input logic parent_clk,
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   inout wire pin,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] received;
+// EXPECT-SV:   assign out = received;
+// EXPECT-SV:   vendor_peripheral #(
+// EXPECT-SV:     .WIDTH(1 << 3)
+// EXPECT-SV:   ) u (
+// EXPECT-SV:     .result(received),
+// EXPECT-SV:     .clk(parent_clk),
+// EXPECT-SV:     .pad(pin),
+// EXPECT-SV:     .data(data)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

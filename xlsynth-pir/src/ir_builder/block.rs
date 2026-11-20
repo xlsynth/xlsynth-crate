@@ -8,12 +8,13 @@ use super::{BValue, Builder, BuilderError, check_name, check_package_name, check
 use crate::IrValue;
 use crate::ir::{
     self, Block, BlockPort, BlockReset, Instantiation, InstantiationKind, NodePayload, NodeRef,
-    Package, PackageMember, Register, Type, Unop,
+    OpaqueExternPort, OpaqueExternPortKind, Package, PackageMember, Register, Type, Unop,
 };
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_block_ids_in_place};
 use crate::ir_utils::is_valid_identifier_name;
 use crate::ir_verify::{
-    verify_block_structure_in_package, verify_function_signature, verify_package,
+    validate_opaque_extern_ports, verify_block_structure_in_package, verify_function_signature,
+    verify_package,
 };
 
 /// A register belonging to exactly one block builder.
@@ -86,6 +87,7 @@ struct ExternalSignature {
 enum InstanceSignature {
     Block(BlockSignature),
     Extern(ExternalSignature),
+    Opaque,
 }
 
 /// Signature and connections accumulated for a single instance.
@@ -625,10 +627,81 @@ impl Builder<BlockState> {
         self.instantiate_block(
             name,
             model,
-            InstantiationKind::ExternBlock {
+            InstantiationKind::BehavioralExternBlock {
                 module_name: module_name.to_string(),
                 parameters,
+                input_casts: BTreeMap::new(),
             },
+        )
+    }
+
+    /// Declares an opaque RTL module with an inline, typed interface.
+    ///
+    /// Bind its inputs, outputs, and inouts as for a child block. If the
+    /// interface declares a clock, it connects to the enclosing block's clock.
+    pub fn instantiate_opaque_extern_block(
+        &mut self,
+        name: &str,
+        module_name: &str,
+        ports: Vec<OpaqueExternPort>,
+    ) -> Result<BInstantiation, BuilderError> {
+        self.instantiate_opaque_extern_block_with_parameters(
+            name,
+            module_name,
+            ports,
+            BTreeMap::new(),
+        )
+    }
+
+    /// Declares an opaque RTL module with named SystemVerilog parameter
+    /// overrides.
+    ///
+    /// The inline port types must match the resulting RTL configuration.
+    pub fn instantiate_opaque_extern_block_with_parameters(
+        &mut self,
+        name: &str,
+        module_name: &str,
+        ports: Vec<OpaqueExternPort>,
+        parameters: BTreeMap<String, String>,
+    ) -> Result<BInstantiation, BuilderError> {
+        if !is_valid_identifier_name(module_name) {
+            return Err(BuilderError::InvalidName(module_name.to_string()));
+        }
+        ir::validate_extern_block_parameters(name, &parameters).map_err(invalid)?;
+        validate_opaque_extern_ports(&ports).map_err(invalid)?;
+        let mut input_types = BTreeMap::new();
+        let mut output_types = BTreeMap::new();
+        let mut inout_types = BTreeMap::new();
+        for port in &ports {
+            match &port.kind {
+                OpaqueExternPortKind::Input(ty) => {
+                    input_types.insert(port.name.clone(), ty.clone());
+                }
+                OpaqueExternPortKind::Output(ty) => {
+                    output_types.insert(port.name.clone(), ty.clone());
+                }
+                OpaqueExternPortKind::Inout(ty) => {
+                    inout_types.insert(port.name.clone(), ty.clone());
+                }
+                OpaqueExternPortKind::Clock => {
+                    // The pin is bound to the parent clock by codegen.
+                }
+            }
+        }
+        self.add_instance(
+            Instantiation {
+                name: name.to_string(),
+                block: module_name.to_string(),
+                kind: InstantiationKind::OpaqueExternBlock {
+                    ports,
+                    parameters,
+                    input_casts: BTreeMap::new(),
+                },
+            },
+            InstanceSignature::Opaque,
+            input_types,
+            output_types,
+            inout_types,
         )
     }
 
@@ -720,14 +793,19 @@ impl Builder<BlockState> {
         let name = definition.name.as_str();
         let target = definition.block.as_str();
         check_name(name)?;
-        if target == self.graph.name {
+        let has_package_target = !matches!(signature, InstanceSignature::Opaque);
+        if has_package_target && target == self.graph.name {
             return Err(invalid("a block cannot instantiate itself"));
         }
         for instance in &self.state.instances {
             if instance.definition.name == name {
                 return Err(BuilderError::DuplicateName(name.to_string()));
             }
-            if instance.definition.block == target && instance.signature != signature {
+            if has_package_target
+                && !matches!(instance.signature, InstanceSignature::Opaque)
+                && instance.definition.block == target
+                && instance.signature != signature
+            {
                 return Err(invalid(format!(
                     "conflicting signatures supplied for instance target '{target}'"
                 )));
@@ -756,6 +834,45 @@ impl Builder<BlockState> {
             return Err(BuilderError::ForeignInstantiation);
         }
         Ok(instance.index)
+    }
+
+    /// Assigns the SystemVerilog typedef used to cast one external block input.
+    ///
+    /// Accepts a simple or package-qualified type name. PIR still type-checks
+    /// the connection against the behavioral model or the declared interface.
+    pub fn set_instantiation_input_cast(
+        &mut self,
+        instance: BInstantiation,
+        port_name: &str,
+        sv_type: &str,
+    ) -> Result<(), BuilderError> {
+        let index = self.instance_index(instance)?;
+        let state = &mut self.state.instances[index];
+        let input_casts = match &mut state.definition.kind {
+            InstantiationKind::BehavioralExternBlock { input_casts, .. }
+            | InstantiationKind::OpaqueExternBlock { input_casts, .. } => input_casts,
+            InstantiationKind::Block | InstantiationKind::Extern => {
+                return Err(invalid("input casts require an external block instance"));
+            }
+        };
+        let input_type = state
+            .input_types
+            .get(port_name)
+            .ok_or_else(|| invalid(format!("unknown instance input '{port_name}'")))?;
+        ir::validate_extern_block_input_cast(
+            &state.definition.name,
+            port_name,
+            input_type,
+            sv_type,
+        )
+        .map_err(invalid)?;
+        if input_casts.contains_key(port_name) {
+            return Err(invalid(format!(
+                "instance input '{port_name}' already has a SystemVerilog cast"
+            )));
+        }
+        input_casts.insert(port_name.to_string(), sv_type.to_string());
+        Ok(())
     }
 
     /// Connects one data input exactly once and returns its unit-valued sink.
@@ -870,10 +987,16 @@ impl Builder<BlockState> {
         Ok(block)
     }
 
-    /// Consumes and verifies a standalone block with no calls or instances.
+    /// Consumes and verifies a standalone block without package references.
     pub fn build(self) -> Result<Block, BuilderError> {
         check_name(&self.graph.name)?;
-        if !self.callees.is_empty() || !self.state.instances.is_empty() {
+        if !self.callees.is_empty()
+            || self
+                .state
+                .instances
+                .iter()
+                .any(|instance| !matches!(instance.signature, InstanceSignature::Opaque))
+        {
             return Err(invalid(
                 "blocks containing calls or instances require package-aware finalization",
             ));
@@ -937,6 +1060,11 @@ impl Builder<BlockState> {
                         ))
                     })?;
                     InstanceSignature::Extern(external_signature(function))
+                }
+                InstanceSignature::Opaque => {
+                    // Its signature is inline, so there is no package member to
+                    // compare.
+                    continue;
                 }
             };
             if actual != instance.signature {

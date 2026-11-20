@@ -703,8 +703,9 @@ explicit external instantiation for a function marked `#[ffi_proto]`. Lower
 `map` operations and unroll `counted_for` loops before emission.
 
 For a SystemVerilog module with a block IR behavioral model, use
-`instantiation u(block=model, kind=extern_block)`. The RTL module name defaults
-to `model`. Set `module_name=external_rtl` to target a different module.
+`instantiation u(block=model, kind=behavioral_extern_block)`. The RTL module
+name defaults to `model`. Set `module_name=external_rtl` to target a different
+module.
 Define `model` earlier in the package with the external module's port names
 and types. The emitter connects the parent clock to the model's clock port
 when present and emits an instance of the external module. Supply that module
@@ -712,9 +713,17 @@ alongside the generated RTL. Models reached only through external instances
 are omitted from the generated RTL. Use the default `--layout=none` for designs
 that instantiate an external block.
 
-In an `extern_block` declaration, `parameters={WIDTH:"42"}` emits a named
-SystemVerilog parameter override. Use a behavioral model that matches the
-external module's elaborated configuration.
+For an opaque RTL module, use `kind=opaque_extern_block` with `module_name=`
+and an inline map such as `ports={clk:clock, data:input bits[8], q:output bits[8]}`.
+`block2sv` uses the declared interface to emit the named connections. Native
+evaluation reports a reachable opaque instance as an error.
+
+Both external block kinds accept `parameters={WIDTH:"42"}` to emit a named
+SystemVerilog parameter override. Use a behavioral model or inline interface
+that matches the external module's elaborated configuration.
+
+Either external block kind can use `input_casts={mode:"pkg::mode_t"}` to
+cast the named input connection to a typedef supplied with the external RTL.
 
 Leading-zero counts, priority encoders, normalization, and
 priority selects use explicit `casez` helper functions. Arithmetic helpers retain

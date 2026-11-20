@@ -115,17 +115,14 @@ fn elaborate<'a>(package: &'a Package, top: &'a Block) -> Result<Vec<Instance<'a
         let clock = block.clock_port_name();
         for inst in block.instantiations.iter().rev() {
             let child_path = qualified(&path, &inst.name);
-            if !inst.kind.is_block() {
-                return Err(format!(
+            let model = inst.referenced_block().ok_or_else(|| {
+                format!(
                     "unsupported extern instance '{child_path}' in block '{}'",
                     block.name
-                ));
-            }
-            let child = blocks.get(inst.block.as_str()).ok_or_else(|| {
-                format!(
-                    "instance '{child_path}' references missing block '{}'",
-                    inst.block
                 )
+            })?;
+            let child = blocks.get(model).ok_or_else(|| {
+                format!("instance '{child_path}' references missing block '{model}'")
             })?;
             if clock.is_none() && child.clock_port_name().is_some() {
                 return Err(format!(

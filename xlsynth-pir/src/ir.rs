@@ -1782,16 +1782,42 @@ pub struct Register {
     pub reset_value: Option<IrValue>,
 }
 
+/// A named port on an external module whose implementation is opaque to PIR.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpaqueExternPort {
+    pub name: String,
+    pub kind: OpaqueExternPortKind,
+}
+
+/// The role and, for data ports, the PIR type of an opaque external pin.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum OpaqueExternPortKind {
+    Clock,
+    Input(Type),
+    Output(Type),
+    Inout(Type),
+}
+
 /// Describes how a block instance is modeled and emitted.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InstantiationKind {
     Block,
     Extern,
     /// Uses a package block for behavior and an external module for RTL.
-    ExternBlock {
+    BehavioralExternBlock {
         module_name: String,
         /// Named overrides as decoded SystemVerilog expression text.
         parameters: BTreeMap<String, String>,
+        /// Named input connections to cast to SystemVerilog typedefs.
+        input_casts: BTreeMap<String, String>,
+    },
+    /// Supplies an inline interface to a separately implemented RTL module.
+    OpaqueExternBlock {
+        ports: Vec<OpaqueExternPort>,
+        /// Named overrides as decoded SystemVerilog expression text.
+        parameters: BTreeMap<String, String>,
+        /// Named input connections to cast to SystemVerilog typedefs.
+        input_casts: BTreeMap<String, String>,
     },
 }
 
@@ -1815,9 +1841,34 @@ pub(crate) fn validate_extern_block_parameters(
     Ok(())
 }
 
-/// Prints a named override map using PIR string escaping and lexical key order.
-pub(crate) fn format_extern_block_parameters(parameters: &BTreeMap<String, String>) -> String {
-    let entries = parameters
+/// Checks that an external input can supply an expression for a named SV cast.
+pub(crate) fn validate_extern_block_input_cast(
+    instance_name: &str,
+    port_name: &str,
+    input_type: &Type,
+    sv_type: &str,
+) -> Result<(), String> {
+    if input_type.checked_bit_count() == Some(0) {
+        return Err(format!(
+            "extern block instance '{instance_name}' cannot cast zero-width input '{port_name}'"
+        ));
+    }
+    let valid_identifier = xlsynth_vast::is_system_verilog_simple_identifier;
+    let valid_type = match sv_type.split_once("::") {
+        Some((package, name)) => valid_identifier(package) && valid_identifier(name),
+        None => valid_identifier(sv_type),
+    };
+    if !valid_type {
+        return Err(format!(
+            "extern block instance '{instance_name}' input cast for port '{port_name}' requires a SystemVerilog type name, got '{sv_type}'"
+        ));
+    }
+    Ok(())
+}
+
+/// Prints named strings using PIR string escaping and lexical key order.
+pub(crate) fn format_extern_block_string_map(values: &BTreeMap<String, String>) -> String {
+    let entries = values
         .iter()
         .map(|(name, value)| format!("{name}:\"{}\"", escape_xls_ir_string(value)))
         .collect::<Vec<_>>()
@@ -1828,7 +1879,15 @@ pub(crate) fn format_extern_block_parameters(parameters: &BTreeMap<String, Strin
 impl InstantiationKind {
     /// Returns whether the instance references a block in the package.
     pub fn is_block(&self) -> bool {
-        matches!(self, Self::Block | Self::ExternBlock { .. })
+        matches!(self, Self::Block | Self::BehavioralExternBlock { .. })
+    }
+
+    /// Returns whether the instance emits a separately supplied RTL module.
+    pub fn is_external_block(&self) -> bool {
+        matches!(
+            self,
+            Self::BehavioralExternBlock { .. } | Self::OpaqueExternBlock { .. }
+        )
     }
 }
 
@@ -1836,9 +1895,28 @@ impl InstantiationKind {
 #[derive(Debug, Clone)]
 pub struct Instantiation {
     pub name: String,
-    /// Package block or foreign function that provides the instance interface.
+    /// Referenced block or foreign function, or the module name of an opaque
+    /// extern.
     pub block: String,
     pub kind: InstantiationKind,
+}
+
+impl Instantiation {
+    /// Returns the package block expanded by graph-based analysis.
+    pub fn referenced_block(&self) -> Option<&str> {
+        self.kind.is_block().then_some(self.block.as_str())
+    }
+
+    /// Returns the module name used for an ordinary or external block instance.
+    pub fn rtl_module_name(&self) -> Option<&str> {
+        match &self.kind {
+            InstantiationKind::Block | InstantiationKind::OpaqueExternBlock { .. } => {
+                Some(self.block.as_str())
+            }
+            InstantiationKind::BehavioralExternBlock { module_name, .. } => Some(module_name),
+            InstantiationKind::Extern => None,
+        }
+    }
 }
 
 impl Package {
@@ -1849,9 +1927,10 @@ impl Package {
             let block_uses_extensions = match member {
                 PackageMember::Block(block) => {
                     !block.inout_nets.is_empty()
-                        || block.instantiations.iter().any(|instance| {
-                            matches!(instance.kind, InstantiationKind::ExternBlock { .. })
-                        })
+                        || block
+                            .instantiations
+                            .iter()
+                            .any(|instance| instance.kind.is_external_block())
                 }
                 PackageMember::Function(_) => false,
             };
@@ -2114,7 +2193,7 @@ block model() {
 }
 
 top block wrapper() {
-  instantiation u(block=model, kind=extern_block)
+  instantiation u(block=model, kind=behavioral_extern_block)
 }
 "#;
         let external = ir_parser::Parser::new(ir)
@@ -2122,7 +2201,7 @@ top block wrapper() {
             .unwrap();
         assert!(external.uses_pir_extensions());
 
-        let ordinary_ir = ir.replace("kind=extern_block", "kind=block");
+        let ordinary_ir = ir.replace("kind=behavioral_extern_block", "kind=block");
         let ordinary = ir_parser::Parser::new(&ordinary_ir)
             .parse_and_validate_package()
             .unwrap();

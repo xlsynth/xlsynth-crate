@@ -8,7 +8,7 @@ block model(data: bits[8], out: bits[8]) {
 }
 
 top block parameterized_wrapper(data: bits[8], result: bits[8]) {
-  instantiation u_ext(block=model, module_name=parameterized_rtl, parameters={WIDTH:"1 << 3", LABEL:"\"wide \\\"mode\\\"\""}, kind=extern_block)
+  instantiation u_ext(block=model, module_name=parameterized_rtl, parameters={WIDTH:"1 << 3", LABEL:"\"wide \\\"mode\\\"\""}, kind=behavioral_extern_block)
   data: bits[8] = input_port(name=data, id=3)
   sent: () = instantiation_input(data, instantiation=u_ext, port_name=data, id=4)
   received: bits[8] = instantiation_output(instantiation=u_ext, port_name=out, id=5)

@@ -8,6 +8,7 @@ use fixtures::*;
 use std::fs;
 use std::path::Path;
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_test_helpers::{FlistEntry, assert_valid_sv_flist};
 
 /// Runs every independently authored combined block-IR/SystemVerilog fixture.
 #[test]
@@ -53,13 +54,43 @@ fn external_block_uses_its_model_name_by_default() {
     );
 }
 
+/// Checks enum-typed vendor inputs with their separately supplied SV package.
+#[test]
+fn extern_block_input_casts_match_golden_and_elaborate_with_slang() {
+    let fixture =
+        GoldenFixture::parse(include_str!("goldens/extern_input_casts.golden.ir")).unwrap();
+    let wrapper = execute_golden_fixture(&fixture).unwrap();
+    assert_eq!(wrapper, fixture.expected_output());
+    assert_valid_sv_flist(&[
+        FlistEntry {
+            filename: "vendor.sv".to_string(),
+            contents: r#"package vendor$pkg;
+  typedef enum logic [1:0] { IDLE = 0, RUN = 1 } mode$t;
+endpackage
+
+module vendor #(parameter bit ENABLE = 1'b0) (
+  input vendor$pkg::mode$t mode,
+  output logic active
+);
+  assign active = ENABLE && (mode == vendor$pkg::RUN);
+endmodule
+"#
+            .to_string(),
+        },
+        FlistEntry {
+            filename: "wrapper.sv".to_string(),
+            contents: wrapper,
+        },
+    ]);
+}
+
 /// Preserves whole-net inout wiring when a model is also used as an RTL child.
 #[test]
 fn external_block_and_ordinary_child_share_an_inout_net() {
     let source = include_str!("goldens/block2sv/hierarchy/shared_inout.golden.ir")
         .replace(
             "instantiation left(block=pad_cell, kind=block)",
-            "instantiation left(block=pad_cell, module_name=board_pad, kind=extern_block)",
+            "instantiation left(block=pad_cell, module_name=board_pad, kind=behavioral_extern_block)",
         )
         .replace(
             "// EXPECT-SV:   pad_cell left (",
