@@ -19,6 +19,7 @@ pub mod edit_distance;
 mod ffi_proto;
 pub mod fuzz_utils;
 pub mod greedy_matching_ged;
+pub mod inout;
 pub mod ir;
 pub mod ir_annotate_ranges;
 mod ir_block;

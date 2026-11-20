@@ -450,8 +450,8 @@ fn emit_member(file: &VastFile, member: &MemberData) -> String {
             };
             format!(
                 "tran {name}{range}({}, {});",
-                emit_expr(file, left.to_expr()),
-                emit_expr(file, right.to_expr())
+                emit_expr(file, *left),
+                emit_expr(file, *right)
             )
         }
         MemberData::Instantiation(handle) => emit_instantiation(file, *handle),

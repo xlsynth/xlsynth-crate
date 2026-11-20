@@ -792,3 +792,65 @@ fn simulate_inout_fixture(ir: &str, testbench: &str) -> Result<(), Box<dyn std::
     tools.run(directory.path(), &binary, Duration::from_secs(30))?;
     Ok(())
 }
+
+#[test]
+fn repeated_inout_positions_are_tied_and_disjoint_spares_are_independent() {
+    simulate_inout_fixture(
+        include_str!("goldens/block2sv/hierarchy/repeated_inout_bits.golden.ir"),
+        r#"
+module tb;
+  reg [7:0] stimulus;
+  wire [7:0] t, i;
+  wrapper dut(.*);
+  assign t = stimulus;
+  assign i = stimulus;
+  task check(input [7:0] drive, input [7:0] expected);
+    stimulus = drive;
+    #1;
+    if (t !== expected || i !== drive)
+      $fatal(1, "drive=%b tied=%b expected=%b independent=%b", drive, t, expected, i);
+  endtask
+  initial begin
+    check(8'bzz_zzzz_zz, 8'bzz_zzzz_zz);
+    check(8'b1z_zzzz_zz, 8'b1z_zzzz_1z);
+    check(8'bzz_zzzz_0z, 8'b0z_zzzz_0z);
+    check(8'bz1_zzzz_zz, 8'bz1_zzzz_z1);
+    check(8'bzz_zzzz_z0, 8'bz0_zzzz_z0);
+    check(8'b1z_1010_0z, 8'bxz_1010_xz);
+    check(8'bzz_zzzz_zz, 8'bzz_zzzz_zz);
+    $finish;
+  end
+endmodule
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn sliced_child_transfers_and_releases_only_connected_lanes() {
+    simulate_inout_fixture(
+        include_str!("goldens/block2sv/hierarchy/sliced_child.golden.ir"),
+        r#"
+module tb;
+  wire [7:0] pad, seen;
+  reg [7:0] external_drive;
+  reg [3:0] data;
+  reg oe;
+  wrapper dut(.*);
+  assign pad = external_drive;
+  initial begin
+    oe = 0; data = 4'b1101; external_drive = 8'b1001_1001;
+    #1; if (seen !== 8'b10_zz_1001) $fatal;
+    external_drive = 'z; oe = 1;
+    #1; if (pad !== 8'b01zz_zzzz || seen !== 8'bzz_1101_zz) $fatal;
+    external_drive = 8'b10zz_1111;
+    #1; if (pad !== 8'bxxzz_1111 || seen !== 8'b11_11xx_zz) $fatal;
+    oe = 0; external_drive = 'z;
+    #1; if (pad !== 8'bz || seen !== 8'bz) $fatal;
+    $finish;
+  end
+endmodule
+"#,
+    )
+    .unwrap();
+}

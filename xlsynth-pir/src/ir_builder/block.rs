@@ -65,13 +65,24 @@ struct RegisterState {
 enum PortSignature {
     Input(String, Type),
     Output(String, Type),
-    Inout(String, Type, String),
+    Inout(String, Type),
     Clock(String),
+}
+
+/// A range of publicly observable pin ties, independent of the local net names.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PublicTie {
+    first: String,
+    other: String,
+    start: usize,
+    other_start: usize,
+    width: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockSignature {
     ports: Vec<PortSignature>,
+    aliases: Vec<PublicTie>,
     reset: Option<(String, ResetBehavior)>,
 }
 
@@ -227,29 +238,23 @@ impl Builder<BlockState> {
         })
     }
 
-    /// Binds a public inout pin to a whole local net.
+    /// Binds a full public pin to local nets in MSB-first binding order.
     pub fn ext_inout_port(
         &mut self,
         name: &str,
         port_type: Type,
-        net: BInoutNet,
+        net: impl Into<ir::InoutBinding<BInoutNet>>,
     ) -> Result<BValue, BuilderError> {
         self.check_node_name(name, None)?;
         if checked_flat_width(&port_type)? == 0 || port_type.contains_token() {
             return Err(invalid("inout ports require a nonempty, token-free type"));
         }
-        let def = self.net_definition(net)?;
-        if def.ty != port_type {
-            return Err(invalid(format!(
-                "inout port '{name}' has type {port_type}, net '{}' has type {}",
-                def.name, def.ty
-            )));
-        }
+        let net = self.resolve_inout_binding(net.into(), &port_type)?;
         let port = self.add_node(
             NodePayload::ExtInoutPort {
                 name: name.to_owned(),
                 port_type,
-                net: def.name.clone(),
+                net,
                 sv_type: None,
             },
             Some(Type::nil()),
@@ -261,6 +266,20 @@ impl Builder<BlockState> {
             .insert(name.to_owned(), Some(port.node));
         self.state.ports.push(BlockPort::Inout(port.node));
         Ok(port)
+    }
+
+    fn resolve_inout_binding(
+        &self,
+        binding: ir::InoutBinding<BInoutNet>,
+        ty: &Type,
+    ) -> Result<ir::InoutBinding, BuilderError> {
+        crate::inout::resolve_binding(&binding, ty, |net| {
+            self.net_definition(*net)
+                .map(|d| (net.index, d))
+                .map_err(|e| e.to_string())
+        })
+        .map_err(invalid)?;
+        binding.try_map(|net| self.net_definition(*net).map(|d| d.name.clone()))
     }
 
     /// Rejects handles from another builder before accessing a declaration.
@@ -321,16 +340,15 @@ impl Builder<BlockState> {
         &mut self,
         instance: BInstantiation,
         port_name: &str,
-        parent: BInoutNet,
+        parent: impl Into<ir::InoutBinding<BInoutNet>>,
     ) -> Result<BValue, BuilderError> {
         let index = self.instance_index(instance)?;
-        let pin = self.net_definition(parent)?;
         let state = &self.state.instances[index];
-        if state.inout_types.get(port_name) != Some(&pin.ty) {
-            return Err(invalid(format!(
-                "missing or incompatible child inout {port_name}"
-            )));
-        }
+        let ty = state
+            .inout_types
+            .get(port_name)
+            .ok_or_else(|| invalid(format!("missing child inout {port_name}")))?;
+        let net = self.resolve_inout_binding(parent.into(), ty)?;
         if state.inout_connections.contains(port_name) {
             return Err(invalid(format!(
                 "child inout {port_name} is already connected"
@@ -340,7 +358,7 @@ impl Builder<BlockState> {
             NodePayload::ExtInstantiationInout {
                 instantiation: state.definition.name.clone(),
                 port_name: port_name.to_owned(),
-                net: pin.name.clone(),
+                net,
             },
             None,
         )?;
@@ -602,7 +620,7 @@ impl Builder<BlockState> {
                 PortSignature::Output(name, ty) => {
                     output_types.insert(name.clone(), ty.clone());
                 }
-                PortSignature::Inout(name, ty, _) => {
+                PortSignature::Inout(name, ty) => {
                     inout_types.insert(name.clone(), ty.clone());
                 }
                 PortSignature::Clock(_) => {
@@ -917,8 +935,6 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
     let mut names = BTreeSet::new();
     let mut input_names = BTreeMap::new();
     let mut clock_seen = false;
-    // Compare which public pins are tied, independently of internal net names.
-    let mut net_representatives = BTreeMap::new();
     for port in &block.ports {
         let signature =
             match port {
@@ -934,10 +950,7 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
                         invalid("instance target inout references a missing node")
                     })?;
                     let NodePayload::ExtInoutPort {
-                        name,
-                        port_type,
-                        net,
-                        ..
+                        name, port_type, ..
                     } = &node.payload
                     else {
                         return Err(invalid(
@@ -950,8 +963,7 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
                     {
                         return Err(invalid("invalid instance inout port type"));
                     }
-                    let representative = *net_representatives.entry(net).or_insert(name);
-                    PortSignature::Inout(name.clone(), port_type.clone(), representative.clone())
+                    PortSignature::Inout(name.clone(), port_type.clone())
                 }
                 BlockPort::Input(port) => {
                     let node = block.nodes.get(port.index).ok_or_else(|| {
@@ -1012,7 +1024,48 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
             ))
         })
         .transpose()?;
-    Ok(BlockSignature { ports, reset })
+    let segments = crate::inout::InoutNetMap::new(&block.inout_nets)
+        .map_err(invalid)?
+        .public_segments(block)
+        .map_err(invalid)?;
+    let mut ties = Vec::new();
+    for segment in segments.into_iter().flatten() {
+        if let Some((first, others)) = segment.ports.split_first() {
+            for other in others {
+                ties.push(PublicTie {
+                    first: block.port_name(first.port).into(),
+                    other: block.port_name(other.port).into(),
+                    start: first.start,
+                    other_start: other.start,
+                    width: segment.width,
+                });
+            }
+        }
+    }
+    // Keep parallel ties together even when one pin position has several
+    // aliases.
+    ties.sort_by(|a, b| {
+        let shift = |t: &PublicTie| t.other_start as i128 - t.start as i128;
+        (&a.first, &a.other, shift(a), a.start).cmp(&(&b.first, &b.other, shift(b), b.start))
+    });
+    let mut aliases = Vec::<PublicTie>::new();
+    for tie in ties {
+        if let Some(prev) = aliases.last_mut()
+            && prev.first == tie.first
+            && prev.other == tie.other
+            && prev.start + prev.width == tie.start
+            && prev.other_start + prev.width == tie.other_start
+        {
+            prev.width += tie.width;
+        } else {
+            aliases.push(tie);
+        }
+    }
+    Ok(BlockSignature {
+        ports,
+        reset,
+        aliases,
+    })
 }
 
 /// Captures named external inputs as well as positional types and return type.

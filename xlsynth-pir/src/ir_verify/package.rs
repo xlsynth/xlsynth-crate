@@ -950,14 +950,8 @@ fn validate_inout_bindings(
         block: block.name.clone(),
         reason,
     };
-    let mut net_indices = HashMap::new();
-    for (index, net) in block.inout_nets.iter().enumerate() {
-        if net.name.is_empty() || net_indices.insert(net.name.as_str(), index).is_some() {
-            return Err(error(format!(
-                "empty or duplicate inout net name '{}'",
-                net.name
-            )));
-        }
+    let nets = crate::inout::InoutNetMap::new(&block.inout_nets).map_err(error)?;
+    for net in &block.inout_nets {
         if !is_valid_inout_type(&net.ty) {
             return Err(error(format!(
                 "inout net '{}' requires a nonempty, token-free type",
@@ -988,9 +982,9 @@ fn validate_inout_bindings(
     // can be distinguished from binding an ordinary port or unknown instance.
     let mut bound = HashSet::new();
     let mut drivers = HashSet::new();
-    let mut connections = vec![false; block.inout_nets.len()];
+    let mut connections = vec![Vec::new(); block.inout_nets.len()];
     for node in &block.nodes {
-        let (name, actual_type) = match &node.payload {
+        let (binding, actual_type) = match &node.payload {
             NodePayload::ExtInoutPort {
                 name,
                 net,
@@ -1004,12 +998,27 @@ fn validate_inout_bindings(
                 }
                 (net, port_type)
             }
-            NodePayload::ExtInoutRead { net } => (net, &node.ty),
-            NodePayload::ExtInoutDrive { net, drive, .. } => {
-                if !drivers.insert(net) {
-                    return Err(error(format!("duplicate driver for inout net '{net}'")));
+            NodePayload::ExtInoutRead { net } | NodePayload::ExtInoutDrive { net, .. } => {
+                let index = nets.index(net).map_err(error)?;
+                let def = &nets.nets[index];
+                let ty = if let NodePayload::ExtInoutDrive { drive, .. } = &node.payload {
+                    if !drivers.insert(net) {
+                        return Err(error(format!("duplicate driver for inout net '{net}'")));
+                    }
+                    block.get_node_ty(*drive)
+                } else {
+                    &node.ty
+                };
+                if ty != &def.ty {
+                    return Err(error(format!(
+                        "{} node {} references net '{net}' of type {}, got {ty}",
+                        node.payload.get_operator(),
+                        node.text_id,
+                        def.ty
+                    )));
                 }
-                (net, block.get_node_ty(*drive))
+                connections[index].push(0..def.ty.bit_count());
+                continue;
             }
             NodePayload::ExtInstantiationInout {
                 instantiation,
@@ -1031,27 +1040,35 @@ fn validate_inout_bindings(
             }
             _ => continue,
         };
-        let &index = net_indices
-            .get(name.as_str())
-            .ok_or_else(|| error(format!("undeclared inout net '{name}'")))?;
-        let ty = &block.inout_nets[index].ty;
-        if actual_type != ty {
-            return Err(error(format!(
-                "{} node {} references net '{name}' of type {ty}, got {actual_type}",
-                node.payload.get_operator(),
-                node.text_id
-            )));
+        for span in nets.resolve(binding, actual_type).map_err(error)? {
+            connections[span.net].push(span.net_start..span.net_start + span.width);
         }
-        connections[index] = true;
     }
     if let Some((inst, pin)) = expected.keys().find(|endpoint| !bound.contains(*endpoint)) {
         return Err(error(format!("missing inout binding {inst}.{pin}")));
     }
-    for (net, connected) in block.inout_nets.iter().zip(connections) {
-        if !connected {
+    for (net, mut ranges) in block.inout_nets.iter().zip(connections) {
+        if ranges.is_empty() {
             return Err(error(format!(
                 "inout net '{}' has no connections",
                 net.name
+            )));
+        }
+        ranges.sort_unstable_by_key(|r| r.start);
+        let width = net.ty.bit_count();
+        let mut covered = 0;
+        let mut holes = Vec::new();
+        for r in ranges.into_iter().chain(std::iter::once(width..width)) {
+            if r.start > covered {
+                holes.push(format!("[{}:{}]", r.start - 1, covered));
+            }
+            covered = covered.max(r.end);
+        }
+        if !holes.is_empty() {
+            return Err(error(format!(
+                "inout net '{}' has uncovered bits {}",
+                net.name,
+                holes.join(", ")
             )));
         }
     }

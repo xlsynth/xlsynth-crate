@@ -60,13 +60,15 @@ struct field ordering policies are exported from the same module.
 - Transitive block hierarchy and existing foreign-function instantiations.
 - A declared inout net supports any number of child pin connections and one local
   driver, emitted as `assign pad = oe ? drive : 'z;`. A private net gets one
-  module-local wire. Each public `ext_inout_port` binds to a whole net of the
-  same PIR type and carries an optional `sv_type`. Its net uses the first
-  connected port in header order as its wire. A net connected only to one
+  module-local wire. Public and child inouts accept whole nets of the same PIR type
+  or full-width connections made from bit-vector selects and MSB-first concats.
+  A public port carries an optional `sv_type`. A public net range uses the
+  first connected port in header order as its wire. A net connected only to one
   public port therefore emits just the interface declaration. Additional
   aliases connect through bidirectional Verilog `tran` primitives. The emitted RTL
   preserves four-state resolution across aliases. Synthesis support depends on the tool. See the
-  [shared bus](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir) and
+  [shared bus](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir),
+  [sliced child](tests/goldens/block2sv/hierarchy/sliced_child.golden.ir), and
   [private request/reply](tests/goldens/block2sv/hierarchy/private_request_reply.golden.ir) examples.
 - Width-specific automatic SystemVerilog helpers for mixed-width multiplication,
   partial products, and division/modulo, using original-width operands.

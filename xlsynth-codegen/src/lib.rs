@@ -7,6 +7,7 @@ mod arithmetic;
 mod block;
 mod error;
 mod hierarchy;
+mod inout;
 mod ops;
 mod options;
 mod priority;

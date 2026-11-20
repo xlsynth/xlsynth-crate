@@ -353,8 +353,9 @@ Also add tests in the same style as the existing extension tests:
 ## Bidirectional block nets
 
 A block declares each resolved wire with `ext_inout_net`. An
-`ext_inout_port` node declares a public pin and binds it to one whole local
-net with `net=`. The port and net must have the same PIR type.
+`ext_inout_port` node declares a public pin and gives it a full-width electrical
+binding with `net=`. A whole-net binding requires an exact PIR type match,
+including for tuples and arrays.
 The port node takes no operands and returns `()`. Its public `name` identifies
 the block header entry that supplies its pin type. The node retains that
 type and can carry a port-specific `sv_type` annotation.
@@ -387,11 +388,12 @@ The parent drives the internal `wire [7:0] bus` with `assign bus = oe ? tx : 'z;
 The child samples it through `io` and returns the resolved value on `data`. Each net
 can have any number of reads and at most one local drive operation. The data
 must match the net type exactly. The active-high `bits[1]` enable controls
-the whole wire. Each child inout binds exactly once to a whole parent net of
-the same type. A parent that only connects children needs no read, drive, or
+the whole wire. Each child inout binds exactly once to a full-width parent
+connection. A parent that only connects children needs no read, drive, or
 enable.
 
-Each declared net needs at least one public port, child binding, read, or drive.
+Each bit of a declared net needs at least one public port, child binding, read,
+or drive.
 A single public pin or a single child pin can be its only connection. To keep
 two pins independent inside a block, give each its own net.
 
@@ -405,7 +407,36 @@ the affected bits. Synthesis support for public aliases depends on the tool.
 For example, Yosys 0.68's Verilog writer can turn a `tran` into a one-way
 assignment.
 
-Hierarchy verification follows electrical aliases across instances. Feedback
+### Bit selects and concatenations
+
+For a `bits[N]` public or child port, `net=` also accepts a constant bit select,
+an inclusive descending part select, or an MSB-first concatenation of whole
+bit-vector nets and selects. Each expression must cover the full port width.
+For example, this binding connects child bits 7–6 to `bus[3:2]`, bits 5–4
+to an independent two-bit net, and bits 3–0 to `bus[7:4]`.
+
+```text
+link: () = ext_instantiation_inout(instantiation=u, port_name=io, net={bus[3:2], spare, bus[7:4]}, id=5)
+```
+
+If `bus` binds to the public port `pad`, the emitted instance connection is
+`.io({pad[3:2], spare, pad[7:4]})`. A public port can use the same syntax.
+For `net={upper, driven, lower}` with widths 2, 4, and 2, a local driver on
+`driven` emits `assign pad[5:2] = oe ? data : 'z;`.
+
+Repeated bits create bidirectional ties. In `net={spare, lanes, spare}`, the
+high and low groups connect pairwise. For independent spare lanes, use distinct
+nets or disjoint ranges such as `net={spare[3:2], lanes, spare[1:0]}`. A read
+or drive still operates on an entire declared net. A binding can cover only
+part of a local net if other connections cover its remaining bits.
+
+`BlockBuilder::ext_inout_port` and `bind_inout_net` accept a builder net handle
+or an `InoutBinding<BInoutNet>`. Use `InoutBinding::Piece` for one select and
+`InoutBinding::Concat` for an ordered vector of `InoutPiece::Whole` and
+`InoutPiece::Select { net, hi, lo }` entries.
+
+Hierarchy verification follows electrical aliases and fixed slices and concats
+by bit position across instances. Feedback
 from a read to a driver on the same resolved net through either data or enable
 is invalid. Registers break combinational feedback. Use `block2sv --layout=none`
 (the default) for RTL. Evaluation, formal and gate projection, desugared/FFI

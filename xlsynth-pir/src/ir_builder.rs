@@ -18,6 +18,7 @@ use crate::ir_verify::{
 mod block;
 pub(crate) mod block_cycles;
 mod ops;
+mod port_ranges;
 
 pub use block::{
     BInoutNet, BInstantiation, BRegister, BlockBuilder, BlockState, RegisterWriteOptions,

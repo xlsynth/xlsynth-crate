@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: Apache-2.0
+package repeated_pins
+
+block tied(pad: bits[8]) {
+  ext_inout_net spare(bits[2])
+  ext_inout_net lanes(bits[4])
+  pad: () = ext_inout_port(name=pad, net={spare, lanes, spare}, id=1)
+}
+
+block independent(pad: bits[8]) {
+  ext_inout_net spare(bits[4])
+  ext_inout_net lanes(bits[4])
+  pad: () = ext_inout_port(name=pad, net={spare[3:2], lanes, spare[1:0]}, id=2)
+}
+
+top block wrapper(t: bits[8], i: bits[8]) {
+  ext_inout_net t(bits[8])
+  ext_inout_net i(bits[8])
+  instantiation tied_pins(block=tied, kind=block)
+  instantiation independent_pins(block=independent, kind=block)
+  t: () = ext_inout_port(name=t, net=t, id=3)
+  i: () = ext_inout_port(name=i, net=i, id=4)
+  c: () = ext_instantiation_inout(instantiation=tied_pins, port_name=pad, net=t, id=5)
+  d: () = ext_instantiation_inout(instantiation=independent_pins, port_name=pad, net=i, id=6)
+}
+
+// EXPECT-SV: module tied(
+// EXPECT-SV:   inout wire [7:0] pad
+// EXPECT-SV: );
+// EXPECT-SV:   tran pad_tie[1:0](pad[1:0], pad[7:6]);
+// EXPECT-SV: endmodule
+// EXPECT-SV: module independent(
+// EXPECT-SV:   inout wire [7:0] pad
+// EXPECT-SV: );
+// EXPECT-SV:
+// EXPECT-SV: endmodule
+// EXPECT-SV: module wrapper(
+// EXPECT-SV:   inout wire [7:0] t,
+// EXPECT-SV:   inout wire [7:0] i
+// EXPECT-SV: );
+// EXPECT-SV:   tied tied_pins (
+// EXPECT-SV:     .pad(t)
+// EXPECT-SV:   );
+// EXPECT-SV:   independent independent_pins (
+// EXPECT-SV:     .pad(i)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

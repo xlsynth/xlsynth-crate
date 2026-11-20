@@ -1977,6 +1977,36 @@ impl Parser {
         self.pop_identifier_or_error(&format!("{} attribute", attr_name))
     }
 
+    /// Parses passive connections. Pieces in braces run from MSB to LSB.
+    fn parse_inout_binding(&mut self) -> Result<ir::InoutBinding, ParseError> {
+        self.drop_or_error("net=")?;
+        let concat = self.try_drop("{");
+        let mut pieces = Vec::new();
+        loop {
+            let net = self.pop_identifier_or_error("inout net")?;
+            let piece = if self.try_drop("[") {
+                let hi = self.pop_number_usize_or_error("inout select")?;
+                let lo = if self.try_drop(":") {
+                    self.pop_number_usize_or_error("inout select")?
+                } else {
+                    hi
+                };
+                self.drop_or_error("]")?;
+                ir::InoutPiece::Select { net, hi, lo }
+            } else {
+                ir::InoutPiece::Whole(net)
+            };
+            if !concat {
+                return Ok(ir::InoutBinding::Piece(piece));
+            }
+            pieces.push(piece);
+            if self.try_drop("}") {
+                return Ok(ir::InoutBinding::Concat(pieces));
+            }
+            self.drop_or_error(",")?;
+        }
+    }
+
     /// Parses a port identifier with optional numeric tuple-component suffixes.
     fn parse_dotted_identifier_attribute(&mut self, attr_name: &str) -> Result<String, ParseError> {
         let mut identifier = self.parse_identifier_attribute(attr_name)?;
@@ -2509,7 +2539,7 @@ impl Parser {
                                 "duplicate ext_inout_port net attribute".to_string(),
                             ));
                         }
-                        bound_net = Some(self.parse_identifier_attribute("net")?);
+                        bound_net = Some(self.parse_inout_binding()?);
                     } else if self.peek_is("id=") {
                         if saw_id {
                             return Err(ParseError::new(format!("duplicate {operator} id attribute")));
@@ -3253,7 +3283,7 @@ impl Parser {
                     } else if self.peek_is("port_name=") && port_name.is_none() {
                         port_name = Some(self.parse_identifier_attribute("port_name")?);
                     } else if self.peek_is("net=") && net.is_none() {
-                        net = Some(self.parse_identifier_attribute("net")?);
+                        net = Some(self.parse_inout_binding()?);
                     } else if self.peek_is("id=") && !saw_id {
                         maybe_id = Some(self.parse_id_attribute()?);
                         saw_id = true;

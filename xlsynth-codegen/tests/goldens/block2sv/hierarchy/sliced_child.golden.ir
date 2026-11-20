@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: Apache-2.0
+package sliced_pins
+
+block leaf(io: bits[8], data: bits[4], oe: bits[1], seen: bits[8]) {
+  ext_inout_net upper(bits[2])
+  ext_inout_net driven(bits[4])
+  ext_inout_net lower(bits[2])
+  io: () = ext_inout_port(name=io, net={upper, driven, lower}, id=1)
+  data: bits[4] = input_port(name=data, id=2)
+  oe: bits[1] = input_port(name=oe, id=3)
+  tx: () = ext_inout_drive(data, oe, net=driven, id=4)
+  hi: bits[2] = ext_inout_read(net=upper, id=5)
+  mid: bits[4] = ext_inout_read(net=driven, id=6)
+  lo: bits[2] = ext_inout_read(net=lower, id=7)
+  sample: bits[8] = concat(hi, mid, lo, id=8)
+  seen: () = output_port(sample, name=seen, id=9)
+}
+
+top block wrapper(pad: bits[8], data: bits[4], oe: bits[1], seen: bits[8]) {
+  ext_inout_net bus(bits[8])
+  ext_inout_net spare(bits[2])
+  instantiation u(block=leaf, kind=block)
+  pad: () = ext_inout_port(name=pad, net=bus, id=10)
+  data: bits[4] = input_port(name=data, id=11)
+  oe: bits[1] = input_port(name=oe, id=12)
+  io: () = ext_instantiation_inout(instantiation=u, port_name=io, net={bus[3:2], spare, bus[7:4]}, id=13)
+  d: () = instantiation_input(data, instantiation=u, port_name=data, id=14)
+  e: () = instantiation_input(oe, instantiation=u, port_name=oe, id=15)
+  sample: bits[8] = instantiation_output(instantiation=u, port_name=seen, id=16)
+  seen: () = output_port(sample, name=seen, id=17)
+}
+
+// EXPECT-SV: module leaf(
+// EXPECT-SV:   inout wire [7:0] io,
+// EXPECT-SV:   input logic [3:0] data,
+// EXPECT-SV:   input logic oe,
+// EXPECT-SV:   output logic [7:0] seen
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] sample;
+// EXPECT-SV:   assign io[5:2] = oe ? data : 'z;
+// EXPECT-SV:   assign sample = {io[7:6], io[5:2], io[1:0]};
+// EXPECT-SV:   assign seen = sample;
+// EXPECT-SV: endmodule
+// EXPECT-SV: module wrapper(
+// EXPECT-SV:   inout wire [7:0] pad,
+// EXPECT-SV:   input logic [3:0] data,
+// EXPECT-SV:   input logic oe,
+// EXPECT-SV:   output logic [7:0] seen
+// EXPECT-SV: );
+// EXPECT-SV:   wire [1:0] spare;
+// EXPECT-SV:   logic [7:0] sample;
+// EXPECT-SV:   assign seen = sample;
+// EXPECT-SV:   leaf u (
+// EXPECT-SV:     .io({pad[3:2], spare, pad[7:4]}),
+// EXPECT-SV:     .data(data),
+// EXPECT-SV:     .oe(oe),
+// EXPECT-SV:     .seen(sample)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

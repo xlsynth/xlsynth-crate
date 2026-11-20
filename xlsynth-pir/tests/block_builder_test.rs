@@ -949,7 +949,7 @@ fn open_inout_keeps_its_interface_and_is_rejected_by_two_state_backends() {
     let port = child.get_inout_port("pad").unwrap();
     assert_eq!(child.port_type(port), &ty);
     assert!(
-        matches!(&child.get_node(port).payload, NodePayload::ExtInoutPort { net, sv_type: Some(sv), .. } if net == "pin" && sv == "pkg::lanes")
+        matches!(&child.get_node(port).payload, NodePayload::ExtInoutPort { net, sv_type: Some(sv), .. } if net == &"pin".to_string().into() && sv == "pkg::lanes")
     );
     assert_pir_package(&package);
     let mut parent = BlockBuilder::new("parent");

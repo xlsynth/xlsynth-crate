@@ -2391,3 +2391,23 @@ top block nested_helpers(first: bits[8], second: bits[8], result: bits[8]) {
 "#;
     check_invoke_result(ir, &[("first", 8, 5), ("second", 8, 14)], 7 ^ 16);
 }
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn oversized_inout_binding_fails_before_constructing_verilog_indices() {
+    let ir = format!(
+        r#"package wide
+top block pads(p: bits[{width}]) {{
+  ext_inout_net n(bits[{width}])
+  p: () = ext_inout_port(name=p, net=n, id=1)
+}}"#,
+        width = usize::MAX
+    );
+    let package = Parser::new(&ir).parse_and_verify_package().unwrap();
+    let err = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("exceeds the SystemVerilog emitter's range"),
+        "{err}"
+    );
+}

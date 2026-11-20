@@ -1491,3 +1491,23 @@ endmodule
 "#;
     assert_eq!(verilog, want);
 }
+
+#[test]
+fn tran_selects_require_compatible_constant_net_terminals() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let module = file.add_module("pins");
+    let byte = file.make_bit_vector_type(8, false);
+    let p = file.add_inout(module, "p", &byte);
+    let pin = p.to_indexable_expr();
+    let low = file.make_slice(&pin, 1, 0).to_expr();
+    let high = file.make_slice(&pin, 7, 6).to_expr();
+    let outside = file.make_slice(&pin, 8, 7).to_expr();
+    let expression = file.make_not(&low);
+    for (width, right) in [(2, outside), (2, expression), (1, high), (2, p.to_expr())] {
+        assert!(
+            file.add_tran_selects(module, "tie", width, low, right)
+                .is_err()
+        );
+    }
+    file.add_tran_selects(module, "tie", 2, low, high).unwrap();
+}
