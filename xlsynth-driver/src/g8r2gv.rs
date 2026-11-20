@@ -62,7 +62,7 @@ pub(crate) fn add_mapping_args(
         .arg(Arg::new("strategy").long("strategy").value_parser(["area","delay"]).default_value(default_strategy)
             .help("Native combinational covering objective"))
         .arg(Arg::new("fanout-opt").long("fanout-opt").value_parser(clap::value_parser!(bool))
-            .help("Native combinational fanout optimization (default: on for delay, off for area)"))
+            .help("Optimize native combinational fanout and buffer overloaded register data outputs after assembly (default: on for delay, off for area)"))
         .arg(Arg::new("area-recovery").long("area-recovery").value_parser(clap::value_parser!(bool))
             .help("Native combinational area recovery (default: on for delay, off for area)"))
         .arg(Arg::new("g8r-resize").long("g8r-resize").value_parser(clap::value_parser!(bool))
