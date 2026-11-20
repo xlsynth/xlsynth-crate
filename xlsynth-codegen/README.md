@@ -138,6 +138,10 @@ ordinary named input. Use `Layout::None` for designs that instantiate an externa
 block. Models reached only through external instances are omitted from the
 generated SystemVerilog.
 
+Add `parameters={WIDTH:"42"}` to emit the named SystemVerilog override
+`#(.WIDTH(42))`. `block2sv` emits the decoded text as a parameter expression.
+The behavioral model supplies the interface for the chosen configuration.
+
 The emitter requires the selected block, its instantiated children, and
 behavioral models to be free of `invoke` nodes. The `block2sv` CLI runs
 `inline_invokes_for_codegen` before emission. Rust callers can run the same

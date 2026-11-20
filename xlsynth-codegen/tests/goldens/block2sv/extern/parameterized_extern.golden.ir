@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package parameterized_extern
+
+block model(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+
+top block parameterized_wrapper(data: bits[8], result: bits[8]) {
+  instantiation u_ext(block=model, module_name=parameterized_rtl, parameters={WIDTH:"1 << 3", LABEL:"\"wide \\\"mode\\\"\""}, kind=extern_block)
+  data: bits[8] = input_port(name=data, id=3)
+  sent: () = instantiation_input(data, instantiation=u_ext, port_name=data, id=4)
+  received: bits[8] = instantiation_output(instantiation=u_ext, port_name=out, id=5)
+  result: () = output_port(received, name=result, id=6)
+}
+
+// OPTIONS: layout = "none"
+// EXPECT-SV: module parameterized_wrapper(
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] result
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] received;
+// EXPECT-SV:   assign result = received;
+// EXPECT-SV:   parameterized_rtl #(
+// EXPECT-SV:     .LABEL("wide \"mode\""),
+// EXPECT-SV:     .WIDTH(1 << 3)
+// EXPECT-SV:   ) u_ext (
+// EXPECT-SV:     .data(data),
+// EXPECT-SV:     .out(received)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

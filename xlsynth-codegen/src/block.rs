@@ -249,7 +249,7 @@ fn validate_module_names(
         .filter(|block| emitted.contains(block.name.as_str()))
     {
         for instance in &block.instantiations {
-            if let InstantiationKind::ExternBlock { module_name } = &instance.kind {
+            if let InstantiationKind::ExternBlock { module_name, .. } = &instance.kind {
                 validate_external_identifier(module_name, "module")?;
                 if module_names.contains(module_name.as_str()) {
                     return Err(BlockCodegenError::InvalidBlock(format!(
@@ -1008,6 +1008,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             self.file.add_member_comment(self.module, comment);
         }
 
+        let no_parameters = BTreeMap::new();
         for instance in &self.block.instantiations {
             validate_external_identifier(&instance.name, "instance")?;
             let mut connections = self
@@ -1018,9 +1019,12 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 .map(|(port, value)| (port, value.expr))
                 .collect::<Vec<_>>();
 
-            let module_name = match &instance.kind {
-                InstantiationKind::Block => &instance.block,
-                InstantiationKind::ExternBlock { module_name } => module_name,
+            let (module_name, parameters) = match &instance.kind {
+                InstantiationKind::Block => (&instance.block, &no_parameters),
+                InstantiationKind::ExternBlock {
+                    module_name,
+                    parameters,
+                } => (module_name, parameters),
                 InstantiationKind::Extern => {
                     self.emit_external_instantiation(instance, &connections)?;
                     continue;
@@ -1064,11 +1068,19 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 .iter()
                 .map(|(_, expr)| Some(expr))
                 .collect::<Vec<_>>();
+            let mut parameter_names = Vec::with_capacity(parameters.len());
+            let mut parameter_expressions = Vec::with_capacity(parameters.len());
+            for (name, value) in parameters {
+                validate_external_identifier(name, "parameter")?;
+                parameter_names.push(name.as_str());
+                parameter_expressions.push(self.file.make_inline_verilog_expression(value));
+            }
+            let parameter_expression_refs = parameter_expressions.iter().collect::<Vec<_>>();
             let handle = self.file.make_instantiation(
                 module_name,
                 &instance.name,
-                &[],
-                &[],
+                &parameter_names,
+                &parameter_expression_refs,
                 &names,
                 &expressions,
             );

@@ -5,7 +5,7 @@
 
 #![allow(unused)]
 
-use std::collections::{HashMap, hash_map::OccupiedError};
+use std::collections::{BTreeMap, HashMap, hash_map::OccupiedError};
 
 use crate::{IrFormatPreference, IrValue};
 
@@ -1790,7 +1790,39 @@ pub enum InstantiationKind {
     /// Uses a package block for behavior and an external module for RTL.
     ExternBlock {
         module_name: String,
+        /// Named overrides as decoded SystemVerilog expression text.
+        parameters: BTreeMap<String, String>,
     },
+}
+
+/// Checks parameter names and nonempty expressions without interpreting HDL.
+pub(crate) fn validate_extern_block_parameters(
+    instance_name: &str,
+    parameters: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (name, value) in parameters {
+        if !crate::ir_utils::is_valid_identifier_name(name) {
+            return Err(format!(
+                "extern block instance '{instance_name}' has an invalid parameter name '{name}'"
+            ));
+        }
+        if value.trim().is_empty() {
+            return Err(format!(
+                "extern block instance '{instance_name}' requires a nonempty SystemVerilog expression for parameter '{name}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Prints a named override map using PIR string escaping and lexical key order.
+pub(crate) fn format_extern_block_parameters(parameters: &BTreeMap<String, String>) -> String {
+    let entries = parameters
+        .iter()
+        .map(|(name, value)| format!("{name}:\"{}\"", escape_xls_ir_string(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{entries}}}")
 }
 
 impl InstantiationKind {

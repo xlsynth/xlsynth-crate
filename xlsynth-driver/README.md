@@ -712,6 +712,10 @@ alongside the generated RTL. Models reached only through external instances
 are omitted from the generated RTL. Use the default `--layout=none` for designs
 that instantiate an external block.
 
+In an `extern_block` declaration, `parameters={WIDTH:"42"}` emits a named
+SystemVerilog parameter override. Use a behavioral model that matches the
+external module's elaborated configuration.
+
 Leading-zero counts, priority encoders, normalization, and
 priority selects use explicit `casez` helper functions. Arithmetic helpers retain
 the original operand widths, and name collisions use `__1`, `__2`, etc.

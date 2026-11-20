@@ -726,11 +726,42 @@ endmodule
     }
 }
 
+/// Checks width-dependent ports and the decoded SystemVerilog string value.
+#[test]
+fn parameterized_external_block_applies_overrides_during_elaboration() {
+    simulate_flat_fixture(
+        include_str!("goldens/block2sv/extern/parameterized_extern.golden.ir"),
+        r#"
+module parameterized_rtl #(
+  parameter integer WIDTH = 4,
+  parameter LABEL = "default"
+) (
+  input wire [WIDTH-1:0] data,
+  output wire [WIDTH-1:0] out
+);
+  assign out = LABEL == "wide \"mode\"" ? data : '0;
+endmodule
+
+module tb;
+  logic [7:0] data = 8'ha5;
+  wire [7:0] result;
+  parameterized_wrapper dut(.data(data), .result(result));
+  initial begin
+    #1;
+    if (result !== data) $fatal(1, "external parameter override lost data: %h", result);
+    $finish;
+  end
+endmodule
+"#,
+    )
+    .unwrap();
+}
+
 /// Every participant sees the same four-state value when local or external
 /// drivers release or contend.
 #[test]
 fn shared_inout_drivers_resolve_in_flat_layout() {
-    simulate_inout_fixture(
+    simulate_flat_fixture(
         include_str!("goldens/block2sv/hierarchy/shared_inout.golden.ir"),
         include_str!("testdata/shared_inout_tb.sv"),
     )
@@ -739,7 +770,7 @@ fn shared_inout_drivers_resolve_in_flat_layout() {
 
 #[test]
 fn private_inout_exchanges_request_and_reply_with_a_released_cycle() {
-    simulate_inout_fixture(
+    simulate_flat_fixture(
         include_str!("goldens/block2sv/hierarchy/private_request_reply.golden.ir"),
         include_str!("testdata/private_request_reply_tb.sv"),
     )
@@ -748,7 +779,7 @@ fn private_inout_exchanges_request_and_reply_with_a_released_cycle() {
 
 #[test]
 fn independent_private_nets_keep_their_drivers_isolated() {
-    simulate_inout_fixture(
+    simulate_flat_fixture(
         include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir"),
         r#"
 module tb;
@@ -774,12 +805,12 @@ endmodule
     .unwrap();
 }
 
-/// Compiles and runs the flat RTL with a testbench that checks resolved values.
-fn simulate_inout_fixture(ir: &str, testbench: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// Compiles and runs a testbench with flat generated RTL.
+fn simulate_flat_fixture(ir: &str, testbench: &str) -> Result<(), Box<dyn std::error::Error>> {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()?;
     let pkg = Parser::new(ir).parse_and_validate_package()?;
     let directory = tempfile::tempdir()?;
-    let source = directory.path().join("pads.sv");
+    let source = directory.path().join("generated.sv");
     let rtl = xlsynth_codegen::emit_system_verilog(&pkg, &Default::default())?.system_verilog;
     fs::write(&source, format!("{rtl}\n{testbench}"))?;
     let binary = tools.compile(
