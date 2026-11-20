@@ -975,6 +975,38 @@ impl VastFile {
         self.add_declaration(module, name, data_type, DataKind::Wire)
     }
 
+    /// Ties corresponding bits of two nets with bidirectional Verilog
+    /// primitives.
+    pub fn add_tran(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        width: usize,
+        left: LogicRef,
+        right: LogicRef,
+    ) -> Result<(), VastError> {
+        if width == 0 {
+            return Err(VastError("tran requires a positive width".into()));
+        }
+        self.check(left.0);
+        self.check(right.0);
+        self.check_unique_module_name(module, name, "tran")?;
+        let index = self.check(module.0);
+        self.ast.modules[index]
+            .defined_names
+            .insert(name.to_owned());
+        self.push_member(
+            module,
+            MemberData::Tran {
+                name: name.to_owned(),
+                width,
+                left,
+                right,
+            },
+        );
+        Ok(())
+    }
+
     /// Appends a register declaration to a module.
     pub fn add_reg(
         &mut self,
@@ -1600,6 +1632,14 @@ impl VastFile {
     pub fn make_unsized_x_literal(&mut self) -> Expr {
         self.add_expression(ExprData::Literal {
             text: "'X".into(),
+            value: None,
+        })
+    }
+
+    /// Creates the context-sized SystemVerilog high-impedance literal.
+    pub fn make_unsized_z_literal(&mut self) -> Expr {
+        self.add_expression(ExprData::Literal {
+            text: "'z".into(),
             value: None,
         })
     }

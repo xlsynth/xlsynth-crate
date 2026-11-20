@@ -61,7 +61,10 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
         match &node.payload {
             NodePayload::Nil => {}
             NodePayload::Param => {}
-            NodePayload::InputPort { .. } => {}
+            NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInoutRead { .. }
+            | NodePayload::ExtInstantiationInout { .. }
+            | NodePayload::InputPort { .. } => { /* No graph operands. */ }
             NodePayload::Tuple(elems)
             | NodePayload::Array(elems)
             | NodePayload::ArrayConcat(elems)
@@ -92,7 +95,12 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
                 child_hashes.push(hashes[start.index]);
                 child_depths.push(depths[start.index]);
             }
-            NodePayload::Binop(_, a, b) => {
+            NodePayload::ExtInoutDrive {
+                drive: a,
+                output_enable: b,
+                ..
+            }
+            | NodePayload::Binop(_, a, b) => {
                 child_hashes.push(hashes[a.index]);
                 child_depths.push(depths[a.index]);
                 child_hashes.push(hashes[b.index]);

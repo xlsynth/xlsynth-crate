@@ -725,3 +725,70 @@ endmodule
         );
     }
 }
+
+/// Every participant sees the same four-state value when local or external
+/// drivers release or contend.
+#[test]
+fn shared_inout_drivers_resolve_in_flat_layout() {
+    simulate_inout_fixture(
+        include_str!("goldens/block2sv/hierarchy/shared_inout.golden.ir"),
+        include_str!("testdata/shared_inout_tb.sv"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn private_inout_exchanges_request_and_reply_with_a_released_cycle() {
+    simulate_inout_fixture(
+        include_str!("goldens/block2sv/hierarchy/private_request_reply.golden.ir"),
+        include_str!("testdata/private_request_reply_tb.sv"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn independent_private_nets_keep_their_drivers_isolated() {
+    simulate_inout_fixture(
+        include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir"),
+        r#"
+module tb;
+  reg [3:0] tx = 4'b1010, external_data = 4'bzzzz;
+  reg oe = 0;
+  wire [3:0] rx;
+  host dut(.*);
+  assign dut.reader.test_point = external_data;
+  initial begin
+    #1; if (rx !== 4'bzzzz || dut.writer.test_point !== 4'bzzzz) $fatal;
+    oe = 1;
+    #1; if (rx !== 4'bzzzz || dut.writer.test_point !== tx) $fatal;
+    external_data = 4'b0101;
+    #1; if (rx !== external_data || dut.writer.test_point !== tx ||
+            dut.isolator.a !== external_data || dut.isolator.b !== tx) $fatal;
+    oe = 0;
+    #1; if (rx !== external_data || dut.writer.test_point !== 4'bzzzz) $fatal;
+    $finish;
+  end
+endmodule
+"#,
+    )
+    .unwrap();
+}
+
+/// Compiles and runs the flat RTL with a testbench that checks resolved values.
+fn simulate_inout_fixture(ir: &str, testbench: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()?;
+    let pkg = Parser::new(ir).parse_and_validate_package()?;
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("pads.sv");
+    let rtl = xlsynth_codegen::emit_system_verilog(&pkg, &Default::default())?.system_verilog;
+    fs::write(&source, format!("{rtl}\n{testbench}"))?;
+    let binary = tools.compile(
+        directory.path(),
+        &[&source],
+        "tb",
+        &[],
+        Duration::from_secs(30),
+    )?;
+    tools.run(directory.path(), &binary, Duration::from_secs(30))?;
+    Ok(())
+}

@@ -32,6 +32,9 @@ impl<'a> BlockContext<'a> {
             graph.name,
             package.name
         );
+        graph
+            .reject_inouts("Lean block emission")
+            .map_err(anyhow::Error::msg)?;
         let normalized = if graph
             .nodes
             .iter()

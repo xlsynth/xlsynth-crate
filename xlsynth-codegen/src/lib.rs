@@ -14,12 +14,15 @@ mod slicing;
 mod stages;
 pub mod sv_bridge_builder;
 
+pub use block::inline_invokes_for_codegen;
 pub use error::BlockCodegenError;
 pub use options::{BlockCodegenOptions, BlockCodegenOutput, BlockCodegenWithRegisterNames, Layout};
 
 use xlsynth_pir::ir::Package;
 
 /// Emits the selected block and its transitive block dependencies.
+/// Call [`inline_invokes_for_codegen`] first if those blocks contain function
+/// calls.
 pub fn emit_system_verilog(
     package: &Package,
     options: &BlockCodegenOptions,
@@ -29,6 +32,7 @@ pub fn emit_system_verilog(
 
 /// Emits the RTL and records the allocated signal name for each representable
 /// register in the selected top block.
+/// The same input requirements apply as for [`emit_system_verilog`].
 pub fn emit_system_verilog_with_register_names(
     package: &Package,
     options: &BlockCodegenOptions,

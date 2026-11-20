@@ -411,6 +411,12 @@ pub(crate) enum MemberData {
         lhs: Expr,
         rhs: Expr,
     },
+    Tran {
+        name: String,
+        width: usize,
+        left: LogicRef,
+        right: LogicRef,
+    },
     Instantiation(Instantiation),
     Function(VastFunction),
     Always(VastAlwaysBase),

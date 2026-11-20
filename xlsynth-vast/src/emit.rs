@@ -375,7 +375,9 @@ fn emit_module(file: &VastFile, module: &ModuleData) -> String {
                 ModulePortDirection::Output => "output",
                 ModulePortDirection::InOut => "inout",
             };
-            let kind = if is_user_defined(file, port.data_type) {
+            let kind = if port.direction != ModulePortDirection::InOut
+                && is_user_defined(file, port.data_type)
+            {
                 DataKind::User
             } else {
                 port.kind
@@ -433,6 +435,23 @@ fn emit_member(file: &VastFile, member: &MemberData) -> String {
                 "assign {} = {};",
                 emit_expr(file, *lhs),
                 emit_expr(file, *rhs)
+            )
+        }
+        MemberData::Tran {
+            name,
+            width,
+            left,
+            right,
+        } => {
+            let range = if *width == 1 {
+                String::new()
+            } else {
+                format!("[{}:0]", width - 1)
+            };
+            format!(
+                "tran {name}{range}({}, {});",
+                emit_expr(file, left.to_expr()),
+                emit_expr(file, right.to_expr())
             )
         }
         MemberData::Instantiation(handle) => emit_instantiation(file, *handle),

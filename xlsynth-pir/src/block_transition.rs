@@ -76,6 +76,7 @@ struct RegisterWrite {
 /// Reuses each input and register-read node as a parameter. Write and output
 /// sinks still evaluate to unit when another IR node consumes their value.
 fn project_transition(package: &Package, block: &Block) -> Result<BlockTransition, String> {
+    block.reject_inouts("block transition projection")?;
     if block.reset.as_ref().is_some_and(|reset| reset.asynchronous) {
         return Err(format!(
             "cannot lower asynchronous reset in block '{}' to a rising-edge transition",

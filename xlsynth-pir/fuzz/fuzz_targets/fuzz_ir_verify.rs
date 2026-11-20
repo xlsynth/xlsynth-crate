@@ -38,16 +38,10 @@ fuzz_target!(|ir_text: String| {
         }
     };
 
-    if pkg.members.iter().any(|member| {
-        member
-            .graph()
-            .nodes
-            .iter()
-            .any(|n| n.payload.is_extension_op())
-    }) {
+    if pkg.uses_pir_extensions() {
         // Early-return rationale: this fuzz target checks verification parity
         // between PIR and upstream XLS IR. Upstream does not understand PIR
-        // extension ops (e.g. `ext_carry_out`), so such samples are outside the
+        // extension nodes or pin declarations, so such samples are outside the
         // target's scope. Extension semantics are fuzzed/tested separately.
         return;
     }

@@ -442,6 +442,10 @@ pub(super) fn evaluate(
         // restrictions on a register's arbitrary current value.
         NodePayload::Nil
         | NodePayload::Param
+        | NodePayload::ExtInoutPort { .. }
+        | NodePayload::ExtInoutRead { .. }
+        | NodePayload::ExtInoutDrive { .. }
+        | NodePayload::ExtInstantiationInout { .. }
         | NodePayload::InputPort { .. }
         | NodePayload::RegisterRead { .. }
         | NodePayload::InstantiationOutput { .. }
