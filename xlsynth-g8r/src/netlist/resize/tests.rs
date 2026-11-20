@@ -3228,7 +3228,7 @@ fn electrical_min_area_preserves_unique_trials_and_untruncated_order() -> Result
     ] {
         let mut menus = menu::RecoveryMenus::default();
         let trial_cells = menus.shortlist(
-            families.alternatives(current),
+            &families,
             current,
             &sta,
             0,
@@ -3262,7 +3262,7 @@ fn electrical_min_area_preserves_unique_trials_and_untruncated_order() -> Result
     let sta = IncrementalSta::new(&net.modules[0], &net.nets, &net.interner, &lib, opts.timing)?;
     let mut menus = menu::RecoveryMenus::default();
     let chosen = menus.shortlist(
-        families.alternatives(current),
+        &families,
         current,
         &sta,
         0,
@@ -3275,5 +3275,174 @@ fn electrical_min_area_preserves_unique_trials_and_untruncated_order() -> Result
     );
     let names: Vec<_> = chosen.iter().map(|&i| lib.cells[i].name.as_str()).collect();
     assert_eq!(names, ["INV1", "INV_min_fast"]);
+    Ok(())
+}
+
+// Give one path enough slack for a lower-leakage swap. Include cheaper cells
+// with a different area or pin contract so leakage alone cannot win.
+#[test]
+fn terminal_leakage_uses_slack_and_only_strictly_cheaper_equal_footprints() -> Result<()> {
+    let mut lib = library()?;
+    // Give BUF4 two equally leaky siblings with the timing of BUF2. The
+    // original, smaller BUF2 and the pin-compatible inverter are even cheaper.
+    let medium = lib.cells.iter().find(|c| c.name == "BUF2").unwrap().clone();
+    for name in ["BUF4_LL", "BUF4_LL_TWIN", "BUF4_FORBIDDEN", "BUF4_UNCHAR"] {
+        let mut variant = medium.clone();
+        variant.name = name.into();
+        variant.area = 4.0;
+        variant.dont_use = Some(name == "BUF4_FORBIDDEN");
+        lib.cells.push(variant);
+    }
+    let leakage: RecoveryCellLeakage = serde_json::from_value(serde_json::json!({
+        "liberty_proto_sha256": "0".repeat(64),
+        "cell_leakage_nw": {"BUF4": 10.0, "BUF4_LL": 3.0, "BUF4_LL_TWIN": 3.0,
+                            "BUF2": 1.0, "INV4": 0.5, "BUF4_FORBIDDEN": 0.1}
+    }))?;
+    let mut net = read_gv_from_str(
+        r#"module m(input a, output y, output z);
+             BUF1 critical(.A(a),.Y(y)); BUF4 spare(.A(a),.Y(z)); endmodule"#,
+    )?;
+    let opts = ResizeOptions {
+        max_downsize_rounds: 4,
+        ..options()
+    };
+    let report = recover_leakage_netlist(
+        &mut net.modules[0],
+        &net.nets,
+        &mut net.interner,
+        &lib,
+        &opts,
+        &leakage,
+    )?;
+    assert_eq!(report.recovery.accepted, 1);
+    assert_eq!(report.uncharacterized_instances, 1);
+    assert_eq!(report.initial_characterized_leakage_nw, 10.0);
+    assert_eq!(report.final_characterized_leakage_nw, 3.0);
+    assert_eq!(report.initial_area, 5.0);
+    assert_eq!(report.final_area, report.initial_area);
+    assert_eq!(report.final_delay, report.initial_delay);
+    let names: Vec<_> = net.modules[0]
+        .instances
+        .iter()
+        .map(|i| net.interner.resolve(i.type_name).unwrap())
+        .collect();
+    assert_eq!(names, ["BUF1", "BUF4_LL"]);
+    let second = recover_leakage_netlist(
+        &mut net.modules[0],
+        &net.nets,
+        &mut net.interner,
+        &lib,
+        &opts,
+        &leakage,
+    )?;
+    assert_eq!(second.recovery.trials, 0);
+    assert_eq!(second.recovery.stop_reason, ResizeStopReason::NoImprovement);
+    Ok(())
+}
+
+// A swap can keep the global maximum unchanged while slowing a different
+// input/register/output class. The per-class checkpoints must reject it.
+#[test]
+fn terminal_leakage_protects_each_boundary_even_when_another_boundary_is_slower() -> Result<()> {
+    let mut lib = library()?;
+    let mut slow = lib.cells.iter().find(|c| c.name == "BUF2").unwrap().clone();
+    slow.name = "BUF4_LL".into();
+    slow.area = 4.0;
+    lib.cells.push(slow);
+    let leakage: RecoveryCellLeakage = serde_json::from_value(serde_json::json!({
+        "liberty_proto_sha256": "0".repeat(64), "cell_leakage_nw": {"BUF4": 10.0, "BUF4_LL": 3.0}
+    }))?;
+    let mut net = read_gv_from_str(
+        r#"module m(input clk, input a, output y, output z);
+             wire q;
+             BUF1 slow(.A(a),.Y(y)); DFF4 launch(.CLK(clk),.D(a),.Q(q));
+             BUF4 driver(.A(q),.Y(z)); endmodule"#,
+    )?;
+    let before = net.modules[0].clone();
+    let report = recover_leakage_netlist(
+        &mut net.modules[0],
+        &net.nets,
+        &mut net.interner,
+        &lib,
+        &options(),
+        &leakage,
+    )?;
+    assert!(report.initial_delay.input_to_output > report.initial_delay.register_to_output);
+    assert!(report.initial_delay.register_to_output > 0.0);
+    assert_eq!(report.recovery.trials, 1);
+    assert_eq!(report.recovery.accepted, 0);
+    assert_eq!(net.modules[0], before);
+    assert_eq!(report.final_delay, report.initial_delay);
+    Ok(())
+}
+
+// A valid library-wide table can contain none of the instantiated masters.
+// Preserve those cells and report the unknown count.
+#[test]
+fn terminal_leakage_reports_a_fully_uncharacterized_netlist() -> Result<()> {
+    let lib = library()?;
+    let leakage: RecoveryCellLeakage = serde_json::from_value(serde_json::json!({
+        "liberty_proto_sha256": "0".repeat(64), "cell_leakage_nw": {"INV1": 1.0}
+    }))?;
+    let mut net = read_gv_from_str("module m(input a, output y); BUF1 b(.A(a),.Y(y)); endmodule")?;
+    let before = net.modules[0].clone();
+    let report = recover_leakage_netlist(
+        &mut net.modules[0],
+        &net.nets,
+        &mut net.interner,
+        &lib,
+        &options(),
+        &leakage,
+    )?;
+    assert_eq!(net.modules[0], before);
+    assert_eq!(report.uncharacterized_instances, 1);
+    assert_eq!(report.recovery.trials, 0);
+    Ok(())
+}
+
+// Two minimum-leakage cells have identical footprint but different loaded
+// delay. A bounded trial list must begin with the more promising cell.
+#[test]
+fn terminal_leakage_electrical_menu_breaks_minimum_leakage_ties_by_loaded_delay() -> Result<()> {
+    let mut lib = library()?;
+    lib.reference_buffer_cell = Some("BUF1".into());
+    for cell in lib.cells.iter_mut().filter(|c| c.name.starts_with("INV")) {
+        cell.area = 5.0;
+    }
+    let mut sibling = lib.cells.iter().find(|c| c.name == "INV2").unwrap().clone();
+    sibling.name = "INV_min_feasible".into();
+    lib.cells.push(sibling);
+    let leakage: RecoveryCellLeakage = serde_json::from_value(serde_json::json!({
+        "liberty_proto_sha256": "0".repeat(64),
+        "cell_leakage_nw": {"INV2": 10.0, "INV1": 1.0, "INV_min_feasible": 1.0, "INV4": 4.0}
+    }))?;
+    // With two nominees, INV1 misses timing and INV4 wins the residual
+    // delay band. Breaking the minimum-leakage tie first finds an exact
+    // timing twin of INV2 that leaks one quarter as much as INV4.
+    for (menu, name, expected_leakage) in
+        [(RecoveryCellMenu::ElectricalMinArea, "INV_min_feasible", 1.0)]
+    {
+        let mut net =
+            read_gv_from_str("module m(input a, output y); INV2 g(.A(a),.Y(y)); endmodule")?;
+        let report = recover_leakage_netlist(
+            &mut net.modules[0],
+            &net.nets,
+            &mut net.interner,
+            &lib,
+            &ResizeOptions {
+                max_downsize_rounds: 1,
+                recovery_cell_limit: Some(2),
+                recovery_cell_menu: menu,
+                ..options()
+            },
+            &leakage,
+        )?;
+        assert_eq!(report.recovery.accepted, 1);
+        assert_eq!(report.final_characterized_leakage_nw, expected_leakage);
+        assert_eq!(
+            net.interner.resolve(net.modules[0].instances[0].type_name),
+            Some(name)
+        );
+    }
     Ok(())
 }

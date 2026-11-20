@@ -82,10 +82,12 @@ pub(crate) fn add_mapping_args(
             .help("Choose native registered topology proposals (adaptive default: timing-cones; otherwise legacy)"))
         .arg(Arg::new("refinement-report").long("refinement-report").value_name("PATH")
             .help("Write optimization and tree-refinement measurements for the selected native cover as JSON"))
+        .arg(Arg::new("terminal-leakage-table").long("terminal-leakage-table").value_name("PATH").value_parser(clap::value_parser!(PathBuf))
+            .help("Require a per-cell leakage table bound to the sizing Liberty SHA-256. By default, look for <sha256>.json beside the proto, then in its sidecars/ directory. Without a table, skip leakage recovery"))
         .arg(Arg::new("resize-liberty-proto").long("resize-liberty-proto").value_name("PATH").value_parser(clap::value_parser!(PathBuf))
             .help("Timing library for the adaptive sizing passes (default: --liberty-proto)"))
         .arg(Arg::new("adaptive-resize-report").long("adaptive-resize-report").value_name("PATH")
-            .help("Write sizing checkpoints and stop reasons to JSON. Gate hashes cover Verilog at each epoch; output_sha256 covers the emitted Verilog or protobuf bytes"))
+            .help("Write sizing checkpoints, stop reasons, and leakage status to JSON. Gate hashes cover Verilog at each epoch; output_sha256 covers the emitted Verilog or protobuf bytes"))
         .arg(Arg::new("area-recovery").long("area-recovery").value_parser(clap::value_parser!(bool))
             .help("Recover native mapped area using measured timing (default: on for delay, off for area)"))
         .args(recovery_cell_args())
@@ -372,6 +374,7 @@ pub(crate) fn map_design(
         && let Some(flag) = [
             "strategy",
             "adaptive-resize-report",
+            "terminal-leakage-table",
             "resize-liberty-proto",
             "fanout-opt",
             "area-recovery",

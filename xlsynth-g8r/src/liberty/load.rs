@@ -175,9 +175,8 @@ pub fn load_library_with_timing_data_from_path(path: &Path) -> Result<liberty_mo
     decode_library_with_timing_data_from_bytes(&bytes, &path.display().to_string())
 }
 
-/// A timing model and the digest of the exact source bytes passed to its
-/// decoder. For compressed inputs the identity covers the original compressed
-/// file.
+/// A timing model and SHA-256 digest of the file it was decoded from.
+/// For gzip inputs, the digest covers the original compressed bytes.
 pub struct TimingLibrarySnapshot {
     pub library: liberty_model::Library,
     pub sha256: String,
@@ -189,6 +188,9 @@ impl TimingLibrarySnapshot {
     pub fn from_path(path: &Path) -> Result<Self> {
         let raw = std::fs::read(path)
             .with_context(|| format!("reading liberty proto '{}'", path.display()))?;
+        // Fingerprint the exact file bytes used to decode the model. Reopening
+        // the path for a digest could bind leakage prices to a replacement
+        // file.
         let sha256 = format!("{:x}", Sha256::digest(&raw));
         let bytes = if path.extension().is_some_and(|ext| ext == "gz") {
             let mut bytes = Vec::new();
@@ -377,8 +379,14 @@ mod tests {
         encoder.write_all(&wire.encode_to_vec()).unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("library.proto.gz");
-        std::fs::write(&path, encoder.finish().unwrap()).unwrap();
+        let compressed = encoder.finish().unwrap();
+        std::fs::write(&path, &compressed).unwrap();
 
+        let snapshot = TimingLibrarySnapshot::from_path(&path).unwrap();
+        assert_eq!(
+            snapshot.sha256,
+            format!("{:x}", Sha256::digest(&compressed))
+        );
         let loaded = load_library_with_timing_data_from_path(&path).unwrap();
         assert_eq!(loaded.cells.len(), 1);
         assert_eq!(loaded.cells[0].pins[0].timing_arcs.len(), 1);
