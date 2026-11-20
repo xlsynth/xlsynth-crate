@@ -54,14 +54,13 @@ fn external_block_uses_its_model_name_by_default() {
     );
 }
 
-/// Elaborates enum-typed vendor inputs connected to PIR bit vectors.
+/// Checks enum-typed vendor inputs with their separately supplied SV package.
 #[test]
-fn extern_block_input_casts_elaborate_with_slang() {
-    let fixture = GoldenFixture::parse(include_str!(
-        "goldens/block2sv/extern/input_casts.golden.ir"
-    ))
-    .unwrap();
+fn extern_block_input_casts_match_golden_and_elaborate_with_slang() {
+    let fixture =
+        GoldenFixture::parse(include_str!("goldens/extern_input_casts.golden.ir")).unwrap();
     let wrapper = execute_golden_fixture(&fixture).unwrap();
+    assert_eq!(wrapper, fixture.expected_output());
     assert_valid_sv_flist(&[
         FlistEntry {
             filename: "vendor.sv".to_string(),
