@@ -1714,9 +1714,11 @@ timing conditions are skipped.
   timing rounds; defaults to `max(50000, 4 * N)` for `N` mapped instances,
   including FFs. Explicit `0` permits no evaluation work.
 - `--recovery-evaluation-budget <COUNT>`: instance evaluation visits across all
-  recovery rounds; defaults to `max(100000, 8 * N)`. Independent of the timing
-  budget; explicit `0` permits no evaluation work. Exhaustion rolls back the
-  unfinished trial and keeps verified work.
+  recovery rounds. With a registered stage, the automatic search starts with
+  `max(100000, 8 * N)` visits and renews that allowance while it continues to
+  reduce area, up to `1 + floor(log2(max(1, N)))` windows. Each renewal
+  preserves all four achieved boundary delays. A combinational circuit gets
+  one window. An explicit count sets a hard total, including zero.
 - `--upsize-rounds <COUNT>`, `--downsize-rounds <COUNT>`: default `4` and `2`;
   `0` disables that phase. Evaluation budgets do not reset each round or borrow
   unused work from the other phase.
@@ -1755,11 +1757,16 @@ the matching raw `--liberty` files.
 ABC's default speed flow also buffers and resizes combinational cells.
 Both paths use g8r to legalize synchronous reset and enable controls, select
 physical flip-flops and clock gates, and assemble the netlist.
-Native delay mapping and ABC mapping then resize the assembled logic and
-compatible flops by default, using the same search as `gv-resize`. Native
-area mapping skips this stage by default. A fixed `--register-cell` remains fixed.
-Delay mapping, native cover optimization and final resizing require a timing-enabled
-proto. For a timing-free native area flow, use `--strategy=area`.
+For a registered native design, the mapper attaches the selected physical
+registers to each candidate cover before optimizing it. Buffering, cell sizing
+and area recovery share the same timed circuit. They see the launch cell's Q
+drive and the capacitance of every capture D pin. Delay mapping selects the
+finished cover with the lowest register-to-register delay, breaking ties by
+area. When there is no register-to-register path it uses the worst available
+boundary delay. ABC uses a separate final `gv-resize` pass by default.
+A fixed `--register-cell` remains fixed. Delay mapping and electrical
+optimization require a timing-enabled proto. For timing-free native area
+mapping, use `--strategy=area`.
 
 Existing direct input-to-register and register-to-output connections remain
 wires, without added buffers or inverters. FFs are selected per bit by minimum
@@ -1787,14 +1794,18 @@ Use `--clock-gating=false` to generate an ungated baseline.
   Native never invokes ABC. Both `--abc-path` and raw `--liberty` files are
   rejected unless you explicitly select `--mapper=abc`.
 - `--strategy <delay|area>` – native covering objective (default: delay).
-- `--fanout-opt <BOOL>`, `--area-recovery <BOOL>` – optimize fanout and recover
-  area on the native combinational cover before attaching flops. Each defaults
-  to true for delay and false for area. Explicitly specifying any of these three
-  native-only flags with ABC is an error, even when specifying false.
-- `--g8r-resize <BOOL>` – resize the complete mapped netlist. Defaults to
-  true for native delay and ABC, false for native area. An explicit value overrides the default.
-  Disabling this stage does not disable sizing/buffering inside an ABC script,
-  or the native cover's fanout optimization/area recovery.
+- `--fanout-opt <BOOL>` – enable native fanout changes, including buffers on
+  overloaded internal gates and launch Q nets. Defaults to true for delay
+  mapping and false for area mapping.
+- `--area-recovery <BOOL>` – permit recovery of combinational area even when
+  full sizing is disabled. Defaults to true for native delay mapping and false
+  for native area mapping. ABC rejects explicit `--strategy`, `--fanout-opt`
+  and `--area-recovery`.
+- `--g8r-resize <BOOL>` – permit timing-driven cell sizing and area recovery
+  on combinational cells and compatible flops. Defaults to true for native
+  delay and ABC, false for native area. On registered native designs this uses
+  the same optimization as fanout changes and does one area-recovery search.
+  To disable both full sizing and recovery, set both sizing flags to false.
 - `--primary-input-transition <SLEW>` – input slew in library time units for
   native delay mapping and electrical optimization (default: 0.01).
 - `--liberty-proto <PATH>` – required normalized library for cell selection.
