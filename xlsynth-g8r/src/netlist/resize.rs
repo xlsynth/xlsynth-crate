@@ -23,8 +23,8 @@ use crate::netlist::sta::incremental::{
 };
 
 pub mod registered_opt;
-mod timing;
-use timing::{ResizeTimingPolicy, TimingTieBreak};
+pub(crate) mod timing;
+use timing::{ElectricalGuard, ResizeTimingPolicy, TimingTieBreak};
 
 const AREA_COMPARISON_TOLERANCE: f64 = 1e-12;
 const MAX_SIGNATURE_VARIABLES: usize = 10;
@@ -360,6 +360,7 @@ impl SearchPhase {
 
 /// Search policy and bookkeeping, independent of the STA transaction state.
 struct ResizeSearch<'a> {
+    electrical_guard: ElectricalGuard,
     library: &'a Library,
     options: &'a ResizeOptions,
     families: &'a CellFamilies,
@@ -446,15 +447,21 @@ impl ResizeSearch<'_> {
                 let previous = sta.score();
                 let objective = sta.objective();
                 let secondary = sta.secondary(objective);
-                sta.trial(instance, cell, work_limit, Some(previous), |timing| {
-                    self.accept_timing(timing, previous, objective, secondary, new_area)
-                })
+                sta.guarded_trial(
+                    instance,
+                    cell,
+                    work_limit,
+                    Some(previous),
+                    self.electrical_guard,
+                    |timing| self.accept_timing(timing, previous, objective, secondary, new_area),
+                )
             }
-            SearchPhase::AreaRecovery => sta.trial(
+            SearchPhase::AreaRecovery => sta.guarded_trial(
                 instance,
                 cell,
                 work_limit,
                 Some(self.timing_checkpoint),
+                self.electrical_guard,
                 |timing| timing.score().within(self.timing_checkpoint),
             ),
         }
@@ -693,6 +700,7 @@ pub(crate) fn resize_netlist_with_remaining_budget(
         return Err(anyhow!("area allowance overflows"));
     }
     let mut search = ResizeSearch {
+        electrical_guard: ElectricalGuard::Absolute,
         library,
         options,
         families: &families,
@@ -778,7 +786,7 @@ pub(crate) fn resize_netlist_with_remaining_budget(
 
 /// Compares independent timing paths without turning rounding tolerance into a
 /// cumulative optimization allowance.
-fn verify_timing(incremental: BoundaryDelays, full: BoundaryDelays) -> Result<()> {
+pub(crate) fn verify_timing(incremental: BoundaryDelays, full: BoundaryDelays) -> Result<()> {
     for (a, b) in incremental.values().into_iter().zip(full.values()) {
         if (a - b).abs() > STA_VERIFICATION_TOLERANCE {
             return Err(anyhow!("incremental/full STA mismatch: {a} versus {b}"));

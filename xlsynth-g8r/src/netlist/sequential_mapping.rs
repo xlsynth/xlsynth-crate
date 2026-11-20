@@ -6,6 +6,7 @@ pub(crate) mod assembly;
 mod native;
 
 pub use native::{
+    NativeMappingResult, NativeMappingSchedule, NativeRefinementReport,
     map_sequential_to_area_netlist, map_sequential_to_native_netlist, map_sequential_with_policy,
 };
 

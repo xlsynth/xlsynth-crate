@@ -598,3 +598,100 @@ fn defaults_resolve_independently_and_invalid_options_fail_cleanly() {
     assert!(rejected.stdout.is_empty());
     assert_eq!(std::fs::read(diagnostics).unwrap(), b"original diagnostics");
 }
+
+/// Write a single-bit wire and timing library usable with or without boundary
+/// flops.
+fn registered_controls_fixture(dir: &Path) -> anyhow::Result<impl Fn() -> Command + use<>> {
+    let library_file =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../xlsynth-g8r/tests/data/clock_gate.lib");
+    let lib = parse_liberty_files(&[&library_file]).map_err(anyhow::Error::msg)?;
+    let proto = dir.join("cells.proto");
+    std::fs::write(&proto, library_to_proto(lib)?.encode_to_vec())?;
+    let mut builder = GateBuilder::new("wire".into(), GateBuilderOptions::no_opt());
+    let input = builder.add_input("a".into(), 1);
+    builder.add_output("z".into(), input);
+    let design = SequentialGateFn::from_gate_fn(builder.build());
+    let input = dir.join("wire.g8rbin");
+    std::fs::write(
+        &input,
+        encode_g8r_binary(&design).map_err(anyhow::Error::msg)?,
+    )?;
+    Ok(move || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+        command
+            .arg("g8r2gv")
+            .arg(&input)
+            .arg("--strategy=area")
+            .arg("--output-load-ff=1")
+            .arg("--liberty-proto")
+            .arg(&proto);
+        command
+    })
+}
+
+// Disable sizing to isolate the base fanout pass. Compare its implicit
+// selector with the explicit legacy setting and check that all choices
+// preserve both boundary registers.
+#[test]
+fn ordinary_registered_fanout_accepts_both_selectors_and_defaults_to_legacy() -> anyhow::Result<()>
+{
+    let dir = tempfile::tempdir()?;
+    let fixture = registered_controls_fixture(dir.path())?;
+    let mut outputs = Vec::new();
+    for selector in [None, Some("legacy"), Some("timing-cones")] {
+        let mut command = fixture();
+        command.args([
+            "--fanout-opt=true",
+            "--g8r-resize=false",
+            "--flop-inputs",
+            "--flop-outputs",
+            "--add-clk-port=clk",
+        ]);
+        if let Some(selector) = selector {
+            command.args(["--registered-candidates", selector]);
+        }
+        let output = command.output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let netlist = read_gv_from_str(std::str::from_utf8(&output.stdout)?)?;
+        let instances = &netlist.modules[0].instances;
+        assert_eq!(
+            instances
+                .iter()
+                .filter(|i| netlist.interner.resolve(i.type_name) == Some("DFF"))
+                .count(),
+            2
+        );
+        outputs.push(output.stdout);
+    }
+    assert_eq!(
+        outputs[0], outputs[1],
+        "explicit legacy must match the historical netlist"
+    );
+    Ok(())
+}
+
+// Ask for a report on a run that cannot refine buffer trees. The CLI
+// must fail without creating an empty report that looks successful.
+#[test]
+fn refinement_report_requires_registered_delay_with_sizing_and_fanout() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let fixture = registered_controls_fixture(dir.path())?;
+    let report = dir.path().join("refinement.json");
+    let result = fixture()
+        .arg("--fanout-opt=true")
+        .arg("--refinement-report")
+        .arg(&report)
+        .output()?;
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr)?;
+    assert!(
+        stderr.contains("--refinement-report requires buffer-tree refinement"),
+        "{stderr}"
+    );
+    assert!(!report.exists());
+    Ok(())
+}

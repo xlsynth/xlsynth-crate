@@ -10,9 +10,16 @@
 //! estimate routed delay or hold.
 
 mod candidates;
+pub(crate) mod coordination;
 mod edit;
 mod graph;
+mod owned;
 mod plan;
+mod refine;
+mod selection;
+pub use self::owned::OwnedBuffers;
+pub use self::refine::TreeRefinementReport;
+pub(crate) use self::refine::refine_registered_trees;
 #[cfg(test)]
 mod tests;
 

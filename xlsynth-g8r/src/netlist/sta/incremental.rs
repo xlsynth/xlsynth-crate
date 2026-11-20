@@ -1147,6 +1147,13 @@ impl<'lib> IncrementalSta<'lib> {
         &self.electrical[i]
     }
 
+    /// Limits for the capacitance, transition and fanout of a pin in cached
+    /// order.
+    pub(crate) fn electrical_limits(&self, cell: usize, ordinal: usize) -> [Option<f64>; 3] {
+        let pin = &self.lib.library.cells[cell].pins[self.lib.electrical_pin_order(cell)[ordinal]];
+        [pin.max_capacitance, pin.max_transition, pin.max_fanout]
+    }
+
     /// Driving output of the net observed by an electrical pin check.
     pub(crate) fn electrical_driver(
         &self,
@@ -1357,5 +1364,7 @@ mod tests {
     }
 }
 
+mod timed_fanins;
 mod topology;
 pub use topology::{TimingEdit, TimingInstance, TimingMutation, TrialOptions, TrialResult};
+pub(crate) mod urgency;

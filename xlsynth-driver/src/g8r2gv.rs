@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::parser::ValueSource;
-use clap::{Arg, ArgAction, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use xlsynth_g8r::aig::SequentialGateFn;
 use xlsynth_g8r::liberty::io_defaults::{
     default_output_load, default_output_load_ff, load_ff_in_library_units, resolve_reference_buffer,
@@ -22,9 +22,10 @@ use xlsynth_g8r::netlist::abc::{
 use xlsynth_g8r::netlist::fanout_opt::FanoutOptimizationOptions;
 use xlsynth_g8r::netlist::io::ParsedNetlist;
 use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
+use xlsynth_g8r::netlist::registered_opt::RegisteredCandidateSelection;
 use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
 use xlsynth_g8r::netlist::sequential_mapping::{
-    SequentialMappingOptions, map_sequential_with_policy,
+    NativeMappingSchedule, SequentialMappingOptions, map_sequential_with_policy,
 };
 use xlsynth_g8r::netlist::sta::StaOptions;
 use xlsynth_g8r::techmap::delay::DelayMappingOptions;
@@ -36,6 +37,13 @@ use crate::mapped_netlist_output::{
     Format, PendingOutput, ensure_pb_handle_distinct_from_stderr, format_arg, metadata_if_exists,
     output_arg, output_paths_alias, path_aliases_stream, reset_regular_output, write_stdout,
 };
+
+/// CLI spelling of the netlist library's registered topology selector.
+#[derive(Clone, Copy, ValueEnum)]
+enum RegisteredCandidates {
+    Legacy,
+    TimingCones,
+}
 
 /// Defines the CLI for native or ABC combinational mapping and native register
 /// mapping.
@@ -63,6 +71,11 @@ pub(crate) fn add_mapping_args(
             .help("Native combinational covering objective"))
         .arg(Arg::new("fanout-opt").long("fanout-opt").value_parser(clap::value_parser!(bool))
             .help("Optimize native data fanout with the assembled register loads (default: on for delay, off for area)"))
+        .arg(Arg::new("registered-candidates").long("registered-candidates")
+            .value_parser(clap::value_parser!(RegisteredCandidates))
+            .help("Choose native registered topology proposals (registered delay default: timing-cones; otherwise legacy)"))
+        .arg(Arg::new("refinement-report").long("refinement-report").value_name("PATH")
+            .help("Write optimization and tree-refinement measurements for the selected native cover as JSON"))
         .arg(Arg::new("area-recovery").long("area-recovery").value_parser(clap::value_parser!(bool))
             .help("Recover native mapped area using measured timing (default: on for delay, off for area)"))
         .arg(Arg::new("g8r-resize").long("g8r-resize").value_parser(clap::value_parser!(bool))
@@ -232,14 +245,18 @@ fn write_sidecar(
     Ok(file.write_all(bytes)?)
 }
 
-/// Checks and writes the ABC sidecars before the netlist.
-fn write_abc_sidecars(
+/// Detect aliases before opening sidecars, including deferred named streams.
+fn check_sidecar_outputs(
     matches: &ArgMatches,
     output_path: &Path,
     netlist: &NetlistOutput,
-    diagnostics: &AbcRunDiagnostics,
 ) -> anyhow::Result<()> {
-    for flag in ["diagnostics-out", "abc-stdout-out", "abc-stderr-out"] {
+    for flag in [
+        "diagnostics-out",
+        "abc-stdout-out",
+        "abc-stderr-out",
+        "refinement-report",
+    ] {
         let Some(path) = matches.get_one::<String>(flag).map(Path::new) else {
             continue;
         };
@@ -263,6 +280,14 @@ fn write_abc_sidecars(
             "--{flag} and --output must name different destinations"
         );
     }
+    Ok(())
+}
+
+fn write_abc_sidecars(
+    matches: &ArgMatches,
+    netlist: &NetlistOutput,
+    diagnostics: &AbcRunDiagnostics,
+) -> anyhow::Result<()> {
     if let Some(path) = matches.get_one::<String>("diagnostics-out") {
         let json = serde_json::to_string_pretty(diagnostics)?;
         write_sidecar(
@@ -321,9 +346,15 @@ pub(crate) fn map_design(
         anyhow::bail!("--{flag} requires the ABC mapper (--mapper abc with --liberty)");
     }
     if !native
-        && let Some(flag) = ["strategy", "fanout-opt", "area-recovery"]
-            .into_iter()
-            .find(|flag| matches.value_source(flag) == Some(ValueSource::CommandLine))
+        && let Some(flag) = [
+            "strategy",
+            "fanout-opt",
+            "area-recovery",
+            "registered-candidates",
+            "refinement-report",
+        ]
+        .into_iter()
+        .find(|flag| matches.value_source(flag) == Some(ValueSource::CommandLine))
     {
         anyhow::bail!("--{flag} requires --mapper native");
     }
@@ -350,6 +381,16 @@ pub(crate) fn map_design(
     );
     let design = crate::g8r_cli::apply_netlist_options(matches, load_design()?)
         .map_err(anyhow::Error::msg)?;
+    let registered_delay = delay
+        && resize
+        && (!design.registers.is_empty()
+            || matches.get_flag("flop-inputs")
+            || matches.get_flag("flop-outputs"));
+    let refine_trees = registered_delay && fanout;
+    anyhow::ensure!(
+        refine_trees || !matches.contains_id("refinement-report"),
+        "--refinement-report requires buffer-tree refinement"
+    );
     let library_path = matches.get_one::<String>("liberty-proto").unwrap();
     let library = if needs_timing {
         load_library_with_timing_data_from_path(Path::new(library_path))
@@ -404,7 +445,7 @@ pub(crate) fn map_design(
         ..Default::default()
     });
     let abc_context;
-    let (mut mapped, diagnostics, library) = if native {
+    let (mut mapped, diagnostics, native_report, library) = if native {
         let strategy = if delay {
             CoverStrategy::Delay(DelayMappingOptions {
                 reference_transition: timing.primary_input_transition,
@@ -428,15 +469,27 @@ pub(crate) fn map_design(
                 ..Default::default()
             }),
         };
-        let mapped = map_sequential_with_policy(
+        let candidate_selection = match matches
+            .get_one::<RegisteredCandidates>("registered-candidates")
+        {
+            Some(RegisteredCandidates::TimingCones) => RegisteredCandidateSelection::TimingCones,
+            None if registered_delay => RegisteredCandidateSelection::TimingCones,
+            Some(RegisteredCandidates::Legacy) | None => RegisteredCandidateSelection::Legacy,
+        };
+        let schedule = NativeMappingSchedule {
+            refine_buffer_trees: refine_trees,
+            candidate_selection,
+        };
+        let result = map_sequential_with_policy(
             &design,
             &library,
             &sequential_options,
             strategy,
             &post,
             sizing.as_ref(),
+            schedule,
         )?;
-        (mapped, None, &library)
+        (result.netlist, None, result.refinement, &library)
     } else {
         let mapped;
         (mapped, abc_context) =
@@ -445,6 +498,7 @@ pub(crate) fn map_design(
         (
             mapped.netlist,
             Some(mapped.diagnostics),
+            None,
             abc_context.library(),
         )
     };
@@ -464,8 +518,20 @@ pub(crate) fn map_design(
     let bytes = format.encode(&mapped)?;
     let netlist = NetlistOutput::open(output_path, pb_stderr.as_ref())
         .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))?;
+    check_sidecar_outputs(matches, output_path, &netlist)?;
+    if let Some(path) = matches.get_one::<String>("refinement-report") {
+        let mut json = match native_report {
+            Some(report) => serde_json::to_vec_pretty(&report)?,
+            None => serde_json::to_vec_pretty(
+                &serde_json::json!({"status": "no_registers_after_cleanup"}),
+            )?,
+        };
+        json.push(b'\n');
+        write_sidecar(Path::new(path), &json, "refinement-report", &netlist)
+            .with_context(|| format!("writing native refinement report '{path}'"))?;
+    }
     if let Some(diagnostics) = diagnostics {
-        write_abc_sidecars(matches, output_path, &netlist, &diagnostics)?;
+        write_abc_sidecars(matches, &netlist, &diagnostics)?;
     }
     netlist
         .write(output_path, &bytes, pb_stderr.as_ref())

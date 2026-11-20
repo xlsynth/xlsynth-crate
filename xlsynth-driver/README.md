@@ -1797,6 +1797,16 @@ Use `--clock-gating=false` to generate an ungated baseline.
 - `--fanout-opt <BOOL>` – enable native fanout changes, including buffers on
   overloaded internal gates and launch Q nets. Defaults to true for delay
   mapping and false for area mapping.
+- `--registered-candidates <legacy|timing-cones>` – select how native
+  registered fanout optimization chooses groups of drivers. The legacy
+  policy ranks drivers by electrical severity. The timing-cones policy
+  also proposes groups that feed competing paths into late captures.
+  Native delay mapping with boundary registers and resizing defaults to timing-cones.
+  The selector applies to registered designs with `--fanout-opt=true` (the delay
+  strategy default).
+- `--refinement-report <PATH>` writes JSON with the chosen cover's
+  optimization and buffer-tree edits. This report is available in registered
+  native delay mapping when resizing and fanout optimization are enabled.
 - `--area-recovery <BOOL>` – permit recovery of combinational area even when
   full sizing is disabled. Defaults to true for native delay mapping and false
   for native area mapping. ABC rejects explicit `--strategy`, `--fanout-opt`
