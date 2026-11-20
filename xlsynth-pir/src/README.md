@@ -124,8 +124,7 @@ A behavioral external block uses a model defined earlier in the package.
 the external SystemVerilog module `model`. Set `module_name=external_rtl` to
 target a different module. The model supplies the port names, types, and
 behavior used for evaluation. Instances of the same RTL module with the
-same override map use the same behavioral model within a package. Migrate
-saved PIR from `kind=extern_block` to `kind=behavioral_extern_block`.
+same override map use the same behavioral model within a package.
 
 Both kinds accept named SystemVerilog parameter overrides. For example,
 `parameters={WIDTH:"42"}` emits `.WIDTH(42)`. The PIR strings contain

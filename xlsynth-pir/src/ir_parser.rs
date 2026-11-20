@@ -2258,12 +2258,6 @@ impl Parser {
         }
         let kind = kind
             .ok_or_else(|| ParseError::new("instantiation missing kind attribute".to_string()))?;
-        if kind == "extern_block" {
-            return Err(ParseError::new(
-                "instantiation kind 'extern_block' was renamed to 'behavioral_extern_block'"
-                    .to_string(),
-            ));
-        }
         if module_name.is_some()
             && !matches!(
                 kind.as_str(),
@@ -6571,10 +6565,6 @@ top block pads(io: bits[129]) {
     #[test]
     fn opaque_extern_parser_rejects_invalid_attributes() {
         for (attributes, reason) in [
-            (
-                "block=model, kind=extern_block",
-                "instantiation kind 'extern_block' was renamed to 'behavioral_extern_block'",
-            ),
             (
                 "ports={}, kind=opaque_extern_block",
                 "opaque_extern_block instantiation missing module_name attribute",
