@@ -1496,7 +1496,7 @@ pub(crate) fn validate_external_identifier(
     name: &str,
     kind: &str,
 ) -> Result<(), BlockCodegenError> {
-    if sanitize_identifier(name) != name {
+    if !xlsynth_vast::is_system_verilog_simple_identifier(name) {
         return Err(BlockCodegenError::InvalidBlock(format!(
             "invalid SystemVerilog {kind} identifier `{name}`: identifier is reserved, \
              malformed, or requires escaping"

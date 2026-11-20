@@ -33,6 +33,15 @@ pub use model::{
 
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Reports whether a name is an unescaped, non-keyword SystemVerilog
+/// identifier.
+pub fn is_system_verilog_simple_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+        && !is_system_verilog_keyword(name)
+}
+
 /// Reports whether `identifier` is reserved in Verilog or SystemVerilog.
 ///
 /// Keywords are case-sensitive. This includes the complete Verilog keyword

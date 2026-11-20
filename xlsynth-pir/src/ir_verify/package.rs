@@ -3551,10 +3551,12 @@ top block wrapper(clk: clock, mode: bits[2], active: bits[1]) {
                         .to_string(),
                 })
             );
-            assert_eq!(
-                validate_package(&package_with_cast("mode", "pkg::mode_t")),
-                Ok(())
-            );
+            for sv_type in ["mode$t", "pkg$rtl::mode$t"] {
+                assert_eq!(
+                    validate_package(&package_with_cast("mode", sv_type)),
+                    Ok(())
+                );
+            }
             for port in ["clk_i", "active", "missing"] {
                 assert_eq!(
                     validate_package(&package_with_cast(port, "pkg::mode_t")),
@@ -3566,13 +3568,17 @@ top block wrapper(clk: clock, mode: bits[2], active: bits[1]) {
                     })
                 );
             }
-            assert_eq!(
-                validate_package(&package_with_cast("mode", "pkg::mode_t'(0)")),
-                Err(ValidationError::BlockInvariantViolation {
-                    block: "wrapper".to_string(),
-                    reason: "extern block instance 'u' input cast for port 'mode' requires a SystemVerilog type name, got 'pkg::mode_t'(0)'".to_string(),
-                })
-            );
+            for sv_type in ["pkg::mode_t'(0)", "$pkg::mode_t", "pkg::$mode_t", "module"] {
+                assert_eq!(
+                    validate_package(&package_with_cast("mode", sv_type)),
+                    Err(ValidationError::BlockInvariantViolation {
+                        block: "wrapper".to_string(),
+                        reason: format!(
+                            "extern block instance 'u' input cast for port 'mode' requires a SystemVerilog type name, got '{sv_type}'"
+                        ),
+                    })
+                );
+            }
         }
     }
 

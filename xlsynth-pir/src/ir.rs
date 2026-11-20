@@ -1853,7 +1853,7 @@ pub(crate) fn validate_extern_block_input_cast(
             "extern block instance '{instance_name}' cannot cast zero-width input '{port_name}'"
         ));
     }
-    let valid_identifier = crate::ir_utils::is_valid_identifier_name;
+    let valid_identifier = xlsynth_vast::is_system_verilog_simple_identifier;
     let valid_type = match sv_type.split_once("::") {
         Some((package, name)) => valid_identifier(package) && valid_identifier(name),
         None => valid_identifier(sv_type),

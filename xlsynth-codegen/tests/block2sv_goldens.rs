@@ -64,15 +64,15 @@ fn extern_block_input_casts_match_golden_and_elaborate_with_slang() {
     assert_valid_sv_flist(&[
         FlistEntry {
             filename: "vendor.sv".to_string(),
-            contents: r#"package vendor_pkg;
-  typedef enum logic [1:0] { IDLE = 0, RUN = 1 } mode_t;
+            contents: r#"package vendor$pkg;
+  typedef enum logic [1:0] { IDLE = 0, RUN = 1 } mode$t;
 endpackage
 
 module vendor #(parameter bit ENABLE = 1'b0) (
-  input vendor_pkg::mode_t mode,
+  input vendor$pkg::mode$t mode,
   output logic active
 );
-  assign active = ENABLE && (mode == vendor_pkg::RUN);
+  assign active = ENABLE && (mode == vendor$pkg::RUN);
 endmodule
 "#
             .to_string(),

@@ -10,8 +10,8 @@ block model(mode: bits[2], active: bits[1]) {
 }
 
 top block wrapper(mode: bits[2], modeled: bits[1], opaque: bits[1]) {
-  instantiation u_model(block=model, module_name=vendor, parameters={ENABLE:"1'b1"}, input_casts={mode:"vendor_pkg::mode_t"}, kind=behavioral_extern_block)
-  instantiation u_opaque(module_name=vendor, ports={mode:input bits[2], active:output bits[1]}, parameters={ENABLE:"1'b1"}, input_casts={mode:"vendor_pkg::mode_t"}, kind=opaque_extern_block)
+  instantiation u_model(block=model, module_name=vendor, parameters={ENABLE:"1'b1"}, input_casts={mode:"vendor$pkg::mode$t"}, kind=behavioral_extern_block)
+  instantiation u_opaque(module_name=vendor, ports={mode:input bits[2], active:output bits[1]}, parameters={ENABLE:"1'b1"}, input_casts={mode:"vendor$pkg::mode$t"}, kind=opaque_extern_block)
   mode: bits[2] = input_port(name=mode, id=5)
   model_mode: () = instantiation_input(mode, instantiation=u_model, port_name=mode, id=6)
   model_active: bits[1] = instantiation_output(instantiation=u_model, port_name=active, id=7)
@@ -34,13 +34,13 @@ top block wrapper(mode: bits[2], modeled: bits[1], opaque: bits[1]) {
 // EXPECT-SV:   vendor #(
 // EXPECT-SV:     .ENABLE(1'b1)
 // EXPECT-SV:   ) u_model (
-// EXPECT-SV:     .mode(vendor_pkg::mode_t'(mode)),
+// EXPECT-SV:     .mode(vendor$pkg::mode$t'(mode)),
 // EXPECT-SV:     .active(model_active)
 // EXPECT-SV:   );
 // EXPECT-SV:   vendor #(
 // EXPECT-SV:     .ENABLE(1'b1)
 // EXPECT-SV:   ) u_opaque (
-// EXPECT-SV:     .mode(vendor_pkg::mode_t'(mode)),
+// EXPECT-SV:     .mode(vendor$pkg::mode$t'(mode)),
 // EXPECT-SV:     .active(opaque_active)
 // EXPECT-SV:   );
 // EXPECT-SV: endmodule
