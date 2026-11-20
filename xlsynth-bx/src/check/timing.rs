@@ -534,13 +534,6 @@ impl<'a> StageChecker<'a> {
                 (Some(a), Some(b)) => Some(IrValue::bool(a && b)),
                 _ => None,
             },
-            Join::Fields => match (left.known, right.known) {
-                (Some(IrValue::Tuple(mut fields)), Some(value)) => {
-                    fields.push(value);
-                    Some(IrValue::Tuple(fields))
-                }
-                _ => None,
-            },
             Join::Branches(_) if left.known.is_some() && left.known == right.known => left.known,
             Join::Selected(_) | Join::Select(_) => right.known,
             _ => None,
@@ -663,6 +656,7 @@ impl<'a> StageChecker<'a> {
                     let left = walk.values.pop().expect("left operand evaluated");
                     walk.values.push(self.binary(expr, left, right)?);
                 }
+                Step::Aggregate(count) => walk.finish_aggregate(count, self.case.is_some())?,
                 Step::Guard(scope) => {
                     let body = &self.scopes[scope];
                     if let Some(value) = body.guard_stage.borrow().clone() {
@@ -758,15 +752,12 @@ impl<'a> StageChecker<'a> {
         } else if let Some(count) = self.register_field_count(&assignment.rhs.ty, &fields)? {
             // Reading all of q has the same timing as rebuilding it from its
             // fields.
-            walk.aggregate(
-                (0..count).map(|index| {
-                    let mut member = Vec::with_capacity(fields.len() + 1);
-                    member.push(index);
-                    member.extend_from_slice(&fields);
-                    Step::Read(name, source, member)
-                }),
-                self.case.is_some(),
-            );
+            walk.aggregate((0..count).map(|index| {
+                let mut member = Vec::with_capacity(fields.len() + 1);
+                member.push(index);
+                member.extend_from_slice(&fields);
+                Step::Read(name, source, member)
+            }));
         } else {
             // In `if en { q := x; }`, x and en meet before the clock edge.
             walk.schedule([
@@ -826,7 +817,7 @@ impl<'a> StageChecker<'a> {
                     walk.pending
                         .push(Step::Expr(&members[index], scope, fields));
                 } else {
-                    walk.aggregate(members.iter().map(operand), self.case.is_some());
+                    walk.aggregate(members.iter().map(operand));
                 }
             }
             K::Binary { left, right, .. } => {
@@ -947,16 +938,36 @@ impl<'a> Walk<'a> {
         self.pending.extend(steps.into_iter().rev());
     }
 
-    /// An empty aggregate is stage-independent. Each member joins the running
-    /// stage.
-    fn aggregate(&mut self, members: impl DoubleEndedIterator<Item = Step<'a>>, case: bool) {
-        self.values.push(TimedValue {
-            stage: Stage::Independent,
-            known: case.then(|| IrValue::Tuple(Vec::new())),
-        });
-        for member in members.rev() {
-            self.schedule([member, Step::Join(Join::Fields)]);
+    /// Evaluate the members in order, then combine them into one tuple.
+    fn aggregate(
+        &mut self,
+        members: impl DoubleEndedIterator<Item = Step<'a>> + ExactSizeIterator,
+    ) {
+        self.pending.push(Step::Aggregate(members.len()));
+        self.pending.extend(members.rev());
+    }
+
+    /// Join the field stages and build the immutable tuple once, rather than
+    /// copying its accumulated fields after each member.
+    fn finish_aggregate(&mut self, count: usize, case: bool) -> Result<(), String> {
+        let start = self.values.len() - count;
+        let mut stage = Stage::Independent;
+        let mut known = case.then(|| Vec::with_capacity(count));
+        for field in self.values.drain(start..) {
+            stage = Join::Fields.apply(stage, field.stage)?;
+            if let Some(fields) = &mut known {
+                if let Some(value) = field.known {
+                    fields.push(value);
+                } else {
+                    known = None;
+                }
+            }
         }
+        self.values.push(TimedValue {
+            stage,
+            known: known.map(|fields| IrValue::Tuple(fields.into())),
+        });
+        Ok(())
     }
 }
 
@@ -975,6 +986,8 @@ enum Step<'a> {
     Unary(&'a TypedExpr),
     /// Combine the stages and, if possible, the known values of two operands.
     Binary(&'a TypedExpr),
+    /// Combine the evaluated tuple fields and their stages.
+    Aggregate(usize),
     /// Calculate a block call's output stage after evaluating its arguments.
     /// If `delay` declares input `x @0` and output `saved @1`, calling it
     /// with an argument at stage 4 establishes offset +4, so `saved` is at
