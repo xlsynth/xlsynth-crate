@@ -706,7 +706,8 @@ Define `model` earlier in the package with the external module's port names
 and types. The emitter connects the parent clock to the model's clock port
 when present and emits an instance of `external_rtl`. Supply that module
 alongside the generated RTL. Models reached only through external instances
-are omitted from the generated RTL.
+are omitted from the generated RTL. Use the default `--layout=none` for designs
+that instantiate an external block.
 
 Leading-zero counts, priority encoders, normalization, and
 priority selects use explicit `casez` helper functions. Arithmetic helpers retain
@@ -740,7 +741,8 @@ Flags:
   package top is used; a package with exactly one block also selects that block.
 - `--layout <none|pipeline>` selects the emitted source organization. The default
   is `none`. Pipeline layout requires a feed-forward register graph and rejects
-  any inout port or net in the selected top or its transitive children, including nets used only by a single port.
+  external block instances, inout ports, and inout nets in the selected top or
+  its transitive children, including nets used only by a single port.
 - `--module_name <NAME>` overrides the generated top module name.
 - `--array_index_bounds_checking <BOOL>` controls out-of-range array indexing
   (default: `true`).

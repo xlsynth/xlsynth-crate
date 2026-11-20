@@ -130,6 +130,21 @@ pub(crate) fn emit_package(
     let blocks: BTreeMap<_, _> = ordered.iter().map(|&b| (b.name.as_str(), b)).collect();
     let emitted = collect_emitted_blocks(&ordered, top);
     let top_module_name = options.module_name.as_deref().unwrap_or(top);
+    if options.layout == Layout::Pipeline {
+        for &block in &ordered {
+            if emitted.contains(block.name.as_str())
+                && let Some(instance) = block
+                    .instantiations
+                    .iter()
+                    .find(|instance| matches!(instance.kind, InstantiationKind::ExternBlock { .. }))
+            {
+                return Err(BlockCodegenError::NotPipeline(format!(
+                    "block `{}` cannot use layout=pipeline with external block instance `{}`; use layout=none",
+                    block.name, instance.name
+                )));
+            }
+        }
+    }
     for &block in &ordered {
         validate_supported_nodes(block, options.layout, emitted.contains(block.name.as_str()))?;
     }
@@ -160,6 +175,9 @@ pub(crate) fn emit_package(
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut child_timings = ChildTimings::new();
     for block in ordered {
+        if !emitted.contains(block.name.as_str()) {
+            continue;
+        }
         let stages = match options.layout {
             Layout::None => None,
             Layout::Pipeline => Some(reconstruct_stages(
@@ -168,9 +186,6 @@ pub(crate) fn emit_package(
                 block.name != top,
             )?),
         };
-        if !emitted.contains(block.name.as_str()) {
-            continue;
-        }
         let module_name = if block.name == top {
             top_module_name
         } else {

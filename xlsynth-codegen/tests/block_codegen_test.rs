@@ -1454,6 +1454,43 @@ const MODEL_BACKED_EXTERN: &str =
     include_str!("goldens/block2sv/extern/model_backed_extern.golden.ir");
 
 #[test]
+fn pipeline_layout_rejects_reachable_external_blocks() {
+    let child_source = MODEL_BACKED_EXTERN.replacen("top block wrapper", "block wrapper", 1);
+    let nested_source = format!(
+        r#"{child_source}
+top block nested(clk: clock, reset: bits[1], data: bits[8], out: bits[8]) {{
+  instantiation u(block=wrapper, kind=block)
+  reset: bits[1] = input_port(name=reset, id=22)
+  data: bits[8] = input_port(name=data, id=23)
+  connected_reset: () = instantiation_input(reset, instantiation=u, port_name=parent_reset, id=24)
+  connected_data: () = instantiation_input(data, instantiation=u, port_name=data, id=25)
+  received: bits[8] = instantiation_output(instantiation=u, port_name=out, id=26)
+  out: () = output_port(received, name=out, id=27)
+}}
+"#
+    );
+    let options = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    for source in [MODEL_BACKED_EXTERN, nested_source.as_str()] {
+        assert_eq!(
+            emit_system_verilog(&package(source), &options).unwrap_err(),
+            BlockCodegenError::NotPipeline(
+                "block `wrapper` cannot use layout=pipeline with external block instance `u_ext`; \
+                 use layout=none"
+                    .into()
+            )
+        );
+    }
+    let select_delay = BlockCodegenOptions {
+        top: Some("delay".to_owned()),
+        ..options
+    };
+    emit_system_verilog(&package(&nested_source), &select_delay).unwrap();
+}
+
+#[test]
 fn external_block_module_name_cannot_shadow_generated_top() {
     let options = BlockCodegenOptions {
         module_name: Some("external_rtl".to_string()),

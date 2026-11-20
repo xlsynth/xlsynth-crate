@@ -5,7 +5,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
 
-use xlsynth_pir::ir::{Block, NodeGraph, NodePayload, NodeRef};
+use xlsynth_pir::ir::{Block, InstantiationKind, NodeGraph, NodePayload, NodeRef};
 use xlsynth_pir::ir_utils::{get_topological, operands};
 
 use crate::BlockCodegenError;
@@ -31,7 +31,7 @@ pub(crate) struct BlockTiming<'a> {
     values: HashMap<NodeRef, OutputTiming<'a>>,
 }
 
-/// Maps each analyzed child block or model to the timing of its output ports.
+/// Maps each previously emitted child block to the timing of its output ports.
 pub(crate) type ChildTimings<'a> = BTreeMap<&'a str, BlockTiming<'a>>;
 
 /// Reconstructs one block's stages in child-before-parent order.
@@ -86,7 +86,7 @@ pub(crate) fn reconstruct_stages<'a>(
         };
         let inputs = instantiation_inputs.get(instance.name.as_str());
         for &(output, port_name) in outputs {
-            if instance.kind.is_block() {
+            if instance.kind == InstantiationKind::Block {
                 let child = &child_timings[instance.block.as_str()];
                 let timing = &child.values[&child.ports[port_name]];
                 stages[output] = timing.minimum_stage;
