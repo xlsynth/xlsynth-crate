@@ -247,10 +247,10 @@ fn native_constant_imports_obey_visibility_and_source_order() -> Result<(), Box<
 }"#;
     check_source_with_options(&format!("use config; {empty_loop}"), &options)?;
     assert!(check_source_with_options(&format!("{empty_loop} use config;"), &options).is_err());
-    // As for imported types and functions, DSLX resolves an unused member
-    // binding. BX checks that the declaration is public at the read site.
-    check_source_with_options("use config::PRIVATE; use middle::WIDTH;", &options)?;
+    check_source_with_options("use config::WIDTH;", &options)?;
     for source in [
+        "use config::PRIVATE;",
+        "use middle::WIDTH;",
         "use config::PRIVATE; const BAD = PRIVATE;",
         "use middle::WIDTH; const BAD = WIDTH;",
         "use middle; const BAD = middle::WIDTH;",

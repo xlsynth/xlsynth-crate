@@ -472,17 +472,14 @@ fn check_forwarded_actuals(data: &[u8], seed: u64) -> Result<(), String> {
     let fits = (!negative || target_signed)
         && (significant_bits..source_width).all(|i| source_bit(i) == negative);
     let literal = value.to_string_fmt(IrFormatPreference::Hex, false);
-    let declarations = |destination: &str| {
-        format!(
+    let program = FunctionProgram {
+        functions: format!(
             r#"struct Inner<P:{target}> {{ payload:u8 }}
 struct Outer<P:{source}> {{ child:Inner<P> }}
 const SOURCE = {source}:{literal};
-const DEST = {destination};
+const DEST = SOURCE as {target};
 fn inspect<P:{target}>(c:Inner<P>) -> (u8,{target}) {{ (c.payload,P) }}"#
-        )
-    };
-    let mut program = FunctionProgram {
-        functions: declarations(&format!("SOURCE as {target}")),
+        ),
         params: "x:u8".to_owned(),
         result: format!("(u8,{target})"),
         body: r#"let child = Inner<DEST> { payload:x };
@@ -493,30 +490,6 @@ inspect(outer.child)"#
         dslx_ir: true,
         dynamic_index: None,
     };
-    // v0.62.0 forwards wide nonnegative values as hexadecimal. It accepts a
-    // signed target with its high bit set even though that changes the value.
-    // Require a constexpr checked_cast in the reference for this boundary.
-    if source_width > 64
-        && target_signed
-        && !negative
-        && !fits
-        && (target_width..source_width).all(|i| !source_bit(i))
-    {
-        let bx = format!(
-            "{}\n{}",
-            program.functions,
-            bx_source(&program.params, &program.result, &program.body)
-        );
-        program.functions = declarations(&format!("checked_cast<{target}>(SOURCE)"));
-        return compare_bx_program(
-            &bx,
-            program,
-            seed,
-            DslxExecution::ConcreteConstants,
-            Vec::new(),
-            &[],
-        );
-    }
     compare_program(program, seed, DslxExecution::ConcreteConstants, Vec::new())
 }
 

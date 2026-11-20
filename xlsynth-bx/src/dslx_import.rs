@@ -1278,7 +1278,7 @@ pub struct Generic<N: u32, T: type = u8> { x: T }
     }
 
     #[test]
-    fn unused_member_uses_resolve_without_exposing_private_types_or_functions()
+    fn private_native_types_and_functions_are_rejected_at_import_or_qualified_use()
     -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         fs::write(
@@ -1289,15 +1289,23 @@ pub struct Generic<N: u32, T: type = u8> { x: T }
             additional_search_paths: vec![dir.path()],
             ..Default::default()
         };
-        let declarations = "use device::{Hidden, hidden};";
-        let unused =
-            crate::parse_module(&format!("{declarations} block b(clk, x: u8) -> u8 {{ x }}"))?;
-        crate::check_module_with_options(&unused, &options)?;
+        for member in ["Hidden", "hidden"] {
+            let unused = crate::parse_module(&format!(
+                "use device::{member}; block b(clk, x: u8) -> u8 {{ x }}"
+            ))?;
+            let error = crate::check_module_with_options(&unused, &options).unwrap_err();
+            assert!(
+                error.contains(&format!(
+                    "Member `{member}` of module `device` is not public"
+                )),
+                "{error}"
+            );
+        }
         for block in [
-            "block b(clk, x: Hidden) -> u8 { x.x }",
-            "block b(clk, x: u8) -> u8 { hidden(x) }",
+            "block b(clk, x: device::Hidden) -> u8 { x.x }",
+            "block b(clk, x: u8) -> u8 { device::hidden(x) }",
         ] {
-            let used = crate::parse_module(&format!("{declarations} {block}"))?;
+            let used = crate::parse_module(&format!("use device; {block}"))?;
             let error = crate::check_module_with_options(&used, &options).unwrap_err();
             assert!(error.contains("public"), "{error}");
         }

@@ -180,6 +180,7 @@ jobs:
           platforms: linux/amd64
           target: validation
           build-args: VALIDATION_MODE=build-only
+          cache-from: type=gha,scope=xlsynth-offline-tools
           no-cache-filters: validation
 
   # -----------------------------------------------------------
