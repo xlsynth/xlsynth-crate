@@ -29,10 +29,11 @@ pub(super) fn check_type_namespaces(
         .iter()
         .map(|decl| declaring_name(&interface.bx_module, decl.name()))
         .collect();
+    let (block_owner, _) = declaring_name(&interface.bx_module, &interface.block_name);
     let owners: BTreeSet<_> = types
         .iter()
         .map(|&(owner, _)| owner)
-        .chain(std::iter::once(interface.bx_module.as_str()))
+        .chain([block_owner])
         .collect();
     for owner in owners {
         let mut prefix = owner;

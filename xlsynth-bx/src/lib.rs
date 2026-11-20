@@ -24,7 +24,7 @@ pub use bx_import::library_item;
 pub use check::{CheckedModule, check_module, check_module_with_options};
 pub use dslx_import::ImportedCall;
 pub use import_structs::ImportNames;
-pub use lower::lower_module;
+pub use lower::{BlockSymbols, lower_module};
 pub use parser::outline::{
     DslxOutline, OutlineDecl, OutlineFunctionParametric, OutlineKind, OutlineShape, OutlineType,
     parse_dslx_outline,
@@ -174,6 +174,8 @@ pub struct CompiledModule {
     pub source: ast::Module,
     /// Checked BX declarations with concrete layouts and diagnostics.
     pub checked: CheckedModule,
+    /// Block names assigned by the lowering that produced `package`.
+    pub block_symbols: BlockSymbols,
     /// Destination package containing the lowered hardware and its callees.
     pub package: Package,
     /// Checked modules and destination symbols for imports that supplied
@@ -214,7 +216,7 @@ pub fn compile_with_source(
     .map_err(bx_import::diagnostic)?;
     let mut modules = modules.into_iter();
     let mut imports = Vec::new();
-    let package = lower::lower_with_imports(&checked, package, reset, |linked| {
+    let (package, block_symbols) = lower::lower_with_imports(&checked, package, reset, |linked| {
         let module = modules.next().expect("one checked module per linked batch");
         let symbols: BTreeMap<_, _> = linked
             .into_iter()
@@ -232,6 +234,7 @@ pub fn compile_with_source(
     Ok(CompiledModule {
         source: linked_source.unwrap_or(source),
         checked,
+        block_symbols,
         package,
         imports,
         imported_structs: sources.types,

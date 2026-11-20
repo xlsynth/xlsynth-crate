@@ -26,17 +26,17 @@ fn reserved_child(name: &str) -> bool {
 
 impl CallableNames {
     pub(super) fn new(
-        block: &BlockContext<'_>,
+        block_name: &str,
         declarations: &[TypeDecl],
         bx_namespace: &str,
     ) -> Result<Self> {
-        let local = block.graph.name.as_str();
+        let (module, local) = declaring_name(bx_namespace, block_name);
         let reserved = declarations.iter().any(|decl| {
             let (owner, child) = declaring_name(bx_namespace, decl.name());
-            owner.rsplit_once('.') == Some((bx_namespace, local)) && reserved_child(child)
+            owner.rsplit_once('.') == Some((module, local)) && reserved_child(child)
         });
-        let local = source_names::declaration_identifier(bx_namespace, local, "block")?;
-        let module = module_identifier(bx_namespace)?;
+        let local = source_names::declaration_identifier(module, local, "block")?;
+        let module = module_identifier(module)?;
         if reserved {
             Ok(Self {
                 block: format!("_root_.{module}.«xls:implementation».{local}"),

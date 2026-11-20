@@ -62,6 +62,9 @@ pub(super) enum SourceType {
 pub(super) struct StatefulInterface {
     /// Logical owner of the block and locally declared BX types.
     pub(super) bx_module: String,
+    /// Written BX block name, qualified by the linker for a library
+    /// declaration.
+    pub(super) block_name: String,
     pub(super) inputs: BTreeMap<String, SourceType>,
     pub(super) registers: BTreeMap<String, SourceType>,
     pub(super) outputs: Vec<SourceType>,

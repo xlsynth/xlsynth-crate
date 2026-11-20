@@ -74,7 +74,7 @@ pub(super) fn emit(
     } else {
         interface.bx_module.clone()
     };
-    let callables = CallableNames::new(block, declarations, &bx_namespace)?;
+    let callables = CallableNames::new(&interface.block_name, declarations, &bx_namespace)?;
     let presentation = Presentation {
         block,
         declarations,

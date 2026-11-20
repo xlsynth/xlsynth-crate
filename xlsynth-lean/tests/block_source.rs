@@ -5,6 +5,62 @@
 use xlsynth_lean::block::{CompiledBx, compile_bx, emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
 
+#[cfg(feature = "lean-tests")]
+#[path = "common/lean_bundle.rs"]
+mod lean_bundle;
+
+#[test]
+fn readable_export_preserves_imported_block_identity() {
+    let library = tempfile::tempdir().unwrap();
+    std::fs::write(
+        library.path().join("lib.bx"),
+        "pub block counter(clk) -> u8 { reg n: u8 = 1; n := n + u8:1; n }",
+    )
+    .unwrap();
+    let parent = "use lib; pub block parent(clk) -> u8 { let y = lib::counter(); y }";
+    let local = "block _bx_lib_counter(clk, value: bool) -> bool { value }";
+    let compile = |source: &str| {
+        compile_bx(
+            "design",
+            source,
+            xlsynth_bx::empty_package("example"),
+            Default::default(),
+            &xlsynth_bx::ImportOptions {
+                additional_search_paths: vec![library.path()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let export = |compiled: &CompiledBx, symbol: &str, callable: &str| {
+        let bundle = compiled.emit_readable(Some(symbol)).unwrap();
+        let declaration = format!("abbrev {callable} := _root_.XlsReadable.eval");
+        assert!(
+            bundle
+                .files
+                .iter()
+                .any(|(_, text)| text.contains(&declaration)),
+            "{declaration}"
+        );
+        bundle
+    };
+    let public_name = "XLS.«lib».«counter»";
+    export(&compile(parent), "_bx_lib_counter", public_name);
+    let collision = compile(&format!("{parent}\n{local}"));
+    export(
+        &collision,
+        "_bx_lib_counter",
+        "XLS.«design».«_bx_lib_counter»",
+    );
+    let symbol = "_bx_lib_counter__bx_1";
+    let bundle = export(&collision, symbol, public_name);
+    let package = collision.package();
+    let graph = select_block(package, Some(symbol)).unwrap();
+    assert_eq!(bundle.files[0].1, emit(package, graph).unwrap());
+    #[cfg(feature = "lean-tests")]
+    lean_bundle::check_bundle(&bundle).unwrap();
+}
+
 /// Compile one self-contained BX fixture in an empty package.
 fn compile(source: &str) -> CompiledBx {
     compile_bx(

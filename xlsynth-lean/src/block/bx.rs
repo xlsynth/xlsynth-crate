@@ -27,6 +27,7 @@ use super::{BlockContext, LeanBlockBundle, readable, select_block};
 /// names without reopening the source files.
 pub struct CompiledBx {
     checked: CheckedModule,
+    block_symbols: xlsynth_bx::BlockSymbols,
     module_name: String,
     imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
     source: Module,
@@ -50,6 +51,7 @@ pub fn compile_bx(
 ) -> Result<CompiledBx> {
     let xlsynth_bx::CompiledModule {
         checked,
+        block_symbols,
         source,
         package,
         imported_structs,
@@ -58,6 +60,7 @@ pub fn compile_bx(
         .map_err(anyhow::Error::msg)?;
     Ok(CompiledBx {
         checked,
+        block_symbols,
         module_name: module_name.to_owned(),
         imported_structs,
         source,
@@ -110,10 +113,11 @@ impl CompiledBx {
         let block = BlockContext::new(&self.package, graph)?;
         let (declarations, interface) = self.readable_interface(&block)?;
         // Root and imported BX libraries can use the same logical module name.
-        let mut bx_names = BTreeSet::from([(self.module_name.as_str(), graph.name.as_str())]);
+        let mut bx_names = BTreeSet::new();
         for (owner, local) in declarations
             .iter()
             .map(TypeDecl::name)
+            .chain([interface.block_name.as_str()])
             .filter(|name| !name.contains("::"))
             .map(|name| xlsynth_bx::library_item(name).unwrap_or((&self.module_name, name)))
         {
@@ -139,13 +143,13 @@ impl CompiledBx {
             .checked
             .blocks()
             .iter()
-            .find(|b| b.name == graph.name)
+            .find(|block| self.block_symbols.ir_name(&block.name) == graph.name)
             .with_context(|| format!("block {} has no checked BX declaration", graph.name))?;
         let source = self
             .source
             .blocks
             .iter()
-            .find(|b| b.name == graph.name)
+            .find(|block| block.name == checked.name)
             .with_context(|| format!("block {} has no checked BX declaration", graph.name))?;
         ensure!(
             source.clock.as_deref() == graph.clock_port_name(),
@@ -284,6 +288,7 @@ impl CompiledBx {
             declarations,
             StatefulInterface {
                 bx_module: self.module_name.clone(),
+                block_name: source.name.clone(),
                 inputs,
                 registers,
                 outputs,

@@ -87,7 +87,7 @@ pub fn lower_module(
     package: Package,
     reset: ResetBehavior,
 ) -> Result<Package, String> {
-    lower_with_imports(module, package, reset, |_| {})
+    lower_with_imports(module, package, reset, |_| {}).map(|(package, _)| package)
 }
 
 /// A lowering diagnostic ready for display, including any source excerpt.
@@ -107,7 +107,7 @@ pub(crate) fn lower_with_imports(
     package: Package,
     reset: ResetBehavior,
     on_import: impl FnMut(BTreeMap<String, crate::import_link::Symbol>),
-) -> Result<Package, String> {
+) -> Result<(Package, BlockSymbols), String> {
     lower_checked_module(
         module,
         package,
@@ -130,7 +130,7 @@ fn lower_checked_module(
     reset: ResetBehavior,
     empty_array_limit: usize,
     mut on_import: impl FnMut(BTreeMap<String, crate::import_link::Symbol>),
-) -> Result<Package, LowerError> {
+) -> Result<(Package, BlockSymbols), LowerError> {
     verify_package(&package).map_err(|error| error.to_string())?;
     let mut layouts = Layouts::new(&module.structs);
     let named = link_externs(module, &package, &mut layouts)?;
@@ -151,7 +151,7 @@ fn lower_checked_module(
     );
     let block_symbols = BlockSymbols::new(module, &package, &function_symbols);
     let reserved_names = block_names
-        .map(|name| block_symbols.get(name).to_owned())
+        .map(|name| block_symbols.ir_name(name).to_owned())
         .chain(function_symbols.iter().cloned())
         .collect::<Vec<_>>();
     let mut imported = BTreeMap::new();
@@ -190,7 +190,7 @@ fn lower_checked_module(
         signatures,
     };
     if module.functions.is_empty() && module.blocks.is_empty() {
-        return Ok(package);
+        return Ok((package, block_symbols));
     }
     let occupied = reserved_names
         .into_iter()
@@ -230,7 +230,7 @@ fn lower_checked_module(
         EmptyArrayBudget::new("generic block specialization", empty_array_limit);
     destination.evaluate_test_discards = false;
     for block in &module.blocks {
-        let ir_block = block_symbols.get(&block.name);
+        let ir_block = block_symbols.ir_name(&block.name);
         let budget = if module.specialized_blocks.contains(&block.name) {
             &mut block_specializations
         } else {
@@ -272,12 +272,13 @@ fn lower_checked_module(
             package.set_top_block(&block.name)?;
         }
     }
-    Ok(package)
+    Ok((package, block_symbols))
 }
 
 /// IR symbols for library blocks, their prelinked externs, and generated
 /// specializations. Parent instances use the same mapping as definitions.
-struct BlockSymbols {
+#[derive(Debug)]
+pub struct BlockSymbols {
     renamed: BTreeMap<String, String>,
 }
 
@@ -320,7 +321,9 @@ impl BlockSymbols {
         Self { renamed }
     }
 
-    fn get<'a>(&'a self, name: &'a str) -> &'a str {
+    /// Return the IR symbol for a checked block name, preserving unrenamed
+    /// names.
+    pub fn ir_name<'a>(&'a self, name: &'a str) -> &'a str {
         self.renamed.get(name).map_or(name, String::as_str)
     }
 }
@@ -876,7 +879,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 block: target,
             } = statement
             {
-                let instance = self.add_instance(name, symbols.get(target), reset)?;
+                let instance = self.add_instance(name, symbols.ir_name(target), reset)?;
                 resources.instances.insert(name.clone(), instance);
             }
         }
