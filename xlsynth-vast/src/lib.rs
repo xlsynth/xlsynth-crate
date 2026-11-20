@@ -1084,6 +1084,17 @@ impl VastFile {
         })
     }
 
+    /// Creates an expression from complete Verilog source text.
+    ///
+    /// Supply any required Verilog quotes and escapes as part of the text.
+    /// VAST preserves that text and parenthesizes it when nested in another
+    /// expression that requires grouping.
+    pub fn make_inline_verilog_expression(&mut self, text: &str) -> Expr {
+        self.add_expression(ExprData::InlineVerilog {
+            text: text.to_owned(),
+        })
+    }
+
     /// Creates an unsigned one-bit scalar type.
     pub fn make_scalar_type(&mut self) -> VastDataType {
         self.add_data_type(TypeData::Scalar { signed: false })

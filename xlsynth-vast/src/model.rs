@@ -274,6 +274,9 @@ pub(crate) enum ExprData {
     StringLiteral {
         value: String,
     },
+    InlineVerilog {
+        text: String,
+    },
     Unary {
         op: UnaryOp,
         arg: Expr,

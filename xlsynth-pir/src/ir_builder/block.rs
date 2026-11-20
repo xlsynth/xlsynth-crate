@@ -603,14 +603,31 @@ impl Builder<BlockState> {
         model: &Block,
         module_name: &str,
     ) -> Result<BInstantiation, BuilderError> {
+        self.instantiate_extern_block_with_parameters(name, model, module_name, BTreeMap::new())
+    }
+
+    /// Declares an external module with named SystemVerilog parameter
+    /// overrides.
+    ///
+    /// The model must already match this configuration. The overrides are
+    /// emitted as expression text and do not specialize the model.
+    pub fn instantiate_extern_block_with_parameters(
+        &mut self,
+        name: &str,
+        model: &Block,
+        module_name: &str,
+        parameters: BTreeMap<String, String>,
+    ) -> Result<BInstantiation, BuilderError> {
         if !is_valid_identifier_name(module_name) {
             return Err(BuilderError::InvalidName(module_name.to_string()));
         }
+        ir::validate_extern_block_parameters(name, &parameters).map_err(invalid)?;
         self.instantiate_block(
             name,
             model,
             InstantiationKind::ExternBlock {
                 module_name: module_name.to_string(),
+                parameters,
             },
         )
     }

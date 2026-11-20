@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth_pir::block_eval::BlockEvaluator;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
@@ -708,6 +708,53 @@ top block parent() {
 }
 
 #[test]
+fn extern_block_builder_keeps_named_parameter_overrides() {
+    let mut package = BlockBuilder::new("model")
+        .build_package("extern_models")
+        .unwrap();
+    let model = package.get_block("model").unwrap();
+    let mut parent = BlockBuilder::new("wrapper");
+    for (name, value) in [("bad-name", "42"), ("WIDTH", " ")] {
+        assert!(
+            parent
+                .instantiate_extern_block_with_parameters(
+                    "u",
+                    model,
+                    "rtl",
+                    BTreeMap::from([(name.to_string(), value.to_string())]),
+                )
+                .is_err()
+        );
+    }
+    parent
+        .instantiate_extern_block_with_parameters(
+            "u",
+            model,
+            "rtl",
+            BTreeMap::from([
+                ("WIDTH".to_string(), "42".to_string()),
+                ("BAR".to_string(), "0".to_string()),
+            ]),
+        )
+        .unwrap();
+    parent.build_into_package(&mut package).unwrap();
+    package.set_top_block("wrapper").unwrap();
+    assert_eq!(
+        package.to_string(),
+        r#"package extern_models
+
+block model() {
+}
+
+top block wrapper() {
+  instantiation u(block=model, module_name=rtl, parameters={BAR:"0", WIDTH:"42"}, kind=extern_block)
+}
+"#
+    );
+    assert_pir_package(&package);
+}
+
+#[test]
 fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() {
     for (registered, external) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut child = BlockBuilder::new("child");
@@ -756,6 +803,7 @@ fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() 
                     instance.kind,
                     InstantiationKind::ExternBlock {
                         module_name: "rtl_register".to_string(),
+                        parameters: BTreeMap::new(),
                     }
                 );
             } else {

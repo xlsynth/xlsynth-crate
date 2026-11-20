@@ -2112,6 +2112,28 @@ impl Parser {
         })
     }
 
+    /// Parses the named SystemVerilog expressions on an external instance.
+    fn parse_instantiation_parameters(&mut self) -> Result<BTreeMap<String, String>, ParseError> {
+        self.drop_or_error("=")?;
+        self.drop_or_error("{")?;
+        let mut parameters = BTreeMap::new();
+        while !self.try_drop("}") {
+            let name = self.pop_identifier_or_error("instantiation parameter name")?;
+            self.drop_or_error(":")?;
+            let value = self.pop_string_or_error()?;
+            if parameters.insert(name.clone(), value).is_some() {
+                return Err(ParseError::new(format!(
+                    "duplicate instantiation parameter '{name}'"
+                )));
+            }
+            if !self.try_drop(",") {
+                self.drop_or_error("}")?;
+                break;
+            }
+        }
+        Ok(parameters)
+    }
+
     fn parse_instantiation_decl(
         &mut self,
         block_name: &str,
@@ -2128,6 +2150,7 @@ impl Parser {
         let mut block_ref: Option<String> = None;
         let mut foreign_function: Option<String> = None;
         let mut module_name: Option<String> = None;
+        let mut parameters = None;
         let mut kind: Option<String> = None;
         loop {
             self.drop_whitespace_and_comments();
@@ -2155,6 +2178,13 @@ impl Parser {
                     ));
                 }
                 module_name = Some(self.parse_identifier_attribute("module_name")?);
+            } else if self.try_drop_keyword("parameters") {
+                if parameters.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate instantiation parameters attribute".to_string(),
+                    ));
+                }
+                parameters = Some(self.parse_instantiation_parameters()?);
             } else if self.peek_is("kind=") {
                 if kind.is_some() {
                     return Err(ParseError::new(
@@ -2180,6 +2210,11 @@ impl Parser {
                 "{kind} instantiation cannot have a module_name attribute"
             )));
         }
+        if parameters.is_some() && kind != "extern_block" {
+            return Err(ParseError::new(format!(
+                "{kind} instantiation cannot have a parameters attribute"
+            )));
+        }
         let (block, kind) = match kind.as_str() {
             "block" | "extern_block" => {
                 if foreign_function.is_some() {
@@ -2193,6 +2228,7 @@ impl Parser {
                 let kind = if kind == "extern_block" {
                     ir::InstantiationKind::ExternBlock {
                         module_name: module_name.unwrap_or_else(|| block.clone()),
+                        parameters: parameters.unwrap_or_default(),
                     }
                 } else {
                     ir::InstantiationKind::Block
@@ -4344,16 +4380,23 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
                 "  instantiation {}(foreign_function={}, kind=extern)",
                 inst.name, inst.block
             ),
-            ir::InstantiationKind::ExternBlock { module_name } if module_name != &inst.block => {
-                format!(
-                    "  instantiation {}(block={}, module_name={}, kind=extern_block)",
-                    inst.name, inst.block, module_name
-                )
+            ir::InstantiationKind::ExternBlock {
+                module_name,
+                parameters,
+            } => {
+                let mut attributes = vec![format!("block={}", inst.block)];
+                if module_name != &inst.block {
+                    attributes.push(format!("module_name={module_name}"));
+                }
+                if !parameters.is_empty() {
+                    attributes.push(format!(
+                        "parameters={}",
+                        ir::format_extern_block_parameters(parameters)
+                    ));
+                }
+                attributes.push("kind=extern_block".to_string());
+                format!("  instantiation {}({})", inst.name, attributes.join(", "))
             }
-            ir::InstantiationKind::ExternBlock { .. } => format!(
-                "  instantiation {}(block={}, kind=extern_block)",
-                inst.name, inst.block
-            ),
         });
     }
     for node in &block.nodes {
@@ -6322,10 +6365,58 @@ top block pads(io: bits[129]) {
                 "foreign_function=f, module_name=rtl, kind=extern",
                 "extern instantiation cannot have a module_name attribute",
             ),
+            (
+                "block=model, parameters={}, parameters={}, kind=extern_block",
+                "duplicate instantiation parameters attribute",
+            ),
+            (
+                r#"block=model, parameters={WIDTH:"1", WIDTH:"1"}, kind=extern_block"#,
+                "duplicate instantiation parameter 'WIDTH'",
+            ),
+            (
+                "block=model, parameters={}, kind=block",
+                "block instantiation cannot have a parameters attribute",
+            ),
+            (
+                "foreign_function=f, parameters={}, kind=extern",
+                "extern instantiation cannot have a parameters attribute",
+            ),
         ] {
             let text = format!("block invalid() {{ instantiation u({attributes}) }}");
             let error = Parser::new(&text).parse_block().unwrap_err();
             assert_eq!(error.to_string(), format!("ParseError: {expected_error}"));
+        }
+    }
+
+    #[test]
+    fn test_external_block_instantiation_parameters_roundtrip() {
+        let source = r#"block wrapper() {
+  instantiation u(kind=extern_block, parameters = {WIDTH:"42", MODE:"\"C:\\\\test,FAST\"", BAR:"0", INIT:"{2{4'hf}}"}, module_name=rtl, block=model)
+  instantiation empty(block=model, parameters={}, kind=extern_block)
+}"#;
+        let canonical = r#"block wrapper() {
+  instantiation u(block=model, module_name=rtl, parameters={BAR:"0", INIT:"{2{4'hf}}", MODE:"\"C:\\\\test,FAST\"", WIDTH:"42"}, kind=extern_block)
+  instantiation empty(block=model, kind=extern_block)
+}"#;
+        for source in [source, canonical] {
+            let block = Parser::new(source).parse_block().unwrap();
+            let ir::InstantiationKind::ExternBlock { parameters, .. } =
+                &block.instantiations[0].kind
+            else {
+                panic!("expected an external block");
+            };
+            assert_eq!(parameters["MODE"], r#""C:\\test,FAST""#);
+            assert_eq!(emit_block(&block, false), canonical);
+        }
+    }
+
+    #[test]
+    fn test_external_block_instantiation_rejects_malformed_parameters() {
+        for parameters in [r#"{WIDTH:42}"#, r#"{9WIDTH:"42"}"#, r#"{WIDTH="42"}"#] {
+            let text = format!(
+                "block wrapper() {{ instantiation u(block=model, parameters={parameters}, kind=extern_block) }}"
+            );
+            assert!(Parser::new(&text).parse_block().is_err(), "{text}");
         }
     }
 

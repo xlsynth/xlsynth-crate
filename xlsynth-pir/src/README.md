@@ -125,8 +125,23 @@ external SystemVerilog module `model`. Set `module_name=external_rtl` to target 
 different module. The model supplies the port names, types, and behavior used
 when inlining for evaluation. Supply the SystemVerilog implementation separately.
 Use the PIR parser for both extern declaration forms.
-Within a package, every instance targeting the same external SystemVerilog
-module must reference the same behavioral block.
+
+Use `parameters=` to bind named SystemVerilog parameter overrides.
+
+```text
+instantiation u(block=model_42, module_name=external_rtl, parameters={WIDTH:"42"}, kind=extern_block)
+```
+
+The PIR strings contain SystemVerilog expression text. `WIDTH:"42"` emits
+`.WIDTH(42)`, and `LABEL:"\"fast\""` emits `.LABEL("fast")`. The Rust builder
+accepts the same bindings through `instantiate_extern_block_with_parameters`.
+
+Within a package, every instance with the same external module name and the
+same map of decoded expression text must reference the same behavioral block.
+Binding order is immaterial, and an omitted map and an empty map are equivalent.
+SystemVerilog elaboration determines the values of the override expressions and
+any RTL defaults. Choose a model whose interface, behavior, and timing match
+the elaborated configuration.
 
 Package finalization checks combinational cycles through block instances, with
 registers as state boundaries. External block instances use their model's

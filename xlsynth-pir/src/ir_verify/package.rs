@@ -6,7 +6,7 @@ use crate::ir_builder::block_cycles::BlockHierarchy;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ir::{
-    Binop, Block, BlockPort, BlockProvenance, BlockProvenanceKind, Fn, InstantiationKind,
+    self, Binop, Block, BlockPort, BlockProvenance, BlockProvenanceKind, Fn, InstantiationKind,
     MemberType, NaryOp, NodeGraph, NodePayload, NodeRef, Package, PackageMember, Type,
 };
 use crate::ir_deduce::deduce_graph_result_type;
@@ -135,9 +135,11 @@ pub enum ValidationError {
         instantiation: String,
         block: String,
     },
-    /// Two external instances bind the same RTL module to different models.
+    /// Two external instances with the same module and overrides use different
+    /// models.
     ExternBlockModelConflict {
         module_name: String,
+        parameters: BTreeMap<String, String>,
         first_model: String,
         first_instance: String,
         model: String,
@@ -484,14 +486,23 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::ExternBlockModelConflict {
                 module_name,
+                parameters,
                 first_model,
                 first_instance,
                 model,
                 instance,
             } => {
+                write!(f, "external module '{module_name}'")?;
+                if !parameters.is_empty() {
+                    write!(
+                        f,
+                        " with parameter overrides {}",
+                        ir::format_extern_block_parameters(parameters)
+                    )?;
+                }
                 write!(
                     f,
-                    "external module '{module_name}' uses behavioral model '{first_model}' in \
+                    " uses behavioral model '{first_model}' in \
                      instance '{first_instance}' and conflicting model '{model}' in instance '{instance}'"
                 )
             }
@@ -731,7 +742,8 @@ impl std::fmt::Display for InstantiationPortDirection {
 /// Member names must be unique within each kind, and a declared top must
 /// resolve to a member of that kind. Blocks may omit provenance. Among blocks
 /// that declare it, each effective source name and kind must be unique.
-/// All external instances of an RTL module must refer to the same model block.
+/// External instances of an RTL module with identical overrides must refer
+/// to the same model block.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     verify_package_structure(p)?;
     verify_package_inout_hierarchies(p)
@@ -839,15 +851,20 @@ fn verify_extern_block_models<'a>(
     let mut bindings = HashMap::new();
     for block in blocks.chain(appended) {
         for inst in &block.instantiations {
-            let InstantiationKind::ExternBlock { module_name } = &inst.kind else {
+            let InstantiationKind::ExternBlock {
+                module_name,
+                parameters,
+            } = &inst.kind
+            else {
                 continue;
             };
             let (first_block, first_inst) = bindings
-                .entry(module_name.as_str())
+                .entry((module_name.as_str(), parameters))
                 .or_insert((block, inst));
             if first_inst.block != inst.block {
                 return Err(ValidationError::ExternBlockModelConflict {
                     module_name: module_name.clone(),
+                    parameters: parameters.clone(),
                     first_model: first_inst.block.clone(),
                     first_instance: format!("{}.{}", first_block.name, first_inst.name),
                     model: inst.block.clone(),
@@ -1203,13 +1220,18 @@ fn validate_block_resources(block: &Block) -> Result<(), ValidationError> {
                 instance.name
             )));
         }
-        if let InstantiationKind::ExternBlock { module_name } = &instance.kind
-            && !is_valid_identifier_name(module_name)
+        if let InstantiationKind::ExternBlock {
+            module_name,
+            parameters,
+        } = &instance.kind
         {
-            return Err(violation(format!(
-                "extern block instance '{}' has an invalid module name '{}'",
-                instance.name, module_name
-            )));
+            if !is_valid_identifier_name(module_name) {
+                return Err(violation(format!(
+                    "extern block instance '{}' has an invalid module name '{}'",
+                    instance.name, module_name
+                )));
+            }
+            ir::validate_extern_block_parameters(&instance.name, parameters).map_err(violation)?;
         }
     }
     Ok(())
@@ -2472,6 +2494,7 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
                     block: "target".to_string(),
                     kind: InstantiationKind::ExternBlock {
                         module_name: "invalid.module".to_string(),
+                        parameters: BTreeMap::new(),
                     },
                 });
             }),
@@ -3141,7 +3164,7 @@ top block wrapper() {
 }
 
 block later() {
-  instantiation repeat(block=model, module_name=model, kind=extern_block)
+  instantiation repeat(block=model, module_name=model, parameters={}, kind=extern_block)
   instantiation alias(block=model, module_name=alternate, kind=extern_block)
 }
 "#;
@@ -3162,10 +3185,75 @@ block later() {
             validate_package(&package),
             Err(ValidationError::ExternBlockModelConflict {
                 module_name: "model".to_string(),
+                parameters: BTreeMap::new(),
                 first_model: "model".to_string(),
                 first_instance: "wrapper.first".to_string(),
                 model: "alternate".to_string(),
                 instance: "later.repeat".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn extern_model_bindings_compare_decoded_parameter_maps() {
+        let ir = r#"package specialized_models
+
+block narrow() {
+}
+
+block wide() {
+}
+
+top block wrapper() {
+  instantiation first(block=narrow, module_name=rtl, parameters={WIDTH:"42", BAR:"0"}, kind=extern_block)
+}
+
+block later() {
+  instantiation second(block=wide, module_name=rtl, parameters={BAR:"0", WIDTH:"43"}, kind=extern_block)
+}
+"#;
+        for width in ["43", " 42 ", "32'd42"] {
+            let ir = ir.replace(r#"WIDTH:"43""#, &format!("WIDTH:\"{width}\""));
+            let package = Parser::new(&ir).parse_package().unwrap();
+            assert_eq!(validate_package(&package), Ok(()));
+        }
+
+        let conflicting_ir = ir.replace(r#"WIDTH:"43""#, r#"WIDTH:"\x34\x32""#);
+        let package = Parser::new(&conflicting_ir).parse_package().unwrap();
+        let error = validate_package(&package).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            r#"external module 'rtl' with parameter overrides {BAR:"0", WIDTH:"42"} uses behavioral model 'narrow' in instance 'wrapper.first' and conflicting model 'wide' in instance 'later.second'"#
+        );
+        assert_eq!(
+            error,
+            ValidationError::ExternBlockModelConflict {
+                module_name: "rtl".to_string(),
+                parameters: BTreeMap::from([
+                    ("BAR".to_string(), "0".to_string()),
+                    ("WIDTH".to_string(), "42".to_string()),
+                ]),
+                first_model: "narrow".to_string(),
+                first_instance: "wrapper.first".to_string(),
+                model: "wide".to_string(),
+                instance: "later.second".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn extern_block_instantiation_rejects_blank_parameter_expressions() {
+        let ir = EXTERN_BLOCK_MODEL_BINDINGS.replace(
+            "first(block=model, kind=extern_block)",
+            r#"first(block=model, parameters={WIDTH:" \t"}, kind=extern_block)"#,
+        );
+        let package = Parser::new(&ir).parse_package().unwrap();
+        assert_eq!(
+            validate_package(&package),
+            Err(ValidationError::BlockInvariantViolation {
+                block: "wrapper".to_string(),
+                reason: "extern block instance 'first' requires a nonempty SystemVerilog expression for parameter 'WIDTH'"
+                    .to_string(),
             })
         );
     }
@@ -3184,6 +3272,7 @@ block later() {
             verify_block_structure_in_package(&replacement, &package, 2),
             Err(ValidationError::ExternBlockModelConflict {
                 module_name: "model".to_string(),
+                parameters: BTreeMap::new(),
                 first_model: "alternate".to_string(),
                 first_instance: "wrapper.first".to_string(),
                 model: "model".to_string(),
