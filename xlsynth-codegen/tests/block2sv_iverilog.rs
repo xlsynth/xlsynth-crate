@@ -805,6 +805,47 @@ endmodule
     .unwrap();
 }
 
+/// Applies an opaque instance's width override when linking independent RTL.
+#[test]
+fn parameterized_opaque_extern_links_clock_and_bidirectional_pin() {
+    simulate_flat_fixture(
+        include_str!("goldens/block2sv/extern/opaque_extern.golden.ir"),
+        r#"
+module vendor_peripheral #(parameter WIDTH = 4) (
+    output logic [WIDTH-1:0] result,
+    input logic clk,
+    inout wire pad,
+    input logic [WIDTH-1:0] data);
+  assign pad = data[WIDTH-1] ? data[0] : 1'bz;
+  always_ff @(posedge clk) result <= {data[WIDTH-1:1], pad};
+endmodule
+
+module tb;
+  logic clk = 0;
+  logic [7:0] data = 8'h00;
+  logic external_drive = 1;
+  wire pin;
+  wire [7:0] out;
+  assign pin = external_drive ? 1'b1 : 1'bz;
+  wrapper dut(.parent_clk(clk), .data(data), .pin(pin), .out(out));
+
+  initial begin
+    #1; clk = 1;
+    #1; if (out !== 8'h01) $fatal(1, "external pin input was not sampled");
+    clk = 0;
+    external_drive = 0;
+    data = 8'h80;
+    #1; if (pin !== 1'b0) $fatal(1, "vendor output did not drive the wrapper pin");
+    clk = 1;
+    #1; if (out !== 8'h80) $fatal(1, "vendor clock or width override was not applied");
+    $finish;
+  end
+endmodule
+"#,
+    )
+    .unwrap();
+}
+
 /// Compiles and runs a testbench with flat generated RTL.
 fn simulate_flat_fixture(ir: &str, testbench: &str) -> Result<(), Box<dyn std::error::Error>> {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()?;

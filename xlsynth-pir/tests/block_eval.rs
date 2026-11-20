@@ -6,6 +6,8 @@ use xlsynth_pir::IrValue;
 use xlsynth_pir::block_eval::{
     BlockAssumptionFailure, BlockEvalError, BlockEvalSite, BlockEvaluator, RegisterInit,
 };
+use xlsynth_pir::block_inline::{flatten_block_hierarchy, inline_all_blocks_in_package};
+use xlsynth_pir::block_transition::lower_block_transition;
 use xlsynth_pir::ir::NodeRef;
 use xlsynth_pir::ir_eval::{AssumptionFailureKind, EvalObserver, SelectEvent, SelectKind};
 use xlsynth_pir::ir_parser::Parser;
@@ -246,7 +248,7 @@ block delay_model(model_clk: clock, rst_n: bits[1], d: bits[8], q: bits[8]) {
 }
 
 top block top(clk: clock, reset_n: bits[1], data: bits[8], result: bits[8]) {
-  instantiation delay(block=delay_model, module_name=external_delay, kind=extern_block)
+  instantiation delay(block=delay_model, module_name=external_delay, kind=behavioral_extern_block)
   reset_n: bits[1] = input_port(name=reset_n, id=11)
   data: bits[8] = input_port(name=data, id=12)
   delay_rst: () = instantiation_input(reset_n, instantiation=delay, port_name=rst_n, id=13)
@@ -274,6 +276,55 @@ top block top(clk: clock, reset_n: bits[1], data: bits[8], result: bits[8]) {
         .unwrap();
     assert_eq!(released.outputs, [reset]);
     assert_eq!(released.next_state.values(), [data]);
+}
+
+#[test]
+fn reachable_opaque_instance_reports_qualified_path_before_inout_rejection() {
+    let ir = r#"package opaque_eval
+
+block child(pad: bits[1]) {
+  ext_inout_net bus(bits[1])
+  pad: () = ext_inout_port(name=pad, net=bus, id=1)
+  instantiation black_box(module_name=vendor_io, ports={pad:inout bits[1]}, parameters={PAD_WIDTH:"1 << 0"}, kind=opaque_extern_block)
+  vendor_pad: () = ext_instantiation_inout(instantiation=black_box, port_name=pad, net=bus, id=2)
+}
+
+block wrapper() {
+  ext_inout_net bus(bits[1])
+  instantiation leaf(block=child, kind=block)
+  child_pad: () = ext_instantiation_inout(instantiation=leaf, port_name=pad, net=bus, id=3)
+}
+
+top block independent() {
+}
+"#;
+    let mut package = Parser::new(ir).parse_and_validate_package().unwrap();
+    BlockEvaluator::prepare(&package, "independent").unwrap();
+    flatten_block_hierarchy(&package, "independent").unwrap();
+    lower_block_transition(&package, "independent").unwrap();
+
+    let expected = "opaque external block instance 'wrapper.leaf.black_box' of module 'vendor_io' has no behavioral model";
+    let Err(BlockEvalError::Preparation(actual)) = BlockEvaluator::prepare(&package, "wrapper")
+    else {
+        panic!("expected an opaque instance preparation error");
+    };
+    assert_eq!(actual, expected);
+    assert_eq!(
+        flatten_block_hierarchy(&package, "wrapper").unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        lower_block_transition(&package, "wrapper").unwrap_err(),
+        expected
+    );
+
+    package.set_top_block("wrapper").unwrap();
+    let before = package.to_string();
+    assert_eq!(
+        inline_all_blocks_in_package(&mut package).unwrap_err(),
+        expected
+    );
+    assert_eq!(package.to_string(), before);
 }
 
 /// Original block node identities reported by a prepared evaluator.

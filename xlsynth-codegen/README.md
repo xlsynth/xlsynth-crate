@@ -129,8 +129,8 @@ child outputs are analyzed separately. Each emitted register must have exactly
 one `register_read` and one `register_write`; multiple write nodes are rejected
 instead of silently dropping an update.
 
-`instantiation u(block=model, kind=extern_block)` emits an instance of the
-external SystemVerilog module `model`. Set `module_name=external_rtl` to target a
+`instantiation u(block=model, kind=behavioral_extern_block)` emits an instance of
+the external SystemVerilog module `model`. Set `module_name=external_rtl` to target a
 different module. The package block `model` supplies the named ports and the
 dependencies used for cycle checks.
 The child clock connects to the parent clock, and reset is connected as an
@@ -138,9 +138,14 @@ ordinary named input. Use `Layout::None` for designs that instantiate an externa
 block. Models reached only through external instances are omitted from the
 generated SystemVerilog.
 
-Add `parameters={WIDTH:"42"}` to emit the named SystemVerilog override
-`#(.WIDTH(42))`. `block2sv` emits the decoded text as a parameter expression.
-The behavioral model supplies the interface for the chosen configuration.
+An `opaque_extern_block` uses a required `module_name=` and an inline typed
+`ports=` map. It emits named associations in the declared port order. The
+emitter checks wrapper wiring and treats the external RTL as a dependency
+boundary. Flat layout supports both external block kinds.
+
+Both kinds accept `parameters={WIDTH:"42"}` to emit the named SystemVerilog
+override `#(.WIDTH(42))`. The decoded value is a parameter expression. Use
+the behavioral model or opaque port interface for the chosen configuration.
 
 The emitter requires the selected block, its instantiated children, and
 behavioral models to be free of `invoke` nodes. The `block2sv` CLI runs

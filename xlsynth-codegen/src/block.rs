@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth::vast_helpers::{RegisterDefinition, RegisterScope, Reset};
 use xlsynth_pir::ir::{
-    Binop, Block, BlockPort, InstantiationKind, MemberType, NodePayload, NodeRef, Package,
-    PackageMember, Register, Type, Unop,
+    Binop, Block, BlockPort, InstantiationKind, MemberType, NodePayload, NodeRef,
+    OpaqueExternPortKind, Package, PackageMember, Register, Type, Unop,
 };
 use xlsynth_pir::ir_utils::{get_topological, operands};
 use xlsynth_pir::ir_verify::verify_package;
@@ -136,7 +136,7 @@ pub(crate) fn emit_package(
                 && let Some(instance) = block
                     .instantiations
                     .iter()
-                    .find(|instance| matches!(instance.kind, InstantiationKind::ExternBlock { .. }))
+                    .find(|instance| instance.kind.is_external_block())
             {
                 return Err(BlockCodegenError::NotPipeline(format!(
                     "block `{}` cannot use layout=pipeline with external block instance `{}`; use layout=none",
@@ -154,12 +154,10 @@ pub(crate) fn emit_package(
             validate_single_register_writes(block)?;
         }
         if block.clock_port_name().is_none() {
-            for instance in block
-                .instantiations
-                .iter()
-                .filter(|inst| inst.kind.is_block())
-            {
-                if let Some(clock_name) = blocks[instance.block.as_str()].clock_port_name() {
+            for instance in &block.instantiations {
+                if let Some(child_name) = instance.referenced_block()
+                    && let Some(clock_name) = blocks[child_name].clock_port_name()
+                {
                     return Err(BlockCodegenError::InvalidBlock(format!(
                         "instance `{}` of block `{}` requires clock port \
                          `{clock_name}`, but parent block `{}` has no clock",
@@ -249,9 +247,12 @@ fn validate_module_names(
         .filter(|block| emitted.contains(block.name.as_str()))
     {
         for instance in &block.instantiations {
-            if let InstantiationKind::ExternBlock { module_name, .. } = &instance.kind {
+            if instance.kind.is_external_block() {
+                let module_name = instance
+                    .rtl_module_name()
+                    .expect("external blocks have RTL module names");
                 validate_external_identifier(module_name, "module")?;
-                if module_names.contains(module_name.as_str()) {
+                if module_names.contains(module_name) {
                     return Err(BlockCodegenError::InvalidBlock(format!(
                         "external module `{module_name}` instantiated as `{}` in block `{}` \
                          conflicts with a generated module",
@@ -436,8 +437,8 @@ fn collect_dependencies<'a>(
         })?;
 
     for instance in &block.instantiations {
-        if instance.kind.is_block() {
-            collect_dependencies(package, &instance.block, ordered, visited, visiting)?;
+        if let Some(child_name) = instance.referenced_block() {
+            collect_dependencies(package, child_name, ordered, visited, visiting)?;
         }
     }
     visiting.remove(name);
@@ -1019,35 +1020,50 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 .map(|(port, value)| (port, value.expr))
                 .collect::<Vec<_>>();
 
-            let (module_name, parameters) = match &instance.kind {
-                InstantiationKind::Block => (&instance.block, &no_parameters),
-                InstantiationKind::ExternBlock {
-                    module_name,
-                    parameters,
-                } => (module_name, parameters),
-                InstantiationKind::Extern => {
-                    self.emit_external_instantiation(instance, &connections)?;
-                    continue;
-                }
+            let Some(module_name) = instance.rtl_module_name() else {
+                self.emit_external_instantiation(instance, &connections)?;
+                continue;
             };
-            let child = self.blocks[instance.block.as_str()];
-            if let Some(clock_name) = child.clock_port_name() {
+            let parameters = match &instance.kind {
+                InstantiationKind::BehavioralExternBlock { parameters, .. }
+                | InstantiationKind::OpaqueExternBlock { parameters, .. } => parameters,
+                InstantiationKind::Block | InstantiationKind::Extern => &no_parameters,
+            };
+            let (clock, order) =
+                if let InstantiationKind::OpaqueExternBlock { ports, .. } = &instance.kind {
+                    let clock = ports
+                        .iter()
+                        .find(|port| matches!(port.kind, OpaqueExternPortKind::Clock))
+                        .map(|port| port.name.as_str());
+                    let order = ports
+                        .iter()
+                        .map(|port| port.name.as_str())
+                        .collect::<Vec<_>>();
+                    (clock, order)
+                } else {
+                    let child_name = instance
+                        .referenced_block()
+                        .expect("ordinary and behavioral instances reference package blocks");
+                    let child = self.blocks[child_name];
+                    let order = child
+                        .ports
+                        .iter()
+                        .map(|port| match port {
+                            BlockPort::Clock(name) => name.as_str(),
+                            BlockPort::Input(node)
+                            | BlockPort::Output(node)
+                            | BlockPort::Inout(node) => child.port_name(*node),
+                        })
+                        .collect::<Vec<_>>();
+                    (child.clock_port_name(), order)
+                };
+            if let Some(clock_name) = clock {
                 let parent_clock = self
                     .block
                     .clock_port_name()
                     .expect("instantiation clocks were validated");
                 connections.push((clock_name.to_string(), self.ports[parent_clock].to_expr()));
             }
-            let order = child
-                .ports
-                .iter()
-                .map(|port| match port {
-                    BlockPort::Clock(name) => name.as_str(),
-                    BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
-                        child.port_name(*node)
-                    }
-                })
-                .collect::<Vec<_>>();
             connections.sort_by_key(|(name, _)| {
                 (
                     order

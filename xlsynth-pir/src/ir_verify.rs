@@ -11,8 +11,8 @@ use crate::ir_deduce::deduce_graph_result_type;
 mod package;
 
 pub(crate) use package::{
-    CalleeLookup, validate_fn_with, verify_block_structure_in_package,
-    verify_package_inout_hierarchies, verify_package_structure,
+    CalleeLookup, validate_fn_with, validate_opaque_extern_ports,
+    verify_block_structure_in_package, verify_package_inout_hierarchies, verify_package_structure,
 };
 pub use package::{InstantiationPortDirection, ValidationError as VerifyError};
 

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use petgraph::algo::toposort;
 use petgraph::graphmap::DiGraphMap;
+use xlsynth_pir::block_inline::reject_reachable_opaque_extern_blocks;
 use xlsynth_pir::block_transition::BlockTransition;
 use xlsynth_pir::ir::{Fn, NodePayload, Package, PackageMember, Type};
 use xlsynth_pir::ir_builder::{BValue, BuilderError, FnBuilder, InvokeSignature};
@@ -23,6 +24,7 @@ pub(super) const MAX_PROOF_WORK: usize = 1 << 20;
 /// Check the nodes and registers that the selected hierarchy would copy before
 /// the transition builder flattens any block instances.
 pub(super) fn check_block_expansion(package: &Package, entry: &str) -> Result<(), String> {
+    reject_reachable_opaque_extern_blocks(package, Some(entry))?;
     let blocks: HashMap<_, _> = package
         .members
         .iter()
@@ -45,13 +47,9 @@ pub(super) fn check_block_expansion(package: &Package, entry: &str) -> Result<()
             block.nodes.len().saturating_add(block.registers.len()),
         );
         for instance in &block.instantiations {
-            if !instance.kind.is_block() {
-                return Err(format!(
-                    "cannot inline external instance '{}'",
-                    instance.name
-                ));
-            }
-            let child = instance.block.as_str();
+            let child = instance
+                .referenced_block()
+                .ok_or_else(|| format!("cannot inline external instance '{}'", instance.name))?;
             costs.add_use(child, name, 1);
             pending.push(child);
         }

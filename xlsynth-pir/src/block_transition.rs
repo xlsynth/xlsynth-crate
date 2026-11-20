@@ -46,8 +46,9 @@ pub struct BlockTransition {
 }
 
 /// Lowers the selected block and its child instances, preserving calls to
-/// package functions. Asynchronous resets and multiple writes to a register
-/// require semantics outside this single-edge model.
+/// package functions. Opaque external instances have no transition to lower.
+/// Asynchronous resets and multiple writes to a register require semantics
+/// outside this single-edge model.
 pub fn lower_block_transition(
     package: &Package,
     block_name: &str,

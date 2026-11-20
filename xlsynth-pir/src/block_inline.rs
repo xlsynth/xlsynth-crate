@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ir::{self, Block, MemberType, NodePayload, NodeRef, PackageMember, Register};
+use crate::ir::{
+    self, Block, InstantiationKind, MemberType, NodePayload, NodeRef, PackageMember, Register,
+};
 use crate::ir_utils::{get_topological, remap_payload_with};
 
 /// Blocks and functions occupy separate namespaces in a PIR package.
@@ -13,10 +15,90 @@ fn member_key(member: &PackageMember) -> (&str, MemberType) {
     }
 }
 
+/// Rejects an opaque external instance reachable from the selected block, or
+/// from any block if no top is given. Check before behavior-dependent work.
+pub fn reject_reachable_opaque_extern_blocks(
+    package: &ir::Package,
+    top: Option<&str>,
+) -> Result<(), String> {
+    let blocks: HashMap<_, _> = package
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            PackageMember::Block(block) => Some((block.name.as_str(), block)),
+            PackageMember::Function(_) => None,
+        })
+        .collect();
+    let mut pending = Vec::new();
+    if let Some(top) = top {
+        if let Some(&block) = blocks.get(top) {
+            pending.push((block, None, block.name.as_str()));
+        }
+    } else {
+        pending.extend(
+            package
+                .members
+                .iter()
+                .rev()
+                .filter_map(|member| match member {
+                    PackageMember::Block(block) => Some((block, None, block.name.as_str())),
+                    PackageMember::Function(_) => None,
+                }),
+        );
+    }
+    let mut visited = HashSet::new();
+    let mut paths: Vec<(Option<usize>, &str)> = Vec::new();
+    while let Some((block, parent, segment)) = pending.pop() {
+        if !visited.insert(block.name.as_str()) {
+            continue;
+        }
+        let path_index = paths.len();
+        paths.push((parent, segment));
+        for instance in &block.instantiations {
+            if matches!(instance.kind, InstantiationKind::OpaqueExternBlock { .. }) {
+                let mut components = vec![instance.name.as_str()];
+                let mut ancestor = Some(path_index);
+                while let Some(index) = ancestor {
+                    let (parent, segment) = paths[index];
+                    components.push(segment);
+                    ancestor = parent;
+                }
+                let path = components
+                    .into_iter()
+                    .rev()
+                    .map(|segment| segment.replace('$', "$$").replace('.', "$d"))
+                    .collect::<Vec<_>>()
+                    .join(".");
+                return Err(format!(
+                    "opaque external block instance '{path}' of module '{}' has no behavioral model",
+                    instance.block
+                ));
+            }
+        }
+        pending.extend(block.instantiations.iter().rev().filter_map(|instance| {
+            let child = blocks.get(instance.referenced_block()?)?;
+            Some((*child, Some(path_index), instance.name.as_str()))
+        }));
+    }
+    Ok(())
+}
+
 /// Flattens one block hierarchy, retaining its transitively called functions.
 /// Registers from a child instance acquire an instance-prefixed name. External
 /// block instances use their behavioral model.
 pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::Package, String> {
+    let mut hierarchy = extract_modeled_block_hierarchy(package, top)?;
+    inline_all_blocks_in_package(&mut hierarchy)?;
+    Ok(hierarchy)
+}
+
+/// Extracts one block hierarchy and its function dependencies without inlining.
+/// This lets consumers of standard XLS IR exclude unrelated PIR declarations.
+pub fn extract_modeled_block_hierarchy(
+    package: &ir::Package,
+    top: &str,
+) -> Result<ir::Package, String> {
+    reject_reachable_opaque_extern_blocks(package, Some(top))?;
     if package.get_block(top).is_none() {
         return Err(format!("block '{top}' not found"));
     }
@@ -36,13 +118,10 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
             .ok_or_else(|| format!("missing block hierarchy dependency '{}'", key.0))?;
         if let PackageMember::Block(block) = member {
             for instance in &block.instantiations {
-                if !instance.kind.is_block() {
-                    return Err(format!(
-                        "cannot inline external instance '{}'",
-                        instance.name
-                    ));
-                }
-                pending.push((&instance.block, MemberType::Block));
+                let child = instance.referenced_block().ok_or_else(|| {
+                    format!("cannot inline external instance '{}'", instance.name)
+                })?;
+                pending.push((child, MemberType::Block));
             }
         }
         pending.extend(
@@ -61,7 +140,7 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
                 }),
         );
     }
-    let mut hierarchy = ir::Package {
+    let hierarchy = ir::Package {
         name: package.name.clone(),
         file_table: package.file_table.clone(),
         members: package
@@ -73,13 +152,13 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
         top: Some((top.to_owned(), MemberType::Block)),
     };
     crate::ir_verify::verify_package(&hierarchy).map_err(|e| e.to_string())?;
-    inline_all_blocks_in_package(&mut hierarchy)?;
     Ok(hierarchy)
 }
 
 /// Inlines block instantiations, substituting the behavioral model for each
 /// external block. Only the top block remains after inlining.
 pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String> {
+    reject_reachable_opaque_extern_blocks(pkg, pkg.get_top_block().map(|top| top.name.as_str()))?;
     if let Some(top) = pkg.get_top_block() {
         let mut selected = std::collections::BTreeSet::new();
         let mut pending = vec![top.name.clone()];
@@ -92,8 +171,7 @@ pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String>
                     block
                         .instantiations
                         .iter()
-                        .filter(|i| i.kind.is_block())
-                        .map(|i| i.block.clone()),
+                        .filter_map(|instance| instance.referenced_block().map(str::to_owned)),
                 );
             }
         }
@@ -154,13 +232,13 @@ fn inline_block_instantiations(pkg: &ir::Package, block: &mut Block) -> Result<b
         let instantiations = block.instantiations.clone();
         let mut did_inline = false;
         for inst in instantiations {
-            if !inst.kind.is_block() {
-                return Err(format!(
+            let model = inst.referenced_block().ok_or_else(|| {
+                format!(
                     "block_inline: cannot inline foreign-function instantiation '{}' of '{}'",
                     inst.name, inst.block
-                ));
-            }
-            let callee = match pkg.get_block(&inst.block) {
+                )
+            })?;
+            let callee = match pkg.get_block(model) {
                 Some(block) => block.clone(),
                 _ => {
                     return Err(format!(

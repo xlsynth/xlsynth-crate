@@ -59,7 +59,7 @@ fn external_block_and_ordinary_child_share_an_inout_net() {
     let source = include_str!("goldens/block2sv/hierarchy/shared_inout.golden.ir")
         .replace(
             "instantiation left(block=pad_cell, kind=block)",
-            "instantiation left(block=pad_cell, module_name=board_pad, kind=extern_block)",
+            "instantiation left(block=pad_cell, module_name=board_pad, kind=behavioral_extern_block)",
         )
         .replace(
             "// EXPECT-SV:   pad_cell left (",

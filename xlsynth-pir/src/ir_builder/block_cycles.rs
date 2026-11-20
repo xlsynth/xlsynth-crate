@@ -77,16 +77,23 @@ impl<'a> DependencyGraph<'a> {
             let index = *names
                 .get(net.as_str())
                 .ok_or_else(|| invalid(format!("undeclared inout net '{net}'")))?;
-            let canonical = definitions
+            let missing_pin = || {
+                invalid(format!(
+                    "no block instance inout named {instantiation}.{port_name}"
+                ))
+            };
+            let instance = definitions
                 .get(instantiation.as_str())
-                .filter(|instance| instance.kind.is_block())
-                .and_then(|instance| summaries.get(&instance.block))
+                .ok_or_else(missing_pin)?;
+            if matches!(instance.kind, InstantiationKind::OpaqueExternBlock { .. }) {
+                // No passive aliases are known across the opaque boundary.
+                continue;
+            }
+            let canonical = instance
+                .referenced_block()
+                .and_then(|name| summaries.get(name))
                 .and_then(|child| child.port_classes.get(port_name))
-                .ok_or_else(|| {
-                    invalid(format!(
-                        "no block instance inout named {instantiation}.{port_name}"
-                    ))
-                })?;
+                .ok_or_else(missing_pin)?;
             let first = *first_bindings
                 .entry((instantiation, canonical))
                 .or_insert(index);
@@ -224,10 +231,10 @@ impl BlockHierarchy {
             )));
         }
         for instance in &block.instantiations {
-            if instance.kind.is_block() {
+            if let Some(child_name) = instance.referenced_block() {
                 let child = package
-                    .get_block(&instance.block)
-                    .ok_or_else(|| invalid(format!("missing child block '{}'", instance.block)))?;
+                    .get_block(child_name)
+                    .ok_or_else(|| invalid(format!("missing child block '{child_name}'")))?;
                 if child.clock_port_name().is_some() && block.clock_port_name().is_none() {
                     return Err(invalid(format!(
                         "clocked child '{}' requires a clock on parent block '{}'",
@@ -281,9 +288,13 @@ impl BlockHierarchy {
                     net,
                 } => {
                     let net = graph.net(net, reference, block.nodes.len())?;
-                    // Graph construction has resolved every binding's instance
-                    // and public alias, including during builder prechecks.
-                    let child = &self.summaries[&definitions[instantiation.as_str()].block];
+                    // Graph construction resolves each binding. Opaque pins
+                    // have no known dependencies through the instance.
+                    let Some(child_name) = definitions[instantiation.as_str()].referenced_block()
+                    else {
+                        continue;
+                    };
+                    let child = &self.summaries[child_name];
                     if child.port_classes[port_name] == *port_name {
                         // Each child net has exactly one boundary
                         // representative. Passive aliases already share a
@@ -308,7 +319,7 @@ impl BlockHierarchy {
             })?;
             let connected = input_connections.get(instantiation.as_str());
             match &definition.kind {
-                InstantiationKind::Block | InstantiationKind::ExternBlock { .. } => {
+                InstantiationKind::Block | InstantiationKind::BehavioralExternBlock { .. } => {
                     let summary = &self.summaries[&definition.block];
                     let inputs = summary.outputs.get(port_name).ok_or_else(|| {
                         invalid(format!(
@@ -327,7 +338,7 @@ impl BlockHierarchy {
                         edges.push(*driver);
                     }
                 }
-                InstantiationKind::Extern => {
+                InstantiationKind::Extern | InstantiationKind::OpaqueExternBlock { .. } => {
                     // The extern's internal connectivity is opaque.
                 }
             }

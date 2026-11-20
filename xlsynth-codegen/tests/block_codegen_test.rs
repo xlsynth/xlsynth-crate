@@ -1508,10 +1508,44 @@ fn external_block_module_name_cannot_shadow_generated_top() {
 }
 
 #[test]
+fn opaque_external_block_rejects_pipeline_layout() {
+    let source = include_str!("goldens/block2sv/extern/opaque_extern.golden.ir");
+    let options = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..BlockCodegenOptions::default()
+    };
+    assert_eq!(
+        emit_system_verilog(&package(source), &options).unwrap_err(),
+        BlockCodegenError::NotPipeline(
+            "block `wrapper` cannot use layout=pipeline with external block instance `u`; \
+             use layout=none"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn opaque_external_module_name_cannot_shadow_generated_top() {
+    let source = include_str!("goldens/block2sv/extern/opaque_extern.golden.ir");
+    let options = BlockCodegenOptions {
+        module_name: Some("vendor_peripheral".into()),
+        ..BlockCodegenOptions::default()
+    };
+    assert_eq!(
+        emit_system_verilog(&package(source), &options).unwrap_err(),
+        BlockCodegenError::InvalidBlock(
+            "external module `vendor_peripheral` instantiated as `u` in block `wrapper` \
+             conflicts with a generated module"
+                .into()
+        )
+    );
+}
+
+#[test]
 fn default_external_module_name_cannot_shadow_generated_child() {
     let source = SHARED_INOUT.replacen(
         "instantiation left(block=pad_cell, kind=block)",
-        "instantiation left(block=pad_cell, kind=extern_block)",
+        "instantiation left(block=pad_cell, kind=behavioral_extern_block)",
         1,
     );
     assert_eq!(
