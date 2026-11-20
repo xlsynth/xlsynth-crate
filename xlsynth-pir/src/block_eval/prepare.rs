@@ -8,8 +8,7 @@ use std::sync::Arc;
 
 use crate::IrValue;
 use crate::ir::{
-    Block, Fn, InstantiationKind, Node, NodeGraph, NodePayload, NodeRef, Package, PackageMember,
-    Type, Unop,
+    Block, Fn, Node, NodeGraph, NodePayload, NodeRef, Package, PackageMember, Type, Unop,
 };
 use crate::ir_utils::{compact_and_toposort_with_mapping_in_place, remap_payload_with};
 
@@ -86,7 +85,8 @@ fn qualified(path: &str, segment: &str) -> String {
 }
 
 /// Enumerates reachable instances in declaration preorder, allocating
-/// independent register slots.
+/// independent register slots. External blocks elaborate their behavioral
+/// model.
 fn elaborate<'a>(package: &'a Package, top: &'a Block) -> Result<Vec<Instance<'a>>, String> {
     let blocks: HashMap<_, _> = package
         .members
@@ -115,7 +115,7 @@ fn elaborate<'a>(package: &'a Package, top: &'a Block) -> Result<Vec<Instance<'a
         let clock = block.clock_port_name();
         for inst in block.instantiations.iter().rev() {
             let child_path = qualified(&path, &inst.name);
-            if inst.kind == InstantiationKind::Extern {
+            if !inst.kind.is_block() {
                 return Err(format!(
                     "unsupported extern instance '{child_path}' in block '{}'",
                     block.name

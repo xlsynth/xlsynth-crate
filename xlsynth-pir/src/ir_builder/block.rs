@@ -11,6 +11,7 @@ use crate::ir::{
     Package, PackageMember, Register, Type, Unop,
 };
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_block_ids_in_place};
+use crate::ir_utils::is_valid_identifier_name;
 use crate::ir_verify::{
     verify_block_structure_in_package, verify_function_signature, verify_package,
 };
@@ -589,6 +590,39 @@ impl Builder<BlockState> {
         name: &str,
         block: &Block,
     ) -> Result<BInstantiation, BuilderError> {
+        self.instantiate_block(name, block, InstantiationKind::Block)
+    }
+
+    /// Declares an RTL module instance backed by a block in the same package.
+    ///
+    /// Port types, clock, and combinational dependencies come from the model.
+    /// Connect or request inputs, outputs, and inouts as for a child block.
+    pub fn instantiate_extern_block(
+        &mut self,
+        name: &str,
+        model: &Block,
+        module_name: &str,
+    ) -> Result<BInstantiation, BuilderError> {
+        if !is_valid_identifier_name(module_name) {
+            return Err(BuilderError::InvalidName(module_name.to_string()));
+        }
+        self.instantiate_block(
+            name,
+            model,
+            InstantiationKind::ExternBlock {
+                module_name: module_name.to_string(),
+            },
+        )
+    }
+
+    /// Checks and records the model interface shared by both kinds of block
+    /// instance.
+    fn instantiate_block(
+        &mut self,
+        name: &str,
+        block: &Block,
+        kind: InstantiationKind,
+    ) -> Result<BInstantiation, BuilderError> {
         check_name(&block.name)?;
         let signature = block_signature(block)?;
         let mut input_types = BTreeMap::new();
@@ -612,8 +646,11 @@ impl Builder<BlockState> {
             }
         }
         self.add_instance(
-            name,
-            &block.name,
+            Instantiation {
+                name: name.to_string(),
+                block: block.name.clone(),
+                kind,
+            },
             InstanceSignature::Block(signature),
             input_types,
             output_types,
@@ -627,8 +664,7 @@ impl Builder<BlockState> {
     /// are addressable as `name.0`, `name.1`, etc., as in XLS IR. The
     /// referenced function must exist with this signature in the
     /// finalization package.
-    /// For cycle checking, every output conservatively depends on all connected
-    /// inputs: a foreign function's IR body may only be a stub for its RTL.
+    /// The foreign function is opaque to combinational cycle checking.
     pub fn instantiate_extern(
         &mut self,
         name: &str,
@@ -643,8 +679,11 @@ impl Builder<BlockState> {
         }
         collect_external_ports("return", &function.ret_ty, &mut output_types);
         self.add_instance(
-            name,
-            &function.name,
+            Instantiation {
+                name: name.to_string(),
+                block: function.name.clone(),
+                kind: InstantiationKind::Extern,
+            },
             InstanceSignature::Extern(external_signature(function)),
             input_types,
             output_types,
@@ -655,13 +694,14 @@ impl Builder<BlockState> {
     /// Records a named instance only after its target contract is consistent.
     fn add_instance(
         &mut self,
-        name: &str,
-        target: &str,
+        definition: Instantiation,
         signature: InstanceSignature,
         input_types: BTreeMap<String, Type>,
         output_types: BTreeMap<String, Type>,
         inout_types: BTreeMap<String, Type>,
     ) -> Result<BInstantiation, BuilderError> {
+        let name = definition.name.as_str();
+        let target = definition.block.as_str();
         check_name(name)?;
         if target == self.graph.name {
             return Err(invalid("a block cannot instantiate itself"));
@@ -676,20 +716,12 @@ impl Builder<BlockState> {
                 )));
             }
         }
-        let kind = match &signature {
-            InstanceSignature::Block(_) => InstantiationKind::Block,
-            InstanceSignature::Extern(_) => InstantiationKind::Extern,
-        };
         let handle = BInstantiation {
             builder_id: self.id,
             index: self.state.instances.len(),
         };
         self.state.instances.push(InstanceState {
-            definition: Instantiation {
-                name: name.to_string(),
-                block: target.to_string(),
-                kind,
-            },
+            definition,
             signature,
             input_types,
             output_types,

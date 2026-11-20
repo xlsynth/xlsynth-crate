@@ -699,6 +699,15 @@ see the inputs each function actually uses. The Rust emitter requires callers to
 inline invokes in the blocks they pass for emission. Use an
 explicit external instantiation for a function marked `#[ffi_proto]`. Lower
 `map` operations and unroll `counted_for` loops before emission.
+
+For a SystemVerilog module with a block IR behavioral model, use
+`instantiation u(block=model, module=external_rtl, kind=extern_block)`.
+Define `model` earlier in the package with the external module's port names
+and types. The emitter connects the parent clock to the model's clock port
+when present and emits an instance of `external_rtl`. Supply that module
+alongside the generated RTL. Models reached only through external instances
+are omitted from the generated RTL.
+
 Leading-zero counts, priority encoders, normalization, and
 priority selects use explicit `casez` helper functions. Arithmetic helpers retain
 the original operand widths, and name collisions use `__1`, `__2`, etc.

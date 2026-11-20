@@ -2127,6 +2127,7 @@ impl Parser {
         self.drop_or_error("(")?;
         let mut block_ref: Option<String> = None;
         let mut foreign_function: Option<String> = None;
+        let mut module_name: Option<String> = None;
         let mut kind: Option<String> = None;
         loop {
             self.drop_whitespace_and_comments();
@@ -2147,6 +2148,13 @@ impl Parser {
                     ));
                 }
                 foreign_function = Some(self.parse_identifier_attribute("foreign_function")?);
+            } else if self.peek_is("module=") {
+                if module_name.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate instantiation module attribute".to_string(),
+                    ));
+                }
+                module_name = Some(self.parse_identifier_attribute("module")?);
             } else if self.peek_is("kind=") {
                 if kind.is_some() {
                     return Err(ParseError::new(
@@ -2167,17 +2175,33 @@ impl Parser {
         }
         let kind = kind
             .ok_or_else(|| ParseError::new("instantiation missing kind attribute".to_string()))?;
+        if module_name.is_some() && kind != "extern_block" {
+            return Err(ParseError::new(format!(
+                "{kind} instantiation cannot have a module attribute"
+            )));
+        }
         let (block, kind) = match kind.as_str() {
-            "block" => {
+            "block" | "extern_block" => {
                 if foreign_function.is_some() {
-                    return Err(ParseError::new(
-                        "block instantiation cannot have a foreign_function attribute".to_string(),
-                    ));
+                    return Err(ParseError::new(format!(
+                        "{kind} instantiation cannot have a foreign_function attribute"
+                    )));
                 }
                 let block = block_ref.ok_or_else(|| {
                     ParseError::new("instantiation missing block attribute".to_string())
                 })?;
-                (block, ir::InstantiationKind::Block)
+                let kind = if kind == "extern_block" {
+                    ir::InstantiationKind::ExternBlock {
+                        module_name: module_name.ok_or_else(|| {
+                            ParseError::new(
+                                "extern_block instantiation missing module attribute".to_string(),
+                            )
+                        })?,
+                    }
+                } else {
+                    ir::InstantiationKind::Block
+                };
+                (block, kind)
             }
             "extern" => {
                 if block_ref.is_some() {
@@ -4309,7 +4333,7 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
         }
     }
     for inst in &block.instantiations {
-        lines.push(match inst.kind {
+        lines.push(match &inst.kind {
             ir::InstantiationKind::Block => format!(
                 "  instantiation {}(block={}, kind=block)",
                 inst.name, inst.block
@@ -4317,6 +4341,10 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
             ir::InstantiationKind::Extern => format!(
                 "  instantiation {}(foreign_function={}, kind=extern)",
                 inst.name, inst.block
+            ),
+            ir::InstantiationKind::ExternBlock { module_name } => format!(
+                "  instantiation {}(block={}, module={}, kind=extern_block)",
+                inst.name, inst.block, module_name
             ),
         });
     }
@@ -6261,6 +6289,36 @@ top block pads(io: bits[129]) {
             error.to_string(),
             "ParseError: block instantiation cannot have a foreign_function attribute"
         );
+    }
+
+    #[test]
+    fn test_external_block_instantiation_attributes() {
+        for (attributes, expected_error) in [
+            (
+                "block=model, kind=extern_block",
+                "extern_block instantiation missing module attribute",
+            ),
+            (
+                "module=rtl, kind=extern_block",
+                "instantiation missing block attribute",
+            ),
+            (
+                "block=model, foreign_function=f, module=rtl, kind=extern_block",
+                "extern_block instantiation cannot have a foreign_function attribute",
+            ),
+            (
+                "block=model, module=rtl, kind=block",
+                "block instantiation cannot have a module attribute",
+            ),
+            (
+                "foreign_function=f, module=rtl, kind=extern",
+                "extern instantiation cannot have a module attribute",
+            ),
+        ] {
+            let text = format!("block invalid() {{ instantiation u({attributes}) }}");
+            let error = Parser::new(&text).parse_block().unwrap_err();
+            assert_eq!(error.to_string(), format!("ParseError: {expected_error}"));
+        }
     }
 
     #[test]

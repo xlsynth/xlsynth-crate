@@ -79,7 +79,7 @@ impl<'a> DependencyGraph<'a> {
                 .ok_or_else(|| invalid(format!("undeclared inout net '{net}'")))?;
             let canonical = definitions
                 .get(instantiation.as_str())
-                .filter(|instance| instance.kind == InstantiationKind::Block)
+                .filter(|instance| instance.kind.is_block())
                 .and_then(|instance| summaries.get(&instance.block))
                 .and_then(|child| child.port_classes.get(port_name))
                 .ok_or_else(|| {
@@ -183,8 +183,8 @@ pub(crate) struct BlockHierarchy {
 ///
 /// Each distinct child block is checked once and summarized by the input ports
 /// reaching each output. Registers cut dependencies, so sequential feedback is
-/// permitted. Traversal stops at extern boundaries because the foreign
-/// function body can be a placeholder for separately supplied RTL.
+/// permitted. External blocks use their behavioral model's dependencies.
+/// Foreign-function implementations are opaque to this analysis.
 pub(super) fn verify_block_combinational_cycles(
     block: &Block,
     package: &Package,
@@ -224,7 +224,7 @@ impl BlockHierarchy {
             )));
         }
         for instance in &block.instantiations {
-            if instance.kind == InstantiationKind::Block {
+            if instance.kind.is_block() {
                 let child = package
                     .get_block(&instance.block)
                     .ok_or_else(|| invalid(format!("missing child block '{}'", instance.block)))?;
@@ -307,8 +307,8 @@ impl BlockHierarchy {
                 ))
             })?;
             let connected = input_connections.get(instantiation.as_str());
-            match definition.kind {
-                InstantiationKind::Block => {
+            match &definition.kind {
+                InstantiationKind::Block | InstantiationKind::ExternBlock { .. } => {
                     let summary = &self.summaries[&definition.block];
                     let inputs = summary.outputs.get(port_name).ok_or_else(|| {
                         invalid(format!(

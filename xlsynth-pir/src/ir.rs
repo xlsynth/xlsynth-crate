@@ -1786,17 +1786,29 @@ pub struct Register {
     pub reset_value: Option<IrValue>,
 }
 
-/// Distinguishes a child block from a foreign-function instantiation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Describes how a block instance is modeled and emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InstantiationKind {
     Block,
     Extern,
+    /// Uses a package block for behavior and an external module for RTL.
+    ExternBlock {
+        module_name: String,
+    },
 }
 
+impl InstantiationKind {
+    /// Returns whether the instance references a block in the package.
+    pub fn is_block(&self) -> bool {
+        matches!(self, Self::Block | Self::ExternBlock { .. })
+    }
+}
+
+/// A named hardware instance scoped to its parent block.
 #[derive(Debug, Clone)]
 pub struct Instantiation {
     pub name: String,
-    /// Child block name, or foreign-function name for an external instance.
+    /// Package block or foreign function that provides the instance interface.
     pub block: String,
     pub kind: InstantiationKind,
 }

@@ -231,6 +231,51 @@ top block pair(clk: clock, x: bits[32], y: bits[32]) {
     assert_eq!(restored.next_state.values(), supplied.values());
 }
 
+#[test]
+fn external_block_evaluates_its_model_with_local_clock_and_reset_ports() {
+    let ir = r#"package modeled_extern
+
+block delay_model(model_clk: clock, rst_n: bits[1], d: bits[8], q: bits[8]) {
+  #![reset(port="rst_n", asynchronous=false, active_low=true)]
+  reg saved(bits[8], reset_value=42)
+  rst_n: bits[1] = input_port(name=rst_n, id=1)
+  d: bits[8] = input_port(name=d, id=2)
+  old: bits[8] = register_read(register=saved, id=3)
+  write: () = register_write(d, register=saved, reset=rst_n, id=4)
+  q: () = output_port(old, name=q, id=5)
+}
+
+top block top(clk: clock, reset_n: bits[1], data: bits[8], result: bits[8]) {
+  instantiation delay(block=delay_model, module=external_delay, kind=extern_block)
+  reset_n: bits[1] = input_port(name=reset_n, id=11)
+  data: bits[8] = input_port(name=data, id=12)
+  delay_rst: () = instantiation_input(reset_n, instantiation=delay, port_name=rst_n, id=13)
+  delay_data: () = instantiation_input(data, instantiation=delay, port_name=d, id=14)
+  delay_q: bits[8] = instantiation_output(instantiation=delay, port_name=q, id=15)
+  result: () = output_port(delay_q, name=result, id=16)
+}
+"#;
+    let pkg = Parser::new(ir).parse_and_validate_package().unwrap();
+    let evaluator = BlockEvaluator::prepare(&pkg, "top").unwrap();
+    assert_eq!(evaluator.registers()[0].name, "delay.saved");
+
+    let zero = IrValue::make_ubits(8, 0).unwrap();
+    let reset = IrValue::make_ubits(8, 42).unwrap();
+    let data = IrValue::make_ubits(8, 19).unwrap();
+    let start = evaluator.initial_state(RegisterInit::AllZeros).unwrap();
+    let asserted = evaluator
+        .step(&start, &[IrValue::bool(false), data.clone()])
+        .unwrap();
+    assert_eq!(asserted.outputs, [zero]);
+    assert_eq!(asserted.next_state.values(), [reset.clone()]);
+
+    let released = evaluator
+        .step(&asserted.next_state, &[IrValue::bool(true), data.clone()])
+        .unwrap();
+    assert_eq!(released.outputs, [reset]);
+    assert_eq!(released.next_state.values(), [data]);
+}
+
 /// Original block node identities reported by a prepared evaluator.
 #[derive(Default)]
 struct Observed {

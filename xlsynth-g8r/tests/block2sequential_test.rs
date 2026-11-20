@@ -409,6 +409,51 @@ top block top(clk: clock, data: bits[1], out: bits[1]) {
 }
 
 #[test]
+fn simulates_the_behavioral_model_for_an_external_block() {
+    let block_ir = r#"package external_delay
+
+block delay_model(clk: clock, rst: bits[1], data: bits[8], out: bits[8]) {
+  #![reset(port="rst", asynchronous=false, active_low=true)]
+  reg state(bits[8], reset_value=42)
+  rst: bits[1] = input_port(name=rst, id=1)
+  data: bits[8] = input_port(name=data, id=2)
+  q: bits[8] = register_read(register=state, id=3)
+  d: () = register_write(data, register=state, reset=rst, id=4)
+  out: () = output_port(q, name=out, id=5)
+}
+
+top block top(clk: clock, rst: bits[1], data: bits[8], out: bits[8]) {
+  #![reset(port="rst", asynchronous=false, active_low=true)]
+  instantiation delay(block=delay_model, module=external_delay_cell, kind=extern_block)
+  rst: bits[1] = input_port(name=rst, id=11)
+  data: bits[8] = input_port(name=data, id=12)
+  delay_rst: () = instantiation_input(rst, instantiation=delay, port_name=rst, id=13)
+  delay_data: () = instantiation_input(data, instantiation=delay, port_name=data, id=14)
+  delay_out: bits[8] = instantiation_output(instantiation=delay, port_name=out, id=15)
+  out: () = output_port(delay_out, name=out, id=16)
+}
+"#;
+
+    let design =
+        block_ir_to_sequential_gate_fn_with_controls(block_ir, GatifyOptions::all_opts_disabled())
+            .unwrap();
+    let byte = |value| IrBits::make_ubits(8, value).unwrap();
+    let inputs = [
+        vec![IrBits::bool(true), byte(2)],
+        vec![IrBits::bool(false), byte(3)],
+        vec![IrBits::bool(true), byte(5)],
+    ];
+    let state = SequentialState::from_register_values(&design, vec![byte(255)]).unwrap();
+    let trace = sequential::simulate(&design, &inputs, state).unwrap();
+
+    assert_eq!(
+        trace.external_outputs(),
+        &[vec![byte(255)], vec![byte(2)], vec![byte(42)]]
+    );
+    assert_eq!(trace.final_state().values(), &[byte(5)]);
+}
+
+#[test]
 fn lowers_inlined_register_reset_with_compatible_explicit_metadata() {
     let block_ir = r#"package hierarchical_reset
 

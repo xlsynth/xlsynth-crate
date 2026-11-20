@@ -2,9 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ir::{
-    self, Block, InstantiationKind, MemberType, NodePayload, NodeRef, PackageMember, Register,
-};
+use crate::ir::{self, Block, MemberType, NodePayload, NodeRef, PackageMember, Register};
 use crate::ir_utils::{get_topological, remap_payload_with};
 
 /// Blocks and functions occupy separate namespaces in a PIR package.
@@ -17,7 +15,7 @@ fn member_key(member: &PackageMember) -> (&str, MemberType) {
 
 /// Flattens one block hierarchy, retaining its transitively called functions.
 /// Registers from a child instance acquire an instance-prefixed name. External
-/// instances have no block body to inline and are rejected.
+/// block instances use their behavioral model.
 pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::Package, String> {
     if package.get_block(top).is_none() {
         return Err(format!("block '{top}' not found"));
@@ -38,7 +36,7 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
             .ok_or_else(|| format!("missing block hierarchy dependency '{}'", key.0))?;
         if let PackageMember::Block(block) = member {
             for instance in &block.instantiations {
-                if instance.kind != InstantiationKind::Block {
+                if !instance.kind.is_block() {
                     return Err(format!(
                         "cannot inline external instance '{}'",
                         instance.name
@@ -79,8 +77,8 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
     Ok(hierarchy)
 }
 
-// Inlines all block instantiations in the package. All blocks are removed after
-// inlining except for the top block.
+/// Inlines block instantiations, substituting the behavioral model for each
+/// external block. Only the top block remains after inlining.
 pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String> {
     if let Some(top) = pkg.get_top_block() {
         let mut selected = std::collections::BTreeSet::new();
@@ -94,7 +92,7 @@ pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String>
                     block
                         .instantiations
                         .iter()
-                        .filter(|i| i.kind == ir::InstantiationKind::Block)
+                        .filter(|i| i.kind.is_block())
                         .map(|i| i.block.clone()),
                 );
             }
@@ -156,6 +154,12 @@ fn inline_block_instantiations(pkg: &ir::Package, block: &mut Block) -> Result<b
         let instantiations = block.instantiations.clone();
         let mut did_inline = false;
         for inst in instantiations {
+            if !inst.kind.is_block() {
+                return Err(format!(
+                    "block_inline: cannot inline foreign-function instantiation '{}' of '{}'",
+                    inst.name, inst.block
+                ));
+            }
             let callee = match pkg.get_block(&inst.block) {
                 Some(block) => block.clone(),
                 _ => {

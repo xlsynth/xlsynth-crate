@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use xlsynth_pir::ir::{Block, InstantiationKind, NodePayload};
+use xlsynth_pir::ir::{Block, NodePayload};
 use xlsynth_pir::ir_utils::operands;
 
 use crate::BlockCodegenError;
@@ -59,9 +59,9 @@ pub(crate) fn verify_hierarchy(ordered_blocks: &[&Block]) -> Result<(), BlockCod
                         block.name
                     ))
                 })?;
-            if instance.kind == InstantiationKind::Extern {
-                // XLS treats foreign instances as opaque during elaborated
-                // combinational-cycle verification.
+            if !instance.kind.is_block() {
+                // XLS treats foreign-function instances as opaque during
+                // elaborated combinational-cycle verification.
                 continue;
             }
 
@@ -217,9 +217,8 @@ mod tests {
     }
 
     #[test]
-    fn direct_child_feedback_is_rejected() {
-        let package = parse_blocks(
-            r#"package public_direct_cycle
+    fn direct_child_feedback_is_rejected_for_internal_and_external_blocks() {
+        let source = r#"package public_direct_cycle
 
 block passthrough(value: bits[8], result: bits[8]) {
   value: bits[8] = input_port(name=value, id=1)
@@ -232,14 +231,16 @@ top block feedback(result: bits[8]) {
   connected: () = instantiation_input(fed, instantiation=component, port_name=value, id=4)
   result: () = output_port(fed, name=result, id=5)
 }
-"#,
-        );
-
-        assert!(matches!(
-            verify_hierarchy(&ordered_blocks(&package)),
-            Err(BlockCodegenError::InvalidBlock(message))
-                if message.contains("block `feedback` contains a combinational cycle")
-        ));
+"#;
+        let external = source.replace("kind=block", "module=external_rtl, kind=extern_block");
+        for source in [source, external.as_str()] {
+            let package = parse_blocks(source);
+            assert!(matches!(
+                verify_hierarchy(&ordered_blocks(&package)),
+                Err(BlockCodegenError::InvalidBlock(message))
+                    if message.contains("block `feedback` contains a combinational cycle")
+            ));
+        }
     }
 
     #[test]
