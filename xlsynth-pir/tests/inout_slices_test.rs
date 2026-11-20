@@ -138,7 +138,7 @@ top block host(pad: bits[2]) {
 }
 
 #[test]
-fn fixed_slices_preserve_ordinary_port_dependencies_in_an_inout_hierarchy() {
+fn ordinary_feedback_is_checked_at_node_granularity_in_an_inout_hierarchy() {
     let ir = r#"package feedback
 block route(d: bits[2], o: bits[2]) {
   d: bits[2] = input_port(name=d, id=1)
@@ -158,11 +158,19 @@ top block parent(pad: bits[1]) {
   write: () = instantiation_input(data, instantiation=u, port_name=d, id=11)
 }
 "#;
-    // o[1] depends on the constant d[0]; o[0] depends on the fed-back d[1].
-    Parser::new(ir).parse_and_verify_package().unwrap();
-    let cyclic = ir.replace("bit_slice(obs, start=1", "bit_slice(obs, start=0");
-    let error = Parser::new(&cyclic).parse_and_verify_package().unwrap_err();
-    assert!(error.to_string().contains("combinational cycle"), "{error}");
+    // The child output depends on d as a whole, regardless of the bit fed back.
+    for start in [0, 1] {
+        let feedback = ir.replace(
+            "bit_slice(obs, start=1",
+            &format!("bit_slice(obs, start={start}"),
+        );
+        let error = Parser::new(&feedback)
+            .parse_and_verify_package()
+            .unwrap_err();
+        assert!(error.to_string().contains("combinational cycle"), "{error}");
+    }
+    let acyclic = ir.replace("concat(bit, zero", "concat(zero, zero");
+    Parser::new(&acyclic).parse_and_verify_package().unwrap();
 }
 
 #[test]

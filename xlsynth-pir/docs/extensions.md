@@ -438,8 +438,9 @@ or an `InoutBinding<BInoutNet>`. Use `InoutBinding::Piece` for one select and
 
 For combinational-cycle checking, an inout read is a source and a drive
 consumes its data and enable. Feedback through the resolved net is allowed,
-including through child bindings and repeated bits. The verifier still checks
-combinational paths through ordinary ports across instances. Use `block2sv --layout=none`
+including through child bindings and repeated bits. Across ordinary child ports,
+the verifier traces dependencies at IR node granularity. For example, a bit
+slice depends on its entire operand. Use `block2sv --layout=none`
 (the default) for RTL. Evaluation, formal and gate projection, desugared/FFI
 extension emission, and pipeline layout reject blocks with inout ports or
 nets, including blocks whose only inout is a public pin on its own net.

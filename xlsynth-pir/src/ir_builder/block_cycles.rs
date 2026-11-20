@@ -4,18 +4,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{
-    BuilderError,
-    port_ranges::{Direction, Graph, Link, Network, Span, Summary},
-};
-use crate::ir::{Block, BlockPort, InstantiationKind, NaryOp, NodePayload, NodeRef, Package, Unop};
+use super::{BlockCycleConnection, BlockCycleStep, BuilderError};
+use crate::ir::{Block, BlockPort, InstantiationKind, NodePayload, NodeRef, Package};
 use crate::ir_utils::operands;
 
-/// Caches boundary dependencies for each verified block in an unchanged
-/// package.
+type InputDependencies = BTreeSet<String>;
+type OutputDependencies = BTreeMap<String, InputDependencies>;
+
+/// Caches ordinary output-to-input dependencies for each verified block.
 #[derive(Default)]
 pub(crate) struct BlockHierarchy {
-    summaries: BTreeMap<String, Summary>,
+    summaries: BTreeMap<String, OutputDependencies>,
     active: BTreeSet<String>,
 }
 
@@ -23,10 +22,9 @@ pub(crate) struct BlockHierarchy {
 ///
 /// Each distinct child block is checked once and summarized by the input ports
 /// reaching each output. Registers cut dependencies, so sequential feedback is
-/// permitted. Inout reads are sources and drives are sinks. Electrical
-/// connections through resolved nets do not create dataflow edges.
-/// Traversal stops at extern boundaries because the foreign
-/// function body can be a placeholder for separately supplied RTL.
+/// permitted. Inout reads are sources and drives are sinks, so an electrical
+/// connection adds no dependency between them. Traversal stops at extern
+/// boundaries because a foreign function body can stand in for external RTL.
 pub(super) fn verify_block_combinational_cycles(
     block: &Block,
     package: &Package,
@@ -47,14 +45,18 @@ impl BlockHierarchy {
         if self.summaries.contains_key(&block.name) {
             return Ok(());
         }
-        let graph = self.verify_graph(block, package)?;
-        let summary = graph.summarize();
+        let dependencies = self.verify_graph(block, package)?;
+        let summary = graph_output_dependencies(block, &dependencies)?;
         self.summaries.insert(block.name.clone(), summary);
         Ok(())
     }
 
     /// Checks the hierarchy and returns cycle-free, instance-aware graph edges.
-    fn verify_graph(&mut self, block: &Block, package: &Package) -> Result<Graph, BuilderError> {
+    fn verify_graph(
+        &mut self,
+        block: &Block,
+        package: &Package,
+    ) -> Result<Vec<Vec<NodeRef>>, BuilderError> {
         if !self.active.insert(block.name.clone()) {
             return Err(invalid(format!(
                 "recursive block instantiation involving '{}'",
@@ -78,149 +80,213 @@ impl BlockHierarchy {
                 self.summarize(child, package)?;
             }
         }
-        let children: BTreeMap<_, _> = block
+        let mut input_connections: BTreeMap<&str, BTreeMap<&str, NodeRef>> = BTreeMap::new();
+        for (index, node) in block.nodes.iter().enumerate() {
+            if let NodePayload::InstantiationInput {
+                instantiation,
+                port_name,
+                ..
+            } = &node.payload
+            {
+                input_connections
+                    .entry(instantiation)
+                    .or_default()
+                    .insert(port_name, NodeRef { index });
+            }
+        }
+        let definitions: BTreeMap<_, _> = block
             .instantiations
             .iter()
-            .filter(|i| i.kind == InstantiationKind::Block)
-            .map(|i| (i.name.as_str(), &self.summaries[&i.block]))
+            .map(|instance| (instance.name.as_str(), instance))
             .collect();
-        let graph = build_graph(block, &children)?;
-        graph.check(block)?;
-        self.active.remove(&block.name);
-        Ok(graph)
-    }
-}
-
-/// Construct the local range graph using only cached child interfaces.
-fn build_graph(block: &Block, children: &BTreeMap<&str, &Summary>) -> Result<Graph, BuilderError> {
-    let mut graph = Network::default();
-    let mut pins = BTreeMap::<(&str, &str), Span<usize>>::new();
-    let mut nodes = Vec::with_capacity(block.nodes.len());
-    for (index, node) in block.nodes.iter().enumerate() {
-        if let Some(bad) = operands(&node.payload)
-            .into_iter()
-            .find(|v| v.index >= block.nodes.len())
-        {
-            return Err(invalid(format!(
-                "block '{}' references missing node {}",
-                block.name, bad.index
-            )));
-        }
-        let ty = match &node.payload {
-            NodePayload::OutputPort { arg, .. } | NodePayload::InstantiationInput { arg, .. } => {
-                block.get_node_ty(*arg)
-            }
-            _ => &node.ty,
-        };
-        // Unit-valued operations still occupy a dependency vertex.
-        let width = ty
-            .checked_bit_count()
-            .ok_or_else(|| invalid("signal width overflow"))?
-            .max(1);
-        nodes.push(graph.signal(width, NodeRef { index }));
-    }
-    for port in &block.ports {
-        let (r, dir) = match port {
-            BlockPort::Input(r) => (*r, Direction::Input),
-            BlockPort::Output(r) => (*r, Direction::Output),
-            BlockPort::Inout(_) | BlockPort::Clock(_) => continue,
-        };
-        let signal = *nodes
-            .get(r.index)
-            .ok_or_else(|| invalid("invalid interface node"))?;
-        let name = match &block.get_node(r).payload {
-            NodePayload::InputPort { name, .. } | NodePayload::OutputPort { name, .. } => name,
-            _ => return Err(invalid("invalid interface node")),
-        };
-        graph.ports.insert(name.clone(), (signal, dir));
-    }
-    for (index, node) in block.nodes.iter().enumerate() {
-        let sink = nodes[index];
-        match &node.payload {
-            NodePayload::InstantiationOutput {
+        let mut dependencies = Vec::with_capacity(block.nodes.len());
+        for node in &block.nodes {
+            let mut edges = operands(&node.payload);
+            if let NodePayload::InstantiationOutput {
                 instantiation,
                 port_name,
-            } => {
-                pins.insert((instantiation, port_name), sink);
-            }
-            NodePayload::InstantiationInput {
-                instantiation,
-                port_name,
-                arg,
-            } => {
-                pins.insert((instantiation, port_name), sink);
-                graph.connect(sink, Link::Aligned, nodes[arg.index])?;
-            }
-            NodePayload::OutputPort { arg, .. } | NodePayload::Unop(Unop::Identity, arg) => {
-                graph.connect(sink, Link::Aligned, nodes[arg.index])?;
-            }
-            NodePayload::BitSlice { arg, start, width } => {
-                let source = nodes[arg.index];
-                let available = source.width.saturating_sub(*start).min(*width);
-                if available > 0 {
-                    graph.connect(
-                        sink.part(0, available),
-                        Link::Aligned,
-                        source.part(*start, available),
-                    )?;
-                }
-            }
-            NodePayload::Nary(NaryOp::Concat, args) => {
-                let mut start = 0usize;
-                for a in args.iter().rev() {
-                    let width = block
-                        .get_node_ty(*a)
-                        .checked_bit_count()
-                        .ok_or_else(|| invalid("concat width overflow"))?;
-                    if width > 0 {
-                        graph.connect(sink.part(start, width), Link::Aligned, nodes[a.index])?;
+            } = &node.payload
+            {
+                let definition = definitions.get(instantiation.as_str()).ok_or_else(|| {
+                    invalid(format!(
+                        "unknown instance '{instantiation}' in block '{}'",
+                        block.name
+                    ))
+                })?;
+                // Follow the input sink node so a cycle can name the
+                // connection. Its explicit operand already
+                // points to the driving value.
+                let connected = input_connections.get(instantiation.as_str());
+                match definition.kind {
+                    InstantiationKind::Block => {
+                        let summary = &self.summaries[&definition.block];
+                        let inputs = summary.get(port_name).ok_or_else(|| {
+                            invalid(format!(
+                                "unknown output '{port_name}' on child '{}'",
+                                definition.block
+                            ))
+                        })?;
+                        for input in inputs {
+                            let connection = connected
+                                .and_then(|ports| ports.get(input.as_str()))
+                                .ok_or_else(|| {
+                                    invalid(format!(
+                                        "unconnected input '{input}' on instance '{instantiation}'"
+                                    ))
+                                })?;
+                            edges.push(*connection);
+                        }
                     }
-                    start = start
-                        .checked_add(width)
-                        .ok_or_else(|| invalid("concat width overflow"))?;
+                    InstantiationKind::Extern => {
+                        // The extern interface doesn't tell us which inputs can
+                        // affect this output combinationally, so traversal
+                        // stops here.
+                    }
                 }
             }
-            _ => {
-                // Inout reads and bindings have no SSA operands. A drive
-                // consumes data and enable, and creates no edge to a read.
-                for dep in operands(&node.payload) {
-                    graph.connect(sink, Link::All, nodes[dep.index])?;
-                }
-            }
+            dependencies.push(edges);
         }
+        verify_graph_acyclic(block, &dependencies)?;
+        self.active.remove(&block.name);
+        Ok(dependencies)
     }
-    for (&instance, child) in children {
-        for (to, kind, from) in child.iter() {
-            let Some(out) = pins.get(&(instance, &to.signal)) else {
-                // An unused ordinary child output contributes no parent edges.
-                continue;
-            };
-            let input = pins.get(&(instance, &from.signal)).ok_or_else(|| {
-                invalid(format!(
-                    "unconnected input '{}' on instance '{instance}'",
-                    from.signal
-                ))
-            })?;
-            graph.connect(
-                out.part(to.start, to.width),
-                *kind,
-                input.part(from.start, from.width),
-            )?;
-        }
-    }
-    Ok(graph.finish())
 }
 
-pub(super) fn invalid(reason: impl Into<String>) -> BuilderError {
+/// Checks even unobserved nodes in O(nodes + edges) time and O(nodes) space.
+fn verify_graph_acyclic(block: &Block, dependencies: &[Vec<NodeRef>]) -> Result<(), BuilderError> {
+    let mut colors = vec![0u8; block.nodes.len()];
+    for root in 0..block.nodes.len() {
+        if colors[root] == 2 {
+            continue;
+        }
+        colors[root] = 1;
+        let mut pending = vec![(root, 0usize)];
+        while let Some((node, next_edge)) = pending.last_mut() {
+            if let Some(dependency) = dependencies[*node].get(*next_edge) {
+                *next_edge += 1;
+                let index = dependency.index;
+                let color = colors.get(index).ok_or_else(|| {
+                    invalid(format!(
+                        "block '{}' references missing node {index}",
+                        block.name
+                    ))
+                })?;
+                match color {
+                    1 => {
+                        let start = pending
+                            .iter()
+                            .position(|(node, _)| *node == index)
+                            .expect("active node is on the DFS path");
+                        return Err(cycle_error(block, &pending[start..]));
+                    }
+                    0 => {
+                        colors[index] = 1;
+                        pending.push((index, 0));
+                    }
+                    _ => {
+                        // This dependency's subgraph has already been checked.
+                    }
+                }
+            } else {
+                let (node, _) = pending.pop().expect("DFS frame exists");
+                colors[node] = 2;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Converts the cyclic segment of the DFS path into block-local text IDs.
+fn cycle_error(block: &Block, path: &[(usize, usize)]) -> BuilderError {
+    let steps = path
+        .iter()
+        .zip(path.iter().cycle().skip(1))
+        .map(|(&(index, _), &(next, _))| {
+            let node = &block.nodes[index];
+            let dependency = &block.nodes[next];
+            let connection = match (&node.payload, &dependency.payload) {
+                (
+                    NodePayload::InstantiationOutput {
+                        instantiation,
+                        port_name: output_port,
+                    },
+                    NodePayload::InstantiationInput {
+                        port_name: input_port,
+                        ..
+                    },
+                ) => Some(BlockCycleConnection {
+                    instance: instantiation.clone(),
+                    input_port: input_port.clone(),
+                    output_port: output_port.clone(),
+                    input_node_id: dependency.text_id,
+                }),
+                _ => None,
+            };
+            BlockCycleStep {
+                node_id: node.text_id,
+                connection,
+            }
+        })
+        .collect();
+    BuilderError::CombinationalCycle {
+        block: block.name.clone(),
+        steps,
+    }
+}
+
+/// Traces each output cone in a checked graph, retaining only interface sets.
+///
+/// Each output visits a reachable node/edge at most once. The scratch storage
+/// is O(nodes), independent of transitive dependency sizes at interior nodes;
+/// only the output-to-input relation itself can require quadratic storage.
+fn graph_output_dependencies(
+    block: &Block,
+    dependencies: &[Vec<NodeRef>],
+) -> Result<OutputDependencies, BuilderError> {
+    // Tag visits by output instead of clearing O(nodes) storage for each cone.
+    let mut visited = vec![None; block.nodes.len()];
+    let mut pending = Vec::new();
+    let mut summary = BTreeMap::new();
+    for port in &block.ports {
+        let BlockPort::Output(reference) = port else {
+            continue;
+        };
+        let node = block
+            .nodes
+            .get(reference.index)
+            .ok_or_else(|| invalid("block output references a missing node"))?;
+        let NodePayload::OutputPort { name, .. } = &node.payload else {
+            return Err(invalid("block output does not reference an output_port"));
+        };
+        let mut inputs = BTreeSet::new();
+        visited[reference.index] = Some(*reference);
+        pending.push(*reference);
+        while let Some(node) = pending.pop() {
+            if let NodePayload::InputPort { name, .. } = &block.nodes[node.index].payload {
+                inputs.insert(name.clone());
+            }
+            for dependency in &dependencies[node.index] {
+                if visited[dependency.index] != Some(*reference) {
+                    visited[dependency.index] = Some(*reference);
+                    pending.push(*dependency);
+                }
+            }
+        }
+        summary.insert(name.clone(), inputs);
+    }
+    Ok(summary)
+}
+
+fn invalid(reason: impl Into<String>) -> BuilderError {
     BuilderError::InvalidOperation(reason.into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BlockBuilder;
     use crate::ir::Type;
     use crate::ir_parser::Parser;
-    use crate::{BlockBuilder, BlockCycleConnection, BlockCycleStep};
 
     fn check(source: &str) -> Result<(), BuilderError> {
         let package = Parser::new(source).parse_and_verify_package().unwrap();
@@ -255,14 +321,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
             ),
             ("direct".into(), BTreeSet::from(["z".into()])),
         ]);
-        let mut actual = BTreeMap::<String, BTreeSet<String>>::new();
-        for (out, _, input) in &hierarchy.summaries["child"] {
-            actual
-                .entry(out.signal.clone())
-                .or_default()
-                .insert(input.signal.clone());
-        }
-        assert_eq!(actual, expected);
+        assert_eq!(hierarchy.summaries["child"], expected);
 
         let mut root_check = BlockHierarchy::default();
         root_check
@@ -287,14 +346,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
         hierarchy
             .summarize(package.get_top_block().unwrap(), &package)
             .unwrap();
-        let mut actual = BTreeMap::<String, BTreeSet<String>>::new();
-        for (out, _, input) in &hierarchy.summaries["disjoint"] {
-            actual
-                .entry(out.signal.clone())
-                .or_default()
-                .insert(input.signal.clone());
-        }
-        assert_eq!(actual, expected);
+        assert_eq!(hierarchy.summaries["disjoint"], expected);
     }
 
     #[test]
