@@ -48,7 +48,9 @@ top block host(clk: clock, u_device_io: bits[4], send: bits[1], capture: bits[1]
 // EXPECT-SV:   inout wire [3:0] io,
 // EXPECT-SV:   inout wire [3:0] probe
 // EXPECT-SV: );
-// EXPECT-SV:   tran probe_tie[3:0](io, probe);
+// EXPECT-SV:   wire [3:0] bridge;
+// EXPECT-SV:   tran io_tie[3:0](bridge, io);
+// EXPECT-SV:   tran probe_tie[3:0](bridge, probe);
 // EXPECT-SV: endmodule
 // EXPECT-SV: module device(
 // EXPECT-SV:   input logic clk,

@@ -34,20 +34,22 @@ top block wrapper(a: bits[8], b: bits[2], seen: bits[12]) {
 // EXPECT-SV:   inout wire [1:0] b,
 // EXPECT-SV:   output logic [11:0] seen
 // EXPECT-SV: );
+// EXPECT-SV:   wire [11:0] bus;
 // EXPECT-SV:   wire [7:0] a_bits;
 // EXPECT-SV:   tran a_tie[7:0](a, a_bits);
-// EXPECT-SV:   wire [11:0] bus;
+// EXPECT-SV:   tran a_tie__1[1:0](bus[11:10], a_bits[1:0]);
+// EXPECT-SV:   tran b_tie[1:0](bus[1:0], b);
 // EXPECT-SV:   logic [5:0] high;
 // EXPECT-SV:   logic [5:0] low;
 // EXPECT-SV:   logic [11:0] sample;
 // EXPECT-SV:   assign sample = {high, low};
 // EXPECT-SV:   assign seen = sample;
 // EXPECT-SV:   probe hi (
-// EXPECT-SV:     .io({a_bits[1:0], bus[9:6]}),
+// EXPECT-SV:     .io(bus[11:6]),
 // EXPECT-SV:     .seen(high)
 // EXPECT-SV:   );
 // EXPECT-SV:   probe lo (
-// EXPECT-SV:     .io({bus[5:2], b}),
+// EXPECT-SV:     .io(bus[5:0]),
 // EXPECT-SV:     .seen(low)
 // EXPECT-SV:   );
 // EXPECT-SV: endmodule

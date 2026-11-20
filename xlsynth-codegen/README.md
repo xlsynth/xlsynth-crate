@@ -62,10 +62,11 @@ struct field ordering policies are exported from the same module.
   driver, emitted as `assign pad = oe ? drive : 'z;`. A private net gets one
   module-local wire. Public and child inouts accept whole nets of the same PIR type
   or full-width connections made from bit-vector selects and MSB-first concats.
-  A public port carries an optional `sv_type`. A public net range uses the
-  first connected port in header order as its wire. A net connected only to one
-  public port therefore emits just the interface declaration. Additional
-  aliases connect through bidirectional Verilog `tran` primitives. The emitted RTL
+  A public port carries an optional `sv_type`. If one contiguous public port
+  range covers the whole net exactly once, the emitter uses that port or slice
+  directly. Otherwise it declares one local wire and connects each public range
+  to it with a bidirectional Verilog `tran`. Child connections, local reads, and
+  local drivers all use the same wire or port range. The emitted RTL
   preserves four-state resolution across aliases. Synthesis support depends on the tool. See the
   [shared bus](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir),
   [sliced child](tests/goldens/block2sv/hierarchy/sliced_child.golden.ir), and

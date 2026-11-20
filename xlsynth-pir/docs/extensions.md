@@ -399,9 +399,10 @@ two pins independent inside a block, give each its own net.
 
 To expose the example's wire, add `pad: bits[8]` to the parent header and
 `pad: () = ext_inout_port(name=pad, net=bus, id=11)` to its body. Additional
-public pins on the same net each have their own port node. Flat codegen emits
-`spare_pin` as the module port `inout wire [7:0] spare` and ties public aliases
-with bidirectional `tran` primitives. Four-state RTL simulation
+public pins on the same net each have their own port node. With just `pad` on
+`bus`, flat codegen connects the child directly to `pad`. Adding a second
+public pin on `bus` emits a local `wire [7:0] bus` and a bidirectional `tran`
+from each public pin to that wire. Four-state RTL simulation
 resolves undriven wires to Z and conflicting equal-strength drives to X on
 the affected bits. Synthesis support for public aliases depends on the tool.
 For example, Yosys 0.68's Verilog writer can turn a `tran` into a one-way

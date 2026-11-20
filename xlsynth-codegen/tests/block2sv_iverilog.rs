@@ -107,6 +107,35 @@ endmodule
 "#,
         ),
         (
+            "hierarchy/shared_net_ranges.golden.ir",
+            r#"
+module tb;
+  wire [7:0] a;
+  wire [1:0] b;
+  wire [11:0] seen;
+  reg [7:0] external_a = 8'hzz;
+  reg [1:0] external_b = 2'bzz;
+  reg [5:0] child_drive = 6'bzzzzzz;
+  wrapper dut(.*);
+  assign a = external_a;
+  assign b = external_b;
+  assign dut.hi.io = child_drive;
+  initial begin
+    external_a = 8'hfe; external_b = 2'b01;
+    #1; if (seen !== 12'b10_zzzz_zzzz_01) $fatal(1, "public to children");
+    external_a = 8'hzz; child_drive = 6'b101100;
+    #1; if (a !== 8'bzzzzzz10 || seen !== 12'b101100_zzzz01)
+      $fatal(1, "child to public and private bits");
+    external_a = 8'bzzzzzz01;
+    #1; if (seen !== 12'bxx1100_zzzz01) $fatal(1, "two public bits contend");
+    external_a = 8'hzz; external_b = 2'bzz; child_drive = 6'bzzzzzz;
+    #1; if (seen !== 12'hzzz) $fatal(1, "all drivers released");
+    $finish;
+  end
+endmodule
+"#,
+        ),
+        (
             "arrays/custom_typed_array.golden.ir",
             r#"
 module tb;

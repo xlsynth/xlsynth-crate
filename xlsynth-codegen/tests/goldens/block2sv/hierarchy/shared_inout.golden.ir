@@ -71,7 +71,9 @@ top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_
 // EXPECT-SV:   output logic [3:0] seen
 // EXPECT-SV: );
 // EXPECT-SV:   wire [3:0] spare__1;
-// EXPECT-SV:   tran pad_b_tie[3:0](pad, pad_b);
+// EXPECT-SV:   wire [3:0] bus;
+// EXPECT-SV:   tran pad_tie[3:0](bus, pad);
+// EXPECT-SV:   tran pad_b_tie[3:0](bus, pad_b);
 // EXPECT-SV:   logic [3:0] sample;
 // EXPECT-SV:   logic [3:0] left_sample;
 // EXPECT-SV:   logic [3:0] right_sample;
@@ -80,17 +82,17 @@ top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_
 // EXPECT-SV:   pad_cell left (
 // EXPECT-SV:     .drive(left_data),
 // EXPECT-SV:     .oe(left_oe),
-// EXPECT-SV:     .io(pad),
+// EXPECT-SV:     .io(bus),
 // EXPECT-SV:     .observed(left_sample)
 // EXPECT-SV:   );
 // EXPECT-SV:   pad_cell right (
 // EXPECT-SV:     .drive(right_data),
 // EXPECT-SV:     .oe(right_oe),
-// EXPECT-SV:     .io(pad),
+// EXPECT-SV:     .io(bus),
 // EXPECT-SV:     .observed(right_sample)
 // EXPECT-SV:   );
 // EXPECT-SV:   listener sense (
-// EXPECT-SV:     .value(pad),
+// EXPECT-SV:     .value(bus),
 // EXPECT-SV:     .observed(sample)
 // EXPECT-SV:   );
 // EXPECT-SV: endmodule

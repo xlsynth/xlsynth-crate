@@ -44,7 +44,9 @@ top block host(tx: bits[2][2], oe: bits[1], rx: bits[2][2]) {
 // EXPECT-SV:   inout wire [1:0][1:0] io,
 // EXPECT-SV:   inout wire [1:0][1:0] probe
 // EXPECT-SV: );
-// EXPECT-SV:   tran probe_tie[3:0](io, probe);
+// EXPECT-SV:   wire [1:0][1:0] io__1;
+// EXPECT-SV:   tran io_tie[3:0](io__1, io);
+// EXPECT-SV:   tran probe_tie[3:0](io__1, probe);
 // EXPECT-SV: endmodule
 // EXPECT-SV: module forward(
 // EXPECT-SV:   inout wire [1:0][1:0] io

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
-use crate::ir::{InoutNet, Type};
+use crate::ir::{Block, InoutNet, NodePayload, NodeRef, Type};
 
 /// One contiguous piece of an electrical binding. Select bounds are inclusive.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,10 +196,17 @@ pub(crate) fn resolve_binding<'a, N>(
     Ok(spans)
 }
 
+/// A contiguous electrical connection between a public port and a local net.
+#[derive(Clone, Copy, Debug)]
+pub struct PublicInoutRange {
+    pub port: NodeRef,
+    pub span: InoutSpan,
+}
+
 /// One public port covering a net segment, at the indicated low port bit.
 #[derive(Clone, Copy, Debug)]
 pub struct PublicPortSpan {
-    pub port: crate::ir::NodeRef,
+    pub port: NodeRef,
     pub start: usize,
 }
 
@@ -211,36 +218,47 @@ pub struct PublicNetSegment {
 }
 
 impl InoutNetMap<'_> {
-    /// Partitions nets by the public pins covering them, in interface order.
-    pub fn public_segments(
-        &self,
-        block: &crate::ir::Block,
-    ) -> Result<Vec<Vec<PublicNetSegment>>, String> {
-        let mut events = vec![BTreeMap::<usize, Vec<(bool, usize)>>::new(); self.nets.len()];
-        let mut pieces = Vec::new();
+    /// Collects public ranges by net in interface order. Adjacent pieces of a
+    /// binding are one range when both port and net bit positions advance
+    /// together.
+    pub fn public_ranges(&self, block: &Block) -> Result<Vec<Vec<PublicInoutRange>>, String> {
+        let mut ranges = vec![Vec::<PublicInoutRange>::new(); self.nets.len()];
         for port in block.inout_ports() {
-            let Some(crate::ir::NodePayload::ExtInoutPort { port_type, net, .. }) =
+            let Some(NodePayload::ExtInoutPort { port_type, net, .. }) =
                 block.nodes.get(port.index).map(|n| &n.payload)
             else {
                 return Err("invalid public inout port reference".into());
             };
             for span in self.resolve(net, port_type)? {
-                let id = pieces.len();
-                pieces.push((port, span));
-                events[span.net]
-                    .entry(span.net_start)
-                    .or_default()
-                    .push((true, id));
-                events[span.net]
-                    .entry(span.net_start + span.width)
+                let bindings = &mut ranges[span.net];
+                if let Some(prev) = bindings.last_mut()
+                    && prev.port == port
+                    && prev.span.net_start + prev.span.width == span.net_start
+                    && prev.span.port_start + prev.span.width == span.port_start
+                {
+                    prev.span.width += span.width;
+                } else {
+                    bindings.push(PublicInoutRange { port, span });
+                }
+            }
+        }
+        Ok(ranges)
+    }
+
+    /// Partitions nets by the public pins covering them, in interface order.
+    pub fn public_segments(&self, block: &Block) -> Result<Vec<Vec<PublicNetSegment>>, String> {
+        let mut result = Vec::with_capacity(self.nets.len());
+        for (net, pieces) in self.nets.iter().zip(self.public_ranges(block)?) {
+            let mut ends = BTreeMap::<usize, Vec<(bool, usize)>>::new();
+            ends.entry(net.ty.checked_bit_count().ok_or("inout width overflow")?)
+                .or_default();
+            for (id, piece) in pieces.iter().enumerate() {
+                let span = piece.span;
+                ends.entry(span.net_start).or_default().push((true, id));
+                ends.entry(span.net_start + span.width)
                     .or_default()
                     .push((false, id));
             }
-        }
-        let mut result = Vec::with_capacity(self.nets.len());
-        for (net, mut ends) in self.nets.iter().zip(events) {
-            ends.entry(net.ty.checked_bit_count().ok_or("inout width overflow")?)
-                .or_default();
             let mut active = BTreeSet::<usize>::new();
             let mut start = 0;
             let mut segments = Vec::new();
@@ -249,7 +267,7 @@ impl InoutNetMap<'_> {
                     let ports = active
                         .iter()
                         .map(|&i| {
-                            let (port, span) = pieces[i];
+                            let PublicInoutRange { port, span } = pieces[i];
                             PublicPortSpan {
                                 port,
                                 start: span.port_start + (start - span.net_start),

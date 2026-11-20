@@ -27,12 +27,16 @@ top block wrapper(t: bits[8], i: bits[8]) {
 // EXPECT-SV: module tied(
 // EXPECT-SV:   inout wire [7:0] pad
 // EXPECT-SV: );
-// EXPECT-SV:   tran pad_tie[1:0](pad[1:0], pad[7:6]);
+// EXPECT-SV:   wire [1:0] spare;
+// EXPECT-SV:   tran pad_tie[1:0](spare, pad[1:0]);
+// EXPECT-SV:   tran pad_tie__1[1:0](spare, pad[7:6]);
 // EXPECT-SV: endmodule
 // EXPECT-SV: module independent(
 // EXPECT-SV:   inout wire [7:0] pad
 // EXPECT-SV: );
-// EXPECT-SV:
+// EXPECT-SV:   wire [3:0] spare;
+// EXPECT-SV:   tran pad_tie[1:0](spare[1:0], pad[1:0]);
+// EXPECT-SV:   tran pad_tie__1[1:0](spare[3:2], pad[7:6]);
 // EXPECT-SV: endmodule
 // EXPECT-SV: module wrapper(
 // EXPECT-SV:   inout wire [7:0] t,
