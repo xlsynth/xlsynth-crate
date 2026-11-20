@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Typed XLS IR nodes, graphs, and package members shared by the parser and
+//! verifier.
+
 #![allow(unused)]
 
 use std::collections::{HashMap, hash_map::OccupiedError};
@@ -1158,6 +1161,23 @@ pub struct ResetAttribute {
     pub port_name: String,
     pub asynchronous: bool,
     pub active_low: bool,
+}
+
+/// The original proc or function from which a block was lowered.
+///
+/// Package verification compares the decoded name and kind together. A proc
+/// and a function with the same name identify different origins.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BlockProvenance {
+    pub name: String,
+    pub kind: BlockProvenanceKind,
+}
+
+/// The kind of XLS source member named by a block's provenance attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockProvenanceKind {
+    Proc,
+    Function,
 }
 
 /// The decoded XLS foreign function metadata used for external implementations.
