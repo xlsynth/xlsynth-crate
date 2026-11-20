@@ -937,6 +937,13 @@ pub enum OutputCycles<T = u64> {
     Uniform(T),
     /// `-> Ports @(live: 0, saved: 1)` gives each physical port its own stage.
     ByPort(BTreeMap<String, T>),
+    /// `@stage(op)` chooses an expected output stage for each input case.
+    CaseCall {
+        /// A concrete pure BX function returning an unsigned stage number.
+        function: String,
+        /// Block input ports supplied to the function in parameter order.
+        inputs: Vec<String>,
+    },
 }
 
 /// The stage declarations on a single block signature.
@@ -984,6 +991,7 @@ impl Block {
     pub(crate) fn map_stages<T: From<u64>>(
         &self,
         constant: impl Fn(&str) -> Result<T, String>,
+        function: impl Fn(&str) -> Result<String, String>,
     ) -> Result<BlockStages<T>, String> {
         let mut stages = BlockStages {
             inputs: BTreeMap::new(),
@@ -1045,6 +1053,21 @@ impl Block {
                     .map(|(port, value)| Ok((port.clone(), stage(value, &locals)?)))
                     .collect::<Result<_, String>>()?,
             )),
+            Some(OutputCycles::CaseCall {
+                function: name,
+                inputs,
+            }) => {
+                let head = name.split("::").next().unwrap_or(name);
+                if locals.contains(head) {
+                    return Err(format!(
+                        "stage helper '{name}' is shadowed by a block parameter"
+                    ));
+                }
+                Some(OutputCycles::CaseCall {
+                    function: function(name)?,
+                    inputs: inputs.clone(),
+                })
+            }
         };
         Ok(stages)
     }
