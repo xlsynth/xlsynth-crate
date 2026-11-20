@@ -60,7 +60,9 @@ fn readable_export_preserves_imported_block_identity() {
     let bundle = export(&collision, symbol, public_name);
     let package = collision.package();
     let graph = select_block(package, Some(symbol)).unwrap();
-    assert_eq!(bundle.files[0].1, emit(package, graph).unwrap());
+    let raw = emit(package, graph).unwrap();
+    let checked = bundle_file(&bundle, "Generated.lean");
+    assert_eq!(checked.replace("import ReadableTypes\n", ""), raw);
     #[cfg(feature = "lean-tests")]
     lean_bundle::check_bundle(&bundle).unwrap();
 }
