@@ -193,7 +193,7 @@ pub struct FanoutOptimizationReport {
 
 /// Computes edge-specific input capacitance with the same fallback as
 /// repository STA.
-fn pin_cap(pin: &Pin) -> [f64; 2] {
+pub(super) fn pin_cap(pin: &Pin) -> [f64; 2] {
     [
         pin.rise_capacitance
             .or(pin.capacitance)

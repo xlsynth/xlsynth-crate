@@ -36,17 +36,24 @@ impl Ord for RankedIndex {
 
 /// Lexicographic progress below the worst delay: first reduce the number of
 /// equally critical endpoints, then improve a bounded near-critical sum.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TimingTieBreak {
     worst_count: usize,
     near_sum: f64,
 }
 
 impl TimingTieBreak {
-    pub fn improves(self, old: Self) -> bool {
-        self.worst_count < old.worst_count
-            || (self.worst_count == old.worst_count
-                && self.near_sum < old.near_sum - TIMING_COMPARISON_TOLERANCE)
+    /// Rank progress on tied paths directly, including nonpositive arrivals.
+    pub fn improvement_rank(self, old: Self) -> Option<(u8, f64)> {
+        if self.worst_count < old.worst_count {
+            Some((1, self.worst_count as f64))
+        } else if self.worst_count == old.worst_count
+            && self.near_sum < old.near_sum - TIMING_COMPARISON_TOLERANCE
+        {
+            Some((2, self.near_sum))
+        } else {
+            None
+        }
     }
 
     /// Returns a dimensionless progress ratio for area-efficiency ranking.
@@ -85,23 +92,25 @@ pub(super) trait ResizeTimingPolicy {
 }
 
 impl ResizeTimingPolicy for IncrementalSta<'_> {
-    /// Prioritizes register-to-register timing when present, otherwise worst
-    /// IO.
+    /// Selects register-to-register timing when reachable. Otherwise the
+    /// longest currently reachable path determines the boundary.
     fn objective(&self) -> usize {
-        if self.endpoint_arrivals(3).next_back().is_some() {
+        if self.endpoint_maximum_count(3) > 0 {
             3
         } else {
-            (0..4)
-                .filter(|i| self.endpoint_arrivals(*i).next_back().is_some())
-                .max_by(|a, b| self.score().values()[*a].total_cmp(&self.score().values()[*b]))
+            let delays = self.score().values();
+            (0..3)
+                .filter(|i| self.endpoint_maximum_count(*i) > 0)
+                .max_by(|a, b| delays[*a].total_cmp(&delays[*b]))
                 .unwrap_or(0)
         }
     }
 
     /// Breaks delay ties without losing progress on large critical plateaus.
     fn secondary(&self, objective: usize) -> TimingTieBreak {
+        let worst_count = self.endpoint_maximum_count(objective);
         TimingTieBreak {
-            worst_count: self.endpoint_maximum_count(objective),
+            worst_count,
             near_sum: self
                 .endpoint_arrivals(objective)
                 .rev()
@@ -252,7 +261,7 @@ impl ResizeTimingPolicy for IncrementalSta<'_> {
 }
 
 /// Electrical constraints cannot be traded for a timing or area improvement.
-fn electrical_worsens(new: ElectricalViolations, old: ElectricalViolations) -> bool {
+pub(super) fn electrical_worsens(new: ElectricalViolations, old: ElectricalViolations) -> bool {
     new.capacitance > old.capacitance + ELECTRICAL_COMPARISON_TOLERANCE
         || new.transition > old.transition + ELECTRICAL_COMPARISON_TOLERANCE
         || new.fanout > old.fanout + ELECTRICAL_COMPARISON_TOLERANCE

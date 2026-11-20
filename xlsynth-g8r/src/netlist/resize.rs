@@ -22,6 +22,7 @@ use crate::netlist::sta::incremental::{
     measure_boundary_delays_with_library,
 };
 
+pub mod registered_opt;
 mod timing;
 use timing::{ResizeTimingPolicy, TimingTieBreak};
 
@@ -49,7 +50,9 @@ pub struct ResizeOptions {
     pub timing_evaluation_budget: Option<usize>,
     /// Instance timing and functional-coverage propagation evaluations across
     /// all recovery rounds; None uses max(100_000, 8 * instance_count).
-    /// Independent of unused timing work.
+    /// Independent of timing work. On registered stages the automatic value
+    /// is the size of a work window. A productive scalar sweep may renew it,
+    /// up to a logarithmic number of windows. Explicit budgets are hard caps.
     pub recovery_evaluation_budget: Option<usize>,
     pub resize_registers: bool,
 }
@@ -96,6 +99,18 @@ pub struct ResizeWorkLimits {
 }
 
 impl ResizeOptions {
+    /// Bound total automatic recovery work on a registered stage. A window is
+    /// renewed only while cells are actually shrinking. A logarithmic number
+    /// of graph-sized windows bounds compile time on large reconvergent cones.
+    fn registered_limits(&self, instances: usize) -> ResizeWorkLimits {
+        let mut limits = self.work_limits(instances);
+        if self.recovery_evaluation_budget.is_none() {
+            let windows = instances.checked_ilog2().unwrap_or(0) as usize + 1;
+            limits.recovery_evaluations = limits.recovery_evaluations.saturating_mul(windows);
+        }
+        limits
+    }
+
     /// Resolves budgets once for the input instance count, including registers.
     pub fn work_limits(&self, instances: usize) -> ResizeWorkLimits {
         ResizeWorkLimits {
@@ -118,6 +133,9 @@ pub struct ResizePhaseStats {
     pub trials: usize,
     pub accepted: usize,
     pub register_changes: usize,
+    /// Additional automatic windows granted after a productive recovery
+    /// interval.
+    pub renewed_windows: usize,
     /// Instance visits for timing and functional-coverage propagation.
     pub propagated_instances: usize,
     pub stop_reason: ResizeStopReason,
@@ -344,10 +362,11 @@ impl SearchPhase {
 struct ResizeSearch<'a> {
     library: &'a Library,
     options: &'a ResizeOptions,
-    families: CellFamilies,
-    objective: usize,
+    families: &'a CellFamilies,
+    area_weight: f64,
     initial_delay: BoundaryDelays,
     timing_checkpoint: BoundaryDelays,
+    objective: usize,
     area: f64,
     area_limit: f64,
     work_limits: ResizeWorkLimits,
@@ -463,18 +482,39 @@ impl ResizeSearch<'_> {
         } else {
             secondary.relative_to(previous_secondary)
         };
-        let worthwhile = new_area <= self.area || delay_ratio < (self.area / new_area).sqrt();
+        let worthwhile = new_area <= self.area
+            || delay_ratio
+                < if self.area_weight == 0.5 {
+                    (self.area / new_area).sqrt()
+                } else {
+                    (self.area / new_area).powf(self.area_weight)
+                };
         score.within(self.initial_delay)
             && score.within(previous)
             && worthwhile
             && (new_delay < old_delay - TIMING_COMPARISON_TOLERANCE
-                || (new_delay <= old_delay && secondary.improves(previous_secondary)))
+                || (new_delay <= old_delay
+                    && secondary.improvement_rank(previous_secondary).is_some()))
     }
 
     /// Runs one bounded phase without changing candidate or tie-breaking order.
-    fn run_phase(&mut self, phase: SearchPhase, sta: &mut IncrementalSta<'_>) -> ResizePhaseStats {
+    fn run_phase(
+        &mut self,
+        phase: SearchPhase,
+        sta: &mut IncrementalSta<'_>,
+        rounds: usize,
+    ) -> ResizePhaseStats {
+        self.run_phase_with_windows(phase, sta, rounds, None)
+    }
+
+    fn run_phase_with_windows(
+        &mut self,
+        phase: SearchPhase,
+        sta: &mut IncrementalSta<'_>,
+        rounds: usize,
+        window: Option<usize>,
+    ) -> ResizePhaseStats {
         let mut stats = ResizePhaseStats::default();
-        let rounds = phase.rounds(self.options);
         if rounds == 0 {
             return stats;
         }
@@ -482,7 +522,10 @@ impl ResizeSearch<'_> {
         let start_work = sta.propagated_instances();
         // Anchor once per phase, not per round. Recovery starts with its own
         // full allowance regardless of how much work timing consumed.
-        let work_limit = phase.work_limit(self.work_limits, start_work);
+        let hard_limit = phase.work_limit(self.work_limits, start_work);
+        let mut work_limit =
+            window.map_or(hard_limit, |w| hard_limit.min(start_work.saturating_add(w)));
+        let mut accepted_at_window_start = 0;
         let mut timing_candidates = Vec::new();
         'rounds: for _ in 0..rounds {
             let sites = self.candidate_sites(phase, sta);
@@ -529,8 +572,26 @@ impl ResizeSearch<'_> {
                 {
                     let new_area = self.area - library.cells[sta.cell_indices()[i]].area
                         + library.cells[cell].area;
-                    stats.trials += 1;
-                    match self.trial(phase, sta, i, cell, work_limit, new_area) {
+                    let result = loop {
+                        stats.trials += 1;
+                        let trial = self.trial(phase, sta, i, cell, work_limit, new_area);
+                        let Some(window) = window else { break trial };
+                        if !matches!(trial, Ok(TrialOutcome::PropagationLimit))
+                            || work_limit >= hard_limit
+                            || stats.accepted == accepted_at_window_start
+                        {
+                            break trial;
+                        }
+                        // The incomplete transaction rolled back. Retry it at
+                        // the same position with a fresh allowance. Lock in
+                        // the timing already attained before spending more
+                        // work.
+                        accepted_at_window_start = stats.accepted;
+                        self.timing_checkpoint = sta.score();
+                        work_limit = hard_limit.min(work_limit.saturating_add(window));
+                        stats.renewed_windows += 1;
+                    };
+                    match result {
                         Ok(TrialOutcome::Accepted) => {
                             stats.accepted += 1;
                             stats.register_changes += usize::from(sta.is_register(i));
@@ -604,6 +665,14 @@ pub(crate) fn resize_netlist_with_remaining_budget(
     }
     let families = CellFamilies::new(library);
     let mut sta = IncrementalSta::new(module, nets, interner, library, options.timing)?;
+    let registered = (0..sta.instance_count()).any(|i| sta.is_register(i));
+    let recovery_window = (registered && options.recovery_evaluation_budget.is_none())
+        .then_some(work_limits.recovery_evaluations);
+    let work_limits = if registered {
+        options.registered_limits(sta.instance_count())
+    } else {
+        work_limits
+    };
     let initial_delay = sta.score();
     let initial_area: f64 = sta
         .cell_indices()
@@ -625,15 +694,20 @@ pub(crate) fn resize_netlist_with_remaining_budget(
     let mut search = ResizeSearch {
         library,
         options,
-        families,
-        objective: sta.objective(),
+        families: &families,
+        area_weight: 0.5,
         initial_delay,
         timing_checkpoint: initial_delay,
+        objective: sta.objective(),
         area: initial_area,
         area_limit,
         work_limits,
     };
-    let upsize = search.run_phase(SearchPhase::Timing, &mut sta);
+    let upsize = search.run_phase(
+        SearchPhase::Timing,
+        &mut sta,
+        SearchPhase::Timing.rounds(options),
+    );
     let upsized_delay = sta.score();
     search.timing_checkpoint = upsized_delay;
     // Re-anchor at the phase boundary to avoid incremental cancellation error.
@@ -643,7 +717,12 @@ pub(crate) fn resize_netlist_with_remaining_budget(
         .map(|i| library.cells[*i].area)
         .sum();
     search.area = upsized_area;
-    let downsize = search.run_phase(SearchPhase::AreaRecovery, &mut sta);
+    let downsize = search.run_phase_with_windows(
+        SearchPhase::AreaRecovery,
+        &mut sta,
+        SearchPhase::AreaRecovery.rounds(options),
+        recovery_window,
+    );
     // Preparation failures spend no visits. Once search completes, charge
     // even rejected trials before final verification can reject this netlist.
     if let Some(limit) = &mut options.timing_evaluation_budget {
@@ -709,4 +788,4 @@ fn verify_timing(incremental: BoundaryDelays, full: BoundaryDelays) -> Result<()
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::netlist) mod tests;

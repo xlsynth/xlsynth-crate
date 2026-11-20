@@ -881,7 +881,7 @@ impl IncrementalSta<'_> {
     }
 
     /// Checks the fixed-pin Resize contract before either preparation path.
-    fn validate_resize(&self, i: usize, cell: usize) -> Result<usize> {
+    fn validate_resize(&mut self, i: usize, cell: usize) -> Result<usize> {
         let inst = self
             .instances
             .get(i)
@@ -919,6 +919,19 @@ impl IncrementalSta<'_> {
                     old.is_clocking_pin == new.is_clocking_pin,
                     "replacement changes clock/data pin role"
                 );
+                if old.direction == PinDirection::Input as i32
+                    && !old.is_clocking_pin
+                    && inst.pins[name]
+                        .iter()
+                        .any(|s| matches!(s, BitSource::Bit(_)))
+                {
+                    crate::netlist::sta::validate_setup_coverage(
+                        old,
+                        new,
+                        &inst.known,
+                        &mut self.evaluation,
+                    )?;
+                }
             }
         }
         ensure!(
