@@ -5,177 +5,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{BlockCycleConnection, BlockCycleStep, BuilderError};
-use crate::ir::{
-    Block, BlockPort, Instantiation, InstantiationKind, NodePayload, NodeRef, Package,
-};
+use crate::ir::{Block, BlockPort, InstantiationKind, NodePayload, NodeRef, Package};
 use crate::ir_utils::operands;
 
 type InputDependencies = BTreeSet<String>;
 type OutputDependencies = BTreeMap<String, InputDependencies>;
 
-/// Boundary relations of one block definition. All aliases of an electrical
-/// net share a representative port in the dependency summary.
-#[derive(Default)]
-struct BlockSummary {
-    outputs: OutputDependencies,
-    port_classes: BTreeMap<String, String>,
-}
-
-/// One local net or a set of local nets joined through child ports.
-#[derive(Default)]
-struct NetClass<'a> {
-    public_name: Option<&'a str>,
-    witness: Option<NodeRef>,
-}
-
-/// Extends SSA dependencies with a vertex per electrically distinct net.
-struct DependencyGraph<'a> {
-    edges: Vec<Vec<NodeRef>>,
-    local_nets: BTreeMap<&'a str, NodeRef>,
-    public_nets: BTreeMap<&'a str, NodeRef>,
-    classes: Vec<NetClass<'a>>,
-}
-
-impl<'a> DependencyGraph<'a> {
-    /// Collapses passive aliases before adding directed driver and read edges.
-    fn new(
-        block: &'a Block,
-        definitions: &BTreeMap<&str, &Instantiation>,
-        summaries: &BTreeMap<String, BlockSummary>,
-    ) -> Result<Self, BuilderError> {
-        let mut edges = Vec::with_capacity(block.nodes.len() + block.inout_nets.len());
-        for node in &block.nodes {
-            let deps = operands(&node.payload);
-            // The builder can call this before its structural verifier. An
-            // out-of-bounds SSA operand must never alias an added net vertex.
-            if let Some(bad) = deps.iter().find(|dep| dep.index >= block.nodes.len()) {
-                return Err(invalid(format!(
-                    "block '{}' references missing node {}",
-                    block.name, bad.index
-                )));
-            }
-            edges.push(deps);
-        }
-
-        let names: BTreeMap<_, _> = block
-            .inout_nets
-            .iter()
-            .enumerate()
-            .map(|(i, net)| (net.name.as_str(), i))
-            .collect();
-        let mut ties = vec![Vec::new(); block.inout_nets.len()];
-        let mut first_bindings = BTreeMap::new();
-        for node in &block.nodes {
-            let NodePayload::ExtInstantiationInout {
-                instantiation,
-                port_name,
-                net,
-            } = &node.payload
-            else {
-                continue;
-            };
-            let index = *names
-                .get(net.as_str())
-                .ok_or_else(|| invalid(format!("undeclared inout net '{net}'")))?;
-            let canonical = definitions
-                .get(instantiation.as_str())
-                .filter(|instance| instance.kind == InstantiationKind::Block)
-                .and_then(|instance| summaries.get(&instance.block))
-                .and_then(|child| child.port_classes.get(port_name))
-                .ok_or_else(|| {
-                    invalid(format!(
-                        "no block instance inout named {instantiation}.{port_name}"
-                    ))
-                })?;
-            let first = *first_bindings
-                .entry((instantiation, canonical))
-                .or_insert(index);
-            if first != index {
-                ties[first].push(index);
-                ties[index].push(first);
-            }
-        }
-
-        // Each component includes transitively joined aliases from different
-        // instances. Each declared net and each tie is visited once.
-        let mut vertices = vec![None; block.inout_nets.len()];
-        let mut classes = Vec::new();
-        let mut pending = Vec::new();
-        for start in 0..vertices.len() {
-            if vertices[start].is_some() {
-                continue;
-            }
-            let vertex = NodeRef { index: edges.len() };
-            edges.push(Vec::new());
-            classes.push(NetClass::default());
-            vertices[start] = Some(vertex);
-            pending.push(start);
-            while let Some(index) = pending.pop() {
-                for &other in &ties[index] {
-                    if vertices[other].is_none() {
-                        vertices[other] = Some(vertex);
-                        pending.push(other);
-                    }
-                }
-            }
-        }
-        let local_nets: BTreeMap<_, _> = block
-            .inout_nets
-            .iter()
-            .zip(vertices)
-            .map(|(net, vertex)| {
-                (
-                    net.name.as_str(),
-                    vertex.expect("visited each net component"),
-                )
-            })
-            .collect();
-        let mut public_nets = BTreeMap::new();
-        for port in block.inout_ports() {
-            let Some(NodePayload::ExtInoutPort { name, net, .. }) =
-                block.nodes.get(port.index).map(|node| &node.payload)
-            else {
-                return Err(invalid("block inout port references an invalid node"));
-            };
-            let vertex = *local_nets
-                .get(net.as_str())
-                .ok_or_else(|| invalid(format!("undeclared inout net '{net}'")))?;
-            public_nets.insert(name.as_str(), vertex);
-            classes[vertex.index - block.nodes.len()]
-                .public_name
-                .get_or_insert(name);
-        }
-        Ok(Self {
-            edges,
-            local_nets,
-            public_nets,
-            classes,
-        })
-    }
-
-    /// Records a concrete IR node to identify a resolved net in a cycle.
-    fn net(
-        &mut self,
-        name: &str,
-        node: NodeRef,
-        node_count: usize,
-    ) -> Result<NodeRef, BuilderError> {
-        let vertex = *self
-            .local_nets
-            .get(name)
-            .ok_or_else(|| invalid(format!("undeclared inout net '{name}'")))?;
-        self.classes[vertex.index - node_count]
-            .witness
-            .get_or_insert(node);
-        Ok(vertex)
-    }
-}
-
-/// Caches boundary dependencies for each verified block in an unchanged
-/// package.
+/// Caches ordinary output-to-input dependencies for each verified block.
 #[derive(Default)]
 pub(crate) struct BlockHierarchy {
-    summaries: BTreeMap<String, BlockSummary>,
+    summaries: BTreeMap<String, OutputDependencies>,
     active: BTreeSet<String>,
 }
 
@@ -183,8 +22,9 @@ pub(crate) struct BlockHierarchy {
 ///
 /// Each distinct child block is checked once and summarized by the input ports
 /// reaching each output. Registers cut dependencies, so sequential feedback is
-/// permitted. Traversal stops at extern boundaries because the foreign
-/// function body can be a placeholder for separately supplied RTL.
+/// permitted. Inout reads are sources and drives are sinks, so an electrical
+/// connection adds no dependency between them. Traversal stops at extern
+/// boundaries because a foreign function body can stand in for external RTL.
 pub(super) fn verify_block_combinational_cycles(
     block: &Block,
     package: &Package,
@@ -205,18 +45,18 @@ impl BlockHierarchy {
         if self.summaries.contains_key(&block.name) {
             return Ok(());
         }
-        let graph = self.verify_graph(block, package)?;
-        let summary = graph_output_dependencies(block, &graph)?;
+        let dependencies = self.verify_graph(block, package)?;
+        let summary = graph_output_dependencies(block, &dependencies)?;
         self.summaries.insert(block.name.clone(), summary);
         Ok(())
     }
 
     /// Checks the hierarchy and returns cycle-free, instance-aware graph edges.
-    fn verify_graph<'a>(
+    fn verify_graph(
         &mut self,
-        block: &'a Block,
+        block: &Block,
         package: &Package,
-    ) -> Result<DependencyGraph<'a>, BuilderError> {
+    ) -> Result<Vec<Vec<NodeRef>>, BuilderError> {
         if !self.active.insert(block.name.clone()) {
             return Err(invalid(format!(
                 "recursive block instantiation involving '{}'",
@@ -240,115 +80,89 @@ impl BlockHierarchy {
                 self.summarize(child, package)?;
             }
         }
+        let mut input_connections: BTreeMap<&str, BTreeMap<&str, NodeRef>> = BTreeMap::new();
+        for (index, node) in block.nodes.iter().enumerate() {
+            if let NodePayload::InstantiationInput {
+                instantiation,
+                port_name,
+                ..
+            } = &node.payload
+            {
+                input_connections
+                    .entry(instantiation)
+                    .or_default()
+                    .insert(port_name, NodeRef { index });
+            }
+        }
         let definitions: BTreeMap<_, _> = block
             .instantiations
             .iter()
-            .map(|inst| (inst.name.as_str(), inst))
+            .map(|instance| (instance.name.as_str(), instance))
             .collect();
-        let mut graph = DependencyGraph::new(block, &definitions, &self.summaries)?;
-        let mut input_connections: BTreeMap<&str, BTreeMap<&str, NodeRef>> = BTreeMap::new();
-        let mut output_connections = Vec::new();
-        for (index, node) in block.nodes.iter().enumerate() {
-            let reference = NodeRef { index };
-            match &node.payload {
-                NodePayload::ExtInoutRead { net } => {
-                    let net = graph.net(net, reference, block.nodes.len())?;
-                    graph.edges[index].push(net);
-                }
-                NodePayload::ExtInoutDrive { net, .. } => {
-                    let net = graph.net(net, reference, block.nodes.len())?;
-                    graph.edges[net.index].push(reference);
-                }
-                NodePayload::InstantiationInput {
-                    instantiation,
-                    port_name,
-                    ..
-                } => {
-                    input_connections
-                        .entry(instantiation)
-                        .or_default()
-                        .insert(port_name, NodeRef { index });
-                }
-                NodePayload::InstantiationOutput {
-                    instantiation,
-                    port_name,
-                } => {
-                    output_connections.push((instantiation, port_name, index));
-                }
-                NodePayload::ExtInstantiationInout {
-                    instantiation,
-                    port_name,
-                    net,
-                } => {
-                    let net = graph.net(net, reference, block.nodes.len())?;
-                    // Graph construction has resolved every binding's instance
-                    // and public alias, including during builder prechecks.
-                    let child = &self.summaries[&definitions[instantiation.as_str()].block];
-                    if child.port_classes[port_name] == *port_name {
-                        // Each child net has exactly one boundary
-                        // representative. Passive aliases already share a
-                        // vertex in this graph.
-                        input_connections
-                            .entry(instantiation)
-                            .or_default()
-                            .insert(port_name, net);
-                        output_connections.push((instantiation, port_name, net.index));
+        let mut dependencies = Vec::with_capacity(block.nodes.len());
+        for node in &block.nodes {
+            let mut edges = operands(&node.payload);
+            if let NodePayload::InstantiationOutput {
+                instantiation,
+                port_name,
+            } = &node.payload
+            {
+                let definition = definitions.get(instantiation.as_str()).ok_or_else(|| {
+                    invalid(format!(
+                        "unknown instance '{instantiation}' in block '{}'",
+                        block.name
+                    ))
+                })?;
+                // Follow the input sink node so a cycle can name the
+                // connection. Its explicit operand already
+                // points to the driving value.
+                let connected = input_connections.get(instantiation.as_str());
+                match definition.kind {
+                    InstantiationKind::Block => {
+                        let summary = &self.summaries[&definition.block];
+                        let inputs = summary.get(port_name).ok_or_else(|| {
+                            invalid(format!(
+                                "unknown output '{port_name}' on child '{}'",
+                                definition.block
+                            ))
+                        })?;
+                        for input in inputs {
+                            let connection = connected
+                                .and_then(|ports| ports.get(input.as_str()))
+                                .ok_or_else(|| {
+                                    invalid(format!(
+                                        "unconnected input '{input}' on instance '{instantiation}'"
+                                    ))
+                                })?;
+                            edges.push(*connection);
+                        }
+                    }
+                    InstantiationKind::Extern => {
+                        // The extern interface doesn't tell us which inputs can
+                        // affect this output combinationally, so traversal
+                        // stops here.
                     }
                 }
-                _ => { /* Other nodes have no implicit instance connections. */ }
             }
+            dependencies.push(edges);
         }
-        for (instantiation, port_name, index) in output_connections {
-            let edges = &mut graph.edges[index];
-            let definition = definitions.get(instantiation.as_str()).ok_or_else(|| {
-                invalid(format!(
-                    "unknown instance '{instantiation}' in block '{}'",
-                    block.name
-                ))
-            })?;
-            let connected = input_connections.get(instantiation.as_str());
-            match definition.kind {
-                InstantiationKind::Block => {
-                    let summary = &self.summaries[&definition.block];
-                    let inputs = summary.outputs.get(port_name).ok_or_else(|| {
-                        invalid(format!(
-                            "unknown output '{port_name}' on child '{}'",
-                            definition.block
-                        ))
-                    })?;
-                    for input in inputs {
-                        let driver = connected
-                            .and_then(|ports| ports.get(input.as_str()))
-                            .ok_or_else(|| {
-                                invalid(format!(
-                                    "unconnected input '{input}' on instance '{instantiation}'"
-                                ))
-                            })?;
-                        edges.push(*driver);
-                    }
-                }
-                InstantiationKind::Extern => {
-                    // The extern's internal connectivity is opaque.
-                }
-            }
-        }
-        verify_graph_acyclic(block, &graph)?;
+        verify_graph_acyclic(block, &dependencies)?;
         self.active.remove(&block.name);
-        Ok(graph)
+        Ok(dependencies)
     }
 }
 
 /// Checks even unobserved nodes in O(nodes + edges) time and O(nodes) space.
-fn verify_graph_acyclic(block: &Block, graph: &DependencyGraph) -> Result<(), BuilderError> {
-    let mut colors = vec![0u8; graph.edges.len()];
-    for root in 0..graph.edges.len() {
+fn verify_graph_acyclic(block: &Block, dependencies: &[Vec<NodeRef>]) -> Result<(), BuilderError> {
+    let mut colors = vec![0u8; block.nodes.len()];
+    for root in 0..block.nodes.len() {
         if colors[root] == 2 {
             continue;
         }
         colors[root] = 1;
         let mut pending = vec![(root, 0usize)];
         while let Some((node, next_edge)) = pending.last_mut() {
-            if let Some(dependency) = graph.edges[*node].get(*next_edge) {
+            if let Some(dependency) = dependencies[*node].get(*next_edge) {
                 *next_edge += 1;
                 let index = dependency.index;
                 let color = colors.get(index).ok_or_else(|| {
@@ -363,7 +177,7 @@ fn verify_graph_acyclic(block: &Block, graph: &DependencyGraph) -> Result<(), Bu
                             .iter()
                             .position(|(node, _)| *node == index)
                             .expect("active node is on the DFS path");
-                        return Err(cycle_error(block, graph, &pending[start..]));
+                        return Err(cycle_error(block, &pending[start..]));
                     }
                     0 => {
                         colors[index] = 1;
@@ -383,21 +197,13 @@ fn verify_graph_acyclic(block: &Block, graph: &DependencyGraph) -> Result<(), Bu
 }
 
 /// Converts the cyclic segment of the DFS path into block-local text IDs.
-fn cycle_error(block: &Block, graph: &DependencyGraph, path: &[(usize, usize)]) -> BuilderError {
-    let witness = |index: usize| {
-        block.nodes.get(index).unwrap_or_else(|| {
-            let origin = graph.classes[index - block.nodes.len()]
-                .witness
-                .expect("a net on a directed cycle has an access or a binding");
-            block.get_node(origin)
-        })
-    };
+fn cycle_error(block: &Block, path: &[(usize, usize)]) -> BuilderError {
     let steps = path
         .iter()
         .zip(path.iter().cycle().skip(1))
         .map(|(&(index, _), &(next, _))| {
-            let node = witness(index);
-            let dependency = witness(next);
+            let node = &block.nodes[index];
+            let dependency = &block.nodes[next];
             let connection = match (&node.payload, &dependency.payload) {
                 (
                     NodePayload::InstantiationOutput {
@@ -435,60 +241,38 @@ fn cycle_error(block: &Block, graph: &DependencyGraph, path: &[(usize, usize)]) 
 /// only the output-to-input relation itself can require quadratic storage.
 fn graph_output_dependencies(
     block: &Block,
-    graph: &DependencyGraph,
-) -> Result<BlockSummary, BuilderError> {
+    dependencies: &[Vec<NodeRef>],
+) -> Result<OutputDependencies, BuilderError> {
     // Tag visits by output instead of clearing O(nodes) storage for each cone.
-    let mut visited = vec![None; graph.edges.len()];
+    let mut visited = vec![None; block.nodes.len()];
     let mut pending = Vec::new();
-    let mut summary = BlockSummary::default();
+    let mut summary = BTreeMap::new();
     for port in &block.ports {
-        let (name, root) = match port {
-            BlockPort::Output(reference) => {
-                let Some(NodePayload::OutputPort { name, .. }) =
-                    block.nodes.get(reference.index).map(|n| &n.payload)
-                else {
-                    return Err(invalid("block output references an invalid node"));
-                };
-                (name.as_str(), *reference)
-            }
-            BlockPort::Inout(reference) => {
-                let name = block.port_name(*reference);
-                let root = graph.public_nets[name];
-                let representative = graph.classes[root.index - block.nodes.len()]
-                    .public_name
-                    .expect("public net has a representative");
-                summary
-                    .port_classes
-                    .insert(name.to_string(), representative.to_string());
-                if representative != name {
-                    continue;
-                }
-                (name, root)
-            }
-            BlockPort::Clock(_) | BlockPort::Input(_) => continue,
+        let BlockPort::Output(reference) = port else {
+            continue;
         };
-        let inputs = summary.outputs.entry(name.to_string()).or_default();
-        visited[root.index] = Some(root);
-        pending.push(root);
-        while let Some(vertex) = pending.pop() {
-            if let Some(node) = block.nodes.get(vertex.index) {
-                if let NodePayload::InputPort { name, .. } = &node.payload {
-                    inputs.insert(name.clone());
-                }
-            } else if let Some(name) = graph.classes[vertex.index - block.nodes.len()].public_name
-                && vertex != root
-            {
-                // Other public nets can be externally driven. The root net
-                // summarizes its own drivers, independent of its alias names.
-                inputs.insert(name.to_string());
+        let node = block
+            .nodes
+            .get(reference.index)
+            .ok_or_else(|| invalid("block output references a missing node"))?;
+        let NodePayload::OutputPort { name, .. } = &node.payload else {
+            return Err(invalid("block output does not reference an output_port"));
+        };
+        let mut inputs = BTreeSet::new();
+        visited[reference.index] = Some(*reference);
+        pending.push(*reference);
+        while let Some(node) = pending.pop() {
+            if let NodePayload::InputPort { name, .. } = &block.nodes[node.index].payload {
+                inputs.insert(name.clone());
             }
-            for dependency in &graph.edges[vertex.index] {
-                if visited[dependency.index] != Some(root) {
-                    visited[dependency.index] = Some(root);
+            for dependency in &dependencies[node.index] {
+                if visited[dependency.index] != Some(*reference) {
+                    visited[dependency.index] = Some(*reference);
                     pending.push(*dependency);
                 }
             }
         }
+        summary.insert(name.clone(), inputs);
     }
     Ok(summary)
 }
@@ -507,46 +291,6 @@ mod tests {
     fn check(source: &str) -> Result<(), BuilderError> {
         let package = Parser::new(source).parse_and_verify_package().unwrap();
         verify_block_combinational_cycles(package.get_top_block().unwrap(), &package)
-    }
-
-    #[test]
-    fn builder_cycle_precheck_handles_unverified_inout_bindings() {
-        let source = r#"package precheck
-block child(a: bits[1], b: bits[1], sensed: bits[1]) {
-  ext_inout_net wire(bits[1])
-  a: () = ext_inout_port(name=a, net=wire, id=6)
-  b: () = ext_inout_port(name=b, net=wire, id=7)
-  read: bits[1] = ext_inout_read(net=wire, id=1)
-  sensed: () = output_port(read, name=sensed, id=2)
-}
-top block parent() {
-  ext_inout_net local(bits[1])
-  instantiation c(block=child, kind=block)
-  first: () = ext_instantiation_inout(instantiation=c, port_name=a, net=local, id=3)
-  second: () = ext_instantiation_inout(instantiation=c, port_name=b, net=local, id=4)
-  sense: bits[1] = instantiation_output(instantiation=c, port_name=sensed, id=5)
-}
-"#;
-        for (from, to) in [
-            ("net=local, id=3", "net=absent, id=3"),
-            (
-                "instantiation=c, port_name=b",
-                "instantiation=absent, port_name=b",
-            ),
-            ("port_name=b, net=", "port_name=absent, net="),
-            (
-                "first: () = ext_instantiation_inout(instantiation=c, port_name=a, net=local, id=3)",
-                "",
-            ),
-        ] {
-            let malformed = source.replace(from, to);
-            let package = Parser::new(&malformed).parse_package().unwrap();
-            assert!(
-                verify_block_combinational_cycles(package.get_top_block().unwrap(), &package)
-                    .is_err(),
-                "{malformed}"
-            );
-        }
     }
 
     #[test]
@@ -577,7 +321,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
             ),
             ("direct".into(), BTreeSet::from(["z".into()])),
         ]);
-        assert_eq!(hierarchy.summaries["child"].outputs, expected);
+        assert_eq!(hierarchy.summaries["child"], expected);
 
         let mut root_check = BlockHierarchy::default();
         root_check
@@ -602,7 +346,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
         hierarchy
             .summarize(package.get_top_block().unwrap(), &package)
             .unwrap();
-        assert_eq!(hierarchy.summaries["disjoint"].outputs, expected);
+        assert_eq!(hierarchy.summaries["disjoint"], expected);
     }
 
     #[test]

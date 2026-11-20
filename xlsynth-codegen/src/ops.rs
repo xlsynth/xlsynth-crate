@@ -52,7 +52,8 @@ impl BlockEmitter<'_, '_> {
                 port_name,
                 net,
             } => {
-                self.connect_instance_port(instantiation, port_name, self.inout_nets[net.as_str()]);
+                let value = self.instance_inout(net);
+                self.connect_instance_port(instantiation, port_name, value);
                 None
             }
             NodePayload::InstantiationInput {

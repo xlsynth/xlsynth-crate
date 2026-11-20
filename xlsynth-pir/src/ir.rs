@@ -11,6 +11,7 @@ use crate::{IrFormatPreference, IrValue};
 
 use crate::{ir, ir_parser, ir_utils::operands};
 
+pub use crate::inout::{InoutBinding, InoutPiece};
 pub use crate::ir_block::{Block, BlockPort, BlockReset, InoutNet};
 
 pub use xlsynth_ir_value::{ArrayTypeData, StartAndLimit, Type};
@@ -319,11 +320,11 @@ pub enum NodePayload {
         start: NodeRef,
         update_value: NodeRef,
     },
-    /// Declares a public bidirectional port bound to a whole local net.
+    /// Declares a public bidirectional port with a full-width passive binding.
     ExtInoutPort {
         name: String,
         port_type: Type,
-        net: String,
+        net: InoutBinding,
         sv_type: Option<String>,
     },
     /// Samples the resolved value of a declared electrical net.
@@ -336,11 +337,11 @@ pub enum NodePayload {
         drive: NodeRef,
         output_enable: NodeRef,
     },
-    /// Connects a child inout port to a net in this block.
+    /// Connects a child inout port to local net spans in this block.
     ExtInstantiationInout {
         instantiation: String,
         port_name: String,
-        net: String,
+        net: InoutBinding,
     },
     /// Extension (non-upstream) op: carry-out bit of addition.
     ///
@@ -1264,10 +1265,11 @@ impl NodeGraph {
     pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
         for node in &self.nodes {
             let pin = match &node.payload {
-                NodePayload::ExtInoutPort { name, .. } => name,
-                NodePayload::ExtInoutRead { net }
-                | NodePayload::ExtInoutDrive { net, .. }
-                | NodePayload::ExtInstantiationInout { net, .. } => net,
+                NodePayload::ExtInoutPort { name, .. } => name.clone(),
+                NodePayload::ExtInoutRead { net } | NodePayload::ExtInoutDrive { net, .. } => {
+                    net.clone()
+                }
+                NodePayload::ExtInstantiationInout { net, .. } => net.to_string(),
                 _ => continue,
             };
             return Err(format!(

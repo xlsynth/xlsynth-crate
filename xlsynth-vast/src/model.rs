@@ -414,8 +414,8 @@ pub(crate) enum MemberData {
     Tran {
         name: String,
         width: usize,
-        left: LogicRef,
-        right: LogicRef,
+        left: Expr,
+        right: Expr,
     },
     Instantiation(Instantiation),
     Function(VastFunction),

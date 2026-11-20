@@ -985,6 +985,72 @@ impl VastFile {
         left: LogicRef,
         right: LogicRef,
     ) -> Result<(), VastError> {
+        self.append_tran(module, name, width, left.to_expr(), right.to_expr())
+    }
+
+    /// Joins two named nets or constant selects of named nets with a tran
+    /// array.
+    pub fn add_tran_selects(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        width: usize,
+        left: Expr,
+        right: Expr,
+    ) -> Result<(), VastError> {
+        if width == 0 {
+            return Err(VastError("tran requires a positive width".into()));
+        }
+        let named_width = |expr: Expr| match self.ast.expressions[self.check(expr.0)] {
+            ExprData::Name {
+                data_type: Some(ty),
+                ..
+            } => Some(
+                self.type_flat_bit_count_as_int64(ty)
+                    .ok()
+                    .and_then(|w| usize::try_from(w).ok()),
+            ),
+            _ => None,
+        };
+        let constant = |expr: Expr| match self.ast.expressions[self.check(expr.0)] {
+            ExprData::Literal { value: Some(n), .. } => usize::try_from(n).ok(),
+            _ => None,
+        };
+        for terminal in [left, right] {
+            let (subject, bounds) = match self.ast.expressions[self.check(terminal.0)] {
+                ExprData::Index { subject, index } => (subject, constant(index).map(|i| (i, i))),
+                ExprData::Slice { subject, hi, lo } => (subject, constant(hi).zip(constant(lo))),
+                _ => (terminal, Some((width - 1, 0))),
+            };
+            let valid = named_width(subject)
+                .zip(bounds)
+                .is_some_and(|(size, (hi, lo))| {
+                    hi.checked_sub(lo) == Some(width - 1)
+                        && size.is_none_or(|n| {
+                            if subject == terminal {
+                                width == n
+                            } else {
+                                hi < n
+                            }
+                        })
+                });
+            if !valid {
+                return Err(VastError("tran terminals must be named nets or in-bounds constant net selects of matching width".into()));
+            }
+        }
+        self.append_tran(module, name, width, left, right)
+    }
+
+    /// Appends a primitive instance after the caller has selected its
+    /// terminals.
+    fn append_tran(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        width: usize,
+        left: Expr,
+        right: Expr,
+    ) -> Result<(), VastError> {
         if width == 0 {
             return Err(VastError("tran requires a positive width".into()));
         }

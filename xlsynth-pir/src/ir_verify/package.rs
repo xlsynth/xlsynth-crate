@@ -705,17 +705,17 @@ impl std::fmt::Display for InstantiationPortDirection {
     }
 }
 
-/// Verifies all package members, their references, and their inout hierarchies.
+/// Verifies package members, their references, and block hierarchy invariants.
 ///
 /// Member names must be unique within each kind, and a declared top must
 /// resolve to a member of that kind. Blocks may omit provenance. Among blocks
 /// that declare it, each effective source name and kind must be unique.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     verify_package_structure(p)?;
-    verify_package_inout_hierarchies(p)
+    verify_cycles_in_hierarchies_with_inouts(p)
 }
 
-/// Checks all package invariants except the inout hierarchy analysis, which
+/// Checks all package invariants except hierarchical cycle analysis, which
 /// can use more precise dependencies after function calls are inlined.
 pub(crate) fn verify_package_structure(p: &Package) -> Result<(), ValidationError> {
     let mut names = HashSet::<(String, MemberType)>::new();
@@ -793,9 +793,9 @@ pub(crate) fn verify_package_structure(p: &Package) -> Result<(), ValidationErro
     Ok(())
 }
 
-/// Checks inout hierarchies on the same package snapshot that passed
-/// `verify_package_structure`, reusing each child's dependency summary.
-pub(crate) fn verify_package_inout_hierarchies(p: &Package) -> Result<(), ValidationError> {
+/// Checks ordinary dataflow in hierarchies containing inouts after structural
+/// verification, reusing each child's ordinary port dependencies.
+pub(crate) fn verify_cycles_in_hierarchies_with_inouts(p: &Package) -> Result<(), ValidationError> {
     let mut hierarchy = BlockHierarchy::default();
     let mut with_inouts = HashSet::new();
     for member in &p.members {
@@ -803,7 +803,7 @@ pub(crate) fn verify_package_inout_hierarchies(p: &Package) -> Result<(), Valida
             && hierarchy_contains_inouts(block, &with_inouts)
         {
             with_inouts.insert(block.name.as_str());
-            validate_block_inout_hierarchy(block, p, &mut hierarchy)?;
+            validate_hierarchical_dataflow(block, p, &mut hierarchy)?;
         }
     }
     Ok(())
@@ -877,7 +877,7 @@ pub fn validate_block(
         }
     }
     if hierarchy_contains_inouts(f, &with_inouts) {
-        validate_block_inout_hierarchy(f, parent, &mut BlockHierarchy::default())?;
+        validate_hierarchical_dataflow(f, parent, &mut BlockHierarchy::default())?;
     }
     Ok(())
 }
@@ -953,8 +953,8 @@ fn validate_block_with(
     validate_block_registers(f)
 }
 
-/// Checks the shared pins of one block and its transitive instances.
-fn validate_block_inout_hierarchy(
+/// Checks ordinary dataflow cycles in a hierarchy containing inout nets.
+fn validate_hierarchical_dataflow(
     block: &Block,
     parent: &Package,
     hierarchy: &mut BlockHierarchy,
@@ -980,14 +980,8 @@ fn validate_inout_bindings(
         block: block.name.clone(),
         reason,
     };
-    let mut net_indices = HashMap::new();
-    for (index, net) in block.inout_nets.iter().enumerate() {
-        if net.name.is_empty() || net_indices.insert(net.name.as_str(), index).is_some() {
-            return Err(error(format!(
-                "empty or duplicate inout net name '{}'",
-                net.name
-            )));
-        }
+    let nets = crate::inout::InoutNetMap::new(&block.inout_nets).map_err(error)?;
+    for net in &block.inout_nets {
         if !is_valid_inout_type(&net.ty) {
             return Err(error(format!(
                 "inout net '{}' requires a nonempty, token-free type",
@@ -1018,9 +1012,9 @@ fn validate_inout_bindings(
     // can be distinguished from binding an ordinary port or unknown instance.
     let mut bound = HashSet::new();
     let mut drivers = HashSet::new();
-    let mut connections = vec![false; block.inout_nets.len()];
+    let mut connections = vec![Vec::new(); block.inout_nets.len()];
     for node in &block.nodes {
-        let (name, actual_type) = match &node.payload {
+        let (binding, actual_type) = match &node.payload {
             NodePayload::ExtInoutPort {
                 name,
                 net,
@@ -1034,12 +1028,27 @@ fn validate_inout_bindings(
                 }
                 (net, port_type)
             }
-            NodePayload::ExtInoutRead { net } => (net, &node.ty),
-            NodePayload::ExtInoutDrive { net, drive, .. } => {
-                if !drivers.insert(net) {
-                    return Err(error(format!("duplicate driver for inout net '{net}'")));
+            NodePayload::ExtInoutRead { net } | NodePayload::ExtInoutDrive { net, .. } => {
+                let index = nets.index(net).map_err(error)?;
+                let def = &nets.nets[index];
+                let ty = if let NodePayload::ExtInoutDrive { drive, .. } = &node.payload {
+                    if !drivers.insert(net) {
+                        return Err(error(format!("duplicate driver for inout net '{net}'")));
+                    }
+                    block.get_node_ty(*drive)
+                } else {
+                    &node.ty
+                };
+                if ty != &def.ty {
+                    return Err(error(format!(
+                        "{} node {} references net '{net}' of type {}, got {ty}",
+                        node.payload.get_operator(),
+                        node.text_id,
+                        def.ty
+                    )));
                 }
-                (net, block.get_node_ty(*drive))
+                connections[index].push(0..def.ty.bit_count());
+                continue;
             }
             NodePayload::ExtInstantiationInout {
                 instantiation,
@@ -1061,27 +1070,35 @@ fn validate_inout_bindings(
             }
             _ => continue,
         };
-        let &index = net_indices
-            .get(name.as_str())
-            .ok_or_else(|| error(format!("undeclared inout net '{name}'")))?;
-        let ty = &block.inout_nets[index].ty;
-        if actual_type != ty {
-            return Err(error(format!(
-                "{} node {} references net '{name}' of type {ty}, got {actual_type}",
-                node.payload.get_operator(),
-                node.text_id
-            )));
+        for span in nets.resolve(binding, actual_type).map_err(error)? {
+            connections[span.net].push(span.net_start..span.net_start + span.width);
         }
-        connections[index] = true;
     }
     if let Some((inst, pin)) = expected.keys().find(|endpoint| !bound.contains(*endpoint)) {
         return Err(error(format!("missing inout binding {inst}.{pin}")));
     }
-    for (net, connected) in block.inout_nets.iter().zip(connections) {
-        if !connected {
+    for (net, mut ranges) in block.inout_nets.iter().zip(connections) {
+        if ranges.is_empty() {
             return Err(error(format!(
                 "inout net '{}' has no connections",
                 net.name
+            )));
+        }
+        ranges.sort_unstable_by_key(|r| r.start);
+        let width = net.ty.bit_count();
+        let mut covered = 0;
+        let mut holes = Vec::new();
+        for r in ranges.into_iter().chain(std::iter::once(width..width)) {
+            if r.start > covered {
+                holes.push(format!("[{}:{}]", r.start - 1, covered));
+            }
+            covered = covered.max(r.end);
+        }
+        if !holes.is_empty() {
+            return Err(error(format!(
+                "inout net '{}' has uncovered bits {}",
+                net.name,
+                holes.join(", ")
             )));
         }
     }

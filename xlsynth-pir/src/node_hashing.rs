@@ -190,7 +190,7 @@ fn hash_payload_attributes(
         } => {
             update_hash_string_attribute(hasher, "port_name", name);
             update_hash_type(hasher, port_type);
-            update_hash_string_attribute(hasher, "net", net);
+            update_hash_string_attribute(hasher, "net", &net.to_string());
             if let Some(sv_type) = sv_type {
                 update_hash_string_attribute(hasher, "sv_type", sv_type);
             }
@@ -205,7 +205,7 @@ fn hash_payload_attributes(
         } => {
             update_hash_str(hasher, instantiation);
             update_hash_str(hasher, port_name);
-            update_hash_str(hasher, net);
+            update_hash_str(hasher, &net.to_string());
         }
         NodePayload::InstantiationInput {
             instantiation,

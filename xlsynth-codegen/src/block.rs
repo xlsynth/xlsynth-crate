@@ -209,6 +209,26 @@ fn validate_supported_nodes(block: &Block, layout: Layout) -> Result<(), BlockCo
             block.name, net.name
         )));
     }
+    // VAST indexes packed nets with signed 64-bit constants.
+    if block
+        .inout_nets
+        .iter()
+        .map(|n| &n.ty)
+        .chain(block.nodes.iter().filter_map(|node| match &node.payload {
+            NodePayload::ExtInoutPort { port_type, .. } => Some(port_type),
+            _ => None,
+        }))
+        .any(|ty| {
+            ty.checked_bit_count()
+                .and_then(|w| i64::try_from(w).ok())
+                .is_none()
+        })
+    {
+        return Err(BlockCodegenError::InvalidBlock(format!(
+            "inout width in block '{}' exceeds the SystemVerilog emitter's range",
+            block.name
+        )));
+    }
     for node in &block.nodes {
         let (operation, lowering) = match &node.payload {
             NodePayload::Invoke { to_apply, .. } => {
@@ -463,18 +483,14 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Emits representable ports in the source block's original header order.
     fn emit_ports(&mut self) -> Result<(), BlockCodegenError> {
-        let mut aliases = BTreeMap::<&str, Vec<NodeRef>>::new();
         for port in &self.block.ports {
             let (name, ir_type, sv_type) = match port {
                 BlockPort::Clock(name) => (name.as_str(), &Type::Bits(1), None),
                 BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
                     let sv_type = match &self.block.get_node(*node).payload {
                         NodePayload::InputPort { sv_type, .. }
-                        | NodePayload::OutputPort { sv_type, .. } => sv_type.as_deref(),
-                        NodePayload::ExtInoutPort { net, sv_type, .. } => {
-                            aliases.entry(net).or_default().push(*node);
-                            sv_type.as_deref()
-                        }
+                        | NodePayload::OutputPort { sv_type, .. }
+                        | NodePayload::ExtInoutPort { sv_type, .. } => sv_type.as_deref(),
                         _ => unreachable!("verified block data port"),
                     };
                     (
@@ -503,7 +519,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             self.ports.insert(name.to_owned(), signal);
         }
 
-        self.emit_inout_nets(&aliases)?;
+        self.emit_inout_nets()?;
         for (index, node) in self.block.nodes.iter().enumerate() {
             match &node.payload {
                 NodePayload::InputPort { name, sv_type } => {
@@ -524,53 +540,6 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                     // Other values are computed in topological order.
                 }
             }
-        }
-        Ok(())
-    }
-
-    /// Allocates each electrical net and joins its public aliases in header
-    /// order.
-    fn emit_inout_nets(
-        &mut self,
-        aliases: &BTreeMap<&str, Vec<NodeRef>>,
-    ) -> Result<(), BlockCodegenError> {
-        for net in &self.block.inout_nets {
-            let value = if let Some((&first, others)) = aliases
-                .get(net.name.as_str())
-                .and_then(|ports| ports.split_first())
-            {
-                let signal = self.ports[self.block.port_name(first)];
-                for &other in others {
-                    let name = self.block.port_name(other);
-                    let tie = self.unique_name(&format!("{name}_tie"));
-                    self.file.add_tran(
-                        self.module,
-                        &tie,
-                        net.ty.bit_count(),
-                        signal,
-                        self.ports[name],
-                    )?;
-                }
-                let value = Value::signal(signal);
-                if self.options.emit_sv_types
-                    && matches!(
-                        &self.block.get_node(first).payload,
-                        NodePayload::ExtInoutPort {
-                            sv_type: Some(_),
-                            ..
-                        }
-                    )
-                {
-                    value.with_width(net.ty.bit_count())
-                } else {
-                    value.with_type(&net.ty)
-                }
-            } else {
-                let name = self.unique_name(&net.name);
-                let ty = self.value_type(&net.ty);
-                Value::signal(self.file.add_wire(self.module, &name, &ty)).with_type(&net.ty)
-            };
-            self.inout_nets.insert(&net.name, value);
         }
         Ok(())
     }
