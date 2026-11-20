@@ -7,8 +7,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde::Serialize;
 use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_lean::{
-    LeanIrAxiomPolicy, LeanIrProofSources, LeanProofSources, LeanTheoremName,
-    prepare_equivalence_target, run_equivalence_proof,
+    LeanAxiomPolicy, LeanNamedProofSources, LeanProofSources, LeanTheoremName,
+    prepare_equivalence_target, run_equivalence_proof, run_gate_equivalence_proof_with_policy,
     run_ir_function_equivalence_proof_with_policy,
 };
 
@@ -39,11 +39,18 @@ pub fn prepare_command() -> Command {
                 .value_name("DIR")
                 .help("Directory for the generated Lean target bundle"),
         )
+        .arg(
+            Arg::new("reject-native-checks")
+                .long("reject-native-checks")
+                .action(ArgAction::SetTrue)
+                .help("Use kernel reduction to check that both AAG files parse"),
+        )
 }
 
 /// Defines the command that runs a user proof against a prepared target.
 pub fn check_command(name: &'static str) -> Command {
-    let command = Command::new(name)
+    let ir = name == "ir-fn-lean-check";
+    Command::new(name)
         .about("Runs a supplied Lean proof against a prepared equivalence target")
         .arg(
             Arg::new("target-dir")
@@ -85,32 +92,40 @@ pub fn check_command(name: &'static str) -> Command {
                 .long("output-json")
                 .value_name("PATH")
                 .help("Write a machine-readable result and captured diagnostics"),
-        );
-    let proof = Arg::new("proof")
-        .long("proof")
-        .required(true)
-        .value_name("PATH");
-    if name == "ir-fn-lean-check" {
-        command
-            .arg(proof.help("Lean module defining the equivalence theorem"))
-            .arg(
-                Arg::new("proof-theorem")
-                    .long("proof-theorem")
-                    .required(true)
-                    .value_name("NAME")
-                    .value_parser(LeanTheoremName::new)
-                    .help("Qualified name of the theorem proving Target.Equivalent"),
-            )
-            .arg(
-                Arg::new("reject-native-checks")
-                    .long("reject-native-checks")
-                    .action(ArgAction::SetTrue)
-                    .help("Require the theorem to depend only on propext, Classical.choice and Quot.sound"),
-            )
+        )
+        .arg(
+            Arg::new("proof")
+                .long("proof")
+                .required(true)
+                .value_name("PATH")
+                .help(if ir {
+                    "Lean module defining the equivalence theorem"
+                } else {
+                    "Lean module defining --proof-theorem, or a proof term for Target.Equivalent when omitted"
+                }),
+        )
+        .arg(
+            Arg::new("proof-theorem")
+                .long("proof-theorem")
+                .required(ir)
+                .value_name("NAME")
+                .value_parser(LeanTheoremName::new)
+                .help("Qualified name of the theorem proving Target.Equivalent"),
+        )
+        .arg(
+            Arg::new("reject-native-checks")
+                .long("reject-native-checks")
+                .requires("proof-theorem")
+                .action(ArgAction::SetTrue)
+                .help("Require the theorem to depend only on propext, Classical.choice and Quot.sound"),
+        )
+}
+
+fn axiom_policy(matches: &ArgMatches) -> LeanAxiomPolicy {
+    if matches.get_flag("reject-native-checks") {
+        LeanAxiomPolicy::RejectNativeChecks
     } else {
-        command.arg(proof.help(
-            "File containing a complete Lean proof term for Target.Equivalent, such as by ...",
-        ))
+        LeanAxiomPolicy::ReplayNativeChecks
     }
 }
 
@@ -120,7 +135,10 @@ pub fn handle_prepare(matches: &ArgMatches) -> Result<(), String> {
     let rhs = load_gate_fn_from_path(Path::new(matches.get_one::<String>("rhs").unwrap()))?;
     prepare_equivalence_target(&lhs, &rhs)
         .map_err(|error| error.to_string())?
-        .write_to(Path::new(matches.get_one::<String>("output-dir").unwrap()))
+        .write_to_with_policy(
+            Path::new(matches.get_one::<String>("output-dir").unwrap()),
+            axiom_policy(matches),
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -175,22 +193,21 @@ pub fn handle_check(matches: &ArgMatches, word_level: bool) -> Result<(), String
     let started = Instant::now();
     let lean = Path::new(matches.get_one::<String>("lean").unwrap());
     let target = Path::new(matches.get_one::<String>("target-dir").unwrap());
-    let outcome = if word_level {
-        let sources = LeanIrProofSources {
+    let outcome = if let Some(theorem) = matches.get_one::<LeanTheoremName>("proof-theorem") {
+        let sources = LeanNamedProofSources {
             root: proof_root,
             module: proof,
-            theorem: matches
-                .get_one::<LeanTheoremName>("proof-theorem")
-                .unwrap()
-                .clone(),
+            theorem: theorem.clone(),
             modules,
         };
-        let policy = if matches.get_flag("reject-native-checks") {
-            LeanIrAxiomPolicy::RejectNativeChecks
+        let policy = axiom_policy(matches);
+        if word_level {
+            run_ir_function_equivalence_proof_with_policy(
+                lean, target, &sources, &work_root, policy,
+            )
         } else {
-            LeanIrAxiomPolicy::ReplayNativeChecks
-        };
-        run_ir_function_equivalence_proof_with_policy(lean, target, &sources, &work_root, policy)
+            run_gate_equivalence_proof_with_policy(lean, target, &sources, &work_root, policy)
+        }
     } else {
         let sources = LeanProofSources {
             root: proof_root,
@@ -243,7 +260,7 @@ mod tests {
     use super::check_command;
 
     #[test]
-    fn theorem_selection_and_native_check_policy_are_ir_only() {
+    fn both_checkers_support_named_theorems_and_require_one_for_strict_checks() {
         let inputs = [
             "--target-dir",
             "target",
@@ -274,19 +291,21 @@ mod tests {
         check_command("g8r-lean-check")
             .try_get_matches_from(gate_args.clone())
             .unwrap();
-        assert_eq!(
-            check_command("g8r-lean-check")
-                .try_get_matches_from(gate_args.clone().chain(theorem))
-                .unwrap_err()
-                .kind(),
-            ErrorKind::UnknownArgument
-        );
+        let strict_gate = check_command("g8r-lean-check")
+            .try_get_matches_from(
+                gate_args
+                    .clone()
+                    .chain(theorem)
+                    .chain(["--reject-native-checks"]),
+            )
+            .unwrap();
+        assert!(strict_gate.get_flag("reject-native-checks"));
         assert_eq!(
             check_command("g8r-lean-check")
                 .try_get_matches_from(gate_args.chain(["--reject-native-checks"]))
                 .unwrap_err()
                 .kind(),
-            ErrorKind::UnknownArgument
+            ErrorKind::MissingRequiredArgument
         );
     }
 }
