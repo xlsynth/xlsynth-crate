@@ -338,31 +338,20 @@ mod tests {
 
     use super::*;
 
-    /// Creates a tool wrapper that dispatches only under its symlink's name.
-    fn create_dispatch_wrapper(directory: &Path) -> PathBuf {
-        let wrapper = directory.join("tool-wrapper");
-        std::fs::write(
-            &wrapper,
-            r#"#!/bin/sh
-case "${0##*/}" in
-  example-tool) printf 'dispatched' ;;
-  *) exit 7 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    /// Links the wrapper under the only name it accepts.
+    fn link_dispatch_wrapper(directory: &Path) -> PathBuf {
+        let wrapper = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tool-wrapper");
         let bin = directory.join("bin");
         std::fs::create_dir(&bin).unwrap();
         let tool = bin.join("example-tool");
-        symlink("../tool-wrapper", &tool).unwrap();
+        symlink(wrapper, &tool).unwrap();
         tool
     }
 
     #[test]
     fn preserves_symlinked_tool_dispatch_for_explicit_and_search_paths() {
         let directory = tempfile::tempdir().unwrap();
-        let tool = create_dispatch_wrapper(directory.path());
+        let tool = link_dispatch_wrapper(directory.path());
         let execution_directory = tempfile::tempdir().unwrap();
         let search_path = directory.path().join("bin");
         for resolved in [
@@ -388,7 +377,7 @@ esac
     fn resolves_relative_tool_and_search_paths_before_changing_directory() {
         let current_dir = std::env::current_dir().unwrap();
         let directory = tempfile::tempdir_in(&current_dir).unwrap();
-        let tool = create_dispatch_wrapper(directory.path());
+        let tool = link_dispatch_wrapper(directory.path());
         let relative_tool = tool.strip_prefix(&current_dir).unwrap();
         let execution_directory = tempfile::tempdir().unwrap();
         for resolved in [
@@ -416,7 +405,7 @@ esac
     #[test]
     fn preserves_parent_components_after_symlinked_directories() {
         let directory = tempfile::tempdir().unwrap();
-        let tool = create_dispatch_wrapper(directory.path());
+        let tool = link_dispatch_wrapper(directory.path());
         std::fs::create_dir(directory.path().join("bin/child")).unwrap();
         symlink("bin/child", directory.path().join("alias")).unwrap();
         let invocation_path = directory.path().join("alias/../example-tool");
@@ -462,7 +451,7 @@ esac
                 .unwrap_err(),
             "executable `example-tool` not found on PATH"
         );
-        let tool = create_dispatch_wrapper(directory.path());
+        let tool = link_dispatch_wrapper(directory.path());
         let search_path = std::env::join_paths([directory.path(), tool.parent().unwrap()]).unwrap();
         assert_eq!(
             resolve_executable_with_path(Path::new("example-tool"), &search_path).unwrap(),
