@@ -187,7 +187,7 @@ A successful assertion emits no hardware.
 BX can evaluate a counted loop with constant inputs directly in an assertion.
 For a match with constant inputs it executes the selected arm, so an invalid
 array read in a helper called only by an untaken arm does not fail the
-assertion. Pinned DSLX v0.62.0 can reject both forms in a direct predicate,
+assertion. The DSLX typechecker can reject both forms in a direct predicate,
 even when it accepts the same expression inside a constexpr helper.
 
 ### Constants in concrete dimensions
@@ -899,7 +899,7 @@ directory. Library API callers supply directories in
 
 ### Using DSLX modules and members
 
-`use arithmetic;` resolves `arithmetic.x` on DSLX's module search path. For a nested module, `use ip::arithmetic;` makes its public functions, constants, structs, and numeric enums available as `arithmetic::name`. To bind individual members, write `use ip::arithmetic::clamp;` or group several under the same path, as in `use ip::arithmetic::{clamp, Limits};`. Each leaf binds its final name in the BX module. To migrate an aliased import, use the module’s final name or select the member directly. If two modules export the same member name, qualify it with distinct module bindings. If the module names also collide, bind one module and the other member directly. For example, `use a::math; use b::math::clamp;` gives you `math::clamp(...)` and `clamp(...)`. BX checks every `use` declaration, including unused ones.
+`use arithmetic;` resolves `arithmetic.x` on DSLX's module search path. For a nested module, `use ip::arithmetic;` makes its public functions, constants, structs, and numeric enums available as `arithmetic::name`. To bind individual members, write `use ip::arithmetic::clamp;` or group several under the same path, as in `use ip::arithmetic::{clamp, Limits};`. Each leaf binds its final name in the BX module. To migrate an aliased import, use the module’s final name or select the member directly. If two modules export the same member name, qualify it with distinct module bindings. If the module names also collide, bind one module and the other member directly. For example, `use a::math; use b::math::clamp;` gives you `math::clamp(...)` and `clamp(...)`. BX checks every `use` declaration, including unused ones. A direct DSLX member import requires a public declaration in the selected module.
 
 DSLX evaluates each imported `pub const` in its declaring module. BX reads its
 typed value, including signedness and the identity of any structs or numeric

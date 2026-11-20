@@ -1012,12 +1012,22 @@ impl Node {
         f: &NodeGraph,
         opts: &NodeRenderOptions,
     ) -> Option<String> {
+        let components = self.payload.to_string_components(f, opts)?;
+        Some(self.render_with_components(components, opts))
+    }
+
+    /// Renders the opcode arguments together with the node's ID and source
+    /// positions.
+    fn render_with_components(
+        &self,
+        mut components: Vec<String>,
+        opts: &NodeRenderOptions,
+    ) -> String {
         let name_str = if let Some(name) = &self.name {
             format!("{}", name)
         } else {
             format!("{}.{}", self.payload.get_operator(), self.text_id)
         };
-        let mut components = self.payload.to_string_components(f, opts)?;
         if opts.include_id {
             components.push(format!("id={}", self.text_id));
         }
@@ -1036,7 +1046,7 @@ impl Node {
             }
         }
         let payload_str = format!("{}({})", self.payload.get_operator(), components.join(", "));
-        Some(format!("{}: {} = {}", name_str, self.ty, payload_str))
+        format!("{}: {} = {}", name_str, self.ty, payload_str)
     }
 
     pub fn to_signature_string(&self, f: &NodeGraph) -> String {
@@ -1324,50 +1334,36 @@ fn append_emitted_node_line(
     comment: Option<String>,
 ) {
     let node = func.get_node(node_ref);
-    let is_ret = if let Some(ret_node_ref) = func.ret_node_ref {
-        ret_node_ref == node_ref
-    } else {
-        false
-    };
-
-    match &node.payload {
-        NodePayload::Param if is_ret => {
-            let name = node
-                .name
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("<unnamed>");
-            let mut line = String::new();
-            line.push_str("  ret ");
-            line.push_str(&format!(
-                "{}: {} = param(name={}, id={})",
-                name, node.ty, name, node.text_id
-            ));
-            if let Some(comment) = comment {
-                line.push_str("  // ");
-                line.push_str(&comment);
+    let is_ret = func.ret_node_ref == Some(node_ref);
+    let node_str = match &node.payload {
+        NodePayload::Param => {
+            // The signature alone represents a parameter unless the body must
+            // carry its return marker or source positions.
+            if !is_ret && node.pos.as_deref().unwrap_or_default().is_empty() {
+                return;
             }
-            out.push_str(&line);
-            out.push('\n');
+            node.render_with_components(
+                vec![format!("name={}", node.param_name())],
+                &NodeRenderOptions::default(),
+            )
         }
         _ => {
             let Some(node_str) = node.to_string(func) else {
                 return;
             };
-            let mut line = String::new();
-            line.push_str("  ");
-            if is_ret {
-                line.push_str("ret ");
-            }
-            line.push_str(&node_str);
-            if let Some(comment) = comment {
-                line.push_str("  // ");
-                line.push_str(&comment);
-            }
-            out.push_str(&line);
-            out.push('\n');
+            node_str
         }
+    };
+    out.push_str("  ");
+    if is_ret {
+        out.push_str("ret ");
     }
+    out.push_str(&node_str);
+    if let Some(comment) = comment {
+        out.push_str("  // ");
+        out.push_str(&comment);
+    }
+    out.push('\n');
 }
 
 /// Emits a function as text, including outer/inner attributes and body.
@@ -2094,6 +2090,29 @@ fn second(y: bits[1] id=3) -> bits[1] { ret second_result: bits[1] = not(y, id=4
         assert!(matches!(ret_node.payload, NodePayload::Param));
 
         assert_eq!(ir_fn.to_string(), ir_text);
+    }
+
+    #[test]
+    fn body_parameter_positions_round_trip() {
+        let ir_text = r#"fn select_pair(x: bits[8] id=1, pair: (bits[4], bits[8][2]) id=2) -> (bits[4], bits[8][2]) {
+  x: bits[8] = param(name=x, id=1, pos=[(0,0,5)])
+  ret pair: (bits[4], bits[8][2]) = param(name=pair, id=2, pos=[(0,0,8), (1,3,4)])
+}"#;
+        assert_round_trip_fn(ir_text);
+        let without_pos = ir_parser::Parser::new_with_options(
+            ir_text,
+            ir_parser::ParseOptions {
+                retain_pos_data: false,
+            },
+        )
+        .parse_fn()
+        .unwrap();
+        assert_eq!(
+            without_pos.to_string(),
+            r#"fn select_pair(x: bits[8] id=1, pair: (bits[4], bits[8][2]) id=2) -> (bits[4], bits[8][2]) {
+  ret pair: (bits[4], bits[8][2]) = param(name=pair, id=2)
+}"#
+        );
     }
 
     #[test]

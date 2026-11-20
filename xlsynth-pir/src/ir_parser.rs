@@ -3743,7 +3743,7 @@ impl Parser {
                             node.text_id
                         ))
                     })?;
-                let existing_node = &nodes[existing.index];
+                let existing_node = &mut nodes[existing.index];
                 if !matches!(existing_node.payload, ir::NodePayload::Param) {
                     return Err(ParseError::new(format!(
                         "param id={} does not reference a signature parameter",
@@ -3755,6 +3755,12 @@ impl Parser {
                         "param id={} type mismatch: header {} vs node {}",
                         node.text_id, existing_node.ty, node.ty
                     )));
+                }
+                // libxls v0.63.0 emits positions on returned parameters during
+                // DSLX conversion, then drops them on an IR text round trip.
+                // PIR keeps those positions on the signature node.
+                if node.pos.is_some() {
+                    existing_node.pos = node.pos;
                 }
                 existing
             } else {

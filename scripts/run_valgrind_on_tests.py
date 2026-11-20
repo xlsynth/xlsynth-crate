@@ -424,6 +424,9 @@ def run_valgrind(
         "--error-exitcode=1",
         f"--suppressions={suppression_path}",
         "--leak-check=full",
+        # Nested estimator protobuf copies can put the loader's _dl_init frame
+        # more than 20 callers above the allocation in a model registry.
+        "--num-callers=32",
         "--track-origins=yes",
         "--sym-offsets=yes",
         # --demangle=no is added conditionally below

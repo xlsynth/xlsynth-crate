@@ -1744,7 +1744,7 @@ dslx_stdlib_path = "{}"
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     assert!(stdout.contains(
         "fn __std__popcount(x: bits[32] id=1) -> bits[32] {
-  ret x: bits[32] = param(name=x, id=1)
+  ret x: bits[32] = param(name=x, id=1, pos=[(0,0,16)])
 }"
     ))
 }
