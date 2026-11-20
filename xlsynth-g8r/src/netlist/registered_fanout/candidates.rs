@@ -84,7 +84,9 @@ pub(crate) fn visit_topology_candidates(
         timing.module_output_load,
         Some(threshold),
     )?;
-    roots.retain(|r| r.sinks.len() >= 2);
+    // Restrict this search to combinational outputs. Registered STA still
+    // accounts for the launch registers and their output loads.
+    roots.retain(|r| r.sinks.len() >= 2 && library.cells[r.cell].sequential.is_empty());
     if roots.is_empty() {
         return Ok(0);
     }
@@ -106,13 +108,11 @@ pub(crate) fn visit_topology_candidates(
     for (i, r) in roots.iter().enumerate() {
         let Some(slew) = slews[i] else { continue };
         let electrical = severity(r, Some(slew), timing);
-        let large_internal =
-            library.cells[r.cell].sequential.is_empty() && r.sinks.len() >= threshold;
-        if timing_cones.is_some() && (electrical > 1.0 + 1e-9 || r.sinks.len() >= threshold) {
-            cone_eligible.push(i);
-        }
-        if electrical > 1.0 + 1e-9 || large_internal {
+        if electrical > 1.0 + 1e-9 || r.sinks.len() >= threshold {
             ranked.push((i, electrical));
+            if timing_cones.is_some() {
+                cone_eligible.push(i);
+            }
         }
     }
     ranked.sort_unstable_by(|&(i, a), &(j, b)| {
@@ -134,23 +134,7 @@ pub(crate) fn visit_topology_candidates(
     const MAX_SINGLE: usize = 8;
     const MAX_GROUP: usize = 64;
     let single = ranked.len().min(options.drivers_per_round).min(MAX_SINGLE);
-    // Reserve a place for each kind of driver: a bank of equally overloaded
-    // Qs must not hide the strongest internal branch, or vice versa.
-    let drivers: Vec<_> = match ranked.first() {
-        Some(&(first, _)) => {
-            let is_internal = |i: usize| library.cells[roots[i].cell].sequential.is_empty();
-            let remaining = ranked.iter().skip(1).map(|&(i, _)| i);
-            let other = remaining
-                .clone()
-                .find(|&i| is_internal(i) != is_internal(first));
-            std::iter::once(first)
-                .chain(other)
-                .chain(remaining.filter(|&i| Some(i) != other))
-                .take(MAX_GROUP)
-                .collect()
-        }
-        None => Vec::new(),
-    };
+    let drivers: Vec<_> = ranked.iter().take(MAX_GROUP).map(|&(i, _)| i).collect();
     let mut retry = None;
     let mut visited = 0;
     let buffers = graph::buffers(library, prepared);

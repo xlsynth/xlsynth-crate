@@ -1777,7 +1777,9 @@ physical flip-flops and clock gates, and assemble the netlist.
 For a registered native design, the mapper attaches the selected physical
 registers to each candidate cover before optimizing it. Buffering, cell sizing
 and area recovery share the same timed circuit. They see the launch cell's Q
-drive and the capacitance of every capture D pin. Delay mapping selects the
+drive and the capacitance of every capture D pin. Initial buffer proposals
+start at combinational gate outputs; later tree refinement can also repair
+launch-register outputs. Delay mapping selects the
 finished cover with the lowest register-to-register delay, breaking ties by
 area. When there is no register-to-register path it uses the worst available
 boundary delay. After choosing the cover, the adaptive flow optimizes area, then timing and area, and finally leakage when characterized cell prices are available. It writes the finished gates to the requested output. ABC uses a separate final `gv-resize` pass by default.

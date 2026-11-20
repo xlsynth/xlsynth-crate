@@ -652,13 +652,13 @@ mod tests {
         Ok(())
     }
 
-    // A loaded launch Q and a separate short path exercise both parts of a
-    // round. Compare topology with sizing, then downsize the short path on the
-    // winner.
+    // A loaded combinational gate and a separate short path exercise both parts
+    // of a round. Compare topology with sizing, then downsize the short path on
+    // the winner.
     #[test]
     fn registered_search_compares_trees_and_sizes_on_the_same_stage() -> Result<()> {
         let mut lib = super::super::tests::library()?;
-        // Make the launch genuinely overload in the library while a small
+        // Make the data driver overload in the library while a small
         // buffer tree can drive the captures. Keep multiple strengths on the
         // data gates.
         for cell in &mut lib.cells {
@@ -674,11 +674,11 @@ mod tests {
                 }
             }
         }
-        let mut gv = "module t(input clk, input d, input other, output short_q, output [31:0] y); wire spare_d,short_d,q; DFF1 spare_ff(.CLK(clk),.D(other),.Q(spare_d)); INV4 cheap_on_short_path(.A(spare_d),.Y(short_d)); DFF1 end_short(.CLK(clk),.D(short_d),.Q(short_q)); DFF1 launch(.CLK(clk),.D(d),.Q(q));".to_string();
+        let mut gv = "module t(input clk, input d, input other, output short_q, output [31:0] y); wire spare_d,short_d,q,shared; DFF1 spare_ff(.CLK(clk),.D(other),.Q(spare_d)); INV4 cheap_on_short_path(.A(spare_d),.Y(short_d)); DFF1 end_short(.CLK(clk),.D(short_d),.Q(short_q)); DFF1 launch(.CLK(clk),.D(d),.Q(q)); INV1 driver(.A(q),.Y(shared));".to_string();
         for i in 0..32 {
             writeln!(
                 gv,
-                "wire n{i}; INV1 inv{i}(.A(q),.Y(n{i})); DFF1 cap{i}(.CLK(clk),.D(n{i}),.Q(y[{i}]));"
+                "wire n{i}; INV1 inv{i}(.A(shared),.Y(n{i})); DFF1 cap{i}(.CLK(clk),.D(n{i}),.Q(y[{i}]));"
             )?;
         }
         gv.push_str("endmodule");

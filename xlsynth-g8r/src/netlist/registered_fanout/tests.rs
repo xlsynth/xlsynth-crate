@@ -50,9 +50,23 @@ pub(super) fn library() -> Result<Library> {
     Ok(lib)
 }
 
-fn broadcast(lanes: usize) -> Result<SequentialGateFn> {
+/// Driver at the root of the broadcast test fixture.
+enum BroadcastDriver {
+    LaunchRegister,
+    CombinationalGate,
+}
+
+// Select whether the shared enable comes directly from a launch register or
+// from a combinational gate after the register boundary.
+fn broadcast(lanes: usize, driver: BroadcastDriver) -> Result<SequentialGateFn> {
     let mut b = GateBuilder::new("broadcast".into(), GateBuilderOptions::no_opt());
-    let enable = *b.add_input("enable".into(), 1).get_lsb(0);
+    let internal_driver = matches!(driver, BroadcastDriver::CombinationalGate);
+    let inputs = b.add_input("enable".into(), if internal_driver { 2 } else { 1 });
+    let enable = if internal_driver {
+        b.add_and_binary(*inputs.get_lsb(0), *inputs.get_lsb(1))
+    } else {
+        *inputs.get_lsb(0)
+    };
     let data = b.add_input("data".into(), lanes);
     let outputs: Vec<_> = data
         .iter_lsb_to_msb()
@@ -90,13 +104,13 @@ fn metrics(parsed: &ParsedNetlist, lib: &Library) -> Result<(f64, f64)> {
     ))
 }
 
-// One launch Q drives a bank of capture paths. Verify that buffering lowers
-// the registered delay and that every lane still obeys the clocked enable.
+// A high-fanout launch Q remains connected directly to its data sinks.
+// The registered output still obeys the clocked enable in every lane.
 #[test]
-fn native_mapping_repairs_the_loaded_launch_q_and_preserves_the_clocked_mask() -> Result<()> {
+fn native_mapping_keeps_launch_q_direct_and_preserves_the_clocked_mask() -> Result<()> {
     let lanes = 32;
     let lib = library()?;
-    let design = broadcast(lanes)?;
+    let design = broadcast(lanes, BroadcastDriver::LaunchRegister)?;
     let options = SequentialMappingOptions::default();
     let baseline = map_sequential_to_native_netlist(
         &design,
@@ -116,11 +130,7 @@ fn native_mapping_repairs_the_loaded_launch_q_and_preserves_the_clocked_mask() -
         map_sequential_to_native_netlist(&design, &lib, &options, CoverStrategy::Area, &post)?;
     let (old_delay, old_area) = metrics(&baseline, &lib)?;
     let (new_delay, new_area) = metrics(&repaired, &lib)?;
-    assert!(
-        new_delay < old_delay,
-        "registered path: {old_delay} -> {new_delay}"
-    );
-    assert!(new_area * new_delay < old_area * old_delay);
+    assert_eq!((new_delay, new_area), (old_delay, old_area));
     let instantiated = |parsed: &ParsedNetlist, name: &str| {
         parsed.modules[0]
             .instances
@@ -132,7 +142,10 @@ fn native_mapping_repairs_the_loaded_launch_q_and_preserves_the_clocked_mask() -
         instantiated(&baseline, "DFF1"),
         instantiated(&repaired, "DFF1")
     );
-    assert!(instantiated(&repaired, "BUF4") > instantiated(&baseline, "BUF4"));
+    assert_eq!(
+        instantiated(&repaired, "BUF4"),
+        instantiated(&baseline, "BUF4")
+    );
     let recovered = project_labeled_sequential_netlist_aig(
         &repaired.modules[0],
         &repaired.nets,
@@ -242,14 +255,15 @@ fn ordinary_optimizer_tracks_only_buffers_in_the_accepted_topology() -> Result<(
     use std::fmt::Write;
 
     let mut gv = String::from(
-        "module t(input clk, input d, output tap, output [31:0] y); wire q;
+        "module t(input clk, input d, output tap, output [31:0] y); wire q, shared;
          DFF1 launch(.CLK(clk),.D(d),.Q(q));
+         INV1 driver(.A(q),.Y(shared));
          BUF4 g8r_data_fanout_buf_42(.A(d),.Y(tap));",
     );
     for lane in 0..32 {
         writeln!(
             gv,
-            "wire n{lane}; INV1 inv{lane}(.A(q),.Y(n{lane}));
+            "wire n{lane}; INV1 inv{lane}(.A(shared),.Y(n{lane}));
             DFF1 cap{lane}(.CLK(clk),.D(n{lane}),.Q(y[{lane}]));"
         )?;
     }
@@ -273,8 +287,8 @@ fn ordinary_optimizer_tracks_only_buffers_in_the_accepted_topology() -> Result<(
         .instances
         .split_at(original.instances.len());
     let root = (
-        tracked.interner.get("launch").unwrap(),
-        tracked.interner.get("Q").unwrap(),
+        tracked.interner.get("driver").unwrap(),
+        tracked.interner.get("Y").unwrap(),
     );
     assert!(!inserted.is_empty());
     assert_eq!(inserted.len(), owned.len());
@@ -299,12 +313,10 @@ fn ordinary_optimizer_tracks_only_buffers_in_the_accepted_topology() -> Result<(
     Ok(())
 }
 
-/// Two independent electrical bottlenecks share a stage; the third broadcast
-/// is also an aliased generated clock, so every tap of that net stays fixed.
-// Exercise a mixed forest with a flip-flop Q and a gate driven by primary inputs.
-// A queue full of one driver type must leave room for the other.
+// A gate, launch Q, and generated clock each fan out to capture data pins.
+// Only the combinational gate's sinks may move in an initial buffer proposal.
 #[test]
-fn joint_candidates_can_buffer_launch_and_internal_data_together() -> Result<()> {
+fn candidate_forests_buffer_internal_data_without_moving_launch_or_clock_taps() -> Result<()> {
     use std::fmt::Write;
     let mut gv = String::from(
         "module t(input clk,input d,input mask,output [49:0] y);
@@ -325,7 +337,7 @@ fn joint_candidates_can_buffer_launch_and_internal_data_together() -> Result<()>
     }
     gv.push_str("endmodule");
     let original = read_mapped_netlist(&gv)?;
-    let mut together = false;
+    let mut buffered_internal = false;
     let lib = library()?;
     let timing = StaOptions {
         module_output_load: 0.01,
@@ -352,6 +364,7 @@ fn joint_candidates_can_buffer_launch_and_internal_data_together() -> Result<()>
                 trial.module.instances[4 + i].connections
                     != original.module.instances[4 + i].connections
             };
+            assert!(!(0..16).any(moved));
             assert!(!(32..49).any(moved));
             assert_eq!(trial.module.instances[2], original.module.instances[2]);
             assert_eq!(trial.module.instances[3], original.module.instances[3]);
@@ -359,14 +372,14 @@ fn joint_candidates_can_buffer_launch_and_internal_data_together() -> Result<()>
                 .iter()
                 .all(|i| trial.interner.resolve(i.type_name) == Some("BUF4"))
             {
-                together |= (0..16).any(moved) && (16..32).any(moved);
+                buffered_internal |= (16..32).any(moved);
             }
             Ok(None)
         },
     )?;
     assert!(
-        total > 0 && together,
-        "missing a mixed launch/internal forest"
+        total > 0 && buffered_internal,
+        "missing an internal-data forest"
     );
     Ok(())
 }
@@ -445,7 +458,7 @@ fn a_forest_retries_only_a_named_driver_output_and_keeps_registered_values() -> 
     use super::{ForestRetry, TopologyTrial};
     use std::fmt::Write;
 
-    // Leave a launch outside the high-fanout batch so a trial can identify
+    // Leave a combinational driver outside the batch so a trial can identify
     // collateral damage at that output. The two inputs toggle independently.
     let banks = 65;
     let sinks = 16;
@@ -457,7 +470,7 @@ fn a_forest_retries_only_a_named_driver_output_and_keeps_registered_values() -> 
         let input = if bank % 2 == 0 { "a" } else { "b" };
         writeln!(
             gv,
-            "wire q{bank}; DFF1 root{bank}(.CLK(clk),.D({input}),.Q(q{bank}));"
+            "wire q{bank}; INV1 root{bank}(.A({input}),.Y(q{bank}));"
         )?;
         for i in 0..sinks {
             let output = bank * sinks + i;
@@ -486,7 +499,7 @@ fn a_forest_retries_only_a_named_driver_output_and_keeps_registered_values() -> 
         simulate(&design, &stimulus, SequentialState::all_zeros(&design)).map_err(Error::msg)
     };
     let expected = simulate_stage(&original)?;
-    for output in ["D", "Q"] {
+    for output in ["A", "Y"] {
         let mut retries = 0;
         let mut requested = 0;
         super::visit_topology_candidates(
@@ -526,7 +539,7 @@ fn a_forest_retries_only_a_named_driver_output_and_keeps_registered_values() -> 
             },
         )?;
         assert!(requested > 0);
-        assert_eq!(retries, usize::from(output == "Q"));
+        assert_eq!(retries, usize::from(output == "Y"));
     }
     Ok(())
 }
@@ -536,7 +549,7 @@ fn a_forest_retries_only_a_named_driver_output_and_keeps_registered_values() -> 
 #[test]
 fn tree_refinement_receives_buffers_inserted_by_the_registered_optimizer() -> Result<()> {
     let lib = library()?;
-    let design = broadcast(32)?;
+    let design = broadcast(32, BroadcastDriver::CombinationalGate)?;
     let timing = StaOptions::default();
     let post = PostMappingOptions {
         fanout: Some(FanoutOptimizationOptions {
@@ -569,7 +582,7 @@ fn tree_refinement_receives_buffers_inserted_by_the_registered_optimizer() -> Re
 
 #[test]
 fn tree_refinement_respects_fanout_area_policy() -> Result<()> {
-    let design = broadcast(32)?;
+    let design = broadcast(32, BroadcastDriver::LaunchRegister)?;
     let run = |lib: &Library, limit, weight| -> Result<bool> {
         let post = PostMappingOptions {
             fanout: Some(FanoutOptimizationOptions {
