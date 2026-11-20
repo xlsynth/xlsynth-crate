@@ -498,7 +498,7 @@ impl std::fmt::Display for ValidationError {
                     write!(
                         f,
                         " with parameter overrides {}",
-                        ir::format_extern_block_parameters(parameters)
+                        ir::format_extern_block_string_map(parameters)
                     )?;
                 }
                 write!(
@@ -856,6 +856,7 @@ fn verify_extern_block_models<'a>(
             let InstantiationKind::BehavioralExternBlock {
                 module_name,
                 parameters,
+                ..
             } = &inst.kind
             else {
                 continue;
@@ -2277,6 +2278,7 @@ fn build_instantiation_info(
                     }
                 }
             }
+            validate_extern_input_casts(block, inst, &input_types)?;
             info_map.insert(
                 inst.name.clone(),
                 InstantiationInfo {
@@ -2320,6 +2322,7 @@ fn build_instantiation_info(
                 )
             })
             .collect();
+        validate_extern_input_casts(block, inst, &input_types)?;
         let output_types = callee
             .output_ports()
             .map(|port| {
@@ -2339,6 +2342,35 @@ fn build_instantiation_info(
         );
     }
     Ok(info_map)
+}
+
+/// Checks that SystemVerilog casts name valid data inputs in the local
+/// signature.
+fn validate_extern_input_casts(
+    block: &Block,
+    inst: &ir::Instantiation,
+    input_types: &BTreeMap<String, Type>,
+) -> Result<(), ValidationError> {
+    let input_casts = match &inst.kind {
+        InstantiationKind::BehavioralExternBlock { input_casts, .. }
+        | InstantiationKind::OpaqueExternBlock { input_casts, .. } => input_casts,
+        InstantiationKind::Block | InstantiationKind::Extern => return Ok(()),
+    };
+    let violation = |reason| ValidationError::BlockInvariantViolation {
+        block: block.name.clone(),
+        reason,
+    };
+    for (port_name, sv_type) in input_casts {
+        let input_type = input_types.get(port_name).ok_or_else(|| {
+            violation(format!(
+                "extern block instance '{}' has no data input '{port_name}' for input_casts",
+                inst.name
+            ))
+        })?;
+        ir::validate_extern_block_input_cast(&inst.name, port_name, input_type, sv_type)
+            .map_err(violation)?;
+    }
+    Ok(())
 }
 
 /// Records aggregate external ports and each addressable tuple component.
@@ -2587,6 +2619,7 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
                     kind: InstantiationKind::BehavioralExternBlock {
                         module_name: "invalid.module".to_string(),
                         parameters: BTreeMap::new(),
+                        input_casts: BTreeMap::new(),
                     },
                 });
             }),
@@ -3468,6 +3501,76 @@ top block wrapper(clk: clock, din: bits[8], dout: bits[8], io: bits[1]) {
                 Err(ValidationError::BlockInvariantViolation {
                     block: "wrapper".to_string(),
                     reason: reason.to_string(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn external_input_casts_require_data_inputs_and_named_sv_types() {
+        let ir = r#"package enum_inputs
+
+block model(clk_i: clock, mode: bits[2], active: bits[1]) {
+  mode: bits[2] = input_port(name=mode, id=1)
+  zero: bits[1] = literal(value=0, id=2)
+  active: () = output_port(zero, name=active, id=3)
+}
+
+top block wrapper(clk: clock, mode: bits[2], active: bits[1]) {
+  instantiation u(ATTRIBUTES)
+  mode: bits[2] = input_port(name=mode, id=4)
+  connected: () = instantiation_input(mode, instantiation=u, port_name=mode, id=5)
+  received: bits[1] = instantiation_output(instantiation=u, port_name=active, id=6)
+  active: () = output_port(received, name=active, id=7)
+}
+"#;
+        for (target, kind) in [
+            ("block=model, module_name=vendor", "behavioral_extern_block"),
+            (
+                "module_name=vendor, ports={clk_i:clock, mode:input bits[2], active:output bits[1]}",
+                "opaque_extern_block",
+            ),
+        ] {
+            let ir_with_cast = |port, sv_type| {
+                let attributes =
+                    format!(r#"{target}, input_casts={{{port}:"{sv_type}"}}, kind={kind}"#);
+                ir.replace("ATTRIBUTES", &attributes)
+            };
+            let package_with_cast = |port, sv_type| {
+                Parser::new(&ir_with_cast(port, sv_type))
+                    .parse_package()
+                    .unwrap()
+            };
+            let zero_width = ir_with_cast("mode", "pkg::mode_t").replace("bits[2]", "bits[0]");
+            let zero_width = Parser::new(&zero_width).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&zero_width),
+                Err(ValidationError::BlockInvariantViolation {
+                    block: "wrapper".to_string(),
+                    reason: "extern block instance 'u' cannot cast zero-width input 'mode'"
+                        .to_string(),
+                })
+            );
+            assert_eq!(
+                validate_package(&package_with_cast("mode", "pkg::mode_t")),
+                Ok(())
+            );
+            for port in ["clk_i", "active", "missing"] {
+                assert_eq!(
+                    validate_package(&package_with_cast(port, "pkg::mode_t")),
+                    Err(ValidationError::BlockInvariantViolation {
+                        block: "wrapper".to_string(),
+                        reason: format!(
+                            "extern block instance 'u' has no data input '{port}' for input_casts"
+                        ),
+                    })
+                );
+            }
+            assert_eq!(
+                validate_package(&package_with_cast("mode", "pkg::mode_t'(0)")),
+                Err(ValidationError::BlockInvariantViolation {
+                    block: "wrapper".to_string(),
+                    reason: "extern block instance 'u' input cast for port 'mode' requires a SystemVerilog type name, got 'pkg::mode_t'(0)'".to_string(),
                 })
             );
         }

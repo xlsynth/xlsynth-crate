@@ -722,6 +722,9 @@ Both external block kinds accept `parameters={WIDTH:"42"}` to emit a named
 SystemVerilog parameter override. Use a behavioral model or inline interface
 that matches the external module's elaborated configuration.
 
+Either external block kind can use `input_casts={mode:"pkg::mode_t"}` to
+cast the named input connection to a typedef supplied with the external RTL.
+
 Leading-zero counts, priority encoders, normalization, and
 priority selects use explicit `casez` helper functions. Arithmetic helpers retain
 the original operand widths, and name collisions use `__1`, `__2`, etc.

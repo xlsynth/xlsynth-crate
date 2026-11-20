@@ -147,6 +147,9 @@ Both kinds accept `parameters={WIDTH:"42"}` to emit the named SystemVerilog
 override `#(.WIDTH(42))`. The decoded value is a parameter expression. Use
 the behavioral model or opaque port interface for the chosen configuration.
 
+Use `input_casts={mode:"pkg::mode_t"}` on either external block kind to emit
+`.mode(pkg::mode_t'(signal))` when `mode` is connected to `signal`.
+
 The emitter requires the selected block, its instantiated children, and
 behavioral models to be free of `invoke` nodes. The `block2sv` CLI runs
 `inline_invokes_for_codegen` before emission. Rust callers can run the same

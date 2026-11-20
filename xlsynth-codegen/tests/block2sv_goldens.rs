@@ -8,6 +8,7 @@ use fixtures::*;
 use std::fs;
 use std::path::Path;
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_test_helpers::{FlistEntry, assert_valid_sv_flist};
 
 /// Runs every independently authored combined block-IR/SystemVerilog fixture.
 #[test]
@@ -51,6 +52,37 @@ fn external_block_uses_its_model_name_by_default() {
         execute_golden_fixture(&fixture).unwrap(),
         fixture.expected_output()
     );
+}
+
+/// Elaborates enum-typed vendor inputs connected to PIR bit vectors.
+#[test]
+fn extern_block_input_casts_elaborate_with_slang() {
+    let fixture = GoldenFixture::parse(include_str!(
+        "goldens/block2sv/extern/input_casts.golden.ir"
+    ))
+    .unwrap();
+    let wrapper = execute_golden_fixture(&fixture).unwrap();
+    assert_valid_sv_flist(&[
+        FlistEntry {
+            filename: "vendor.sv".to_string(),
+            contents: r#"package vendor_pkg;
+  typedef enum logic [1:0] { IDLE = 0, RUN = 1 } mode_t;
+endpackage
+
+module vendor #(parameter bit ENABLE = 1'b0) (
+  input vendor_pkg::mode_t mode,
+  output logic active
+);
+  assign active = ENABLE && (mode == vendor_pkg::RUN);
+endmodule
+"#
+            .to_string(),
+        },
+        FlistEntry {
+            filename: "wrapper.sv".to_string(),
+            contents: wrapper,
+        },
+    ]);
 }
 
 /// Preserves whole-net inout wiring when a model is also used as an RTL child.

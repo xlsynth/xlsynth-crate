@@ -805,6 +805,7 @@ fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() 
                     InstantiationKind::BehavioralExternBlock {
                         module_name: "rtl_register".to_string(),
                         parameters: BTreeMap::new(),
+                        input_casts: BTreeMap::new(),
                     }
                 );
             } else {
@@ -1018,8 +1019,98 @@ fn opaque_builder_preserves_named_parameter_overrides() {
         InstantiationKind::OpaqueExternBlock {
             ports: Vec::new(),
             parameters,
+            input_casts: BTreeMap::new(),
         }
     );
+}
+
+#[test]
+fn builder_records_input_casts_for_both_external_block_kinds() {
+    let model = leaf_block();
+    let mut package = Package {
+        name: "extern_casts".to_string(),
+        file_table: xlsynth_pir::ir::FileTable::new(),
+        members: vec![PackageMember::Block(model.clone())],
+        top: None,
+    };
+    let mut builder = BlockBuilder::new("wrapper");
+    let behavioral = builder
+        .instantiate_extern_block("behavioral", &model, "model_rtl")
+        .unwrap();
+    let opaque = builder
+        .instantiate_opaque_extern_block(
+            "opaque",
+            "opaque_rtl",
+            [
+                ("x", OpaqueExternPortKind::Input(Type::Bits(8))),
+                ("y", OpaqueExternPortKind::Output(Type::Bits(8))),
+            ]
+            .into_iter()
+            .map(|(name, kind)| OpaqueExternPort {
+                name: name.to_string(),
+                kind,
+            })
+            .collect(),
+        )
+        .unwrap();
+
+    let mut other = BlockBuilder::new("other");
+    let internal = other.instantiate("internal", &model).unwrap();
+    assert_eq!(
+        builder.set_instantiation_input_cast(internal, "x", "mode_t"),
+        Err(BuilderError::ForeignInstantiation)
+    );
+    assert!(
+        other
+            .set_instantiation_input_cast(internal, "x", "mode_t")
+            .is_err()
+    );
+
+    let value = builder.input_port("value", Type::Bits(8)).unwrap();
+    for (instance, output_name, cast) in [
+        (behavioral, "modeled_result", "mode_t"),
+        (opaque, "opaque_result", "pkg::mode_t"),
+    ] {
+        assert!(
+            builder
+                .set_instantiation_input_cast(instance, "y", cast)
+                .is_err()
+        );
+        assert!(
+            builder
+                .set_instantiation_input_cast(instance, "x", "pkg::")
+                .is_err()
+        );
+        builder
+            .set_instantiation_input_cast(instance, "x", cast)
+            .unwrap();
+        assert!(
+            builder
+                .set_instantiation_input_cast(instance, "x", "other_t")
+                .is_err()
+        );
+        builder.instantiation_input(instance, "x", value).unwrap();
+        let result = builder.instantiation_output(instance, "y").unwrap();
+        builder.output_port(output_name, result).unwrap();
+    }
+
+    builder.build_into_package(&mut package).unwrap();
+    package.set_top_block("wrapper").unwrap();
+    assert_pir_package(&package);
+    let emitted = package.to_string();
+    let parsed = Parser::new(&emitted).parse_and_verify_package().unwrap();
+    let block = parsed.get_top_block().unwrap();
+    for (instance, cast) in block.instantiations.iter().zip(["mode_t", "pkg::mode_t"]) {
+        let input_casts = match &instance.kind {
+            InstantiationKind::BehavioralExternBlock { input_casts, .. }
+            | InstantiationKind::OpaqueExternBlock { input_casts, .. } => input_casts,
+            unexpected => panic!("expected external block instance, got {unexpected:?}"),
+        };
+        assert_eq!(
+            input_casts,
+            &BTreeMap::from([("x".to_string(), cast.to_string())])
+        );
+    }
 }
 
 #[test]

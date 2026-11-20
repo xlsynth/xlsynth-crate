@@ -138,6 +138,13 @@ The Rust builder accepts overrides through
 `instantiate_extern_block_with_parameters` and
 `instantiate_opaque_extern_block_with_parameters`.
 
+Both kinds accept `input_casts={mode:"pkg::mode_t"}` to cast a named input
+connection in the generated SystemVerilog. The port must be a nonzero-width
+data input. Its PIR type is used for connection checking and behavioral
+evaluation. Specify a simple or package-qualified typedef name and supply the
+compatible typedef with the external RTL. Use
+`BlockBuilder::set_instantiation_input_cast` from Rust.
+
 An opaque external instance declares its interface inline. Its RTL module
 name and port map are required. Use `ports={}` for a module with zero ports.
 

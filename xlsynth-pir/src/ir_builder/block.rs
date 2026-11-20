@@ -630,6 +630,7 @@ impl Builder<BlockState> {
             InstantiationKind::BehavioralExternBlock {
                 module_name: module_name.to_string(),
                 parameters,
+                input_casts: BTreeMap::new(),
             },
         )
     }
@@ -691,7 +692,11 @@ impl Builder<BlockState> {
             Instantiation {
                 name: name.to_string(),
                 block: module_name.to_string(),
-                kind: InstantiationKind::OpaqueExternBlock { ports, parameters },
+                kind: InstantiationKind::OpaqueExternBlock {
+                    ports,
+                    parameters,
+                    input_casts: BTreeMap::new(),
+                },
             },
             InstanceSignature::Opaque,
             input_types,
@@ -829,6 +834,45 @@ impl Builder<BlockState> {
             return Err(BuilderError::ForeignInstantiation);
         }
         Ok(instance.index)
+    }
+
+    /// Assigns the SystemVerilog typedef used to cast one external block input.
+    ///
+    /// Accepts a simple or package-qualified type name. PIR still type-checks
+    /// the connection against the behavioral model or the declared interface.
+    pub fn set_instantiation_input_cast(
+        &mut self,
+        instance: BInstantiation,
+        port_name: &str,
+        sv_type: &str,
+    ) -> Result<(), BuilderError> {
+        let index = self.instance_index(instance)?;
+        let state = &mut self.state.instances[index];
+        let input_casts = match &mut state.definition.kind {
+            InstantiationKind::BehavioralExternBlock { input_casts, .. }
+            | InstantiationKind::OpaqueExternBlock { input_casts, .. } => input_casts,
+            InstantiationKind::Block | InstantiationKind::Extern => {
+                return Err(invalid("input casts require an external block instance"));
+            }
+        };
+        let input_type = state
+            .input_types
+            .get(port_name)
+            .ok_or_else(|| invalid(format!("unknown instance input '{port_name}'")))?;
+        ir::validate_extern_block_input_cast(
+            &state.definition.name,
+            port_name,
+            input_type,
+            sv_type,
+        )
+        .map_err(invalid)?;
+        if input_casts.contains_key(port_name) {
+            return Err(invalid(format!(
+                "instance input '{port_name}' already has a SystemVerilog cast"
+            )));
+        }
+        input_casts.insert(port_name.to_string(), sv_type.to_string());
+        Ok(())
     }
 
     /// Connects one data input exactly once and returns its unit-valued sink.

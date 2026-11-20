@@ -2112,18 +2112,22 @@ impl Parser {
         })
     }
 
-    /// Parses the named SystemVerilog expressions on an external instance.
-    fn parse_instantiation_parameters(&mut self) -> Result<BTreeMap<String, String>, ParseError> {
+    /// Parses named, quoted SystemVerilog text on an external instance.
+    fn parse_instantiation_string_map(
+        &mut self,
+        entry_kind: &str,
+    ) -> Result<BTreeMap<String, String>, ParseError> {
         self.drop_or_error("=")?;
         self.drop_or_error("{")?;
-        let mut parameters = BTreeMap::new();
+        let mut entries = BTreeMap::new();
+        let key_context = format!("instantiation {entry_kind} name");
         while !self.try_drop("}") {
-            let name = self.pop_identifier_or_error("instantiation parameter name")?;
+            let name = self.pop_identifier_or_error(&key_context)?;
             self.drop_or_error(":")?;
             let value = self.pop_string_or_error()?;
-            if parameters.insert(name.clone(), value).is_some() {
+            if entries.insert(name.clone(), value).is_some() {
                 return Err(ParseError::new(format!(
-                    "duplicate instantiation parameter '{name}'"
+                    "duplicate instantiation {entry_kind} '{name}'"
                 )));
             }
             if !self.try_drop(",") {
@@ -2131,7 +2135,7 @@ impl Parser {
                 break;
             }
         }
-        Ok(parameters)
+        Ok(entries)
     }
 
     /// Parses an ordered, inline SystemVerilog interface for an opaque
@@ -2197,6 +2201,7 @@ impl Parser {
         let mut module_name: Option<String> = None;
         let mut ports = None;
         let mut parameters = None;
+        let mut input_casts = None;
         let mut kind: Option<String> = None;
         loop {
             self.drop_whitespace_and_comments();
@@ -2237,7 +2242,14 @@ impl Parser {
                         "duplicate instantiation parameters attribute".to_string(),
                     ));
                 }
-                parameters = Some(self.parse_instantiation_parameters()?);
+                parameters = Some(self.parse_instantiation_string_map("parameter")?);
+            } else if self.try_drop_keyword("input_casts") {
+                if input_casts.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate instantiation input_casts attribute".to_string(),
+                    ));
+                }
+                input_casts = Some(self.parse_instantiation_string_map("input cast")?);
             } else if self.peek_is("kind=") {
                 if kind.is_some() {
                     return Err(ParseError::new(
@@ -2258,25 +2270,21 @@ impl Parser {
         }
         let kind = kind
             .ok_or_else(|| ParseError::new("instantiation missing kind attribute".to_string()))?;
-        if module_name.is_some()
-            && !matches!(
-                kind.as_str(),
-                "behavioral_extern_block" | "opaque_extern_block"
-            )
-        {
-            return Err(ParseError::new(format!(
-                "{kind} instantiation cannot have a module_name attribute"
-            )));
-        }
-        if parameters.is_some()
-            && !matches!(
-                kind.as_str(),
-                "behavioral_extern_block" | "opaque_extern_block"
-            )
-        {
-            return Err(ParseError::new(format!(
-                "{kind} instantiation cannot have a parameters attribute"
-            )));
+        if !matches!(
+            kind.as_str(),
+            "behavioral_extern_block" | "opaque_extern_block"
+        ) {
+            for (attribute, present) in [
+                ("a module_name", module_name.is_some()),
+                ("a parameters", parameters.is_some()),
+                ("an input_casts", input_casts.is_some()),
+            ] {
+                if present {
+                    return Err(ParseError::new(format!(
+                        "{kind} instantiation cannot have {attribute} attribute"
+                    )));
+                }
+            }
         }
         if ports.is_some() && kind != "opaque_extern_block" {
             return Err(ParseError::new(format!(
@@ -2297,6 +2305,7 @@ impl Parser {
                     ir::InstantiationKind::BehavioralExternBlock {
                         module_name: module_name.unwrap_or_else(|| block.clone()),
                         parameters: parameters.unwrap_or_default(),
+                        input_casts: input_casts.unwrap_or_default(),
                     }
                 } else {
                     ir::InstantiationKind::Block
@@ -2326,6 +2335,7 @@ impl Parser {
                     ir::InstantiationKind::OpaqueExternBlock {
                         ports,
                         parameters: parameters.unwrap_or_default(),
+                        input_casts: input_casts.unwrap_or_default(),
                     },
                 )
             }
@@ -4424,6 +4434,22 @@ impl Parser {
     }
 }
 
+/// Adds external instantiation maps in canonical attribute order.
+fn append_extern_block_map_attributes(
+    attributes: &mut Vec<String>,
+    parameters: &BTreeMap<String, String>,
+    input_casts: &BTreeMap<String, String>,
+) {
+    for (attribute, entries) in [("parameters", parameters), ("input_casts", input_casts)] {
+        if !entries.is_empty() {
+            attributes.push(format!(
+                "{attribute}={}",
+                ir::format_extern_block_string_map(entries)
+            ));
+        }
+    }
+}
+
 /// Emits a block with its declared port order and ordinary graph-node IDs.
 pub fn emit_block(block: &Block, is_top: bool) -> String {
     let header_parts: Vec<String> = block
@@ -4477,21 +4503,21 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
             ir::InstantiationKind::BehavioralExternBlock {
                 module_name,
                 parameters,
+                input_casts,
             } => {
                 let mut attributes = vec![format!("block={}", inst.block)];
                 if module_name != &inst.block {
                     attributes.push(format!("module_name={module_name}"));
                 }
-                if !parameters.is_empty() {
-                    attributes.push(format!(
-                        "parameters={}",
-                        ir::format_extern_block_parameters(parameters)
-                    ));
-                }
+                append_extern_block_map_attributes(&mut attributes, parameters, input_casts);
                 attributes.push("kind=behavioral_extern_block".to_string());
                 format!("  instantiation {}({})", inst.name, attributes.join(", "))
             }
-            ir::InstantiationKind::OpaqueExternBlock { ports, parameters } => {
+            ir::InstantiationKind::OpaqueExternBlock {
+                ports,
+                parameters,
+                input_casts,
+            } => {
                 let ports = ports
                     .iter()
                     .map(|port| {
@@ -4509,12 +4535,7 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
                     format!("module_name={}", inst.block),
                     format!("ports={{{ports}}}"),
                 ];
-                if !parameters.is_empty() {
-                    attributes.push(format!(
-                        "parameters={}",
-                        ir::format_extern_block_parameters(parameters)
-                    ));
-                }
+                append_extern_block_map_attributes(&mut attributes, parameters, input_casts);
                 attributes.push("kind=opaque_extern_block".to_string());
                 format!("  instantiation {}({})", inst.name, attributes.join(", "))
             }
@@ -6502,6 +6523,22 @@ top block pads(io: bits[129]) {
                 "foreign_function=f, parameters={}, kind=extern",
                 "extern instantiation cannot have a parameters attribute",
             ),
+            (
+                "block=model, input_casts={}, input_casts={}, kind=behavioral_extern_block",
+                "duplicate instantiation input_casts attribute",
+            ),
+            (
+                r#"module_name=rtl, ports={mode:input bits[2]}, input_casts={mode:"mode_t", mode:"other_t"}, kind=opaque_extern_block"#,
+                "duplicate instantiation input cast 'mode'",
+            ),
+            (
+                "block=model, input_casts={}, kind=block",
+                "block instantiation cannot have an input_casts attribute",
+            ),
+            (
+                "foreign_function=f, input_casts={}, kind=extern",
+                "extern instantiation cannot have an input_casts attribute",
+            ),
         ] {
             let text = format!("block invalid() {{ instantiation u({attributes}) }}");
             let error = Parser::new(&text).parse_block().unwrap_err();
@@ -6538,6 +6575,24 @@ top block pads(io: bits[129]) {
                 "block wrapper() {{ instantiation u(block=model, parameters={parameters}, kind=behavioral_extern_block) }}"
             );
             assert!(Parser::new(&text).parse_block().is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn external_block_instantiation_input_casts_roundtrip() {
+        let source = r#"block wrapper() {
+  instantiation behavioral(input_casts = {mode:"pkg::mode_t", enable:"enable_t"}, kind=behavioral_extern_block, parameters={WIDTH:"2"}, block=model)
+  instantiation opaque(module_name=rtl, input_casts={mode:"pkg::mode_t"}, ports={mode:input bits[2]}, kind=opaque_extern_block)
+  instantiation empty(module_name=empty, ports={}, input_casts={}, kind=opaque_extern_block)
+}"#;
+        let canonical = r#"block wrapper() {
+  instantiation behavioral(block=model, parameters={WIDTH:"2"}, input_casts={enable:"enable_t", mode:"pkg::mode_t"}, kind=behavioral_extern_block)
+  instantiation opaque(module_name=rtl, ports={mode:input bits[2]}, input_casts={mode:"pkg::mode_t"}, kind=opaque_extern_block)
+  instantiation empty(module_name=empty, ports={}, kind=opaque_extern_block)
+}"#;
+        for source in [source, canonical] {
+            let block = Parser::new(source).parse_block().unwrap();
+            assert_eq!(emit_block(&block, false), canonical);
         }
     }
 

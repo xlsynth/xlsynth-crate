@@ -669,13 +669,18 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         if self.options.emit_sv_types
             && let Some(sv_type) = sv_type
         {
-            if let Some((package, ty)) = sv_type.rsplit_once("::") {
-                self.file.make_extern_package_type(package, ty)
-            } else {
-                self.file.make_extern_type(sv_type)
-            }
+            self.external_data_type(sv_type)
         } else {
             self.value_type(ty)
+        }
+    }
+
+    /// References a SystemVerilog typedef provided by the caller's RTL.
+    fn external_data_type(&mut self, sv_type: &str) -> VastDataType {
+        if let Some((package, ty)) = sv_type.rsplit_once("::") {
+            self.file.make_extern_package_type(package, ty)
+        } else {
+            self.file.make_extern_type(sv_type)
         }
     }
 
@@ -1009,7 +1014,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             self.file.add_member_comment(self.module, comment);
         }
 
-        let no_parameters = BTreeMap::new();
+        let empty_bindings = BTreeMap::new();
         for instance in &self.block.instantiations {
             validate_external_identifier(&instance.name, "instance")?;
             let mut connections = self
@@ -1024,10 +1029,20 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 self.emit_external_instantiation(instance, &connections)?;
                 continue;
             };
-            let parameters = match &instance.kind {
-                InstantiationKind::BehavioralExternBlock { parameters, .. }
-                | InstantiationKind::OpaqueExternBlock { parameters, .. } => parameters,
-                InstantiationKind::Block | InstantiationKind::Extern => &no_parameters,
+            let (parameters, input_casts) = match &instance.kind {
+                InstantiationKind::BehavioralExternBlock {
+                    parameters,
+                    input_casts,
+                    ..
+                }
+                | InstantiationKind::OpaqueExternBlock {
+                    parameters,
+                    input_casts,
+                    ..
+                } => (parameters, input_casts),
+                InstantiationKind::Block | InstantiationKind::Extern => {
+                    (&empty_bindings, &empty_bindings)
+                }
             };
             let (clock, order) =
                 if let InstantiationKind::OpaqueExternBlock { ports, .. } = &instance.kind {
@@ -1073,6 +1088,15 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                     name.clone(),
                 )
             });
+            for (name, expr) in &mut connections {
+                if let Some(sv_type) = input_casts.get(name) {
+                    for component in sv_type.split("::") {
+                        validate_external_identifier(component, "input cast type")?;
+                    }
+                    let data_type = self.external_data_type(sv_type);
+                    *expr = self.file.make_type_cast(&data_type, expr);
+                }
+            }
             let names = connections
                 .iter()
                 .map(|(name, _)| {

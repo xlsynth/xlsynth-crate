@@ -1808,12 +1808,16 @@ pub enum InstantiationKind {
         module_name: String,
         /// Named overrides as decoded SystemVerilog expression text.
         parameters: BTreeMap<String, String>,
+        /// Named input connections to cast to SystemVerilog typedefs.
+        input_casts: BTreeMap<String, String>,
     },
     /// Supplies an inline interface to a separately implemented RTL module.
     OpaqueExternBlock {
         ports: Vec<OpaqueExternPort>,
         /// Named overrides as decoded SystemVerilog expression text.
         parameters: BTreeMap<String, String>,
+        /// Named input connections to cast to SystemVerilog typedefs.
+        input_casts: BTreeMap<String, String>,
     },
 }
 
@@ -1837,9 +1841,34 @@ pub(crate) fn validate_extern_block_parameters(
     Ok(())
 }
 
-/// Prints a named override map using PIR string escaping and lexical key order.
-pub(crate) fn format_extern_block_parameters(parameters: &BTreeMap<String, String>) -> String {
-    let entries = parameters
+/// Checks that an external input can supply an expression for a named SV cast.
+pub(crate) fn validate_extern_block_input_cast(
+    instance_name: &str,
+    port_name: &str,
+    input_type: &Type,
+    sv_type: &str,
+) -> Result<(), String> {
+    if input_type.checked_bit_count() == Some(0) {
+        return Err(format!(
+            "extern block instance '{instance_name}' cannot cast zero-width input '{port_name}'"
+        ));
+    }
+    let valid_identifier = crate::ir_utils::is_valid_identifier_name;
+    let valid_type = match sv_type.split_once("::") {
+        Some((package, name)) => valid_identifier(package) && valid_identifier(name),
+        None => valid_identifier(sv_type),
+    };
+    if !valid_type {
+        return Err(format!(
+            "extern block instance '{instance_name}' input cast for port '{port_name}' requires a SystemVerilog type name, got '{sv_type}'"
+        ));
+    }
+    Ok(())
+}
+
+/// Prints named strings using PIR string escaping and lexical key order.
+pub(crate) fn format_extern_block_string_map(values: &BTreeMap<String, String>) -> String {
+    let entries = values
         .iter()
         .map(|(name, value)| format!("{name}:\"{}\"", escape_xls_ir_string(value)))
         .collect::<Vec<_>>()
