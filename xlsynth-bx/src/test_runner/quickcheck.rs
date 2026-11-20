@@ -208,7 +208,7 @@ impl<'a> PirCircuit<'a> {
     /// statements. If an assumption failed, check the dependencies of the
     /// sampled port or register update before attributing that failure to the
     /// current statement.
-    fn sample(&mut self, index: usize) -> Result<IrValue, String> {
+    fn sample(&mut self, index: usize) -> Result<IrValue, ExecutionError> {
         let value = match self.settle() {
             FnEvalResult::Success(result) => Some(&result.value),
             FnEvalResult::Failure(failure) if failure.assumption_failures.is_empty() => {
@@ -217,12 +217,16 @@ impl<'a> PirCircuit<'a> {
             FnEvalResult::Failure(_) => None,
         };
         if let Some(value) = value {
-            return value.get_element(index).map_err(|e| e.to_string());
+            return value
+                .get_element(index)
+                .map_err(|e| ExecutionError::Runtime(e.to_string()));
         }
         let function = &self.transition.function;
         let ret = function.ret_node_ref.expect("transition result");
         let NodePayload::Tuple(fields) = &function.get_node(ret).payload else {
-            return Err("expected transition result tuple".into());
+            return Err(ExecutionError::Runtime(
+                "expected transition result tuple".into(),
+            ));
         };
         let node = fields[index];
         let expr = match self.expressions.entry(node) {
@@ -251,7 +255,7 @@ impl<'a> PirCircuit<'a> {
         Ok(())
     }
 
-    fn tick(&mut self) -> Result<(), String> {
+    fn tick(&mut self) -> Result<(), ExecutionError> {
         let first = self.transition.outputs.len();
         let count = self.transition.registers.len();
         // The emitted RTL clocks all assertions in the flattened block and
@@ -287,26 +291,26 @@ impl ClockedHarness for Concrete<'_, '_> {
         }
         Ok(())
     }
-    fn tick(&mut self) -> Result<(), String> {
+    fn tick(&mut self) -> Result<(), ExecutionError> {
         self.pir.tick()?;
         if let Some(rtl) = &mut self.rtl {
             rtl.tick()?;
         }
         Ok(())
     }
-    fn sample(&mut self, index: usize) -> Result<Observed, String> {
+    fn sample(&mut self, index: usize) -> Result<Observed, ExecutionError> {
         let value = self.pir.sample(index)?;
         if let Some(rtl) = &mut self.rtl {
             match rtl.output_observed(index)? {
                 Observed::Known(other) if value != other => {
-                    return Err(format!(
+                    return Err(ExecutionError::Runtime(format!(
                         "Vastly cross-check mismatch: PIR {value}, Vastly {other}"
-                    ));
+                    )));
                 }
                 Observed::Unknown(reason) => {
-                    return Err(format!(
+                    return Err(ExecutionError::Runtime(format!(
                         "Vastly cross-check mismatch: PIR {value}, Vastly {reason}"
-                    ));
+                    )));
                 }
                 Observed::Known(_) => { /* Both concrete samples agree. */ }
             }
@@ -856,7 +860,7 @@ block read(clk, idx: u8) -> u8 {
     }
 
     #[test]
-    fn concrete_cross_check_detects_a_different_pre_edge_sample() -> Result<(), String> {
+    fn concrete_cross_check_detects_a_different_pre_edge_sample() -> Result<(), ExecutionError> {
         let package = compile(
             "pub block sample(clk, d: u8) -> u8 { reg q: u8; q := d; q }",
             empty_package("sample"),
@@ -874,8 +878,10 @@ block read(clk, idx: u8) -> u8 {
             rtl: Some(&mut rtl),
         };
         assert_eq!(
-            circuit.sample(0).err().as_deref(),
-            Some("Vastly cross-check mismatch: PIR bits[8]:0, Vastly bits[8]:1")
+            circuit.sample(0).err(),
+            Some(ExecutionError::Runtime(
+                "Vastly cross-check mismatch: PIR bits[8]:0, Vastly bits[8]:1".into()
+            ))
         );
         circuit.tick()?;
         assert!(

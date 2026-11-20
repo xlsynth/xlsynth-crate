@@ -688,6 +688,9 @@ Vastly currently cannot parse this syntax.
 
 ### Bounded proofs for clocked properties
 
+See the [clocked testing and proof glossary](#clocked-testing-and-proof-glossary)
+for terms shared by the concrete runner and the prover.
+
 ```shell
 xlsynth-driver bx-prove-quickcheck counter.bx
 ```
@@ -709,8 +712,12 @@ in `tick!(rst: drive.reset)` can itself be symbolic.
 
 A property that exceeds the static expansion limit is reported as inconclusive.
 The command continues checking the other properties in the file.
-Reachable hardware assertions in linked IR, array operations marked
-`assumed_in_bounds=true`, and partial-product multiplies (`umulp` and `smulp`)
+For `array_index` and `array_update` marked `assumed_in_bounds=true`, the
+solver proves that every index fits its array dimension whenever the test
+samples the expression or clocks a register update that depends on it. This
+includes operations in called functions. A violated bound disproves the
+property even when the sampled values compare equal. Reachable hardware
+assertions in linked IR and partial-product multiplies (`umulp` and `smulp`)
 are currently unsupported. A solver counterexample is replayed through the
 concrete BX runner to report the failing observation, clock edge, and stimulus
 trace. The proof covers the edges executed by the property.
@@ -782,15 +789,47 @@ xlsynth-driver bx-prove-invariant parity.bx --engine=bitwuzla --max-depth 8
 ```
 
 Concrete trials and bounded proofs check the helpers and the trailing Boolean
-on every sampled cycle. A reachable failure identifies the failing predicate
-and the stimulus trace. An induction step that remains open at the depth limit
-is inconclusive. The word-level proof has the same linked-IR operation limits
-as bounded clocked QuickChecks.
+on every sampled cycle. They also check marked array accesses in each sampled
+expression and register update, including updates on the initial reset edge
+and the last edge of a bounded trace. A reachable failure identifies the
+failing predicate or array operation and the stimulus trace. An induction step
+that remains open at the depth limit is inconclusive. The word-level proof
+has the same linked-IR operation limits as bounded clocked QuickChecks.
 
 For runnable observational equivalence proofs, see the widened accumulator,
 binary versus one-hot detector, and parity machine with an unreachable state.
 Each harness imports the two DSLX step functions and compares their outputs
 on a shared input stream. [Observational equivalence case studies](../xlsynth-driver/examples/bx-observational-equivalence/README.md)
+
+### Clocked testing and proof glossary
+
+| Term | Meaning in BX |
+| --- | --- |
+| Invariant trial | One run of an `#[invariant]` block with a chosen starting register state and a concrete sequence of inputs. `bx-test` generates these values and checks the invariant on each sampled cycle. |
+| Symbolic query | A question for the solver in which inputs or register values are variables. For example, can any legal input make a sampled array index go out of bounds? |
+| Property and predicate | A property is a claim about the circuit. A predicate is a Boolean expression that states a condition, such as `index < u2:3`. |
+| Clocked invariant | A property claimed to hold on every sampled cycle of every legal execution, however long the circuit runs. |
+| Harness | The test circuit BX builds to connect the design, drive its inputs, and expose the expressions the runner or prover needs to observe. |
+| Stimulus and stimulus domain | Stimulus is the input supplied to the circuit. Its domain is the set of allowed values. For example, an enum input ranges over its declared members. |
+| Frame and trace | A frame describes the inputs and current register values at one point in execution. A trace records a starting state and the sequence of inputs and clock edges that follow. |
+| Sample and tick | Sampling reads a value using the current inputs and register state. A tick advances the clock and applies the register updates together. |
+| Guard | The condition that determines whether a procedural check executes. In `if enabled { assert!(ok); }`, the guard is `enabled`. |
+| Proof obligation | A condition the prover must establish. For a marked array access, every index must be smaller than its dimension's length whenever the access is checked. |
+| Bounded model checking (BMC) | Checking whether any legal execution from initialization can violate a property within a specified number of cycles. |
+| Base check and induction step | The base checks the first `k` sampled cycles from legal initialization. The induction step asks whether the property holding for `k` consecutive cycles guarantees it holds on the next one. Together they can prove an invariant for all cycles. |
+| Helper lemma | An additional property marked `#[lemma]`. BX proves the helpers before using them in the main induction step. |
+| Counterexample and replay | A counterexample gives values that make a check fail. For a failure reachable from initialization, replay runs those values through the original circuit to locate the failing check or array access. |
+| Transition function | A function that takes the current inputs and register values and returns the sampled outputs followed by the next register values. |
+| PIR transition package | The transition function and the functions it calls, stored in the project's Rust representation of XLS IR (PIR). |
+| Dependency cone | The operations and operands that feed a particular value. Two outputs of the same block can depend on different array accesses. |
+| Bounds instrumentation | Adding Boolean checks to the proof's transition function and its callees so the prover can verify accesses marked `assumed_in_bounds=true`. |
+| Contract projection | Selecting the Boolean bounds-check field that belongs to a particular output or next register value in the transition's result tuple. |
+
+For example, a transition that returns `(out, next_q)` can return
+`(out, next_q, out_in_bounds, next_q_in_bounds)` in the proof. Sampling
+`out` selects `out_in_bounds`. Clocking the update to `q` selects
+`next_q_in_bounds`. Each selection is a **contract projection**. The
+selected bit says whether all bounds checks associated with that value hold.
 
 ## Compile and link
 

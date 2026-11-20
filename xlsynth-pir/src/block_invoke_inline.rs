@@ -226,9 +226,11 @@ fn index_literal(index: usize, width: usize) -> Result<NodePayload, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Appends ordinary invokes in iteration order without changing the register
-/// graph.
-fn expand_iterations(
+/// Unrolls a verified map or counted_for by appending one ordinary invoke per
+/// iteration. The returned payload replaces the original operation. Callers
+/// bound the expansion before calling (three nodes per map element or two
+/// per loop iteration) and provide the package's last allocated node ID.
+pub fn expand_iterations(
     call: &Node,
     function: &Fn,
     nodes: &mut Vec<Node>,

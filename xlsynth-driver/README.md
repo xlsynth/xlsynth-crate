@@ -535,8 +535,9 @@ checks a counter against a reference using a randomly generated sequence of driv
 
 Proves the `#[quickcheck] block` declarations in a BX file. The command unrolls
 each property's ticks into word-level IR and asks an SMT solver whether any
-legal stimulus and initial DUT register state can fail an assertion or return
-`false`. A property can tick inside a loop over a fixed-size array. Stimulus
+legal stimulus and initial DUT register state can fail an assertion, violate
+an `assumed_in_bounds=true` array access, or return `false`. A property can
+tick inside a loop over a fixed-size array. Stimulus
 can control reset, load enables, and the values sampled at each edge.
 
 ```shell
@@ -575,7 +576,8 @@ data inputs each cycle. The block's trailing Boolean defines the predicate
 for the current cycle. An induction proof establishes that it stays true on
 every legal execution from the specified initialization, for arbitrarily many
 cycles. In BMC mode, a successful result covers the sampled prefix. Both
-modes also check every named `#[lemma]`.
+modes also check every named `#[lemma]` and the bounds of marked array
+accesses in sampled observations and register updates.
 
 ```shell
 xlsynth-driver bx-prove-invariant parity.bx --engine=bitwuzla --max-depth 8

@@ -71,6 +71,7 @@ pub(super) fn lower_property(
     transition: &BlockTransition,
     domains: &[Stimulus],
     transition_package: &Package,
+    has_bounds: bool,
 ) -> Result<Fn, String> {
     let mut work_left = MAX_PROOF_WORK;
     check_schedule(&program.steps, 1, false, &mut work_left).map_err(|e| e.to_string())?;
@@ -158,7 +159,10 @@ pub(super) fn lower_property(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     frame.extend(registers);
-    let transition_work = expanded_node_visits(transition_package, &transition.function.name)?
+    let transition_fn = transition_package
+        .get_top_fn()
+        .ok_or("missing proof transition function")?;
+    let transition_work = expanded_node_visits(transition_package, &transition_fn.name)?
         .saturating_add(frame.len())
         .saturating_add(transition.outputs.len())
         .saturating_add(transition.registers.len());
@@ -171,8 +175,8 @@ pub(super) fn lower_property(
         active_low: reset.active_low,
         input_count: transition.inputs.len(),
         output_count: transition.outputs.len(),
-        signature: InvokeSignature::from_function(&transition.function)
-            .map_err(|e| e.to_string())?,
+        bounds_offset: has_bounds.then_some(transition.outputs.len() + transition.registers.len()),
+        signature: InvokeSignature::from_function(transition_fn).map_err(|e| e.to_string())?,
         settled: None,
         predicates: Vec::new(),
         transition_work,
@@ -319,6 +323,9 @@ struct SymbolicExecution {
     active_low: bool,
     input_count: usize,
     output_count: usize,
+    /// The instrumented transition appends one bounds predicate per original
+    /// field.
+    bounds_offset: Option<usize>,
     signature: InvokeSignature,
     settled: Option<BValue>,
     predicates: Vec<BValue>,
@@ -340,11 +347,29 @@ impl SymbolicExecution {
         Ok(value)
     }
 
+    /// Check the contracts of the field actually sampled on this path. Other
+    /// outputs can belong to later statements or skipped branches.
+    fn sample_field(
+        &mut self,
+        tuple: BValue,
+        index: usize,
+        guard: Option<BValue>,
+        position: SourcePosition,
+    ) -> Result<BValue, BuilderError> {
+        if let Some(offset) = self.bounds_offset {
+            charge(&mut self.work_left, 1, position)?;
+            let in_bounds = self.builder.tuple_index(tuple, offset + index)?;
+            self.assert(in_bounds, guard)?;
+        }
+        self.builder.tuple_index(tuple, index)
+    }
+
     /// An action can sample individual outputs or one tuple captured on entry.
     fn operand(
         &mut self,
         index: usize,
         group: Option<(usize, BValue)>,
+        guard: Option<BValue>,
         position: SourcePosition,
     ) -> Result<BValue, BuilderError> {
         if let Some((start, tuple)) = group {
@@ -354,7 +379,7 @@ impl SymbolicExecution {
             self.builder.tuple_index(tuple, field)
         } else {
             let tuple = self.settle(position)?;
-            self.builder.tuple_index(tuple, index)
+            self.sample_field(tuple, index, guard, position)
         }
     }
 
@@ -399,9 +424,8 @@ impl SymbolicExecution {
         self.set(self.reset_index, reset);
         let sampled = self.settle(position)?;
         for index in self.input_count..self.frame.len() {
-            let next = self
-                .builder
-                .tuple_index(sampled, self.output_count + (index - self.input_count))?;
+            let field = self.output_count + (index - self.input_count);
+            let next = self.sample_field(sampled, field, None, position)?;
             self.set(index, next);
         }
         self.set(self.reset_index, self.inactive_reset);
@@ -427,27 +451,31 @@ impl SymbolicExecution {
             let pos = step.position;
             let group = step
                 .group
-                .map(|index| self.operand(index, None, pos).map(|tuple| (index, tuple)))
+                .map(|index| {
+                    self.operand(index, None, guard, pos)
+                        .map(|tuple| (index, tuple))
+                })
                 .transpose()?;
+            let mut operand = |index| self.operand(index, group, guard, pos);
             match &step.action {
                 TestAction::Evaluate(index) => {
-                    self.operand(*index, group, pos)?;
+                    operand(*index)?;
                 }
                 TestAction::Drive { port, value } => {
-                    let value = self.operand(*value, group, pos)?;
+                    let value = operand(*value)?;
                     self.drive(*port, value, guard)?;
                 }
                 TestAction::Tick(reset) => {
-                    let reset = reset.map(|i| self.operand(i, group, pos)).transpose()?;
+                    let reset = reset.map(operand).transpose()?;
                     self.tick(reset, pos)?;
                 }
                 TestAction::Assert { predicate, .. } => {
-                    let holds = self.operand(*predicate, group, pos)?;
+                    let holds = operand(*predicate)?;
                     self.assert(holds, guard)?;
                 }
                 TestAction::AssertEq { actual, expected } => {
-                    let actual = self.operand(*actual, group, pos)?;
-                    let expected = self.operand(*expected, group, pos)?;
+                    let actual = operand(*actual)?;
+                    let expected = operand(*expected)?;
                     let equal = self.builder.eq(actual, expected)?;
                     self.assert(equal, guard)?;
                 }
@@ -456,7 +484,7 @@ impl SymbolicExecution {
                     then_body,
                     else_body,
                 } => {
-                    let condition = self.operand(*condition, group, pos)?;
+                    let condition = operand(*condition)?;
                     let mut then_guard = condition;
                     let mut else_guard = self.builder.not(condition)?;
                     if let Some(parent) = guard {
@@ -473,7 +501,7 @@ impl SymbolicExecution {
                     body,
                 } => match iterable {
                     TestIterable::Array(index) => {
-                        let array = self.operand(*index, group, pos)?;
+                        let array = operand(*index)?;
                         for ordinal in 0..*count {
                             let i = self.builder.literal(IrValue::u32(ordinal as u32))?;
                             let element = self.builder.array_index(array, i)?;
