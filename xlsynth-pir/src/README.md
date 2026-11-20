@@ -125,6 +125,8 @@ external SystemVerilog module `model`. Set `module_name=external_rtl` to target 
 different module. The model supplies the port names, types, and behavior used
 when inlining for evaluation. Supply the SystemVerilog implementation separately.
 Use the PIR parser for both extern declaration forms.
+Within a package, every instance targeting the same external SystemVerilog
+module must reference the same behavioral block.
 
 Package finalization checks combinational cycles through block instances, with
 registers as state boundaries. External block instances use their model's

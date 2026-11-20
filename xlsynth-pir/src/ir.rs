@@ -1818,7 +1818,16 @@ impl Package {
     /// parse.
     pub fn uses_pir_extensions(&self) -> bool {
         self.members.iter().any(|member| {
-            matches!(member, PackageMember::Block(block) if !block.inout_nets.is_empty())
+            let block_uses_extensions = match member {
+                PackageMember::Block(block) => {
+                    !block.inout_nets.is_empty()
+                        || block.instantiations.iter().any(|instance| {
+                            matches!(instance.kind, InstantiationKind::ExternBlock { .. })
+                        })
+                }
+                PackageMember::Function(_) => false,
+            };
+            block_uses_extensions
                 || member
                     .graph()
                     .nodes
@@ -2068,6 +2077,29 @@ mod tests {
     use crate::ir_utils::operands;
 
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn modeled_extern_block_uses_pir_extensions_without_inouts() {
+        let ir = r#"package modeled_extern
+
+block model() {
+}
+
+top block wrapper() {
+  instantiation u(block=model, kind=extern_block)
+}
+"#;
+        let external = ir_parser::Parser::new(ir)
+            .parse_and_validate_package()
+            .unwrap();
+        assert!(external.uses_pir_extensions());
+
+        let ordinary_ir = ir.replace("kind=extern_block", "kind=block");
+        let ordinary = ir_parser::Parser::new(&ordinary_ir)
+            .parse_and_validate_package()
+            .unwrap();
+        assert!(!ordinary.uses_pir_extensions());
+    }
 
     #[test]
     fn package_function_lookup_respects_name_and_unambiguous_default() {
