@@ -60,7 +60,7 @@ pub(super) enum SourceType {
 /// They pair each entry in `outputs` with the IR output port at the same index
 /// when constructing the result or converting it between readable and raw Lean.
 pub(super) struct StatefulInterface {
-    /// Logical owner of the block and locally declared BX types.
+    /// Root BX module for unqualified source declarations.
     pub(super) bx_module: String,
     /// Written BX block name, qualified by the linker for a library
     /// declaration.

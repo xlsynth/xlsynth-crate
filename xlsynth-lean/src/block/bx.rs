@@ -103,8 +103,8 @@ impl CompiledBx {
         &self.package
     }
 
-    /// Emit the selected BX block, defaulting to the package's top or sole
-    /// block.
+    /// Select a block by its exact IR name in [`Self::package`] and emit
+    /// readable Lean. With `None`, select the package's top or sole block.
     ///
     /// The block and the types on its ports and registers keep their declaring
     /// modules. Emission rejects competing declarations at the same Lean path.
