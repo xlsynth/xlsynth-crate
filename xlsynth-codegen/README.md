@@ -125,17 +125,26 @@ resizing requires part-selects.
 
 Block instances are checked for combinational cycles across hierarchical
 boundaries. Register-delimited feedback remains valid, and independently timed
-child outputs are analyzed separately. Each declared register must have exactly
+child outputs are analyzed separately. Each emitted register must have exactly
 one `register_read` and one `register_write`; multiple write nodes are rejected
 instead of silently dropping an update.
 
-The emitter requires the selected block and its instantiated children to be
-free of `invoke` nodes. The `block2sv` CLI runs `inline_invokes_for_codegen`
-before emission. Rust callers can run the same stage to inline nested calls,
-including their assertions, coverage, and traces, while preserving register
-boundaries. Use an explicit external instantiation for a function marked
-`#[ffi_proto]`. Lower `map` operations and unroll `counted_for` loops
-before emission.
+`instantiation u(block=model, kind=extern_block)` emits an instance of the
+external SystemVerilog module `model`. Set `module_name=external_rtl` to target a
+different module. The package block `model` supplies the named ports and the
+dependencies used for cycle checks.
+The child clock connects to the parent clock, and reset is connected as an
+ordinary named input. Use `Layout::None` for designs that instantiate an external
+block. Models reached only through external instances are omitted from the
+generated SystemVerilog.
+
+The emitter requires the selected block, its instantiated children, and
+behavioral models to be free of `invoke` nodes. The `block2sv` CLI runs
+`inline_invokes_for_codegen` before emission. Rust callers can run the same
+stage to inline nested calls, including their assertions, coverage, and traces,
+while preserving register boundaries. Use an explicit external instantiation
+for a function marked `#[ffi_proto]`. Lower `map` operations and unroll
+`counted_for` loops before emission.
 
 Name collisions use double-underscore suffixes such as `add_3__1`.
 Emitted ports (including clocks), instance names, and assertion/coverage labels

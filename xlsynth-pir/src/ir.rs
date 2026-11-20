@@ -1782,17 +1782,29 @@ pub struct Register {
     pub reset_value: Option<IrValue>,
 }
 
-/// Distinguishes a child block from a foreign-function instantiation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Describes how a block instance is modeled and emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InstantiationKind {
     Block,
     Extern,
+    /// Uses a package block for behavior and an external module for RTL.
+    ExternBlock {
+        module_name: String,
+    },
 }
 
+impl InstantiationKind {
+    /// Returns whether the instance references a block in the package.
+    pub fn is_block(&self) -> bool {
+        matches!(self, Self::Block | Self::ExternBlock { .. })
+    }
+}
+
+/// A named hardware instance scoped to its parent block.
 #[derive(Debug, Clone)]
 pub struct Instantiation {
     pub name: String,
-    /// Child block name, or foreign-function name for an external instance.
+    /// Package block or foreign function that provides the instance interface.
     pub block: String,
     pub kind: InstantiationKind,
 }
@@ -1802,7 +1814,16 @@ impl Package {
     /// parse.
     pub fn uses_pir_extensions(&self) -> bool {
         self.members.iter().any(|member| {
-            matches!(member, PackageMember::Block(block) if !block.inout_nets.is_empty())
+            let block_uses_extensions = match member {
+                PackageMember::Block(block) => {
+                    !block.inout_nets.is_empty()
+                        || block.instantiations.iter().any(|instance| {
+                            matches!(instance.kind, InstantiationKind::ExternBlock { .. })
+                        })
+                }
+                PackageMember::Function(_) => false,
+            };
+            block_uses_extensions
                 || member
                     .graph()
                     .nodes
@@ -2052,6 +2073,29 @@ mod tests {
     use crate::ir_utils::operands;
 
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn modeled_extern_block_uses_pir_extensions_without_inouts() {
+        let ir = r#"package modeled_extern
+
+block model() {
+}
+
+top block wrapper() {
+  instantiation u(block=model, kind=extern_block)
+}
+"#;
+        let external = ir_parser::Parser::new(ir)
+            .parse_and_validate_package()
+            .unwrap();
+        assert!(external.uses_pir_extensions());
+
+        let ordinary_ir = ir.replace("kind=extern_block", "kind=block");
+        let ordinary = ir_parser::Parser::new(&ordinary_ir)
+            .parse_and_validate_package()
+            .unwrap();
+        assert!(!ordinary.uses_pir_extensions());
+    }
 
     #[test]
     fn package_function_lookup_respects_name_and_unambiguous_default() {

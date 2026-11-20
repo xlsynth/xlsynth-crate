@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package model_backed_extern
+
+block delay(delay_clk: clock, reset: bits[1], data: bits[8], out: bits[8]) {
+  #![reset(port="reset", asynchronous=false, active_low=false)]
+  reg state(bits[8], reset_value=0)
+  reset: bits[1] = input_port(name=reset, id=1)
+  data: bits[8] = input_port(name=data, id=2)
+  state_q: bits[8] = register_read(register=state, id=3)
+  state_d: () = register_write(data, register=state, reset=reset, id=4)
+  out: () = output_port(state_q, name=out, id=5)
+}
+
+block model(model_clk: clock, reset: bits[1], data: bits[8], out: bits[8]) {
+  instantiation u_delay(block=delay, kind=block)
+  reset: bits[1] = input_port(name=reset, id=6)
+  data: bits[8] = input_port(name=data, id=7)
+  delay_reset: () = instantiation_input(reset, instantiation=u_delay, port_name=reset, id=8)
+  delay_input: () = instantiation_input(data, instantiation=u_delay, port_name=data, id=9)
+  delay_output: bits[8] = instantiation_output(instantiation=u_delay, port_name=out, id=10)
+  out: () = output_port(delay_output, name=out, id=11)
+}
+
+top block wrapper(parent_clk: clock, parent_reset: bits[1], data: bits[8], out: bits[8]) {
+  instantiation u_ext(block=model, module_name=external_rtl, kind=extern_block)
+  reg input_stage(bits[8])
+  reg output_stage(bits[8])
+  parent_reset: bits[1] = input_port(name=parent_reset, id=12)
+  data: bits[8] = input_port(name=data, id=13)
+  input_q: bits[8] = register_read(register=input_stage, id=14)
+  input_d: () = register_write(data, register=input_stage, id=15)
+  child_reset: () = instantiation_input(parent_reset, instantiation=u_ext, port_name=reset, id=16)
+  child_input: () = instantiation_input(input_q, instantiation=u_ext, port_name=data, id=17)
+  child_output: bits[8] = instantiation_output(instantiation=u_ext, port_name=out, id=18)
+  output_q: bits[8] = register_read(register=output_stage, id=19)
+  output_d: () = register_write(child_output, register=output_stage, id=20)
+  out: () = output_port(output_q, name=out, id=21)
+}
+
+// OPTIONS: layout = "none"
+// EXPECT-SV: module wrapper(
+// EXPECT-SV:   input logic parent_clk,
+// EXPECT-SV:   input logic parent_reset,
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] input_stage;
+// EXPECT-SV:   logic [7:0] output_stage;
+// EXPECT-SV:   logic [7:0] child_output;
+// EXPECT-SV:   always_ff @ (posedge parent_clk) begin
+// EXPECT-SV:     input_stage <= data;
+// EXPECT-SV:     output_stage <= child_output;
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = output_stage;
+// EXPECT-SV:   external_rtl u_ext (
+// EXPECT-SV:     .model_clk(parent_clk),
+// EXPECT-SV:     .reset(parent_reset),
+// EXPECT-SV:     .data(input_stage),
+// EXPECT-SV:     .out(child_output)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

@@ -133,6 +133,7 @@ fn underscore_and_hyphen_flags_forward_typed_codegen_options() {
         "structure/separate_lines.golden.ir",
         "structure/systemverilog_types_disabled.golden.ir",
         "debug/assertion_disabled.golden.ir",
+        "extern/model_backed_extern.golden.ir",
         "arrays/ignore_custom_typed_array.golden.ir",
         "registers/two_stage_pipeline.golden.ir",
         "registers/custom_reset_and_enable_template.golden.ir",

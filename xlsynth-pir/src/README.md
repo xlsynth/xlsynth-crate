@@ -112,19 +112,27 @@ to declare the block reset and supply a one-bit reset in `RegisterWriteOptions`.
 Multiple writes require load enables and the same reset operand; mutually
 exclusive enables remain the caller's responsibility.
 
-`instantiate(name, &child_block)` and `instantiate_extern(name, &function)`
-return scoped `BInstantiation` handles. `instantiation_input` connects each
-named input once; `instantiation_output` caches a typed output handle. External
-tuple components use names such as `arg.0` and `return.0`; upstream XLS requires
-the referenced function's Verilog FFI template as well.
-The pinned libxls v0.54.7 parser rejects PIR's current `foreign_function=` extern
-declaration syntax, so extern builder tests use PIR verification and roundtrips,
-not upstream parsing. Other supported block forms are cross-checked with libxls.
+`instantiate(name, &child_block)`, `instantiate_extern(name, &function)`, and
+`instantiate_extern_block(name, &model, module_name)` return scoped
+`BInstantiation` handles. `instantiation_input` connects each named input once,
+and `instantiation_output` caches a typed output handle. Foreign-function tuple
+components use names such as `arg.0` and `return.0`. Codegen uses the referenced
+function's Verilog FFI template.
+
+An external block uses a behavioral model defined earlier in the package.
+`instantiation u(block=model, kind=extern_block)` emits an instance of the
+external SystemVerilog module `model`. Set `module_name=external_rtl` to target a
+different module. The model supplies the port names, types, and behavior used
+when inlining for evaluation. Supply the SystemVerilog implementation separately.
+Use the PIR parser for both extern declaration forms.
+Within a package, every instance targeting the same external SystemVerilog
+module must reference the same behavioral block.
 
 Package finalization checks combinational cycles through block instances, with
-registers as state boundaries. Traversal stops at extern boundaries because
-the implementing RTL is supplied separately. A clocked child requires a
-parent clock, but their clock names need not match.
+registers as state boundaries. External block instances use their model's
+dependencies. Foreign-function instances are opaque to cycle checking.
+A clocked child or model connects to the parent clock. The child and parent
+may use different clock port names.
 
 `build()` verifies a standalone block. `build_package(package_name)` additionally
 marks it as top in a one-block package. Calls and instances require

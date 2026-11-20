@@ -9,7 +9,9 @@ use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::desugar_extensions::{
     ExtensionEmitMode, desugar_extensions_in_package, emit_package_with_extension_mode,
 };
-use xlsynth_pir::ir::{Block, MemberType, NodePayload, Package, PackageMember, Type};
+use xlsynth_pir::ir::{
+    Block, InstantiationKind, MemberType, NodePayload, Package, PackageMember, Type,
+};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_rebase_ids::package_max_emitted_node_id;
@@ -685,8 +687,29 @@ fn extern_finalization_rejects_renamed_unconnected_parameters_with_identical_typ
 }
 
 #[test]
+fn extern_block_module_name_defaults_to_the_model_name_in_canonical_ir() {
+    let canonical = r#"package external_module_name
+
+block model() {
+}
+
+top block parent() {
+  instantiation u(block=model, kind=extern_block)
+}
+"#;
+    let explicit = canonical.replace(
+        "block=model, kind=extern_block",
+        "block=model, module_name=model, kind=extern_block",
+    );
+    for source in [canonical, explicit.as_str()] {
+        let package = Parser::new(source).parse_and_verify_package().unwrap();
+        assert_eq!(package.to_string(), canonical);
+    }
+}
+
+#[test]
 fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() {
-    for registered in [false, true] {
+    for (registered, external) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut child = BlockBuilder::new("child");
         let input = child.input_port("data", Type::Bits(8)).unwrap();
         let value = if registered {
@@ -706,9 +729,13 @@ fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() 
         if registered {
             parent.clock_port("clk").unwrap();
         }
-        let instance = parent
-            .instantiate("child_instance", package.get_block("child").unwrap())
-            .unwrap();
+        let child = package.get_block("child").unwrap();
+        let instance = if external {
+            parent.instantiate_extern_block("child_instance", child, "rtl_register")
+        } else {
+            parent.instantiate("child_instance", child)
+        }
+        .unwrap();
         let output = parent.instantiation_output(instance, "result").unwrap();
         parent
             .instantiation_input(instance, "data", output)
@@ -719,7 +746,21 @@ fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() 
         if registered {
             built.unwrap();
             package.set_top_block("parent").unwrap();
-            assert_standard_package(&package);
+            if external {
+                assert_pir_package(&package);
+                let text = package.to_string();
+                let parsed = Parser::new(&text).parse_and_validate_package().unwrap();
+                let instance = &parsed.get_top_block().unwrap().instantiations[0];
+                assert_eq!(instance.block, "child");
+                assert_eq!(
+                    instance.kind,
+                    InstantiationKind::ExternBlock {
+                        module_name: "rtl_register".to_string(),
+                    }
+                );
+            } else {
+                assert_standard_package(&package);
+            }
         } else {
             assert!(built.is_err());
             assert_eq!(package.to_string(), before);

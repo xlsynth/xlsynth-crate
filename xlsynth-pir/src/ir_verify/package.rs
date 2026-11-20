@@ -10,7 +10,7 @@ use crate::ir::{
     MemberType, NaryOp, NodeGraph, NodePayload, NodeRef, Package, PackageMember, Type,
 };
 use crate::ir_deduce::deduce_graph_result_type;
-use crate::ir_utils::{direct_function_references, operands};
+use crate::ir_utils::{direct_function_references, is_valid_identifier_name, operands};
 
 /// Errors that can arise during validation of XLS IR structures.
 #[derive(Debug, PartialEq, Eq)]
@@ -134,6 +134,14 @@ pub enum ValidationError {
         func: String,
         instantiation: String,
         block: String,
+    },
+    /// Two external instances bind the same RTL module to different models.
+    ExternBlockModelConflict {
+        module_name: String,
+        first_model: String,
+        first_instance: String,
+        model: String,
+        instance: String,
     },
     /// An external instantiation references a function absent from the package.
     InstantiationForeignFunctionNotFound {
@@ -474,6 +482,19 @@ impl std::fmt::Display for ValidationError {
                     func, instantiation, block
                 )
             }
+            ValidationError::ExternBlockModelConflict {
+                module_name,
+                first_model,
+                first_instance,
+                model,
+                instance,
+            } => {
+                write!(
+                    f,
+                    "external module '{module_name}' uses behavioral model '{first_model}' in \
+                     instance '{first_instance}' and conflicting model '{model}' in instance '{instance}'"
+                )
+            }
             ValidationError::InstantiationForeignFunctionNotFound {
                 func,
                 instantiation,
@@ -710,6 +731,7 @@ impl std::fmt::Display for InstantiationPortDirection {
 /// Member names must be unique within each kind, and a declared top must
 /// resolve to a member of that kind. Blocks may omit provenance. Among blocks
 /// that declare it, each effective source name and kind must be unique.
+/// All external instances of an RTL module must refer to the same model block.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     verify_package_structure(p)?;
     verify_package_inout_hierarchies(p)
@@ -767,6 +789,7 @@ pub(crate) fn verify_package_structure(p: &Package) -> Result<(), ValidationErro
         }
     }
     validate_function_call_graph(p, &functions)?;
+    verify_extern_block_models(&p.members, None)?;
 
     // Enforce package-wide uniqueness of node text ids (including parameter
     // nodes).
@@ -790,6 +813,49 @@ pub(crate) fn verify_package_structure(p: &Package) -> Result<(), ValidationErro
         }
     }
 
+    Ok(())
+}
+
+/// Checks external module bindings in package order, with an optional block
+/// replacing a member or being appended by the block builder.
+fn verify_extern_block_models<'a>(
+    members: &'a [PackageMember],
+    replacement: Option<(usize, &'a Block)>,
+) -> Result<(), ValidationError> {
+    let blocks = members.iter().enumerate().filter_map(|(index, member)| {
+        if let Some((at, block)) = replacement
+            && at == index
+        {
+            return Some(block);
+        }
+        match member {
+            PackageMember::Block(block) => Some(block),
+            PackageMember::Function(_) => None,
+        }
+    });
+    let appended = replacement
+        .filter(|(index, _)| *index >= members.len())
+        .map(|(_, block)| block);
+    let mut bindings = HashMap::new();
+    for block in blocks.chain(appended) {
+        for inst in &block.instantiations {
+            let InstantiationKind::ExternBlock { module_name } = &inst.kind else {
+                continue;
+            };
+            let (first_block, first_inst) = bindings
+                .entry(module_name.as_str())
+                .or_insert((block, inst));
+            if first_inst.block != inst.block {
+                return Err(ValidationError::ExternBlockModelConflict {
+                    module_name: module_name.clone(),
+                    first_model: first_inst.block.clone(),
+                    first_instance: format!("{}.{}", first_block.name, first_inst.name),
+                    model: inst.block.clone(),
+                    instance: format!("{}.{}", block.name, inst.name),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -886,9 +952,10 @@ pub fn validate_block(
 /// ports.
 fn hierarchy_contains_inouts(block: &Block, prior: &HashSet<&str>) -> bool {
     !block.inout_nets.is_empty()
-        || block.instantiations.iter().any(|inst| {
-            inst.kind == InstantiationKind::Block && prior.contains(inst.block.as_str())
-        })
+        || block
+            .instantiations
+            .iter()
+            .any(|inst| inst.kind.is_block() && prior.contains(inst.block.as_str()))
 }
 
 /// Verifies a block's local invariants against a verified package context.
@@ -902,7 +969,14 @@ pub(crate) fn verify_block_structure_in_package(
         parent,
         member_index,
         CalleeLookup::Unverified(&|name| parent.get_fn(name)),
-    )
+    )?;
+    if f.instantiations
+        .iter()
+        .any(|inst| matches!(inst.kind, InstantiationKind::ExternBlock { .. }))
+    {
+        verify_extern_block_models(&parent.members, Some((member_index, f)))?;
+    }
+    Ok(())
 }
 
 fn validate_block_with(
@@ -915,8 +989,10 @@ fn validate_block_with(
     validate_block_resources(f)?;
     let prior_blocks = collect_prior_blocks(parent, member_index);
     for inst in f.instantiations.iter() {
-        match inst.kind {
-            InstantiationKind::Block if !prior_blocks.contains_key(&inst.block) => {
+        match &inst.kind {
+            InstantiationKind::Block | InstantiationKind::ExternBlock { .. }
+                if !prior_blocks.contains_key(&inst.block) =>
+            {
                 return Err(ValidationError::InstantiationBlockNotFound {
                     func: f.name.clone(),
                     instantiation: inst.name.clone(),
@@ -998,7 +1074,7 @@ fn validate_inout_bindings(
 
     let mut expected = BTreeMap::new();
     for inst in &block.instantiations {
-        if inst.kind == InstantiationKind::Block {
+        if inst.kind.is_block() {
             let child = prior[&inst.block];
             for port in child.inout_ports() {
                 let Some(NodePayload::ExtInoutPort {
@@ -1125,6 +1201,14 @@ fn validate_block_resources(block: &Block) -> Result<(), ValidationError> {
             return Err(violation(format!(
                 "duplicate instantiation '{}'",
                 instance.name
+            )));
+        }
+        if let InstantiationKind::ExternBlock { module_name } = &instance.kind
+            && !is_valid_identifier_name(module_name)
+        {
+            return Err(violation(format!(
+                "extern block instance '{}' has an invalid module name '{}'",
+                instance.name, module_name
             )));
         }
     }
@@ -2240,8 +2324,24 @@ top block parent(io: bits[1]) {
   instantiation u(block=child, kind=block)
   link: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=1)
 }"#;
-        let package = Parser::new(source).parse_package().unwrap();
-        assert_eq!(validate_package(&package), Ok(()));
+        for kind in ["kind=block", "module_name=external_cell, kind=extern_block"] {
+            let source = source.replace("kind=block", kind);
+            let package = Parser::new(&source).parse_package().unwrap();
+            assert_eq!(validate_package(&package), Ok(()));
+
+            let wrong_width = source
+                .replace("parent(io: bits[1])", "parent(io: bits[2])")
+                .replace("ext_inout_net bus(bits[1])", "ext_inout_net bus(bits[2])");
+            let package = Parser::new(&wrong_width).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&package),
+                Err(ValidationError::BlockInvariantViolation {
+                    block: "parent".to_string(),
+                    reason: "ext_instantiation_inout node 1 references net 'bus' of type bits[2], got bits[1]"
+                        .to_string(),
+                }),
+            );
+        }
     }
 
     // Verifies: PIR and XLS use each block's last provenance name and kind.
@@ -2364,6 +2464,18 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
                 block.instantiations = vec![instance.clone(), instance];
             }),
             "duplicate instantiation 'child'",
+        );
+        check(
+            verify_mutated_register_block(|block| {
+                block.instantiations.push(ir::Instantiation {
+                    name: "child".to_string(),
+                    block: "target".to_string(),
+                    kind: InstantiationKind::ExternBlock {
+                        module_name: "invalid.module".to_string(),
+                    },
+                });
+            }),
+            "extern block instance 'child' has an invalid module name 'invalid.module'",
         );
     }
 
@@ -2975,12 +3087,21 @@ block add_block(a: bits[32], b: bits[32], x: bits[32], y: bits[32]) {
   y: () = output_port(b, name=y, id=6)
 }
 "#;
-        let mut parser = Parser::new(ir);
-        let pkg = parser.parse_package().unwrap();
-        assert!(matches!(
-            validate_package(&pkg),
-            Err(ValidationError::InstantiationBlockNotFound { .. })
-        ));
+        for kind in [
+            "kind=block",
+            "module_name=external_adder, kind=extern_block",
+        ] {
+            let ir = ir.replace("kind=block", kind);
+            let pkg = Parser::new(&ir).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&pkg),
+                Err(ValidationError::InstantiationBlockNotFound {
+                    func: "my_block".to_string(),
+                    instantiation: "inst_add".to_string(),
+                    block: "add_block".to_string(),
+                })
+            );
+        }
     }
 
     #[test]
@@ -3005,6 +3126,124 @@ top block wrapper(value: bits[8], result: bits[8]) {
                 foreign_function: "missing".to_string(),
             })
         );
+    }
+
+    const EXTERN_BLOCK_MODEL_BINDINGS: &str = r#"package extern_models
+
+block model() {
+}
+
+block alternate() {
+}
+
+top block wrapper() {
+  instantiation first(block=model, kind=extern_block)
+}
+
+block later() {
+  instantiation repeat(block=model, module_name=model, kind=extern_block)
+  instantiation alias(block=model, module_name=alternate, kind=extern_block)
+}
+"#;
+
+    #[test]
+    fn extern_instances_require_one_behavioral_model_per_rtl_module() {
+        let package = Parser::new(EXTERN_BLOCK_MODEL_BINDINGS)
+            .parse_package()
+            .unwrap();
+        assert_eq!(validate_package(&package), Ok(()));
+
+        let conflicting_ir = EXTERN_BLOCK_MODEL_BINDINGS.replace(
+            "repeat(block=model, module_name=model",
+            "repeat(block=alternate, module_name=model",
+        );
+        let package = Parser::new(&conflicting_ir).parse_package().unwrap();
+        assert_eq!(
+            validate_package(&package),
+            Err(ValidationError::ExternBlockModelConflict {
+                module_name: "model".to_string(),
+                first_model: "model".to_string(),
+                first_instance: "wrapper.first".to_string(),
+                model: "alternate".to_string(),
+                instance: "later.repeat".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn extern_model_bindings_check_replacement_against_later_blocks() {
+        let package = Parser::new(EXTERN_BLOCK_MODEL_BINDINGS)
+            .parse_and_verify_package()
+            .unwrap();
+        let replacement = Parser::new(
+            "block wrapper() { instantiation first(block=alternate, module_name=model, kind=extern_block) }",
+        )
+        .parse_block()
+        .unwrap();
+        assert_eq!(
+            verify_block_structure_in_package(&replacement, &package, 2),
+            Err(ValidationError::ExternBlockModelConflict {
+                module_name: "model".to_string(),
+                first_model: "alternate".to_string(),
+                first_instance: "wrapper.first".to_string(),
+                model: "model".to_string(),
+                instance: "later.repeat".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn block_builder_rejects_conflicting_extern_models_before_appending() {
+        let mut package = Parser::new(EXTERN_BLOCK_MODEL_BINDINGS)
+            .parse_and_verify_package()
+            .unwrap();
+        let before = package.to_string();
+        let mut builder = crate::BlockBuilder::new("new_user");
+        builder
+            .instantiate_extern_block(
+                "new_instance",
+                package.get_block("alternate").unwrap(),
+                "model",
+            )
+            .unwrap();
+        assert_eq!(
+            builder.build_into_package(&mut package),
+            Err(crate::BuilderError::InvalidOperation(
+                "external module 'model' uses behavioral model 'model' in instance 'wrapper.first' \
+                 and conflicting model 'alternate' in instance 'new_user.new_instance'"
+                    .to_string(),
+            ))
+        );
+        assert_eq!(package.to_string(), before);
+    }
+
+    #[test]
+    fn extern_block_instantiation_checks_model_port_types() {
+        let ir = r#"package external_test
+
+block model(value: bits[8], result: bits[8]) {
+  value: bits[8] = input_port(name=value, id=1)
+  result: () = output_port(value, name=result, id=2)
+}
+
+top block wrapper(input: bits[8], output: bits[16]) {
+  instantiation u(block=model, module_name=external_cell, kind=extern_block)
+  input: bits[8] = input_port(name=input, id=3)
+  connected: () = instantiation_input(input, instantiation=u, port_name=value, id=4)
+  received: bits[16] = instantiation_output(instantiation=u, port_name=result, id=5)
+  output: () = output_port(received, name=output, id=6)
+}
+"#;
+        let package = Parser::new(ir).parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&package),
+            Err(ValidationError::InstantiationPortTypeMismatch {
+                direction: InstantiationPortDirection::Output,
+                expected: Type::Bits(8),
+                actual: Type::Bits(16),
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -3108,15 +3347,22 @@ block my_block(in0: bits[32], in1: bits[32], out0: bits[32], out1: bits[32]) {
   out1: () = output_port(instantiation_output.13, name=out1, id=15)
 }
 "#;
-        let mut parser = Parser::new(ir);
-        let pkg = parser.parse_package().unwrap();
-        assert!(matches!(
-            validate_package(&pkg),
-            Err(ValidationError::MissingInstantiationPorts {
-                direction: InstantiationPortDirection::Input,
-                ..
-            })
-        ));
+        for kind in [
+            "kind=block",
+            "module_name=external_adder, kind=extern_block",
+        ] {
+            let ir = ir.replace("kind=block", kind);
+            let pkg = Parser::new(&ir).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&pkg),
+                Err(ValidationError::MissingInstantiationPorts {
+                    func: "my_block".to_string(),
+                    instantiation: "inst_add".to_string(),
+                    missing: vec!["b".to_string()],
+                    direction: InstantiationPortDirection::Input,
+                })
+            );
+        }
     }
 
     #[test]

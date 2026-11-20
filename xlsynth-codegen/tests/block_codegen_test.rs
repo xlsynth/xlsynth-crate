@@ -1450,6 +1450,93 @@ top block parent(clk: clock, value: bits[8], result: bits[8]) {
     assert_eq!(clocks, 3);
 }
 
+const MODEL_BACKED_EXTERN: &str =
+    include_str!("goldens/block2sv/extern/model_backed_extern.golden.ir");
+
+#[test]
+fn pipeline_layout_rejects_reachable_external_blocks() {
+    let child_source = MODEL_BACKED_EXTERN.replacen("top block wrapper", "block wrapper", 1);
+    let nested_source = format!(
+        r#"{child_source}
+top block nested(clk: clock, reset: bits[1], data: bits[8], out: bits[8]) {{
+  instantiation u(block=wrapper, kind=block)
+  reset: bits[1] = input_port(name=reset, id=22)
+  data: bits[8] = input_port(name=data, id=23)
+  connected_reset: () = instantiation_input(reset, instantiation=u, port_name=parent_reset, id=24)
+  connected_data: () = instantiation_input(data, instantiation=u, port_name=data, id=25)
+  received: bits[8] = instantiation_output(instantiation=u, port_name=out, id=26)
+  out: () = output_port(received, name=out, id=27)
+}}
+"#
+    );
+    let options = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    for source in [MODEL_BACKED_EXTERN, nested_source.as_str()] {
+        assert_eq!(
+            emit_system_verilog(&package(source), &options).unwrap_err(),
+            BlockCodegenError::NotPipeline(
+                "block `wrapper` cannot use layout=pipeline with external block instance `u_ext`; \
+                 use layout=none"
+                    .into()
+            )
+        );
+    }
+    let select_delay = BlockCodegenOptions {
+        top: Some("delay".to_owned()),
+        ..options
+    };
+    emit_system_verilog(&package(&nested_source), &select_delay).unwrap();
+}
+
+#[test]
+fn external_block_module_name_cannot_shadow_generated_top() {
+    let options = BlockCodegenOptions {
+        module_name: Some("external_rtl".to_string()),
+        ..BlockCodegenOptions::default()
+    };
+    let package = package(MODEL_BACKED_EXTERN);
+    assert_eq!(
+        emit_system_verilog(&package, &options),
+        Err(BlockCodegenError::InvalidBlock(
+            "external module `external_rtl` instantiated as `u_ext` in block `wrapper` \
+             conflicts with a generated module"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
+fn default_external_module_name_cannot_shadow_generated_child() {
+    let source = SHARED_INOUT.replacen(
+        "instantiation left(block=pad_cell, kind=block)",
+        "instantiation left(block=pad_cell, kind=extern_block)",
+        1,
+    );
+    assert_eq!(
+        emit_system_verilog(&package(&source), &BlockCodegenOptions::default()).unwrap_err(),
+        BlockCodegenError::InvalidBlock(
+            "external module `pad_cell` instantiated as `left` in block `pads` \
+             conflicts with a generated module"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn external_model_requires_a_clock_for_its_clocked_child() {
+    let ir = MODEL_BACKED_EXTERN.replace("block model(model_clk: clock, ", "block model(");
+    assert_eq!(
+        emit_system_verilog(&package(&ir), &BlockCodegenOptions::default()),
+        Err(BlockCodegenError::InvalidBlock(
+            "instance `u_delay` of block `delay` requires clock port `delay_clk`, \
+             but parent block `model` has no clock"
+                .to_string()
+        ))
+    );
+}
+
 #[test]
 fn external_templates_substitute_function_names_and_connected_ports() {
     let generated = emit(EXTERNAL, &BlockCodegenOptions::default());

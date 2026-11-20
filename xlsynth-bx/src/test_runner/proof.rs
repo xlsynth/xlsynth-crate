@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use petgraph::algo::toposort;
 use petgraph::graphmap::DiGraphMap;
 use xlsynth_pir::block_transition::BlockTransition;
-use xlsynth_pir::ir::{Fn, InstantiationKind, NodePayload, Package, PackageMember, Type};
+use xlsynth_pir::ir::{Fn, NodePayload, Package, PackageMember, Type};
 use xlsynth_pir::ir_builder::{BValue, BuilderError, FnBuilder, InvokeSignature};
 use xlsynth_pir::ir_value_utils::zero_ir_value_for_type;
 use xlsynth_pir::{IrBits, IrValue};
@@ -45,7 +45,7 @@ pub(super) fn check_block_expansion(package: &Package, entry: &str) -> Result<()
             block.nodes.len().saturating_add(block.registers.len()),
         );
         for instance in &block.instantiations {
-            if instance.kind != InstantiationKind::Block {
+            if !instance.kind.is_block() {
                 return Err(format!(
                     "cannot inline external instance '{}'",
                     instance.name

@@ -126,39 +126,75 @@ pub(crate) fn emit_package(
     mut top_register_names: Option<&mut BTreeMap<String, String>>,
 ) -> Result<BlockCodegenOutput, BlockCodegenError> {
     let top = select_top(package, options.top.as_deref())?;
-    let ordered = blocks_in_emission_order(package, top)?;
-    for block in &ordered {
-        validate_supported_nodes(block, options.layout)?;
+    let ordered = blocks_in_dependency_order(package, top)?;
+    let blocks: BTreeMap<_, _> = ordered.iter().map(|&b| (b.name.as_str(), b)).collect();
+    let emitted = collect_emitted_blocks(&ordered, top);
+    let top_module_name = options.module_name.as_deref().unwrap_or(top);
+    if options.layout == Layout::Pipeline {
+        for &block in &ordered {
+            if emitted.contains(block.name.as_str())
+                && let Some(instance) = block
+                    .instantiations
+                    .iter()
+                    .find(|instance| matches!(instance.kind, InstantiationKind::ExternBlock { .. }))
+            {
+                return Err(BlockCodegenError::NotPipeline(format!(
+                    "block `{}` cannot use layout=pipeline with external block instance `{}`; use layout=none",
+                    block.name, instance.name
+                )));
+            }
+        }
+    }
+    for &block in &ordered {
+        validate_supported_nodes(block, options.layout, emitted.contains(block.name.as_str()))?;
     }
     verify_package(package).map_err(|error| BlockCodegenError::InvalidBlock(error.to_string()))?;
-    let blocks = ordered.iter().map(|&b| (b.name.as_str(), b)).collect();
     for &block in &ordered {
-        validate_single_register_writes(block)?;
+        if emitted.contains(block.name.as_str()) {
+            validate_single_register_writes(block)?;
+        }
+        if block.clock_port_name().is_none() {
+            for instance in block
+                .instantiations
+                .iter()
+                .filter(|inst| inst.kind.is_block())
+            {
+                if let Some(clock_name) = blocks[instance.block.as_str()].clock_port_name() {
+                    return Err(BlockCodegenError::InvalidBlock(format!(
+                        "instance `{}` of block `{}` requires clock port \
+                         `{clock_name}`, but parent block `{}` has no clock",
+                        instance.name, instance.block, block.name
+                    )));
+                }
+            }
+        }
     }
     crate::hierarchy::verify_hierarchy(&ordered)?;
-    if let Some(module_name) = options.module_name.as_deref()
-        && ordered
-            .iter()
-            .any(|block| block.name != top && block.name == module_name)
-    {
-        return Err(BlockCodegenError::InvalidBlock(format!(
-            "top module name `{module_name}` conflicts with an instantiated child block; \
-             choose a distinct module name"
-        )));
-    }
+    validate_module_names(&ordered, &emitted, top, top_module_name)?;
 
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut child_timings = ChildTimings::new();
     for block in ordered {
+        if !emitted.contains(block.name.as_str()) {
+            continue;
+        }
+        let stages = match options.layout {
+            Layout::None => None,
+            Layout::Pipeline => Some(reconstruct_stages(
+                block,
+                &mut child_timings,
+                block.name != top,
+            )?),
+        };
         let module_name = if block.name == top {
-            options.module_name.as_deref().unwrap_or(&block.name)
+            top_module_name
         } else {
             &block.name
         };
         validate_external_identifier(module_name, "module")?;
         let module = file.add_module(module_name);
         let mut emitter = BlockEmitter::new(package, &blocks, options, block, &mut file, module);
-        emitter.emit(&mut child_timings, block.name != top)?;
+        emitter.emit(stages.as_deref())?;
         if block.name == top
             && let Some(names) = top_register_names.take()
         {
@@ -174,6 +210,58 @@ pub(crate) fn emit_package(
     Ok(BlockCodegenOutput {
         system_verilog: file.emit(),
     })
+}
+
+/// Finds modules reached from the top through ordinary block instances.
+fn collect_emitted_blocks<'a>(ordered: &[&'a Block], top: &'a str) -> BTreeSet<&'a str> {
+    let mut emitted = BTreeSet::from([top]);
+    for block in ordered.iter().rev() {
+        if emitted.contains(block.name.as_str()) {
+            emitted.extend(
+                block
+                    .instantiations
+                    .iter()
+                    .filter(|instance| instance.kind == InstantiationKind::Block)
+                    .map(|instance| instance.block.as_str()),
+            );
+        }
+    }
+    emitted
+}
+
+/// Prevents an external RTL reference from binding to a generated module.
+fn validate_module_names(
+    ordered: &[&Block],
+    emitted: &BTreeSet<&str>,
+    top: &str,
+    top_module_name: &str,
+) -> Result<(), BlockCodegenError> {
+    let mut module_names = emitted.clone();
+    module_names.remove(top);
+    if !module_names.insert(top_module_name) {
+        return Err(BlockCodegenError::InvalidBlock(format!(
+            "top module name `{top_module_name}` conflicts with an instantiated child block; \
+             choose a distinct module name"
+        )));
+    }
+    for block in ordered
+        .iter()
+        .filter(|block| emitted.contains(block.name.as_str()))
+    {
+        for instance in &block.instantiations {
+            if let InstantiationKind::ExternBlock { module_name } = &instance.kind {
+                validate_external_identifier(module_name, "module")?;
+                if module_names.contains(module_name.as_str()) {
+                    return Err(BlockCodegenError::InvalidBlock(format!(
+                        "external module `{module_name}` instantiated as `{}` in block `{}` \
+                         conflicts with a generated module",
+                        instance.name, block.name
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Rejects multiple enabled writes, which PIR permits but codegen cannot emit.
@@ -199,8 +287,12 @@ fn validate_single_register_writes(block: &Block) -> Result<(), BlockCodegenErro
     Ok(())
 }
 
-/// Checks which operations the requested layout can emit.
-fn validate_supported_nodes(block: &Block, layout: Layout) -> Result<(), BlockCodegenError> {
+/// Checks which operations can be analyzed and, for emitted blocks, lowered.
+fn validate_supported_nodes(
+    block: &Block,
+    layout: Layout,
+    emitted: bool,
+) -> Result<(), BlockCodegenError> {
     if layout == Layout::Pipeline
         && let Some(net) = block.inout_nets.first()
     {
@@ -214,8 +306,8 @@ fn validate_supported_nodes(block: &Block, layout: Layout) -> Result<(), BlockCo
             NodePayload::Invoke { to_apply, .. } => {
                 return Err(unsupported_invoke(block, to_apply));
             }
-            NodePayload::CountedFor { .. } => ("counted_for", "unroll loops"),
-            NodePayload::Map { .. } => ("map", "expand maps"),
+            NodePayload::CountedFor { .. } if emitted => ("counted_for", "unroll loops"),
+            NodePayload::Map { .. } if emitted => ("map", "expand maps"),
             _ => continue,
         };
         return Err(BlockCodegenError::Unsupported(format!(
@@ -234,13 +326,14 @@ pub(crate) fn unsupported_invoke(block: &Block, callee: &str) -> BlockCodegenErr
     ))
 }
 
-/// Inlines function calls in the selected top and its transitive child blocks.
+/// Inlines function calls in the selected top, child blocks, and behavioral
+/// models.
 pub fn inline_invokes_for_codegen(
     package: Package,
     explicit_top: Option<&str>,
 ) -> Result<Package, BlockCodegenError> {
     let top = select_top(&package, explicit_top)?;
-    let names = blocks_in_emission_order(&package, top)?
+    let names = blocks_in_dependency_order(&package, top)?
         .into_iter()
         .map(|block| block.name.clone())
         .collect::<Vec<_>>();
@@ -296,8 +389,8 @@ fn select_top<'a>(
     }
 }
 
-/// Appends each transitive child once, before the block which instantiates it.
-fn blocks_in_emission_order<'a>(
+/// Orders child blocks and behavioral models before blocks that reference them.
+fn blocks_in_dependency_order<'a>(
     package: &'a Package,
     top: &'a str,
 ) -> Result<Vec<&'a Block>, BlockCodegenError> {
@@ -312,7 +405,8 @@ fn blocks_in_emission_order<'a>(
     Ok(ordered)
 }
 
-/// Visits instantiated blocks in declaration order for deterministic emission.
+/// Visits instantiated blocks in declaration order for deterministic analysis
+/// and emission.
 fn collect_dependencies<'a>(
     package: &'a Package,
     name: &'a str,
@@ -342,7 +436,7 @@ fn collect_dependencies<'a>(
         })?;
 
     for instance in &block.instantiations {
-        if instance.kind == InstantiationKind::Block {
+        if instance.kind.is_block() {
             collect_dependencies(package, &instance.block, ordered, visited, visiting)?;
         }
     }
@@ -391,22 +485,15 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     }
 
     /// Emits ports, logic, state, output assignments, and child instances.
-    fn emit(
-        &mut self,
-        child_timings: &mut ChildTimings<'a>,
-        summarize_for_parent: bool,
-    ) -> Result<(), BlockCodegenError> {
+    fn emit(&mut self, stages: Option<&[Stage]>) -> Result<(), BlockCodegenError> {
         self.reserve_fixed_names()?;
         self.emit_ports()?;
         self.emit_arithmetic_helpers()?;
         self.emit_slice_helpers()?;
         self.emit_priority_helpers(self.block)?;
-        match self.options.layout {
-            Layout::None => self.emit_flat()?,
-            Layout::Pipeline => {
-                let stages = reconstruct_stages(self.block, child_timings, summarize_for_parent)?;
-                self.emit_pipeline(&stages)?;
-            }
+        match stages {
+            None => self.emit_flat()?,
+            Some(stages) => self.emit_pipeline(stages)?,
         }
         self.emit_outputs()?;
         self.emit_instantiations()?;
@@ -931,64 +1018,61 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 .map(|(port, value)| (port, value.expr))
                 .collect::<Vec<_>>();
 
-            if instance.kind == InstantiationKind::Block {
-                let child = self.blocks[instance.block.as_str()];
-                if let Some(clock_name) = child.clock_port_name() {
-                    if !connections.iter().any(|(name, _)| name == clock_name) {
-                        if let Some(parent_clock) = self
-                            .block
-                            .clock_port_name()
-                            .and_then(|name| self.ports.get(name))
-                        {
-                            connections.push((clock_name.to_string(), parent_clock.to_expr()));
-                        } else {
-                            return Err(BlockCodegenError::InvalidBlock(format!(
-                                "instance `{}` of block `{}` requires clock port \
-                                 `{clock_name}`, but parent block `{}` has no clock",
-                                instance.name, instance.block, self.block.name
-                            )));
-                        }
-                    }
+            let module_name = match &instance.kind {
+                InstantiationKind::Block => &instance.block,
+                InstantiationKind::ExternBlock { module_name } => module_name,
+                InstantiationKind::Extern => {
+                    self.emit_external_instantiation(instance, &connections)?;
+                    continue;
                 }
-                let order = child
-                    .ports
-                    .iter()
-                    .map(|port| match port {
-                        BlockPort::Clock(name) => name.as_str(),
-                        BlockPort::Input(node)
-                        | BlockPort::Output(node)
-                        | BlockPort::Inout(node) => child.port_name(*node),
-                    })
-                    .collect::<Vec<_>>();
-                connections.sort_by_key(|(name, _)| {
-                    (
-                        order
-                            .iter()
-                            .position(|port| *port == name)
-                            .unwrap_or(usize::MAX),
-                        name.clone(),
-                    )
-                });
-                let names = connections
-                    .iter()
-                    .map(|(name, _)| name.as_str())
-                    .collect::<Vec<_>>();
-                let expressions = connections
-                    .iter()
-                    .map(|(_, expr)| Some(expr))
-                    .collect::<Vec<_>>();
-                let handle = self.file.make_instantiation(
-                    &instance.block,
-                    &instance.name,
-                    &[],
-                    &[],
-                    &names,
-                    &expressions,
-                );
-                self.file.add_member_instantiation(self.module, handle);
-            } else {
-                self.emit_external_instantiation(instance, &connections)?;
+            };
+            let child = self.blocks[instance.block.as_str()];
+            if let Some(clock_name) = child.clock_port_name() {
+                let parent_clock = self
+                    .block
+                    .clock_port_name()
+                    .expect("instantiation clocks were validated");
+                connections.push((clock_name.to_string(), self.ports[parent_clock].to_expr()));
             }
+            let order = child
+                .ports
+                .iter()
+                .map(|port| match port {
+                    BlockPort::Clock(name) => name.as_str(),
+                    BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
+                        child.port_name(*node)
+                    }
+                })
+                .collect::<Vec<_>>();
+            connections.sort_by_key(|(name, _)| {
+                (
+                    order
+                        .iter()
+                        .position(|port| *port == name)
+                        .unwrap_or(usize::MAX),
+                    name.clone(),
+                )
+            });
+            let names = connections
+                .iter()
+                .map(|(name, _)| {
+                    validate_external_identifier(name, "port")?;
+                    Ok(name.as_str())
+                })
+                .collect::<Result<Vec<_>, BlockCodegenError>>()?;
+            let expressions = connections
+                .iter()
+                .map(|(_, expr)| Some(expr))
+                .collect::<Vec<_>>();
+            let handle = self.file.make_instantiation(
+                module_name,
+                &instance.name,
+                &[],
+                &[],
+                &names,
+                &expressions,
+            );
+            self.file.add_member_instantiation(self.module, handle);
         }
         Ok(())
     }

@@ -20,9 +20,9 @@ pub use options::{BlockCodegenOptions, BlockCodegenOutput, BlockCodegenWithRegis
 
 use xlsynth_pir::ir::Package;
 
-/// Emits the selected block and its transitive block dependencies.
-/// Call [`inline_invokes_for_codegen`] first if those blocks contain function
-/// calls.
+/// Emits the selected block and its ordinary transitive dependencies.
+/// Call [`inline_invokes_for_codegen`] first if any reachable blocks or models
+/// contain function calls.
 pub fn emit_system_verilog(
     package: &Package,
     options: &BlockCodegenOptions,
