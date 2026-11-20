@@ -1,0 +1,6 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+case "${0##*/}" in
+  example-tool) printf 'dispatched' ;;
+  *) exit 7 ;;
+esac
