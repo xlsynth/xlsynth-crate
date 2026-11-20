@@ -69,13 +69,13 @@ enum PortSignature {
     Clock(String),
 }
 
-/// A range of publicly observable pin ties, independent of the local net names.
+/// Ties `port_a[start_a + i]` to `port_b[start_b + i]` for each `i < width`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PublicTie {
-    first: String,
-    other: String,
-    start: usize,
-    other_start: usize,
+    port_a: String,
+    port_b: String,
+    start_a: usize,
+    start_b: usize,
     width: usize,
 }
 
@@ -1033,10 +1033,10 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
         if let Some((first, others)) = segment.ports.split_first() {
             for other in others {
                 ties.push(PublicTie {
-                    first: block.port_name(first.port).into(),
-                    other: block.port_name(other.port).into(),
-                    start: first.start,
-                    other_start: other.start,
+                    port_a: block.port_name(first.port).into(),
+                    port_b: block.port_name(other.port).into(),
+                    start_a: first.start,
+                    start_b: other.start,
                     width: segment.width,
                 });
             }
@@ -1044,17 +1044,22 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
     }
     // Keep parallel ties together even when one pin position has several
     // aliases.
-    ties.sort_by(|a, b| {
-        let shift = |t: &PublicTie| t.other_start as i128 - t.start as i128;
-        (&a.first, &a.other, shift(a), a.start).cmp(&(&b.first, &b.other, shift(b), b.start))
+    ties.sort_by(|left, right| {
+        let shift = |t: &PublicTie| t.start_b as i128 - t.start_a as i128;
+        (&left.port_a, &left.port_b, shift(left), left.start_a).cmp(&(
+            &right.port_a,
+            &right.port_b,
+            shift(right),
+            right.start_a,
+        ))
     });
     let mut aliases = Vec::<PublicTie>::new();
     for tie in ties {
         if let Some(prev) = aliases.last_mut()
-            && prev.first == tie.first
-            && prev.other == tie.other
-            && prev.start + prev.width == tie.start
-            && prev.other_start + prev.width == tie.other_start
+            && prev.port_a == tie.port_a
+            && prev.port_b == tie.port_b
+            && prev.start_a + prev.width == tie.start_a
+            && prev.start_b + prev.width == tie.start_b
         {
             prev.width += tie.width;
         } else {
