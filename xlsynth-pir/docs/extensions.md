@@ -436,10 +436,10 @@ or an `InoutBinding<BInoutNet>`. Use `InoutBinding::Piece` for one select and
 `InoutBinding::Concat` for an ordered vector of `InoutPiece::Whole` and
 `InoutPiece::Select { net, hi, lo }` entries.
 
-Hierarchy verification follows electrical aliases and fixed slices and concats
-by bit position across instances. Feedback
-from a read to a driver on the same resolved net through either data or enable
-is invalid. Registers break combinational feedback. Use `block2sv --layout=none`
+For combinational-cycle checking, an inout read is a source and a drive
+consumes its data and enable. Feedback through the resolved net is allowed,
+including through child bindings and repeated bits. The verifier still checks
+combinational paths through ordinary ports across instances. Use `block2sv --layout=none`
 (the default) for RTL. Evaluation, formal and gate projection, desugared/FFI
 extension emission, and pipeline layout reject blocks with inout ports or
 nets, including blocks whose only inout is a public pin on its own net.

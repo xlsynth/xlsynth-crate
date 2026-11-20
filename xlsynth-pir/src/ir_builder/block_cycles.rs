@@ -8,7 +8,6 @@ use super::{
     BuilderError,
     port_ranges::{Direction, Graph, Link, Network, Span, Summary},
 };
-use crate::inout::InoutNetMap;
 use crate::ir::{Block, BlockPort, InstantiationKind, NaryOp, NodePayload, NodeRef, Package, Unop};
 use crate::ir_utils::operands;
 
@@ -24,7 +23,9 @@ pub(crate) struct BlockHierarchy {
 ///
 /// Each distinct child block is checked once and summarized by the input ports
 /// reaching each output. Registers cut dependencies, so sequential feedback is
-/// permitted. Traversal stops at extern boundaries because the foreign
+/// permitted. Inout reads are sources and drives are sinks. Electrical
+/// connections through resolved nets do not create dataflow edges.
+/// Traversal stops at extern boundaries because the foreign
 /// function body can be a placeholder for separately supplied RTL.
 pub(super) fn verify_block_combinational_cycles(
     block: &Block,
@@ -47,7 +48,7 @@ impl BlockHierarchy {
             return Ok(());
         }
         let graph = self.verify_graph(block, package)?;
-        let summary = graph.summarize(block);
+        let summary = graph.summarize();
         self.summaries.insert(block.name.clone(), summary);
         Ok(())
     }
@@ -92,10 +93,8 @@ impl BlockHierarchy {
 
 /// Construct the local range graph using only cached child interfaces.
 fn build_graph(block: &Block, children: &BTreeMap<&str, &Summary>) -> Result<Graph, BuilderError> {
-    let nets = InoutNetMap::new(&block.inout_nets).map_err(invalid)?;
     let mut graph = Network::default();
     let mut pins = BTreeMap::<(&str, &str), Span<usize>>::new();
-    let mut types = Vec::with_capacity(block.nodes.len());
     let mut nodes = Vec::with_capacity(block.nodes.len());
     for (index, node) in block.nodes.iter().enumerate() {
         if let Some(bad) = operands(&node.payload)
@@ -108,23 +107,9 @@ fn build_graph(block: &Block, children: &BTreeMap<&str, &Summary>) -> Result<Gra
             )));
         }
         let ty = match &node.payload {
-            NodePayload::ExtInoutPort { port_type, .. } => port_type,
             NodePayload::OutputPort { arg, .. } | NodePayload::InstantiationInput { arg, .. } => {
                 block.get_node_ty(*arg)
             }
-            NodePayload::ExtInoutDrive { drive, .. } => block.get_node_ty(*drive),
-            NodePayload::ExtInstantiationInout {
-                instantiation,
-                port_name,
-                ..
-            } => children
-                .get(instantiation.as_str())
-                .and_then(|c| c.inouts.get(port_name))
-                .ok_or_else(|| {
-                    invalid(format!(
-                        "no block instance inout named {instantiation}.{port_name}"
-                    ))
-                })?,
             _ => &node.ty,
         };
         // Unit-valued operations still occupy a dependency vertex.
@@ -132,34 +117,19 @@ fn build_graph(block: &Block, children: &BTreeMap<&str, &Summary>) -> Result<Gra
             .checked_bit_count()
             .ok_or_else(|| invalid("signal width overflow"))?
             .max(1);
-        nodes.push(graph.signal(width, Some(NodeRef { index })));
-        types.push(ty);
+        nodes.push(graph.signal(width, NodeRef { index }));
     }
-    let wires: Vec<_> = block
-        .inout_nets
-        .iter()
-        .map(|n| {
-            Ok(graph.signal(
-                n.ty.checked_bit_count()
-                    .ok_or_else(|| invalid("inout width overflow"))?,
-                None,
-            ))
-        })
-        .collect::<Result<_, BuilderError>>()?;
     for port in &block.ports {
         let (r, dir) = match port {
             BlockPort::Input(r) => (*r, Direction::Input),
             BlockPort::Output(r) => (*r, Direction::Output),
-            BlockPort::Inout(r) => (*r, Direction::Inout),
-            BlockPort::Clock(_) => continue,
+            BlockPort::Inout(_) | BlockPort::Clock(_) => continue,
         };
         let signal = *nodes
             .get(r.index)
             .ok_or_else(|| invalid("invalid interface node"))?;
         let name = match &block.get_node(r).payload {
-            NodePayload::InputPort { name, .. }
-            | NodePayload::OutputPort { name, .. }
-            | NodePayload::ExtInoutPort { name, .. } => name,
+            NodePayload::InputPort { name, .. } | NodePayload::OutputPort { name, .. } => name,
             _ => return Err(invalid("invalid interface node")),
         };
         graph.ports.insert(name.clone(), (signal, dir));
@@ -167,40 +137,6 @@ fn build_graph(block: &Block, children: &BTreeMap<&str, &Summary>) -> Result<Gra
     for (index, node) in block.nodes.iter().enumerate() {
         let sink = nodes[index];
         match &node.payload {
-            NodePayload::ExtInoutPort { net, .. }
-            | NodePayload::ExtInstantiationInout { net, .. } => {
-                if let NodePayload::ExtInstantiationInout {
-                    instantiation,
-                    port_name,
-                    ..
-                } = &node.payload
-                {
-                    pins.insert((instantiation, port_name), sink);
-                }
-                for span in nets.resolve(net, types[index]).map_err(invalid)? {
-                    graph.connect(
-                        sink.part(span.port_start, span.width),
-                        Link::Tie,
-                        wires[span.net].part(span.net_start, span.width),
-                    )?;
-                }
-            }
-            NodePayload::ExtInoutRead { net } => {
-                let wire = wires[nets.index(net).map_err(invalid)?];
-                graph.witness(wire, NodeRef { index });
-                graph.connect(sink, Link::Aligned, wire)?;
-            }
-            NodePayload::ExtInoutDrive {
-                net,
-                drive,
-                output_enable,
-            } => {
-                let wire = wires[nets.index(net).map_err(invalid)?];
-                graph.witness(wire, NodeRef { index });
-                graph.connect(wire, Link::Aligned, sink)?;
-                graph.connect(sink, Link::Aligned, nodes[drive.index])?;
-                graph.connect(sink, Link::All, nodes[output_enable.index])?;
-            }
             NodePayload::InstantiationOutput {
                 instantiation,
                 port_name,
@@ -245,6 +181,8 @@ fn build_graph(block: &Block, children: &BTreeMap<&str, &Summary>) -> Result<Gra
                 }
             }
             _ => {
+                // Inout reads and bindings have no SSA operands. A drive
+                // consumes data and enable, and creates no edge to a read.
                 for dep in operands(&node.payload) {
                     graph.connect(sink, Link::All, nodes[dep.index])?;
                 }
@@ -252,12 +190,7 @@ fn build_graph(block: &Block, children: &BTreeMap<&str, &Summary>) -> Result<Gra
         }
     }
     for (&instance, child) in children {
-        for name in child.inouts.keys() {
-            if !pins.contains_key(&(instance, name)) {
-                return Err(invalid(format!("missing inout binding {instance}.{name}")));
-            }
-        }
-        for (to, kind, from) in &child.links {
+        for (to, kind, from) in child.iter() {
             let Some(out) = pins.get(&(instance, &to.signal)) else {
                 // An unused ordinary child output contributes no parent edges.
                 continue;
@@ -295,46 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn builder_cycle_precheck_handles_unverified_inout_bindings() {
-        let source = r#"package precheck
-block child(a: bits[1], b: bits[1], sensed: bits[1]) {
-  ext_inout_net wire(bits[1])
-  a: () = ext_inout_port(name=a, net=wire, id=6)
-  b: () = ext_inout_port(name=b, net=wire, id=7)
-  read: bits[1] = ext_inout_read(net=wire, id=1)
-  sensed: () = output_port(read, name=sensed, id=2)
-}
-top block parent() {
-  ext_inout_net local(bits[1])
-  instantiation c(block=child, kind=block)
-  first: () = ext_instantiation_inout(instantiation=c, port_name=a, net=local, id=3)
-  second: () = ext_instantiation_inout(instantiation=c, port_name=b, net=local, id=4)
-  sense: bits[1] = instantiation_output(instantiation=c, port_name=sensed, id=5)
-}
-"#;
-        for (from, to) in [
-            ("net=local, id=3", "net=absent, id=3"),
-            (
-                "instantiation=c, port_name=b",
-                "instantiation=absent, port_name=b",
-            ),
-            ("port_name=b, net=", "port_name=absent, net="),
-            (
-                "first: () = ext_instantiation_inout(instantiation=c, port_name=a, net=local, id=3)",
-                "",
-            ),
-        ] {
-            let malformed = source.replace(from, to);
-            let package = Parser::new(&malformed).parse_package().unwrap();
-            assert!(
-                verify_block_combinational_cycles(package.get_top_block().unwrap(), &package)
-                    .is_err(),
-                "{malformed}"
-            );
-        }
-    }
-
-    #[test]
     fn summaries_keep_shared_and_independent_output_cones_separate() {
         let source = r#"package shared_cones
 top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8], direct: bits[8]) {
@@ -363,7 +256,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
             ("direct".into(), BTreeSet::from(["z".into()])),
         ]);
         let mut actual = BTreeMap::<String, BTreeSet<String>>::new();
-        for (out, _, input) in &hierarchy.summaries["child"].links {
+        for (out, _, input) in &hierarchy.summaries["child"] {
             actual
                 .entry(out.signal.clone())
                 .or_default()
@@ -395,7 +288,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
             .summarize(package.get_top_block().unwrap(), &package)
             .unwrap();
         let mut actual = BTreeMap::<String, BTreeSet<String>>::new();
-        for (out, _, input) in &hierarchy.summaries["disjoint"].links {
+        for (out, _, input) in &hierarchy.summaries["disjoint"] {
             actual
                 .entry(out.signal.clone())
                 .or_default()

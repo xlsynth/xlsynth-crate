@@ -691,13 +691,13 @@ impl std::fmt::Display for InstantiationPortDirection {
     }
 }
 
-/// Verifies all package members, their references, and their inout hierarchies.
+/// Verifies package members, their references, and block hierarchy invariants.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     verify_package_structure(p)?;
-    verify_package_inout_hierarchies(p)
+    verify_cycles_in_hierarchies_with_inouts(p)
 }
 
-/// Checks all package invariants except the inout hierarchy analysis, which
+/// Checks all package invariants except hierarchical cycle analysis, which
 /// can use more precise dependencies after function calls are inlined.
 pub(crate) fn verify_package_structure(p: &Package) -> Result<(), ValidationError> {
     let mut names = HashSet::<(String, MemberType)>::new();
@@ -763,9 +763,9 @@ pub(crate) fn verify_package_structure(p: &Package) -> Result<(), ValidationErro
     Ok(())
 }
 
-/// Checks inout hierarchies on the same package snapshot that passed
-/// `verify_package_structure`, reusing each child's dependency summary.
-pub(crate) fn verify_package_inout_hierarchies(p: &Package) -> Result<(), ValidationError> {
+/// Checks ordinary dataflow in hierarchies containing inouts after structural
+/// verification, reusing each child's ordinary port dependencies.
+pub(crate) fn verify_cycles_in_hierarchies_with_inouts(p: &Package) -> Result<(), ValidationError> {
     let mut hierarchy = BlockHierarchy::default();
     let mut with_inouts = HashSet::new();
     for member in &p.members {
@@ -773,7 +773,7 @@ pub(crate) fn verify_package_inout_hierarchies(p: &Package) -> Result<(), Valida
             && hierarchy_contains_inouts(block, &with_inouts)
         {
             with_inouts.insert(block.name.as_str());
-            validate_block_inout_hierarchy(block, p, &mut hierarchy)?;
+            validate_hierarchical_dataflow(block, p, &mut hierarchy)?;
         }
     }
     Ok(())
@@ -847,7 +847,7 @@ pub fn validate_block(
         }
     }
     if hierarchy_contains_inouts(f, &with_inouts) {
-        validate_block_inout_hierarchy(f, parent, &mut BlockHierarchy::default())?;
+        validate_hierarchical_dataflow(f, parent, &mut BlockHierarchy::default())?;
     }
     Ok(())
 }
@@ -923,8 +923,8 @@ fn validate_block_with(
     validate_block_registers(f)
 }
 
-/// Checks the shared pins of one block and its transitive instances.
-fn validate_block_inout_hierarchy(
+/// Checks ordinary dataflow cycles in a hierarchy containing inout nets.
+fn validate_hierarchical_dataflow(
     block: &Block,
     parent: &Package,
     hierarchy: &mut BlockHierarchy,

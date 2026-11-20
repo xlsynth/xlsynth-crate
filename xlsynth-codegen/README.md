@@ -126,9 +126,10 @@ out of surrounding expressions where tool-specific width inference could alter
 concatenation positions. Extended-adder terms also use named sources when
 resizing requires part-selects.
 
-Block instances are checked for combinational cycles across hierarchical
-boundaries. Register-delimited feedback remains valid, and independently timed
-child outputs are analyzed separately. Each declared register must have exactly
+Block instances are checked for combinational cycles through ordinary input
+and output ports. Inout reads and drives end the traversal at the resolved net.
+Register-delimited feedback remains valid, and independently timed child
+outputs are analyzed separately. Each declared register must have exactly
 one `register_read` and one `register_write`; multiple write nodes are rejected
 instead of silently dropping an update.
 

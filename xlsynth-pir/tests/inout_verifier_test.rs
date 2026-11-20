@@ -11,7 +11,7 @@ fn verify(source: &str) -> Result<(), VerifyError> {
 }
 
 #[test]
-fn private_net_dependencies_reach_ancestors_with_only_ordinary_ports() {
+fn private_inout_cuts_feedback_between_ordinary_ports() {
     let source = r#"package private_wrapper
 block wrapper(x: bits[1], y: bits[1]) {
   ext_inout_net bus(bits[1])
@@ -30,15 +30,18 @@ top block grandparent(x: bits[1]) {
 "#;
     verify(source).unwrap();
     let cyclic = source.replace("instantiation_input(x,", "instantiation_input(feedback,");
+    verify(&cyclic).unwrap();
+    // Connecting the ordinary output directly to the input closes an SSA path.
+    let ordinary = cyclic.replace("output_port(read_bus,", "output_port(x,");
     assert!(matches!(
-        verify(&cyclic),
+        verify(&ordinary),
         Err(VerifyError::BlockInvariantViolation { block, reason })
             if block == "grandparent" && reason.contains("combinational cycle")
     ));
 }
 
 #[test]
-fn child_public_aliases_join_distinct_parent_nets_transitively() {
+fn child_public_aliases_allow_feedback_through_drive_data_and_enable() {
     let source = r#"package aliases
 block tie(x: bits[1], y: bits[1]) {
   ext_inout_net shorted(bits[1])
@@ -77,11 +80,7 @@ top block top(clk: clock, data: bits[1]) {
     verify(&two_drivers).unwrap();
     for operands in ["sampled, data", "data, sampled"] {
         let cyclic = source.replace("drive(delayed, data", &format!("drive({operands}"));
-        assert!(matches!(
-            verify(&cyclic),
-            Err(VerifyError::BlockInvariantViolation { block, reason })
-                if block == "top" && reason.contains("combinational cycle")
-        ));
+        verify(&cyclic).unwrap();
         // Distinct nets inside the child keep the two parent pins independent.
         let independent = cyclic
             .replace(
@@ -95,7 +94,7 @@ top block top(clk: clock, data: bits[1]) {
 }
 
 #[test]
-fn shared_private_nets_collect_dependencies_from_each_instance() {
+fn shared_private_net_allows_feedback_between_siblings() {
     let source = r#"package sibling_drivers
 block cell(io: bits[1], data: bits[1], sense: bits[1]) {
   ext_inout_net pad(bits[1])
@@ -124,11 +123,7 @@ top block container(x: bits[1]) {
         "instantiation_input(x, instantiation=b",
         "instantiation_input(a_sense, instantiation=b",
     );
-    assert!(matches!(
-        verify(&cyclic),
-        Err(VerifyError::BlockInvariantViolation { block, reason })
-            if block == "container" && reason.contains("combinational cycle")
-    ));
+    verify(&cyclic).unwrap();
     let isolated = cyclic
         .replace(
             "ext_inout_net shared(bits[1])",
@@ -139,7 +134,7 @@ top block container(x: bits[1]) {
 }
 
 #[test]
-fn binding_independent_child_ports_to_the_same_net_can_close_a_cycle() {
+fn child_inouts_can_share_a_net_that_feeds_its_own_enable() {
     let source = r#"package local_short
 block bridge(a: bits[1], b: bits[1]) {
   ext_inout_net input_wire(bits[1])
@@ -162,11 +157,7 @@ top block parent() {
     let shorted = source
         .replace("net=q, id=5", "net=p, id=5")
         .replace("ext_inout_net q(bits[1])", "");
-    assert!(matches!(
-        verify(&shorted),
-        Err(VerifyError::BlockInvariantViolation { block, reason })
-            if block == "parent" && reason.contains("combinational cycle")
-    ));
+    verify(&shorted).unwrap();
 }
 
 #[test]
@@ -420,6 +411,7 @@ top block pads(io: bits[4], data: bits[4], oe: bits[1]) {
             .replace("net=bus", "net=data"),
     )
     .unwrap();
+    verify(&source.replace("drive(data, oe", "drive(read_a, oe")).unwrap();
     for (from, to) in [
         ("net=bus, id=4", "net=data, id=4"),
         ("net=bus, id=4", "net=io, id=4"),
@@ -431,9 +423,43 @@ top block pads(io: bits[4], data: bits[4], oe: bits[1]) {
             "read_b: bits[4] = ext_inout_read(",
             "read_b: () = ext_inout_drive(data, oe, ",
         ),
-        ("drive(data, oe", "drive(read_a, oe"),
     ] {
         let invalid = source.replace(from, to);
         assert!(verify(&invalid).is_err(), "unexpectedly accepted {invalid}");
+    }
+}
+
+#[test]
+fn package_verification_rejects_malformed_child_inout_bindings() {
+    let source = r#"package precheck
+block child(a: bits[1], b: bits[1], sensed: bits[1]) {
+  ext_inout_net wire(bits[1])
+  a: () = ext_inout_port(name=a, net=wire, id=6)
+  b: () = ext_inout_port(name=b, net=wire, id=7)
+  read: bits[1] = ext_inout_read(net=wire, id=1)
+  sensed: () = output_port(read, name=sensed, id=2)
+}
+top block parent() {
+  ext_inout_net local(bits[1])
+  instantiation c(block=child, kind=block)
+  first: () = ext_instantiation_inout(instantiation=c, port_name=a, net=local, id=3)
+  second: () = ext_instantiation_inout(instantiation=c, port_name=b, net=local, id=4)
+  sense: bits[1] = instantiation_output(instantiation=c, port_name=sensed, id=5)
+}
+"#;
+    for (from, to) in [
+        ("net=local, id=3", "net=absent, id=3"),
+        (
+            "instantiation=c, port_name=b",
+            "instantiation=absent, port_name=b",
+        ),
+        ("port_name=b, net=", "port_name=absent, net="),
+        (
+            "first: () = ext_instantiation_inout(instantiation=c, port_name=a, net=local, id=3)",
+            "",
+        ),
+    ] {
+        let malformed = source.replace(from, to);
+        assert!(verify(&malformed).is_err(), "{malformed}");
     }
 }

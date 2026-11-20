@@ -12,7 +12,7 @@ mod package;
 
 pub(crate) use package::{
     CalleeLookup, validate_fn_with, verify_block_structure_in_package,
-    verify_package_inout_hierarchies, verify_package_structure,
+    verify_cycles_in_hierarchies_with_inouts, verify_package_structure,
 };
 pub use package::{InstantiationPortDirection, ValidationError as VerifyError};
 

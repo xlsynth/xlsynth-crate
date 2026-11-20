@@ -10,7 +10,7 @@ use crate::ir::{Block, Fn, Node, NodePayload, NodeRef, Package, PackageMember, T
 use crate::ir_rebase_ids::package_max_emitted_node_id;
 use crate::ir_utils::remap_payload_with;
 use crate::ir_verify::{
-    verify_package, verify_package_inout_hierarchies, verify_package_structure,
+    verify_cycles_in_hierarchies_with_inouts, verify_package, verify_package_structure,
 };
 
 /// Inlines ordinary calls in every block, retaining the package's functions,
@@ -48,7 +48,7 @@ pub fn inline_block_invokes_in_blocks(
         }
         verify_package_structure(&package).map_err(|error| error.to_string())?;
     }
-    verify_package_inout_hierarchies(&package).map_err(|error| error.to_string())?;
+    verify_cycles_in_hierarchies_with_inouts(&package).map_err(|error| error.to_string())?;
     Ok(package)
 }
 
@@ -515,7 +515,7 @@ block untouched() {
     }
 
     #[test]
-    fn hierarchy_cycles_use_inlined_pin_driver_dependencies() {
+    fn pin_feedback_is_accepted_before_and_after_inlining() {
         let ir = r#"package pins
 fn drive(sensed: bits[1] id=1) -> bits[1] {
   ret zero: bits[1] = literal(value=0, id=2)
@@ -537,21 +537,11 @@ top block parent(pin: bits[1]) {
   sense: () = instantiation_input(sample, instantiation=cell, port_name=data, id=9)
 }
 "#;
-        let package = Parser::new(ir).parse_package().unwrap();
-        // The standalone verifier conservatively considers the call to read
-        // data.
-        assert!(
-            verify_package(&package)
-                .unwrap_err()
-                .to_string()
-                .contains("combinational cycle")
-        );
-        inline_block_invokes_in_package(package).unwrap();
-
-        let feedback = ir.replace("literal(value=0, id=2)", "identity(sensed, id=2)");
-        let package = Parser::new(&feedback).parse_package().unwrap();
-        let error = inline_block_invokes_in_package(package).unwrap_err();
-        assert!(error.contains("combinational cycle"), "{error}");
+        for body in ["literal(value=0, id=2)", "identity(sensed, id=2)"] {
+            let source = ir.replace("literal(value=0, id=2)", body);
+            let package = Parser::new(&source).parse_and_verify_package().unwrap();
+            inline_block_invokes_in_package(package).unwrap();
+        }
     }
 
     #[test]

@@ -93,7 +93,7 @@ fn builder_checks_handles_before_installing_a_composite_binding() {
 }
 
 #[test]
-fn swapped_lanes_and_repeated_bits_propagate_across_two_levels() {
+fn swapped_lanes_and_repeated_bits_allow_inout_feedback_across_two_levels() {
     let ir = r#"package wiring
 block leaf(io: bits[2], sense: bits[1], data: bits[1]) {
   ext_inout_net hi(bits[1])
@@ -132,46 +132,37 @@ top block host(pad: bits[2]) {
             "port_name=p, net={wire[0], wire[0]}",
         ] {
             let cyclic = base.replace("port_name=p, net=wire", short);
-            let err = Parser::new(&cyclic).parse_and_verify_package().unwrap_err();
-            assert!(err.to_string().contains("combinational cycle"), "{err}");
+            Parser::new(&cyclic).parse_and_verify_package().unwrap();
         }
     }
 }
 
 #[test]
-fn fixed_slice_and_concat_preserve_bit_dependencies_through_a_child() {
+fn fixed_slices_preserve_ordinary_port_dependencies_in_an_inout_hierarchy() {
     let ir = r#"package feedback
-block route(p: bits[2], o: bits[2]) {
-  ext_inout_net bus(bits[2])
-  p: () = ext_inout_port(name=p, net=bus, id=1)
-  read: bits[2] = ext_inout_read(net=bus, id=2)
-  high: bits[1] = bit_slice(read, start=1, width=1, id=3)
-  low: bits[1] = bit_slice(read, start=0, width=1, id=4)
-  swapped: bits[2] = concat(low, high, id=5)
-  o: () = output_port(swapped, name=o, id=6)
+block route(d: bits[2], o: bits[2]) {
+  d: bits[2] = input_port(name=d, id=1)
+  high: bits[1] = bit_slice(d, start=1, width=1, id=2)
+  low: bits[1] = bit_slice(d, start=0, width=1, id=3)
+  swapped: bits[2] = concat(low, high, id=4)
+  o: () = output_port(swapped, name=o, id=5)
 }
-top block parent(clk: clock) {
-  ext_inout_net x(bits[1])
-  ext_inout_net y(bits[1])
+top block parent(pad: bits[1]) {
+  ext_inout_net pin(bits[1])
+  pad: () = ext_inout_port(name=pad, net=pin, id=6)
   instantiation u(block=route, kind=block)
-  link: () = ext_instantiation_inout(instantiation=u, port_name=p, net={x, y}, id=7)
-  obs: bits[2] = instantiation_output(instantiation=u, port_name=o, id=8)
-  bit: bits[1] = bit_slice(obs, start=1, width=1, id=9)
-  one: bits[1] = literal(value=1, id=10)
-  tx: () = ext_inout_drive(bit, one, net=x, id=11)
+  obs: bits[2] = instantiation_output(instantiation=u, port_name=o, id=7)
+  bit: bits[1] = bit_slice(obs, start=1, width=1, id=8)
+  zero: bits[1] = literal(value=0, id=9)
+  data: bits[2] = concat(bit, zero, id=10)
+  write: () = instantiation_input(data, instantiation=u, port_name=d, id=11)
 }
 "#;
+    // o[1] depends on the constant d[0]; o[0] depends on the fed-back d[1].
     Parser::new(ir).parse_and_verify_package().unwrap();
     let cyclic = ir.replace("bit_slice(obs, start=1", "bit_slice(obs, start=0");
-    assert!(
-        Parser::new(&cyclic)
-            .parse_and_verify_package()
-            .unwrap_err()
-            .to_string()
-            .contains("combinational cycle")
-    );
-    let registered=cyclic.replace("  instantiation u", "  reg state(bits[1])\n  instantiation u").replace("  tx:", "  wr: () = register_write(bit, register=state, id=12)\n  q: bits[1] = register_read(register=state, id=13)\n  tx:").replace("drive(bit,", "drive(q,");
-    Parser::new(&registered).parse_and_verify_package().unwrap();
+    let error = Parser::new(&cyclic).parse_and_verify_package().unwrap_err();
+    assert!(error.to_string().contains("combinational cycle"), "{error}");
 }
 
 #[test]
@@ -183,7 +174,7 @@ fn wide_unfragmented_bindings_use_ranges() {
 }
 
 #[test]
-fn child_passive_ties_alias_only_the_corresponding_positions_in_ancestors() {
+fn child_passive_ties_allow_feedback_in_ancestors() {
     let source = r#"package ties
 block leaf(p: bits[4]) {
   ext_inout_net shared(bits[1])
@@ -211,13 +202,7 @@ top block host() {
     // The leaf joins relay bits 1 and 2, which are low[1] and high[0].
     Parser::new(source).parse_and_verify_package().unwrap();
     let cyclic = source.replace("start=0", "start=1");
-    assert!(
-        Parser::new(&cyclic)
-            .parse_and_verify_package()
-            .unwrap_err()
-            .to_string()
-            .contains("combinational cycle")
-    );
+    Parser::new(&cyclic).parse_and_verify_package().unwrap();
     let isolated = cyclic
         .replace("shared(bits[1])", "shared(bits[2])")
         .replace("{shared, lanes, shared}", "{shared[1], lanes, shared[0]}");

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Split electrical and dataflow ranges only at boundaries observable by a
-//! connection.
+//! Track combinational dependencies between bit ranges of ordinary block ports.
 
 use super::{BlockCycleConnection, BlockCycleStep, BuilderError};
 use crate::ir::{Block, NodePayload, NodeRef};
@@ -25,43 +24,35 @@ impl<S: Copy> Span<S> {
     }
 }
 
-/// Ties collapse passive connections. Aligned dependencies preserve bit
-/// positions. Opaque operations conservatively depend on all bits of each
-/// operand.
+/// Aligned dependencies preserve bit positions. Opaque operations
+/// conservatively depend on all bits of each operand.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
 pub(super) enum Link {
-    Tie,
     Aligned,
     All,
 }
 
-/// The cached electrical aliases and directed dependencies of a block
-/// interface.
-#[derive(Default)]
-pub(super) struct Summary {
-    pub inouts: BTreeMap<String, crate::ir::Type>,
-    pub links: Vec<(Span<String>, Link, Span<String>)>,
-}
+/// Cached dependencies from ordinary outputs to ordinary inputs of a block.
+pub(super) type Summary = Vec<(Span<String>, Link, Span<String>)>;
 
 /// One signal's contribution to an interface summary.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Direction {
     Input,
     Output,
-    Inout,
 }
 
 /// Unpartitioned signals and their span-to-span connections.
 #[derive(Default)]
 pub(super) struct Network {
     widths: Vec<usize>,
-    witnesses: Vec<Option<NodeRef>>,
+    witnesses: Vec<NodeRef>,
     pub ports: BTreeMap<String, (Span<usize>, Direction)>,
     links: Vec<(Span<usize>, Link, Span<usize>)>,
 }
 
 impl Network {
-    pub fn signal(&mut self, width: usize, witness: Option<NodeRef>) -> Span<usize> {
+    pub fn signal(&mut self, width: usize, witness: NodeRef) -> Span<usize> {
         let signal = self.widths.len();
         self.widths.push(width);
         self.witnesses.push(witness);
@@ -70,10 +61,6 @@ impl Network {
             start: 0,
             width,
         }
-    }
-
-    pub fn witness(&mut self, s: Span<usize>, node: NodeRef) {
-        self.witnesses[s.signal].get_or_insert(node);
     }
 
     pub fn connect(
@@ -156,8 +143,7 @@ impl Network {
         cuts.into_iter().map(|c| c.into_iter().collect()).collect()
     }
 
-    /// Split signals on matching cut points, collapse passive aliases, and
-    /// install directed combinational edges on the resulting representatives.
+    /// Split signals on matching cut points and add combinational dependencies.
     pub fn finish(&self) -> Graph {
         let cuts = self.cuts();
         let mut count = 0;
@@ -175,44 +161,21 @@ impl Network {
             base + c.binary_search(&s.start).unwrap()
                 ..base + c.binary_search(&(s.start + s.width)).unwrap()
         };
-        let mut parents: Vec<usize> = (0..count).collect();
-        fn root(p: &mut [usize], mut i: usize) -> usize {
-            while i != p[i] {
-                p[i] = p[p[i]];
-                i = p[i];
-            }
-            i
-        }
-        for &(a, kind, b) in &self.links {
-            if kind == Link::Tie {
-                for (left, right) in vertices(a).zip(vertices(b)) {
-                    let l = root(&mut parents, left);
-                    let r = root(&mut parents, right);
-                    parents[r] = l;
-                }
-            }
-        }
-        for i in 0..count {
-            parents[i] = root(&mut parents, i);
-        }
         let mut graph = Graph {
             edges: vec![Vec::new(); count],
-            witness: vec![None; count],
+            witness: self
+                .witnesses
+                .iter()
+                .zip(&cuts)
+                .flat_map(|(&node, c)| std::iter::repeat_n(node, c.len() - 1))
+                .collect(),
             ports: Vec::new(),
         };
-        for (i, witness) in self.witnesses.iter().enumerate() {
-            if let Some(w) = witness {
-                for &id in &parents[bases[i]..bases[i] + cuts[i].len() - 1] {
-                    graph.witness[id].get_or_insert(*w);
-                }
-            }
-        }
         for &(a, kind, b) in &self.links {
             match kind {
-                Link::Tie => { /* The endpoints already share vertices. */ }
                 Link::Aligned => {
                     for (l, r) in vertices(a).zip(vertices(b)) {
-                        graph.edges[parents[l]].push((parents[r], kind));
+                        graph.edges[l].push((r, kind));
                     }
                 }
                 Link::All => {
@@ -222,15 +185,15 @@ impl Network {
                     // for fragmented operands.
                     if ls.len() > 1 && rs.len() > 1 {
                         let hub = graph.edges.len();
-                        graph.edges.push(rs.map(|r| (parents[r], kind)).collect());
+                        graph.edges.push(rs.map(|r| (r, kind)).collect());
                         graph.witness.push(self.witnesses[a.signal]);
                         for l in ls {
-                            graph.edges[parents[l]].push((hub, kind));
+                            graph.edges[l].push((hub, kind));
                         }
                     } else {
                         for l in ls {
                             for r in rs.clone() {
-                                graph.edges[parents[l]].push((parents[r], kind));
+                                graph.edges[l].push((r, kind));
                             }
                         }
                     }
@@ -246,7 +209,7 @@ impl Network {
                         width: w[1] - w[0],
                     },
                     *dir,
-                    parents[bases[s.signal] + i],
+                    bases[s.signal] + i,
                 ));
             }
         }
@@ -254,10 +217,10 @@ impl Network {
     }
 }
 
-/// Partitioned graph with one representative per passive electrical class.
+/// Partitioned combinational dependencies, with IR nodes for cycle diagnostics.
 pub(super) struct Graph {
     edges: Vec<Vec<(usize, Link)>>,
-    witness: Vec<Option<NodeRef>>,
+    witness: Vec<NodeRef>,
     ports: Vec<(Span<String>, Direction, usize)>,
 }
 
@@ -282,10 +245,8 @@ impl Graph {
                             .iter()
                             .zip(path.iter().cycle().skip(1))
                             .map(|(&(a, _), &(b, _))| {
-                                let node = block
-                                    .get_node(self.witness[a].expect("cycle vertex has an access"));
-                                let dep = block
-                                    .get_node(self.witness[b].expect("cycle vertex has an access"));
+                                let node = block.get_node(self.witness[a]);
+                                let dep = block.get_node(self.witness[b]);
                                 let connection = match (&node.payload, &dep.payload) {
                                     (
                                         NodePayload::InstantiationOutput {
@@ -329,28 +290,16 @@ impl Graph {
 
     /// Summarize one output cone at a time. A path through any opaque edge
     /// summarizes to all-to-all; otherwise corresponding bit positions suffice.
-    pub fn summarize(self, block: &Block) -> Summary {
-        let mut summary = Summary {
-            inouts: block
-                .inout_ports()
-                .map(|p| (block.port_name(p).to_owned(), block.port_type(p).clone()))
-                .collect(),
-            links: Vec::new(),
-        };
+    pub fn summarize(self) -> Summary {
+        let mut summary = Vec::new();
         let mut inputs = BTreeMap::new();
         let mut outputs = Vec::new();
         for (span, dir, v) in self.ports {
-            if dir == Direction::Inout
-                && let Some(first) = inputs.get(&v)
-            {
-                summary.links.push((span, Link::Tie, Span::clone(first)));
-                continue;
-            }
-            if dir != Direction::Output {
-                inputs.insert(v, span.clone());
-            }
-            if dir != Direction::Input {
-                outputs.push((v, span));
+            match dir {
+                Direction::Input => {
+                    inputs.insert(v, span);
+                }
+                Direction::Output => outputs.push((v, span)),
             }
         }
         let mut visited = vec![(usize::MAX, false); self.edges.len()];
@@ -363,7 +312,7 @@ impl Graph {
                     continue;
                 }
                 visited[v] = (root, opaque);
-                if v != root && inputs.contains_key(&v) {
+                if inputs.contains_key(&v) {
                     deps.entry(v).and_modify(|p| *p |= opaque).or_insert(opaque);
                 }
                 for &(dep, kind) in &self.edges[v] {
@@ -371,7 +320,7 @@ impl Graph {
                 }
             }
             for (v, all) in deps {
-                summary.links.push((
+                summary.push((
                     span.clone(),
                     if all { Link::All } else { Link::Aligned },
                     inputs[&v].clone(),

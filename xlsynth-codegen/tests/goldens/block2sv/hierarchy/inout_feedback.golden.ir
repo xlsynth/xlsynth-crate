@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: Apache-2.0
+package inout_feedback
+
+block invert_pin(pad: bits[2]) {
+  ext_inout_net rx(bits[1])
+  ext_inout_net tx(bits[1])
+  pad: () = ext_inout_port(name=pad, net={tx, rx}, id=1)
+  r: bits[1] = ext_inout_read(net=rx, id=2)
+  d: bits[1] = not(r, id=3)
+  oe: bits[1] = literal(value=1, id=4)
+  drive: () = ext_inout_drive(d, oe, net=tx, id=5)
+}
+
+top block parent() {
+  ext_inout_net n(bits[1])
+  instantiation u(block=invert_pin, kind=block)
+  bind: () = ext_instantiation_inout(instantiation=u, port_name=pad, net={n, n}, id=6)
+}
+
+// EXPECT-SV: module invert_pin(
+// EXPECT-SV:   inout wire [1:0] pad
+// EXPECT-SV: );
+// EXPECT-SV:   logic d;
+// EXPECT-SV:   logic oe;
+// EXPECT-SV:   assign d = ~pad[0];
+// EXPECT-SV:   assign oe = 1'h1;
+// EXPECT-SV:   assign pad[1] = oe ? d : 'z;
+// EXPECT-SV: endmodule
+// EXPECT-SV: module parent;
+// EXPECT-SV:   wire n;
+// EXPECT-SV:   invert_pin u (
+// EXPECT-SV:     .pad({n, n})
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule
