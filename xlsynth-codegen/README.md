@@ -129,9 +129,10 @@ child outputs are analyzed separately. Each emitted register must have exactly
 one `register_read` and one `register_write`; multiple write nodes are rejected
 instead of silently dropping an update.
 
-`instantiation u(block=model, module=external_rtl, kind=extern_block)` emits an
-instance of the external SystemVerilog module `external_rtl`. Its package block
-`model` supplies the named ports and the dependencies used for cycle checks.
+`instantiation u(block=model, kind=extern_block)` emits an instance of the
+external SystemVerilog module `model`. Set `module_name=external_rtl` to target a
+different module. The package block `model` supplies the named ports and the
+dependencies used for cycle checks.
 The child clock connects to the parent clock, and reset is connected as an
 ordinary named input. Use `Layout::None` for designs that instantiate an external
 block. Models reached only through external instances are omitted from the

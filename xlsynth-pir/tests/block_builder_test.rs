@@ -687,6 +687,27 @@ fn extern_finalization_rejects_renamed_unconnected_parameters_with_identical_typ
 }
 
 #[test]
+fn extern_block_module_name_defaults_to_the_model_name_in_canonical_ir() {
+    let canonical = r#"package external_module_name
+
+block model() {
+}
+
+top block parent() {
+  instantiation u(block=model, kind=extern_block)
+}
+"#;
+    let explicit = canonical.replace(
+        "block=model, kind=extern_block",
+        "block=model, module_name=model, kind=extern_block",
+    );
+    for source in [canonical, explicit.as_str()] {
+        let package = Parser::new(source).parse_and_verify_package().unwrap();
+        assert_eq!(package.to_string(), canonical);
+    }
+}
+
+#[test]
 fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() {
     for (registered, external) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut child = BlockBuilder::new("child");

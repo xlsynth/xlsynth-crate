@@ -23,7 +23,7 @@ block model(model_clk: clock, reset: bits[1], data: bits[8], out: bits[8]) {
 }
 
 top block wrapper(parent_clk: clock, parent_reset: bits[1], data: bits[8], out: bits[8]) {
-  instantiation u_ext(block=model, module=external_rtl, kind=extern_block)
+  instantiation u_ext(block=model, module_name=external_rtl, kind=extern_block)
   reg input_stage(bits[8])
   reg output_stage(bits[8])
   parent_reset: bits[1] = input_port(name=parent_reset, id=12)

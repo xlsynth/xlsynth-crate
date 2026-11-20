@@ -701,10 +701,11 @@ explicit external instantiation for a function marked `#[ffi_proto]`. Lower
 `map` operations and unroll `counted_for` loops before emission.
 
 For a SystemVerilog module with a block IR behavioral model, use
-`instantiation u(block=model, module=external_rtl, kind=extern_block)`.
+`instantiation u(block=model, kind=extern_block)`. The RTL module name defaults
+to `model`. Set `module_name=external_rtl` to target a different module.
 Define `model` earlier in the package with the external module's port names
 and types. The emitter connects the parent clock to the model's clock port
-when present and emits an instance of `external_rtl`. Supply that module
+when present and emits an instance of the external module. Supply that module
 alongside the generated RTL. Models reached only through external instances
 are omitted from the generated RTL. Use the default `--layout=none` for designs
 that instantiate an external block.

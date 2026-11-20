@@ -2251,7 +2251,7 @@ top block parent(io: bits[1]) {
   instantiation u(block=child, kind=block)
   link: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=1)
 }"#;
-        for kind in ["kind=block", "module=external_cell, kind=extern_block"] {
+        for kind in ["kind=block", "module_name=external_cell, kind=extern_block"] {
             let source = source.replace("kind=block", kind);
             let package = Parser::new(&source).parse_package().unwrap();
             assert_eq!(validate_package(&package), Ok(()));
@@ -3014,7 +3014,10 @@ block add_block(a: bits[32], b: bits[32], x: bits[32], y: bits[32]) {
   y: () = output_port(b, name=y, id=6)
 }
 "#;
-        for kind in ["kind=block", "module=external_adder, kind=extern_block"] {
+        for kind in [
+            "kind=block",
+            "module_name=external_adder, kind=extern_block",
+        ] {
             let ir = ir.replace("kind=block", kind);
             let pkg = Parser::new(&ir).parse_package().unwrap();
             assert_eq!(
@@ -3062,7 +3065,7 @@ block model(value: bits[8], result: bits[8]) {
 }
 
 top block wrapper(input: bits[8], output: bits[16]) {
-  instantiation u(block=model, module=external_cell, kind=extern_block)
+  instantiation u(block=model, module_name=external_cell, kind=extern_block)
   input: bits[8] = input_port(name=input, id=3)
   connected: () = instantiation_input(input, instantiation=u, port_name=value, id=4)
   received: bits[16] = instantiation_output(instantiation=u, port_name=result, id=5)
@@ -3182,7 +3185,10 @@ block my_block(in0: bits[32], in1: bits[32], out0: bits[32], out1: bits[32]) {
   out1: () = output_port(instantiation_output.13, name=out1, id=15)
 }
 "#;
-        for kind in ["kind=block", "module=external_adder, kind=extern_block"] {
+        for kind in [
+            "kind=block",
+            "module_name=external_adder, kind=extern_block",
+        ] {
             let ir = ir.replace("kind=block", kind);
             let pkg = Parser::new(&ir).parse_package().unwrap();
             assert_eq!(

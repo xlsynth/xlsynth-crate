@@ -1508,6 +1508,23 @@ fn external_block_module_name_cannot_shadow_generated_top() {
 }
 
 #[test]
+fn default_external_module_name_cannot_shadow_generated_child() {
+    let source = SHARED_INOUT.replacen(
+        "instantiation left(block=pad_cell, kind=block)",
+        "instantiation left(block=pad_cell, kind=extern_block)",
+        1,
+    );
+    assert_eq!(
+        emit_system_verilog(&package(&source), &BlockCodegenOptions::default()).unwrap_err(),
+        BlockCodegenError::InvalidBlock(
+            "external module `pad_cell` instantiated as `left` in block `pads` \
+             conflicts with a generated module"
+                .into()
+        )
+    );
+}
+
+#[test]
 fn external_model_requires_a_clock_for_its_clocked_child() {
     let ir = MODEL_BACKED_EXTERN.replace("block model(model_clk: clock, ", "block model(");
     assert_eq!(

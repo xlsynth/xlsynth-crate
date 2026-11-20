@@ -232,7 +232,7 @@ top block feedback(result: bits[8]) {
   result: () = output_port(fed, name=result, id=5)
 }
 "#;
-        let external = source.replace("kind=block", "module=external_rtl, kind=extern_block");
+        let external = source.replace("kind=block", "module_name=external_rtl, kind=extern_block");
         for source in [source, external.as_str()] {
             let package = parse_blocks(source);
             assert!(matches!(

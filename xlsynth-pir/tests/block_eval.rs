@@ -246,7 +246,7 @@ block delay_model(model_clk: clock, rst_n: bits[1], d: bits[8], q: bits[8]) {
 }
 
 top block top(clk: clock, reset_n: bits[1], data: bits[8], result: bits[8]) {
-  instantiation delay(block=delay_model, module=external_delay, kind=extern_block)
+  instantiation delay(block=delay_model, module_name=external_delay, kind=extern_block)
   reset_n: bits[1] = input_port(name=reset_n, id=11)
   data: bits[8] = input_port(name=data, id=12)
   delay_rst: () = instantiation_input(reset_n, instantiation=delay, port_name=rst_n, id=13)

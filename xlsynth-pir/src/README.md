@@ -119,12 +119,12 @@ and `instantiation_output` caches a typed output handle. Foreign-function tuple
 components use names such as `arg.0` and `return.0`. Codegen uses the referenced
 function's Verilog FFI template.
 
-An external block uses a behavioral model defined earlier in the package. Its
-IR declaration is `instantiation u(block=model, module=external_rtl, kind=extern_block)`.
-The model supplies the port names and types and the behavior used when inlining
-for evaluation. Native SystemVerilog codegen emits an instance of
-`external_rtl`, whose implementation must be supplied separately. Use the PIR
-parser for both extern declaration forms.
+An external block uses a behavioral model defined earlier in the package.
+`instantiation u(block=model, kind=extern_block)` emits an instance of the
+external SystemVerilog module `model`. Set `module_name=external_rtl` to target a
+different module. The model supplies the port names, types, and behavior used
+when inlining for evaluation. Supply the SystemVerilog implementation separately.
+Use the PIR parser for both extern declaration forms.
 
 Package finalization checks combinational cycles through block instances, with
 registers as state boundaries. External block instances use their model's

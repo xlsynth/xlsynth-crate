@@ -37,13 +37,29 @@ fn block2sv_golden_fixtures() {
     );
 }
 
+/// Binds the default module name while emitting only the wrapper definition.
+#[test]
+fn external_block_uses_its_model_name_by_default() {
+    let source = include_str!("goldens/block2sv/extern/model_backed_extern.golden.ir")
+        .replace("module_name=external_rtl, ", "")
+        .replace(
+            "// EXPECT-SV:   external_rtl u_ext (",
+            "// EXPECT-SV:   model u_ext (",
+        );
+    let fixture = GoldenFixture::parse(&source).unwrap();
+    assert_eq!(
+        execute_golden_fixture(&fixture).unwrap(),
+        fixture.expected_output()
+    );
+}
+
 /// Preserves whole-net inout wiring when a model is also used as an RTL child.
 #[test]
 fn external_block_and_ordinary_child_share_an_inout_net() {
     let source = include_str!("goldens/block2sv/hierarchy/shared_inout.golden.ir")
         .replace(
             "instantiation left(block=pad_cell, kind=block)",
-            "instantiation left(block=pad_cell, module=board_pad, kind=extern_block)",
+            "instantiation left(block=pad_cell, module_name=board_pad, kind=extern_block)",
         )
         .replace(
             "// EXPECT-SV:   pad_cell left (",
