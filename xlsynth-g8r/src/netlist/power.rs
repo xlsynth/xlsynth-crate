@@ -1828,18 +1828,8 @@ fn resolve_source(
 }
 
 fn effective_input_capacitance(pin: &Pin, context: &str) -> Result<EdgeValue<f64>, String> {
-    let result = EdgeValue {
-        rise: pin
-            .rise_capacitance
-            .or(pin.capacitance)
-            .or(pin.fall_capacitance)
-            .unwrap_or(0.0),
-        fall: pin
-            .fall_capacitance
-            .or(pin.capacitance)
-            .or(pin.rise_capacitance)
-            .unwrap_or(0.0),
-    };
+    let [rise, fall] = crate::netlist::electrical::input_capacitance(pin);
+    let result = EdgeValue { rise, fall };
     for (name, value) in [("rise", result.rise), ("fall", result.fall)] {
         if !value.is_finite() || value < 0.0 {
             return Err(format!(

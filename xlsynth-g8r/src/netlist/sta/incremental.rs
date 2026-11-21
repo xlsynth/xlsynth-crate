@@ -15,6 +15,8 @@ use super::{
 };
 use crate::liberty::Library;
 use crate::liberty_model::{PinDirection, TimingArc};
+pub use crate::netlist::electrical::ElectricalViolations;
+use crate::netlist::electrical::{PinLimits, input_fanout_load};
 use crate::netlist::normalized::{BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow, ensure};
@@ -235,14 +237,6 @@ impl std::fmt::Display for UnsupportedTopology {
     }
 }
 impl std::error::Error for UnsupportedTopology {}
-
-/// Componentwise violation amounts for one pin, all zero when unconstrained.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ElectricalViolations {
-    pub capacitance: f64,
-    pub transition: f64,
-    pub fanout: f64,
-}
 
 /// Read-only normalized instance bindings. Iterate pin_order for stable
 /// ordering.
@@ -1143,10 +1137,8 @@ impl<'lib> IncrementalSta<'lib> {
         let mut values = Vec::with_capacity(pins.len());
         for &pin_index in pins {
             let pin = &cell.pins[pin_index];
-            if pin.max_capacitance.is_none()
-                && pin.max_transition.is_none()
-                && pin.max_fanout.is_none()
-            {
+            let limits = PinLimits::for_pin(pin);
+            if limits.is_unconstrained() {
                 values.push(ElectricalViolations::default());
                 continue;
             }
@@ -1166,20 +1158,20 @@ impl<'lib> IncrementalSta<'lib> {
             if let Some(bit) = bit {
                 if pin.direction == PinDirection::Output as i32 {
                     cap = self.capacitances[bit].rise.max(self.capacitances[bit].fall);
-                    if pin.max_fanout.is_some() {
+                    if limits.fanout.is_some() {
                         fanout = self.loads[bit]
                             .iter()
                             .map(|(load, name)| {
-                                self.lib
-                                    .pin(self.cells[*load], name)
-                                    .expect("validated pin")
-                                    .fanout_load
-                                    .unwrap_or(1.0)
+                                input_fanout_load(
+                                    self.lib
+                                        .pin(self.cells[*load], name)
+                                        .expect("validated pin"),
+                                )
                             })
                             .sum();
                     }
                 }
-                if pin.max_transition.is_some() {
+                if limits.transition.is_some() {
                     for timing in &self.timing {
                         if let Some(t) = &timing[bit] {
                             for edge in t.rise.iter().chain(t.fall.iter()) {
@@ -1189,17 +1181,7 @@ impl<'lib> IncrementalSta<'lib> {
                     }
                 }
             }
-            values.push(ElectricalViolations {
-                capacitance: pin
-                    .max_capacitance
-                    .map_or(0.0, |limit| (cap - limit).max(0.0)),
-                transition: pin
-                    .max_transition
-                    .map_or(0.0, |limit| (transition - limit).max(0.0)),
-                fanout: pin
-                    .max_fanout
-                    .map_or(0.0, |limit| (fanout - limit).max(0.0)),
-            });
+            values.push(limits.violations_known(cap, transition, fanout));
         }
         values
     }

@@ -297,15 +297,13 @@ fn bit_index(
     })
 }
 
-fn find_alias_root(parents: &mut [BitIndex], bit_idx: BitIndex) -> BitIndex {
-    let parent = parents[bit_idx];
-    if parent == bit_idx {
-        bit_idx
-    } else {
-        let root = find_alias_root(parents, parent);
-        parents[bit_idx] = root;
-        root
+/// Iterative path halving avoids recursion on long chains of directed aliases.
+pub(super) fn find_alias_root(parents: &mut [BitIndex], mut bit_idx: BitIndex) -> BitIndex {
+    while parents[bit_idx] != bit_idx {
+        parents[bit_idx] = parents[parents[bit_idx]];
+        bit_idx = parents[bit_idx];
     }
+    bit_idx
 }
 
 fn union_aliases(parents: &mut [BitIndex], lhs_bit_idx: BitIndex, rhs_bit_idx: BitIndex) {

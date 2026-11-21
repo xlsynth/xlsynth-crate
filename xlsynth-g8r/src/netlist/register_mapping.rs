@@ -16,7 +16,7 @@ use crate::aig::sequential_gate::{
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, PinDirection};
 use crate::netlist::sequential_liberty::{
-    GvEvalSequentialCellSpec, get_gv_eval_sequential_cell_spec,
+    GvEvalSequentialCellSpec, get_gv_eval_sequential_cell_spec, input_polarity,
 };
 
 // Exhaustive tie-off checking is intentionally bounded: at most 9 candidate
@@ -80,6 +80,31 @@ pub struct RegisterMappingPlan {
     pub cells: Vec<RegisterCellMapping>,
     /// Original register order, then LSB-first bit order. No state is removed.
     pub bits: Vec<RegisterBitMapping>,
+}
+
+/// Physical register instances emitted by one assembly. The register order is
+/// the plan's bit order; indices refer to the assembled netlist snapshot and
+/// remain valid when new instances append. Deleting or reordering instances
+/// invalidates the indices. Cell mappings describe the original assembly;
+/// after resizing a register, query its current cell through the live netlist.
+#[derive(Clone, Copy)]
+pub struct AssembledRegisters<'a> {
+    pub(crate) first_instance: usize,
+    pub(crate) plan: &'a RegisterMappingPlan,
+}
+impl<'a> AssembledRegisters<'a> {
+    /// Physical instance indices in the assembly snapshot.
+    pub fn instances(&self) -> std::ops::Range<usize> {
+        self.first_instance..self.first_instance + self.plan.bits.len()
+    }
+    /// The cell and pin binding originally selected for one register instance.
+    pub fn initial_mapping(&self, instance: usize) -> Option<&'a RegisterCellMapping> {
+        let bit = self
+            .plan
+            .bits
+            .get(instance.checked_sub(self.first_instance)?)?;
+        self.plan.cells.get(bit.cell_index)
+    }
 }
 
 /// An unsupported sequential cell and the reason it cannot be selected.
@@ -526,14 +551,11 @@ fn data_polarity(
     let mut polarity = None;
     for old_state in [false, true] {
         bind_state(&mut values, spec, old_state);
-        values.insert(data.to_string(), false);
-        let at_zero = spec.next_state.evaluate_partial(&values)?;
-        values.insert(data.to_string(), true);
-        let at_one = spec.next_state.evaluate_partial(&values)?;
-        if at_zero == at_one || polarity.is_some_and(|previous| previous != at_zero) {
+        let phase = input_polarity(&spec.next_state, data, &mut values)?;
+        if polarity.is_some_and(|previous| previous != phase) {
             return None;
         }
-        polarity = Some(at_zero);
+        polarity = Some(phase);
     }
     polarity
 }

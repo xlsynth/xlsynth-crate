@@ -247,7 +247,7 @@ fn buffer_and_two_level_trees_preserve_polarity_constants_and_shared_outputs() {
             after_g
                 .drivers
                 .iter()
-                .find(|x| x.instance == d.instance)
+                .find(|x| x.binding == d.binding)
                 .unwrap()
                 .output_ports,
             2
@@ -302,7 +302,12 @@ fn rejection_accounts_for_replication_loading_upstream() {
     )
     .unwrap();
     let (after, after_sta, _) = measure(&changed, &lib, &options()).unwrap();
-    let upstream = g.drivers.iter().find(|d| d.instance == 0).unwrap().net;
+    let upstream = g
+        .drivers
+        .iter()
+        .find(|d| d.binding.instance.0 == 0)
+        .unwrap()
+        .net;
     assert!(
         after_sta
             .timing_for_net(NetIndex(upstream))
@@ -375,8 +380,10 @@ fn asymmetric_function_matching_is_by_named_pin_truth_not_cell_name() {
     let cells = choices(&lib).unwrap();
     let old = cells.iter().find(|c| c.name == "DRIVE").unwrap();
     let d = Driver {
-        instance: 0,
-        output_connection: 2,
+        binding: PinConnection {
+            instance: InstIndex(0),
+            connection: 2,
+        },
         net: 0,
         sinks: vec![],
         load: [2.0; 2],
@@ -560,7 +567,7 @@ fn check_incremental_candidates(original: &MappedNetlist, lib: &Library) {
     for d in &g.drivers {
         let name = resolve_symbol(
             &original.interner,
-            original.module.instances[d.instance].type_name,
+            original.module.instances[d.binding.instance.0].type_name,
             "cell",
         )
         .unwrap();
@@ -1034,7 +1041,7 @@ fn successive_replications_preserve_tied_metrics_and_remove_last_maximum() {
         let driver = graph
             .drivers
             .iter()
-            .find(|d| d.instance == instance)
+            .find(|d| d.binding.instance.0 == instance)
             .unwrap();
         let kind = FanoutEdit::Replicate { groups: 4 };
         let edit = edit::EditPlan::new(&changed, &graph, driver, &kind, &cells).unwrap();

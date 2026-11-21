@@ -13,7 +13,7 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 /// A small load- and slew-sensitive library with explicitly sized equivalents.
-fn library() -> Result<Library> {
+pub(in crate::netlist) fn library() -> Result<Library> {
     let mut text = String::from(
         r#"library(test) {
         lu_table_template(delay) { variable_1: input_net_transition; variable_2: total_output_net_capacitance; index_1("0,10"); index_2("0,10"); }
