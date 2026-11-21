@@ -11,13 +11,13 @@ mod callable_names;
 mod forwarding;
 mod source_names;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use xlsynth_pir::ir::{self, NodePayload, NodeRef, Type};
 
 use crate::block::{
     BlockContext,
     raw::{self as lean, LeanBlockBundle, identifier, lean_type},
-    source_types::{SourceType, StatefulInterface, TypeDecl, source_shape},
+    source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
 };
 use callable_names::CallableNames;
 use source_names::{declaring_name, module_identifier, source_type_in, write_struct};
@@ -116,6 +116,27 @@ impl<'a> Presentation<'a> {
     fn register_type(&self, register: &str) -> Result<Option<SourceType>> {
         Ok(self.interface.registers.get(register).cloned())
     }
+    /// Recover a declaration's nominal kind without erasing its name.
+    fn named_type(&self, name: &str) -> Result<SourceType> {
+        Ok(match self.declaration(name)? {
+            TypeDecl::Enum { .. } => SourceType::Enum { name: name.into() },
+            TypeDecl::Struct { .. } => SourceType::Struct { name: name.into() },
+            TypeDecl::Alias { .. } => SourceType::Alias { name: name.into() },
+        })
+    }
+
+    /// Follow the native-checked alias chain to its underlying source type.
+    fn unalias<'b>(&'b self, ty: &'b SourceType) -> Result<&'b SourceType> {
+        if let SourceType::Alias { name } = ty {
+            let TypeDecl::Alias { target, .. } = self.declaration(name)? else {
+                unreachable!("validated alias reference")
+            };
+            self.unalias(target)
+        } else {
+            Ok(ty)
+        }
+    }
+
     fn source_type(&self, ty: &SourceType) -> Result<String> {
         source_type_in(self.bx_namespace, ty, None, &|_| false)
     }
@@ -158,12 +179,101 @@ impl<'a> Presentation<'a> {
                     Ok(product_value(&fields, true))
                 }
             }
-            Some(SourceType::Struct { name }) => Ok(format!(
+            Some(
+                SourceType::Enum { name }
+                | SourceType::Struct { name }
+                | SourceType::Alias { name },
+            ) => Ok(format!(
                 "(XlsCodec.{}.{operation} ({value}))",
                 type_identifier(name)?
             )),
         }
     }
+    /// Add collision-free constructors for every unnamed physical enum
+    /// encoding.
+    ///
+    /// Giving every bit pattern a case lets both codec round trips hold for
+    /// arbitrary initial register values. An unnamed case carries its physical
+    /// encoding without attributing a source constructor to it.
+    ///
+    /// Keeping unnamed encodings in the readable proof domain is provisional.
+    /// Restricting proofs to declared enum values would also require proving
+    /// that initialization and transitions preserve those values.
+    fn enum_cases(&self, name: &str) -> Result<Vec<(String, u64)>> {
+        let TypeDecl::Enum { width, members, .. } = self.declaration(name)? else {
+            bail!("{name} is not an enum")
+        };
+        let mut names: BTreeSet<_> = members.iter().map(|m| m.name.clone()).collect();
+        let mut cases = members
+            .iter()
+            .map(|m| (m.name.clone(), m.value))
+            .collect::<Vec<_>>();
+        for value in 0..(1u64 << width) {
+            if !members.iter().any(|m| m.value == value) {
+                let mut name = format!("encoding{value}");
+                while !names.insert(name.clone()) {
+                    name.push('_');
+                }
+                cases.push((name, value));
+            }
+        }
+        Ok(cases)
+    }
+
+    /// Emit the enum and return the inductive type name for deriving instances.
+    ///
+    /// One collision with a Lean-generated member moves all constructors under
+    /// `Constructors` on a separate inductive type. Public abbreviations keep
+    /// each source spelling usable in terms and patterns. Unlike Lean's
+    /// `export` aliases, these abbreviations also support absolute references.
+    fn write_enum(
+        &self,
+        out: &mut String,
+        original: &str,
+        namespace: &str,
+        name: &str,
+    ) -> Result<String> {
+        let cases = self.enum_cases(original)?;
+        let needs_backing = cases.iter().any(|(member, _)| {
+            lean::generated_member(member)
+                || matches!(
+                    member.as_str(),
+                    "ofNat" | "ofNat_ctorIdx" | "ctorElim" | "ctorElimType"
+                )
+        });
+        let (backing, prefix) = if needs_backing {
+            ensure!(
+                !cases.iter().any(|(member, _)| member == "_root_"),
+                "cannot emit {original}._root_: Lean reserves this name for the root namespace and this enum needs a public constructor abbreviation"
+            );
+            (format!("«xls:implementation».{name}"), "Constructors.")
+        } else {
+            (name.to_owned(), "")
+        };
+        let members = cases
+            .iter()
+            .map(|(member, _)| identifier(member))
+            .collect::<Result<Vec<_>>>()?;
+        writeln!(out, "inductive {backing} where")?;
+        for member in &members {
+            writeln!(out, "  | {prefix}{member}")?;
+        }
+        out.push('\n');
+        if needs_backing {
+            writeln!(out, "abbrev {name} := {backing}\n")?;
+            for member in &members {
+                // A match on this constructor infers its pattern namespace from
+                // the result type.
+                writeln!(
+                    out,
+                    "@[match_pattern] abbrev {name}.{member} : _root_.{namespace}.{name} := {backing}.{prefix}{member}"
+                )?;
+            }
+            out.push('\n');
+        }
+        Ok(backing)
+    }
+
     /// Emit source declarations, total codecs, and proofs of both codec round
     /// trips.
     ///
@@ -179,20 +289,44 @@ impl<'a> Presentation<'a> {
         for declaration in self.declarations {
             let (module, local) = declaring_name(self.bx_namespace, declaration.name());
             let namespace = module_identifier(module)?;
-            source_names::declaration_identifier(module, local, "type")?;
+            let name = source_names::declaration_identifier(module, local, "type")?;
             writeln!(out, "namespace {namespace}\n")?;
-            let backing = write_struct(
-                &mut out,
-                self.bx_namespace,
-                module,
-                local,
-                &declaration.fields,
-                self.declarations,
-            )?;
-            writeln!(
-                instances,
-                "deriving instance L.Repr for _root_.{namespace}.{backing}"
-            )?;
+            let derived = match declaration {
+                TypeDecl::Enum { name: original, .. } => Some((
+                    "L.Repr, L.DecidableEq",
+                    self.write_enum(&mut out, original, &namespace, &name)?,
+                )),
+                TypeDecl::Struct { fields, .. } => {
+                    let backing = write_struct(
+                        &mut out,
+                        self.bx_namespace,
+                        module,
+                        local,
+                        fields,
+                        self.declarations,
+                    )?;
+                    Some(("L.Repr", backing))
+                }
+                TypeDecl::Alias { target, .. } => {
+                    writeln!(
+                        out,
+                        "abbrev {name} := {}\n",
+                        source_type_in(
+                            self.bx_namespace,
+                            target,
+                            Some((module, self.declarations)),
+                            &|_| false
+                        )?
+                    )?;
+                    None
+                }
+            };
+            if let Some((classes, target)) = derived {
+                writeln!(
+                    instances,
+                    "deriving instance {classes} for _root_.{namespace}.{target}"
+                )?;
+            }
             writeln!(out, "end {namespace}\n")?;
         }
         out.push_str("namespace XlsCodec\n\nattribute [local simp] L.Function.comp_def\n\n");
@@ -201,59 +335,114 @@ impl<'a> Presentation<'a> {
         out.push_str(BOOL_REPRESENTATION);
         for declaration in self.declarations {
             let name = type_identifier(declaration.name())?;
-            let nominal = SourceType::Struct {
-                name: declaration.name.clone(),
-            };
+            let nominal = self.named_type(declaration.name())?;
             // Codec namespaces and their arguments have their own scope,
             // independent of the readable evaluator's locals.
             let source_type = source_type_in(self.bx_namespace, &nominal, None, &|_| true)?;
             let physical = source_shape(&nominal, self.declarations)?;
             writeln!(out, "namespace {name}\n")?;
-            let encoded = declaration
-                .fields
-                .iter()
-                .map(|f| {
-                    self.convert(
-                        Some(&f.source_type),
-                        &format!("x.{}", identifier(&f.name)?),
-                        true,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
-            writeln!(
-                out,
-                "def encode (x : {source_type}) : {} :=\n  {}\n",
-                lean_type(&physical)?,
-                tuple_value(encoded.into_iter())
-            )?;
-            let decoded = declaration
-                .fields
-                .iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    Ok((
-                        identifier(&f.name)?,
-                        self.convert(Some(&f.source_type), &tuple_element("x", i), false)?,
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            writeln!(
-                out,
-                "def decode (x : {}) : {source_type} :=\n  {}\n",
-                lean_type(&physical)?,
-                lean::source_record_value(&decoded)
-            )?;
-            writeln!(
-                out,
-                "@[simp] theorem decode_encode (x : {source_type}) : decode (encode x) = x := by\n  cases x\n  simp [decode, encode]\n"
-            )?;
-            let mut serial = 0;
-            let pattern = physical_pattern(&physical, &mut serial);
-            writeln!(
-                out,
-                "@[simp] theorem encode_decode (x : {}) : encode (decode x) = x := by\n  rcases x with {pattern}\n  simp [decode, encode]\n",
-                lean_type(&physical)?
-            )?;
+            match declaration {
+                TypeDecl::Enum {
+                    name: original,
+                    width,
+                    ..
+                } => {
+                    let cases = self.enum_cases(original)?;
+                    writeln!(out, "def encode : {source_type} → L.BitVec {width}")?;
+                    for (member, value) in &cases {
+                        writeln!(
+                            out,
+                            "  | .{} => L.BitVec.ofNat {width} {value}",
+                            identifier(member)?
+                        )?;
+                    }
+                    writeln!(
+                        out,
+                        "\ndef decode (x : L.BitVec {width}) : {source_type} :="
+                    )?;
+                    let (last, rest) = cases.split_last().context("empty physical enum")?;
+                    for (member, value) in rest {
+                        writeln!(out, "  if x = {value} then .{} else", identifier(member)?)?;
+                    }
+                    writeln!(out, "  .{}\n", identifier(&last.0)?)?;
+                    writeln!(
+                        out,
+                        "@[simp] theorem decode_encode (x : {source_type}) : decode (encode x) = x := by\n  cases x <;> rfl\n"
+                    )?;
+                    writeln!(
+                        out,
+                        "@[simp] theorem encode_decode (x : L.BitVec {width}) : encode (decode x) = x := by\n  rcases two_bit_cases x with rfl | rfl | rfl | rfl <;> rfl\n"
+                    )?;
+                }
+                TypeDecl::Struct { fields, .. } => {
+                    let encoded = fields
+                        .iter()
+                        .map(|f| {
+                            self.convert(
+                                Some(&f.source_type),
+                                &format!("x.{}", identifier(&f.name)?),
+                                true,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    writeln!(
+                        out,
+                        "def encode (x : {source_type}) : {} :=\n  {}\n",
+                        lean_type(&physical)?,
+                        tuple_value(encoded.into_iter())
+                    )?;
+                    let decoded = fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| {
+                            Ok((
+                                identifier(&f.name)?,
+                                self.convert(Some(&f.source_type), &tuple_element("x", i), false)?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    writeln!(
+                        out,
+                        "def decode (x : {}) : {source_type} :=\n  {}\n",
+                        lean_type(&physical)?,
+                        lean::source_record_value(&decoded)
+                    )?;
+                    writeln!(
+                        out,
+                        "@[simp] theorem decode_encode (x : {source_type}) : decode (encode x) = x := by\n  cases x\n  simp [decode, encode]\n"
+                    )?;
+                    let mut serial = 0;
+                    let pattern = physical_pattern(&physical, &mut serial);
+                    writeln!(
+                        out,
+                        "@[simp] theorem encode_decode (x : {}) : encode (decode x) = x := by\n  rcases x with {pattern}\n  simp [decode, encode]\n",
+                        lean_type(&physical)?
+                    )?;
+                }
+                TypeDecl::Alias { target, .. } => {
+                    writeln!(
+                        out,
+                        "def encode (x : {source_type}) : {} := {}",
+                        lean_type(&physical)?,
+                        self.convert(Some(target), "x", true)?
+                    )?;
+                    writeln!(
+                        out,
+                        "def decode (x : {}) : {source_type} := {}\n",
+                        lean_type(&physical)?,
+                        self.convert(Some(target), "x", false)?
+                    )?;
+                    writeln!(
+                        out,
+                        "@[simp] theorem decode_encode (x : {source_type}) : decode (encode x) = x := by\n  simp [decode, encode]\n"
+                    )?;
+                    writeln!(
+                        out,
+                        "@[simp] theorem encode_decode (x : {}) : encode (decode x) = x := by\n  simp [decode, encode]\n",
+                        lean_type(&physical)?
+                    )?;
+                }
+            }
             writeln!(out, "end {name}\n")?;
         }
         out.push_str("end XlsCodec\n");
@@ -587,6 +776,15 @@ theorem one_bit_cases (b : L.BitVec 1) : b = 0 ∨ b = 1 := by
   rcases alternatives with zero | one
   · exact L.Or.inl (L.BitVec.eq_of_toNat_eq (by simpa using zero))
   · exact L.Or.inr (L.BitVec.eq_of_toNat_eq (by simpa using one))
+
+theorem two_bit_cases (b : L.BitVec 2) : b = 0 ∨ b = 1 ∨ b = 2 ∨ b = 3 := by
+  have bound := L.BitVec.isLt b
+  have alternatives : L.BitVec.toNat b = 0 ∨ L.BitVec.toNat b = 1 ∨ L.BitVec.toNat b = 2 ∨ L.BitVec.toNat b = 3 := by omega
+  rcases alternatives with zero | one | two | three
+  · exact L.Or.inl (L.BitVec.eq_of_toNat_eq (by simpa using zero))
+  · exact L.Or.inr (L.Or.inl (L.BitVec.eq_of_toNat_eq (by simpa using one)))
+  · exact L.Or.inr (L.Or.inr (L.Or.inl (L.BitVec.eq_of_toNat_eq (by simpa using two))))
+  · exact L.Or.inr (L.Or.inr (L.Or.inr (L.BitVec.eq_of_toNat_eq (by simpa using three))))
 
 @[simp] theorem decode_encodeBool (b : L.Bool) : decodeBool (encodeBool b) = b := by
   cases b <;> rfl

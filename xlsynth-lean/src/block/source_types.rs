@@ -5,21 +5,45 @@
 //! BX interface validation uses [`source_shape`] to check widths and tuple
 //! positions against block IR. The readable emitter keeps the declarations
 //! themselves so it can turn the same positions back into named fields.
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use xlsynth_pir::ir;
 
 /// A source type declaration used by the executable equations and codecs.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct TypeDecl {
-    pub(super) name: String,
-    pub(super) fields: Vec<StructField>,
+pub(super) enum TypeDecl {
+    /// An unsigned two-bit enum with distinct named physical encodings.
+    Enum {
+        name: String,
+        width: usize,
+        members: Vec<EnumMember>,
+    },
+    /// A nonempty struct whose ordered fields determine its physical tuple
+    /// shape.
+    Struct {
+        name: String,
+        fields: Vec<StructField>,
+    },
+    /// A named reference to a supported type, retaining alias-chain identity.
+    Alias { name: String, target: SourceType },
 }
 
 impl TypeDecl {
+    /// The declared source type name.
     pub(super) fn name(&self) -> &str {
-        &self.name
+        match self {
+            Self::Enum { name, .. } | Self::Struct { name, .. } | Self::Alias { name, .. } => name,
+        }
     }
+}
+
+/// One named, native-evaluated enum encoding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct EnumMember {
+    /// DSLX constructor name.
+    pub(super) name: String,
+    /// Physical encoding, validated to be distinct and less than four.
+    pub(super) value: u64,
 }
 
 /// A source field in declaration order and its nominal or primitive type.
@@ -49,8 +73,12 @@ pub(super) enum SourceType {
         element: Box<SourceType>,
         size: usize,
     },
+    /// A reference to an enum declaration in the same catalogue.
+    Enum { name: String },
     /// A reference to a struct declaration in the same catalogue.
     Struct { name: String },
+    /// A reference to an alias declaration in the same catalogue.
+    Alias { name: String },
 }
 
 /// Carries the checked BX port and register types into the readable Lean model.
@@ -78,6 +106,34 @@ fn declaration<'a>(declarations: &'a [TypeDecl], name: &str) -> Result<&'a TypeD
         .with_context(|| format!("unknown supported source type {name}"))
 }
 
+/// Expand transparent aliases while preserving named struct and enum
+/// identities.
+///
+/// Two arrays or tuples can agree even when their elements use different
+/// aliases. Compare their resolved types before inferring a shared element
+/// type.
+pub(super) fn resolve_aliases(ty: &SourceType, declarations: &[TypeDecl]) -> Result<SourceType> {
+    match ty {
+        SourceType::Alias { name } => {
+            let TypeDecl::Alias { target, .. } = declaration(declarations, name)? else {
+                bail!("source type {name} is not an alias")
+            };
+            resolve_aliases(target, declarations)
+        }
+        SourceType::Tuple { members } => Ok(SourceType::Tuple {
+            members: members
+                .iter()
+                .map(|ty| resolve_aliases(ty, declarations))
+                .collect::<Result<_>>()?,
+        }),
+        SourceType::Array { element, size } => Ok(SourceType::Array {
+            element: Box::new(resolve_aliases(element, declarations)?),
+            size: *size,
+        }),
+        nominal_or_primitive => Ok(nominal_or_primitive.clone()),
+    }
+}
+
 /// Erase nominal types to the physical shapes used by block IR.
 ///
 /// Array lengths survive erasure even when a named element becomes a tuple or
@@ -99,12 +155,22 @@ pub(super) fn source_shape(
                 .map(|ty| source_shape(ty, declarations).map(Box::new))
                 .collect::<Result<_>>()?,
         )),
-        SourceType::Struct { name } => Ok(ir::Type::Tuple(
-            declaration(declarations, name)?
-                .fields
-                .iter()
-                .map(|field| source_shape(&field.source_type, declarations).map(Box::new))
-                .collect::<Result<_>>()?,
-        )),
+        SourceType::Enum { name } => match declaration(declarations, name)? {
+            TypeDecl::Enum { width, .. } => Ok(ir::Type::Bits(*width)),
+            _ => bail!("source type {name} is not an enum"),
+        },
+        SourceType::Struct { name } => match declaration(declarations, name)? {
+            TypeDecl::Struct { fields, .. } => Ok(ir::Type::Tuple(
+                fields
+                    .iter()
+                    .map(|field| source_shape(&field.source_type, declarations).map(Box::new))
+                    .collect::<Result<_>>()?,
+            )),
+            _ => bail!("source type {name} is not a struct"),
+        },
+        SourceType::Alias { name } => match declaration(declarations, name)? {
+            TypeDecl::Alias { target, .. } => source_shape(target, declarations),
+            _ => bail!("source type {name} is not an alias"),
+        },
     }
 }
