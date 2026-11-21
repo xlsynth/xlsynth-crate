@@ -48,16 +48,20 @@ impl EditPlan {
             added: vec![],
             first_net: netlist.nets.len(),
         };
-        let original = node(driver.instance)?;
+        let original = node(driver.binding.instance.0)?;
         let mut insert = |mut instance: Instance, output: usize, sinks: &[Sink]| -> Result<usize> {
             let net = plan.first_net + plan.added.len();
             instance.connections[output].1 = NetRef::Simple(NetIndex(net));
             plan.added.push(instance);
             for sink in sinks {
-                if !plan.changed.contains_key(&sink.instance) {
-                    plan.changed.insert(sink.instance, node(sink.instance)?);
+                let PinConnection {
+                    instance: InstIndex(i),
+                    connection,
+                } = sink.binding;
+                if !plan.changed.contains_key(&i) {
+                    plan.changed.insert(i, node(i)?);
                 }
-                plan.changed.get_mut(&sink.instance).unwrap().connections[sink.connection].1 =
+                plan.changed.get_mut(&i).unwrap().connections[connection].1 =
                     NetRef::Simple(NetIndex(net));
             }
             Ok(net)
@@ -70,8 +74,8 @@ impl EditPlan {
                     .ok_or_else(|| anyhow!("missing replacement"))?;
                 let mut replacement = original;
                 replacement.cell = new.index;
-                replacement.connections[driver.output_connection].0 = new.output.clone();
-                plan.changed.insert(driver.instance, replacement);
+                replacement.connections[driver.binding.connection].0 = new.output.clone();
+                plan.changed.insert(driver.binding.instance.0, replacement);
             }
             FanoutEdit::Replicate { groups } => {
                 for part in partition(&driver.sinks, *groups, driver.fixed_output_load)
@@ -81,7 +85,7 @@ impl EditPlan {
                     if part.is_empty() {
                         continue;
                     }
-                    insert(original.clone(), driver.output_connection, part)?;
+                    insert(original.clone(), driver.binding.connection, part)?;
                 }
             }
             FanoutEdit::Buffer {

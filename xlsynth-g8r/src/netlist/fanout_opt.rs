@@ -11,10 +11,11 @@
 
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty_model::{Library, Pin, PinDirection};
+use crate::netlist::connectivity::PinConnection;
 use crate::netlist::io::resolve_symbol;
 use crate::netlist::mapped::MappedNetlist;
 use crate::netlist::parse::{
-    AssignExpr, Net, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, PortDirection,
+    AssignExpr, InstIndex, Net, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, PortDirection,
 };
 use crate::netlist::report::build_area_report;
 use crate::netlist::sta::{
@@ -73,16 +74,14 @@ struct CellChoice {
 /// One rewirable scalar input-pin load.
 #[derive(Clone, Debug)]
 struct Sink {
-    instance: usize,
-    connection: usize,
+    binding: PinConnection,
     capacitance: f64,
 }
 
 /// Electrical information for one uniquely driven scalar net.
 #[derive(Clone, Debug)]
 struct Driver {
-    instance: usize,
-    output_connection: usize,
+    binding: PinConnection,
     net: usize,
     sinks: Vec<Sink>,
     load: [f64; 2],
@@ -459,8 +458,10 @@ fn graph(
             if p.direction == PinDirection::Input as i32 {
                 let cap = pin_cap(p);
                 sinks.entry(n).or_default().push(Sink {
-                    instance: i,
-                    connection: j,
+                    binding: PinConnection {
+                        instance: InstIndex(i),
+                        connection: j,
+                    },
                     // Each moved sink carries its affine wire contribution.
                     // The constant term is common to all used group outputs.
                     capacitance: cap[0].max(cap[1]) + options.wire_load.capacitance_per_sink,
@@ -479,8 +480,10 @@ fn graph(
             } else if p.direction == PinDirection::Output as i32 {
                 ensure!(seen_drivers.insert(n), "multiple cell drivers");
                 drivers.push(Driver {
-                    instance: i,
-                    output_connection: j,
+                    binding: PinConnection {
+                        instance: InstIndex(i),
+                        connection: j,
+                    },
                     net: n,
                     sinks: vec![],
                     load: [0.0; 2],
@@ -615,7 +618,7 @@ fn report_metrics(
         timing_queries: sta.timing_query_diagnostic_counts,
     };
     for d in &g.drivers {
-        let inst = &netlist.module.instances[d.instance];
+        let inst = &netlist.module.instances[d.binding.instance.0];
         let name = resolve_symbol(&netlist.interner, inst.type_name, "cell")?;
         let cell = library
             .cells
@@ -624,7 +627,7 @@ fn report_metrics(
             .ok_or_else(|| anyhow!("unknown cell"))?;
         let pname = resolve_symbol(
             &netlist.interner,
-            inst.connections[d.output_connection].0,
+            inst.connections[d.binding.connection].0,
             "pin",
         )?;
         let pin = cell
@@ -644,7 +647,7 @@ fn report_metrics(
         m.max_capacitance_violations += usize::from(pin.max_capacitance.is_some_and(|v| load > v));
         m.max_transition_violations += usize::from(pin.max_transition.is_some_and(|v| slew > v));
         for sink in &d.sinks {
-            let si = &netlist.module.instances[sink.instance];
+            let si = &netlist.module.instances[sink.binding.instance.0];
             let sn = resolve_symbol(&netlist.interner, si.type_name, "sink cell")?;
             let sc = library
                 .cells
@@ -653,7 +656,7 @@ fn report_metrics(
                 .ok_or_else(|| anyhow!("unknown sink"))?;
             let sp = resolve_symbol(
                 &netlist.interner,
-                si.connections[sink.connection].0,
+                si.connections[sink.binding.connection].0,
                 "sink pin",
             )?;
             let bound = sc
@@ -675,8 +678,8 @@ fn partition(sinks: &[Sink], groups: usize, initial_load: f64) -> Vec<Vec<Sink>>
     ordered.sort_by(|a, b| {
         b.capacitance
             .total_cmp(&a.capacitance)
-            .then(a.instance.cmp(&b.instance))
-            .then(a.connection.cmp(&b.connection))
+            .then(a.binding.instance.0.cmp(&b.binding.instance.0))
+            .then(a.binding.connection.cmp(&b.binding.connection))
     });
     let mut result = vec![vec![]; groups];
     let mut load = vec![0.0; groups];
@@ -779,12 +782,12 @@ fn input_context(
     sta: &StaReport,
 ) -> Result<Vec<(String, [f64; 4])>> {
     let mut out = Vec::new();
-    for (j, (pin, r)) in netlist.module.instances[driver.instance]
+    for (j, (pin, r)) in netlist.module.instances[driver.binding.instance.0]
         .connections
         .iter()
         .enumerate()
     {
-        if j == driver.output_connection {
+        if j == driver.binding.connection {
             continue;
         }
         let name = resolve_symbol(&netlist.interner, *pin, "pin")?;
@@ -871,7 +874,7 @@ pub fn optimize_fanout(
         for d in &g.drivers {
             let name = resolve_symbol(
                 &netlist.interner,
-                netlist.module.instances[d.instance].type_name,
+                netlist.module.instances[d.binding.instance.0].type_name,
                 "cell",
             )?;
             let Some(c) = cells.iter().find(|c| c.name == name) else {
@@ -892,7 +895,7 @@ pub fn optimize_fanout(
                 || slew > d.slew_bound
                 || slew > p.max_transition.unwrap_or(f64::INFINITY);
             if d.sinks.len() >= options.fanout_trigger || overloaded {
-                targets.push((slew, d.instance, d.clone(), c.clone()));
+                targets.push((slew, d.binding.instance.0, d.clone(), c.clone()));
             }
         }
         targets.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -927,7 +930,7 @@ pub fn optimize_fanout(
             for kind in candidates(&driver, &old, &cells) {
                 let instance = resolve_symbol(
                     &netlist.interner,
-                    netlist.module.instances[driver.instance].instance_name,
+                    netlist.module.instances[driver.binding.instance.0].instance_name,
                     "instance",
                 )?;
                 let plan = edit::EditPlan::new(netlist, &g, &driver, &kind, &cells)?;

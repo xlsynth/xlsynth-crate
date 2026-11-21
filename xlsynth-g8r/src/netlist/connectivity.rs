@@ -8,6 +8,7 @@
 //! consumers walk the graph.
 
 pub(crate) mod directed;
+pub mod exact;
 
 use crate::liberty::IndexedLibrary;
 use crate::liberty_model::PinDirection;
@@ -17,6 +18,15 @@ use anyhow::Result;
 use std::collections::HashMap;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
+
+/// Exact position of a pin binding in one netlist snapshot, including duplicate
+/// bindings to one port. Appending instances preserves existing positions;
+/// deleting, reordering or replacing connections requires revalidation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PinConnection {
+    pub instance: InstIndex,
+    pub connection: usize,
+}
 
 /// Instances and ports that connect to one normalized net bit.
 pub struct BitNeighbors {
