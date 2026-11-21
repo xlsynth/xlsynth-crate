@@ -406,7 +406,7 @@ top block consumer(x: bits[4], a: bits[4][2], y: bits[8], ys: bits[8][2]) {
                 ))
             })
             .unwrap();
-        let module = format!(
+        let mut module = format!(
             r#"-- SPDX-License-Identifier: Apache-2.0
 import XlsynthLean.IR
 
@@ -429,6 +429,7 @@ def rows : Rows := #[#[1, 2].toVector, #[3, 4].toVector].toVector
 end Example
 "#
         );
+        crate::block::library_notation::add_to_module(&mut module);
         assert_eq!(module, include_str!("../tests/goldens/shared_helpers.lean"));
     }
 }

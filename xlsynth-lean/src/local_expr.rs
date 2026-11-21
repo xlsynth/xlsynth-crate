@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Lean expressions for local values in a PIR function or block graph.
+//!
+//! Function models use ordinary Lean operators and field notation. Block
+//! models also have source-named binders, so the renderer spells library
+//! operations explicitly using aliases supplied by the enclosing block file.
 
 use std::fmt::Write as _;
 
 use xlsynth_pir::ir::{Binop, NaryOp, NodeGraph, NodePayload as P, NodeRef, Type, Unop};
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
-/// Named proof nodes may be applications, and readable equations may inline
-/// entire expressions. Group either before applying a projection or operator.
+/// A Lean operand with the grouping needed for a projection or operator.
+///
+/// Function nodes refer to local bindings by name. A block equation can inline
+/// a whole expression, which needs parentheses when used as an operand.
 pub(crate) enum LeanOperand {
     Atom(String),
     Expression(String),
@@ -54,15 +60,28 @@ pub(crate) fn write_elaboration_limits<'a>(
     source: &mut String,
     graphs: impl IntoIterator<Item = &'a NodeGraph>,
 ) {
-    let mut max_nodes = 0;
+    write_body_elaboration_limits(source, graphs.into_iter().map(|g| (g, g.nodes.len())));
+}
+
+/// Size Lean's recursion and instance-search limits for the generated
+/// definitions.
+///
+/// Pair each graph with the size of its largest generated body. Splitting a
+/// graph bounds its local let depth, but any nested aggregate type in that
+/// graph can still require a large `Packed` instance.
+pub(crate) fn write_body_elaboration_limits<'a>(
+    source: &mut String,
+    graphs: impl IntoIterator<Item = (&'a NodeGraph, usize)>,
+) {
+    let mut max_body = 0;
     let mut instance_size = 1;
-    for graph in graphs {
-        max_nodes = max_nodes.max(graph.nodes.len());
+    for (graph, body_size) in graphs {
+        max_body = max_body.max(body_size);
         for n in &graph.nodes {
             instance_size = instance_size.max(packed_instance_size(&n.ty));
         }
     }
-    let depth = max_nodes.max(instance_size);
+    let depth = max_body.max(instance_size);
     if depth >= 256 {
         writeln!(
             source,
@@ -82,24 +101,29 @@ pub(crate) fn write_elaboration_limits<'a>(
 }
 
 /// Preserve operand order while keeping the Lean expression depth logarithmic.
-fn balanced_infix(operands: &[String], separator: &str) -> String {
-    fn emit(out: &mut String, operands: &[String], separator: &str) {
+///
+/// Each pair is parenthesized. Use an empty prefix and an infix separator for
+/// operators, or a function name with trailing space and a space separator
+/// for applications. An empty input produces no term.
+pub(crate) fn balanced(operands: &[String], prefix: &str, separator: &str) -> String {
+    fn emit(out: &mut String, operands: &[String], prefix: &str, separator: &str) {
         match operands {
             [] => {}
             [operand] => out.push_str(operand),
             _ => {
                 let (left, right) = operands.split_at(operands.len() / 2);
                 out.push('(');
-                emit(out, left, separator);
+                out.push_str(prefix);
+                emit(out, left, prefix, separator);
                 out.push_str(separator);
-                emit(out, right, separator);
+                emit(out, right, prefix, separator);
                 out.push(')');
             }
         }
     }
 
     let mut expression = String::new();
-    emit(&mut expression, operands, separator);
+    emit(&mut expression, operands, prefix, separator);
     expression
 }
 
@@ -111,6 +135,7 @@ fn tuple(fields: &[String]) -> String {
     }
 }
 
+/// Select the Lean library spellings available in the enclosing module.
 #[derive(Clone, Copy)]
 pub(crate) enum LocalRenderer {
     Function,
@@ -120,23 +145,16 @@ pub(crate) enum LocalRenderer {
 const IR: &str = "_root_.XlsynthLean.IR";
 
 impl LocalRenderer {
-    // Block fields retain source names, which may shadow library names in
-    // dependent record declarations. Keep the public function source spelling.
+    /// Prefix library names in blocks, where fields can shadow later types.
     fn root(self) -> &'static str {
         match self {
             Self::Function => "",
-            Self::Block => "_root_.",
+            Self::Block => "L.",
         }
     }
 
-    fn limited_offset(self, offset: &str, width: usize) -> String {
-        let min = match self {
-            Self::Function => "min",
-            Self::Block => "_root_.Nat.min",
-        };
-        format!("({min} {offset}.toNat {width})")
-    }
-
+    /// Render the physical PIR type, ending tuple products with Lean's unit
+    /// type.
     pub(crate) fn lean_type(self, ty: &Type) -> String {
         let root = self.root();
         match ty {
@@ -158,12 +176,19 @@ impl LocalRenderer {
         }
     }
 
-    /// `Array.toVector` avoids unfolding computed elements in a `#v` size
-    /// proof. Explicit append lengths keep size checks local to each leaf.
-    fn vector_literal(self, fields: &[String]) -> String {
+    /// Render the given Lean element expressions in order as a fixed-length
+    /// vector.
+    ///
+    /// `Array.toVector` avoids unfolding computed elements to prove a literal's
+    /// size. Balanced appends with explicit lengths keep those proofs small.
+    pub(crate) fn vector_literal(self, fields: &[String]) -> String {
         let root = self.root();
         if fields.len() <= 64 {
-            return format!("#[{}].toVector", fields.join(", "));
+            let fields = fields.join(", ");
+            return match self {
+                Self::Function => format!("#[{fields}].toVector"),
+                Self::Block => format!("(L.Array.toVector #[{fields}])"),
+            };
         }
         let (left, right) = fields.split_at(fields.len() / 2);
         format!(
@@ -175,6 +200,8 @@ impl LocalRenderer {
         )
     }
 
+    /// Render literal bits at their declared width and preserve aggregate
+    /// nesting.
     pub(crate) fn literal(self, value: &IrValue) -> String {
         let fields = |xs: &[IrValue]| xs.iter().map(|x| self.literal(x)).collect::<Vec<_>>();
         match value {
@@ -190,36 +217,102 @@ impl LocalRenderer {
         }
     }
 
-    /// The declared result width is significant for ordinary multiply and
-    /// shifts.
+    /// Keep ordinary Lean syntax in public function models and name the library
+    /// operations explicitly in block equations.
+    fn infix(self, name: &str, symbol: &str, a: &str, b: &str) -> String {
+        match self {
+            Self::Function => format!("{a} {symbol} {b}"),
+            Self::Block => format!("L.BitVec.{name} {a} {b}"),
+        }
+    }
+
+    /// Render a bit-vector method whose receiver is its first explicit
+    /// argument.
+    fn method(self, name: &str, a: &str, b: &str) -> String {
+        match self {
+            Self::Function => format!("{a}.{name} {b}"),
+            Self::Block => format!("L.BitVec.{name} {a} {b}"),
+        }
+    }
+
+    /// Render a width-changing operation with the width first in the library
+    /// call.
+    fn resize(self, name: &str, w: usize, a: &str) -> String {
+        match self {
+            Self::Function => format!("{a}.{name} {w}"),
+            Self::Block => format!("L.BitVec.{name} {w} {a}"),
+        }
+    }
+
+    /// Complement all bits, preserving the operand's width.
+    fn complement(self, a: &str) -> String {
+        match self {
+            Self::Function => format!("~~~{a}"),
+            Self::Block => format!("L.BitVec.not {a}"),
+        }
+    }
+
+    /// Render an unsigned index, grouping the block call as a single argument.
+    fn to_nat(self, a: &str) -> String {
+        match self {
+            Self::Function => format!("{a}.toNat"),
+            Self::Block => format!("(L.BitVec.toNat {a})"),
+        }
+    }
+
+    /// Clamp offsets to the width where all larger offsets have the same
+    /// result.
+    fn limited_offset(self, a: &str, w: usize) -> String {
+        let offset = self.to_nat(a);
+        match self {
+            Self::Function => format!("(min {offset} {w})"),
+            Self::Block => format!("(L.Nat.min {offset} {w})"),
+        }
+    }
+
+    /// Render a binary node using its declared result width.
+    ///
+    /// Multiplication resizes both operands before the operation. Shifts cap
+    /// the unsigned shift amount at that width.
     fn binary<E>(self, op: Binop, a: &str, b: &str, w: usize) -> Result<String, RenderError<E>> {
         let root = self.root();
         Ok(match op {
-            Binop::Add => format!("{a} + {b}"),
-            Binop::Sub => format!("{a} - {b}"),
-            Binop::Umul => format!("{a}.setWidth {w} * {b}.setWidth {w}"),
-            Binop::Smul => format!("{a}.signExtend {w} * {b}.signExtend {w}"),
+            Binop::Add => self.infix("add", "+", a, b),
+            Binop::Sub => self.infix("sub", "-", a, b),
+            Binop::Umul | Binop::Smul => {
+                let resize = if op == Binop::Umul {
+                    "setWidth"
+                } else {
+                    "signExtend"
+                };
+                let a = self.resize(resize, w, a);
+                let b = self.resize(resize, w, b);
+                match self {
+                    Self::Function => format!("{a} * {b}"),
+                    Self::Block => format!("L.BitVec.mul ({a}) ({b})"),
+                }
+            }
             Binop::Udiv => format!("{root}BitVec.smtUDiv {a} {b}"),
             Binop::Sdiv => format!("{IR}.sdiv {a} {b}"),
-            Binop::Umod => format!("if {b} == 0 then 0 else {a} % {b}"),
-            Binop::Smod => format!("if {b} == 0 then 0 else {a}.srem {b}"),
-            Binop::Shll => format!("{a} <<< {}", self.limited_offset(b, w)),
-            Binop::Shrl => format!("{a} >>> {}", self.limited_offset(b, w)),
-            Binop::Shra => format!("{a}.sshiftRight {}", self.limited_offset(b, w)),
+            Binop::Umod => format!("if {b} == 0 then 0 else {}", self.infix("umod", "%", a, b)),
+            Binop::Smod => format!("if {b} == 0 then 0 else {}", self.method("srem", a, b)),
+            Binop::Shll => self.infix("shiftLeft", "<<<", a, &self.limited_offset(b, w)),
+            Binop::Shrl => self.infix("ushiftRight", ">>>", a, &self.limited_offset(b, w)),
+            Binop::Shra => self.method("sshiftRight", a, &self.limited_offset(b, w)),
             Binop::Eq => format!("{root}BitVec.ofBool ({a} == {b})"),
             Binop::Ne => format!("{root}BitVec.ofBool ({a} != {b})"),
-            Binop::Ult => format!("{root}BitVec.ofBool ({a}.ult {b})"),
-            Binop::Ule => format!("{root}BitVec.ofBool ({a}.ule {b})"),
-            Binop::Ugt => format!("{root}BitVec.ofBool ({b}.ult {a})"),
-            Binop::Uge => format!("{root}BitVec.ofBool ({b}.ule {a})"),
-            Binop::Slt => format!("{root}BitVec.ofBool ({a}.slt {b})"),
-            Binop::Sle => format!("{root}BitVec.ofBool ({a}.sle {b})"),
-            Binop::Sgt => format!("{root}BitVec.ofBool ({b}.slt {a})"),
-            Binop::Sge => format!("{root}BitVec.ofBool ({b}.sle {a})"),
+            Binop::Ult => format!("{root}BitVec.ofBool ({})", self.method("ult", a, b)),
+            Binop::Ule => format!("{root}BitVec.ofBool ({})", self.method("ule", a, b)),
+            Binop::Ugt => format!("{root}BitVec.ofBool ({})", self.method("ult", b, a)),
+            Binop::Uge => format!("{root}BitVec.ofBool ({})", self.method("ule", b, a)),
+            Binop::Slt => format!("{root}BitVec.ofBool ({})", self.method("slt", a, b)),
+            Binop::Sle => format!("{root}BitVec.ofBool ({})", self.method("sle", a, b)),
+            Binop::Sgt => format!("{root}BitVec.ofBool ({})", self.method("slt", b, a)),
+            Binop::Sge => format!("{root}BitVec.ofBool ({})", self.method("sle", b, a)),
             Binop::Gate => {
                 let default = match self {
                     Self::Function => "default",
-                    Self::Block => "_root_.Inhabited.default",
+                    Self::Block => "L.Inhabited.default",
                 };
                 format!("if {a} == 1 then {b} else {default}")
             }
@@ -227,8 +320,11 @@ impl LocalRenderer {
         })
     }
 
-    /// Resolve operands only when used. The caller handles graph-specific
-    /// bindings, effects and calls, and supplies diagnostic source context.
+    /// Render a local node, resolving each operand through the caller.
+    ///
+    /// An unsupported node may need graph-specific handling for bindings,
+    /// effects or calls. Invalid payloads and operand errors carry separate
+    /// diagnostics that the caller can report with source context.
     pub(crate) fn local_rhs<E>(
         self,
         graph: &NodeGraph,
@@ -248,11 +344,17 @@ impl LocalRenderer {
             P::Literal(v) => self.literal(v),
             P::Tuple(rs) => tuple(&names(rs)?),
             P::Array(rs) => self.vector_literal(&names(rs)?),
-            P::ArrayConcat(rs) => balanced_infix(&names(rs)?, " ++ "),
+            P::ArrayConcat(rs) => match self {
+                Self::Function => balanced(&names(rs)?, "", " ++ "),
+                Self::Block => balanced(&names(rs)?, "L.Vector.append ", " "),
+            },
             P::TupleIndex { tuple, index } => format!("{}{}.1", name(*tuple)?, ".2".repeat(*index)),
             P::ArrayIndex { array, indices, .. } => {
                 indices.iter().try_fold(name(*array)?, |base, i| {
-                    Ok(format!("({IR}.arrayIndex {base} {}.toNat)", name(*i)?))
+                    Ok(format!(
+                        "({IR}.arrayIndex {base} {})",
+                        self.to_nat(&name(*i)?)
+                    ))
                 })?
             }
             P::ArrayUpdate {
@@ -269,12 +371,15 @@ impl LocalRenderer {
                 // operands.
                 let mut update = format!("(fun _ => {value})");
                 for index in inner.iter().rev() {
-                    update = format!("({IR}.arrayModify · {}.toNat {update})", name(*index)?);
+                    update = format!(
+                        "({IR}.arrayModify · {} {update})",
+                        self.to_nat(&name(*index)?)
+                    );
                 }
                 format!(
-                    "{IR}.arrayModify {} {}.toNat {update}",
+                    "{IR}.arrayModify {} {} {update}",
                     name(*array)?,
-                    name(*outer)?
+                    self.to_nat(&name(*outer)?)
                 )
             }
             P::ArraySlice {
@@ -282,45 +387,57 @@ impl LocalRenderer {
                 start,
                 width,
             } => format!(
-                "{IR}.arraySlice {width} {} {}.toNat",
+                "{IR}.arraySlice {width} {} {}",
                 name(*array)?,
-                name(*start)?
+                self.to_nat(&name(*start)?)
             ),
             P::Binop(op, a, b) => self.binary(*op, &name(*a)?, &name(*b)?, width(&n.ty)?)?,
             P::Unop(op, a) => {
                 let a = name(*a)?;
                 match op {
                     Unop::Identity => a,
-                    Unop::Neg => format!("-{a}"),
-                    Unop::Not => format!("~~~{a}"),
-                    Unop::Reverse => format!("{a}.reverse"),
+                    Unop::Neg => match self {
+                        Self::Function => format!("-{a}"),
+                        Self::Block => format!("L.BitVec.neg {a}"),
+                    },
+                    Unop::Not => self.complement(&a),
+                    Unop::Reverse => match self {
+                        Self::Function => format!("{a}.reverse"),
+                        Self::Block => format!("L.BitVec.reverse {a}"),
+                    },
                     Unop::OrReduce => format!("{root}BitVec.ofBool ({a} != 0)"),
                     Unop::AndReduce => {
                         format!("{root}BitVec.ofBool ({a} == {root}BitVec.allOnes _)")
                     }
-                    Unop::XorReduce => format!("{a}.cpop.setWidth 1"),
+                    Unop::XorReduce => match self {
+                        Self::Function => format!("{a}.cpop.setWidth 1"),
+                        Self::Block => format!("L.BitVec.setWidth 1 (L.BitVec.cpop {a})"),
+                    },
                 }
             }
             P::Nary(NaryOp::Concat, rs) if rs.is_empty() => "0".to_owned(),
             P::Nary(op, rs) => {
-                let sep = match op {
-                    NaryOp::And | NaryOp::Nand => " &&& ",
-                    NaryOp::Or | NaryOp::Nor => " ||| ",
-                    NaryOp::Xor => " ^^^ ",
-                    NaryOp::Concat => " ++ ",
+                let (named, infix) = match op {
+                    NaryOp::And | NaryOp::Nand => ("L.BitVec.and ", " &&& "),
+                    NaryOp::Or | NaryOp::Nor => ("L.BitVec.or ", " ||| "),
+                    NaryOp::Xor => ("L.BitVec.xor ", " ^^^ "),
+                    NaryOp::Concat => ("L.BitVec.append ", " ++ "),
                 };
-                let args = balanced_infix(&names(rs)?, sep);
+                let args = match self {
+                    Self::Function => balanced(&names(rs)?, "", infix),
+                    Self::Block => balanced(&names(rs)?, named, " "),
+                };
                 if matches!(op, NaryOp::Nand | NaryOp::Nor) {
-                    format!("~~~({args})")
+                    self.complement(&format!("({args})"))
                 } else {
                     args
                 }
             }
             P::SignExt { arg, new_bit_count } => {
-                format!("{}.signExtend {new_bit_count}", name(*arg)?)
+                self.resize("signExtend", *new_bit_count, &name(*arg)?)
             }
             P::ZeroExt { arg, new_bit_count } => {
-                format!("{}.setWidth {new_bit_count}", name(*arg)?)
+                self.resize("setWidth", *new_bit_count, &name(*arg)?)
             }
             P::BitSlice { arg, start, width } => {
                 format!("{root}BitVec.extractLsb' {start} {width} {}", name(*arg)?)
@@ -379,12 +496,13 @@ impl LocalRenderer {
                 let fallback = default
                     .or_else(|| cases.last().copied())
                     .ok_or_else(|| RenderError::Invalid("sel has no cases or default".into()))?;
-                format!(
-                    "#[{}].getD {}.toNat {}",
-                    names(cases)?.join(", "),
-                    name(*selector)?,
-                    name(fallback)?
-                )
+                let cases = names(cases)?.join(", ");
+                let index = self.to_nat(&name(*selector)?);
+                let fallback = name(fallback)?;
+                match self {
+                    Self::Function => format!("#[{cases}].getD {index} {fallback}"),
+                    Self::Block => format!("L.Array.getD #[{cases}] {index} {fallback}"),
+                }
             }
             _ => return Err(RenderError::Unsupported),
         })
