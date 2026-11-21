@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: Apache-2.0
+
+#![no_main]
+
+//! Compares each Lean clock's outputs and committed registers with PIR.
+
+use std::sync::OnceLock;
+
+use libfuzzer_sys::fuzz_target;
+use rand::{SeedableRng, rngs::StdRng};
+use xlsynth_ir_value::IrValue;
+use xlsynth_lean::LeanEvaluator;
+use xlsynth_lean_fuzz::generate_lean_block;
+use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
+use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
+
+/// Shares the compiled Lean support modules across fuzz cases in this process.
+static EVALUATOR: OnceLock<LeanEvaluator> = OnceLock::new();
+
+/// Replays the same starting registers and eight input vectors in Lean and PIR.
+///
+/// Each evaluator carries its own next state. Checking both outputs and
+/// registers on every clock exposes a wrong write even if no later output
+/// reads the register.
+fn check_case(data: &[u8]) {
+    let mut rng = StdRng::from_seed(*blake3::hash(data).as_bytes());
+    let package = generate_lean_block(data, &mut rng);
+    let block = package.get_top_block().expect("generated top block");
+    let reset = block.reset.as_ref().expect("required register reset");
+    let reset_index = block.input_ports().position(|p| p == reset.port).unwrap();
+    let initial = generate_mixed_values_with_rng(&mut rng, block.registers.iter().map(|r| &r.ty));
+    // The first reset observes arbitrary old state. Reassert reset after
+    // ordinary clocks to exercise reset priority over enabled/held writes.
+    let inputs: Vec<_> = (0..8)
+        .map(|clock| {
+            let mut values = generate_mixed_values_with_rng(
+                &mut rng,
+                block.input_ports().map(|p| block.port_type(p)),
+            );
+            let asserted = matches!(clock, 0 | 4);
+            values[reset_index] =
+                IrValue::make_ubits(1, u64::from(asserted != reset.active_low)).unwrap();
+            values
+        })
+        .collect();
+    let ir = package.to_string();
+    let actual = EVALUATOR
+        .get()
+        .expect("Lean evaluator initialized at startup")
+        .eval_block_trace(&package, block, &initial, &inputs)
+        .unwrap_or_else(|err| {
+            panic!("Lean evaluation failed: {err}\n{ir}\ninitial={initial:?}\ninputs={inputs:?}")
+        });
+    assert_eq!(actual.len(), inputs.len(), "wrong trace length\n{ir}");
+    let evaluator =
+        BlockEvaluator::prepare(&package, &block.name).expect("prepare generated block");
+    let mut state = evaluator
+        .initial_state(RegisterInit::Supplied(initial))
+        .expect("initialize generated registers");
+    for (clock, (inputs, result)) in inputs.iter().zip(actual).enumerate() {
+        let cycle = evaluator.step(&state, inputs).unwrap_or_else(|err| {
+            panic!("PIR evaluation failed at clock {clock}: {err}\n{ir}\nstate={state:?}\ninputs={inputs:?}")
+        });
+        assert_eq!(
+            result.outputs, cycle.outputs,
+            "outputs at clock {clock}\n{ir}\nstate={state:?}\ninputs={inputs:?}"
+        );
+        assert_eq!(
+            result.next_state,
+            cycle.next_state.values(),
+            "registers at clock {clock}\n{ir}\nstate={state:?}\ninputs={inputs:?}"
+        );
+        state = cycle.next_state;
+    }
+}
+
+// Verifies: Lean and PIR agree on outputs and register values at every clock.
+// Catches: Transient mismatches that a later register write can hide.
+fuzz_target!(init: {
+    let lean = std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the actual Lean executable");
+    EVALUATOR.set(LeanEvaluator::new(lean).expect("initialize Lean evaluator")).unwrap();
+}, |data: &[u8]| {
+    check_case(data);
+});

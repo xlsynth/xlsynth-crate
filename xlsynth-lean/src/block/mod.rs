@@ -14,6 +14,7 @@ mod raw;
 mod segments;
 
 pub use raw::{emit, write_to};
+pub(crate) use raw::{identifier, source_record_value};
 
 /// The block and its package-level context used during emission.
 pub(crate) struct BlockContext<'a> {

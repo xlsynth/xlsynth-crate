@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Run emitted Lean models on concrete inputs and check the resulting traces
+//! and values.
+
 mod common;
 
 use std::path::PathBuf;
@@ -13,6 +16,7 @@ use xlsynth_ir_value::IrBits;
 use xlsynth_lean::{
     LeanError, LeanEvaluator, LeanExportOptions, LeanModuleName, export_gate_fn, write_lean_support,
 };
+use xlsynth_pir::{IrValue, ir_parser::Parser};
 
 static EVALUATOR: OnceLock<LeanEvaluator> = OnceLock::new();
 
@@ -23,6 +27,139 @@ fn evaluator() -> &'static LeanEvaluator {
             .expect("set XLSYNTH_LEAN to the actual Lean executable path");
         LeanEvaluator::new(PathBuf::from(executable)).unwrap()
     })
+}
+
+// Verifies: Trace outputs use old state across simultaneous writes and reset.
+// Catches: Swapping positional fields whose names clash with Lean declarations.
+#[test]
+fn block_trace_observes_old_state_and_carries_simultaneous_writes() {
+    // Exercise positional trace construction with a generated-name collision
+    // and nonalphabetical declaration order in both input and state records.
+    let ir = include_str!("fixtures/block_step.ir")
+        .replace("rst", "recOn")
+        .replace("reg a(", "reg noConfusion(")
+        .replace("register=a", "register=noConfusion");
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    let block = package.get_top_block().unwrap();
+    let word = |n| IrValue::make_ubits(2, n).unwrap();
+    let bit = |n| IrValue::make_ubits(1, n).unwrap();
+    // Starting at (2, 3), swap, reset a with enable low, then hold a.
+    // b samples old a on all three clocks, including the reset clock.
+    let inputs = vec![
+        vec![bit(1), bit(1)],
+        vec![bit(0), bit(0)],
+        vec![bit(1), bit(0)],
+    ];
+    let trace = evaluator()
+        .eval_block_trace(&package, block, &[word(2), word(3)], &inputs)
+        .unwrap();
+    let expected = [(2, [3, 2]), (3, [1, 3]), (1, [1, 1])];
+    assert_eq!(trace.len(), expected.len());
+    for (cycle, (output, next)) in trace.iter().zip(expected) {
+        assert_eq!(cycle.outputs, [word(output)]);
+        assert_eq!(cycle.next_state, next.map(word));
+    }
+}
+
+// Verifies: Array registers carry wide and zero-width tuple fields over clocks.
+// Catches: Reordered elements, lost high bits, or reads of a same-clock write.
+#[test]
+fn block_trace_carries_arrays_of_tuples_across_clocks() {
+    let package = Parser::new(
+        r#"package pipeline
+top block pipeline(clk: clock, data: (bits[3], bits[0], bits[65])[2], index: bits[1], empty: bits[0],
+                   selected: bits[65], old_data: (bits[3], bits[0], bits[65])[2], empty_out: bits[0]) {
+  reg saved((bits[3], bits[0], bits[65])[2])
+  data: (bits[3], bits[0], bits[65])[2] = input_port(name=data, id=1)
+  index: bits[1] = input_port(name=index, id=2)
+  empty: bits[0] = input_port(name=empty, id=3)
+  old: (bits[3], bits[0], bits[65])[2] = register_read(register=saved, id=4)
+  item: (bits[3], bits[0], bits[65]) = array_index(old, indices=[index], id=5)
+  payload: bits[65] = tuple_index(item, index=2, id=6)
+  write: () = register_write(data, register=saved, id=7)
+  empty_out: () = output_port(empty, name=empty_out, id=8)
+  old_data: () = output_port(old, name=old_data, id=9)
+  selected: () = output_port(payload, name=selected, id=10)
+}"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    let high = IrValue::parse_typed("bits[65]:0x10000000000000003").unwrap();
+    let empty = IrValue::parse_typed("bits[0]:0").unwrap();
+    let a = IrValue::make_tuple(&[
+        IrValue::make_ubits(3, 5).unwrap(),
+        empty.clone(),
+        high.clone(),
+    ]);
+    let b = IrValue::parse_typed("(bits[3]:2, bits[0]:0, bits[65]:7)").unwrap();
+    let initial = IrValue::make_array(&[a.clone(), b.clone()]).unwrap();
+    let first = IrValue::make_array(&[b.clone(), a]).unwrap();
+    let second = IrValue::make_array(&[b.clone(), b]).unwrap();
+    let trace = evaluator()
+        .eval_block_trace(
+            &package,
+            package.get_top_block().unwrap(),
+            std::slice::from_ref(&initial),
+            &[
+                vec![first.clone(), IrValue::bool(false), empty.clone()],
+                vec![second.clone(), IrValue::bool(true), empty.clone()],
+            ],
+        )
+        .unwrap();
+    assert_eq!(trace.len(), 2);
+    assert_eq!(trace[0].outputs, [high.clone(), initial, empty.clone()]);
+    assert_eq!(trace[0].next_state, std::slice::from_ref(&first));
+    assert_eq!(trace[1].outputs, [high, first, empty]);
+    assert_eq!(trace[1].next_state, [second]);
+}
+
+// Negative test: A tuple at an array port must report the cycle and type.
+#[test]
+fn block_trace_rejects_equal_width_input_with_the_wrong_shape() {
+    let package = Parser::new(
+        r#"package input_shape
+top block input_shape(data: bits[1][2], out: bits[1][2]) {
+  data: bits[1][2] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    let tuple = IrValue::make_tuple(&[IrValue::bool(false), IrValue::bool(true)]);
+    let error = evaluator()
+        .eval_block_trace(
+            &package,
+            package.get_top_block().unwrap(),
+            &[],
+            &[vec![tuple]],
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "block inputs at cycle 0");
+    assert_eq!(
+        error.root_cause().to_string(),
+        "expected bits[1][2] for «data», got (bits[1], bits[1])"
+    );
+}
+
+// Verifies: Bit 64 survives in the output and the updated register.
+// Catches: Truncation to 64 bits on the round trip through Lean.
+#[test]
+fn block_trace_preserves_bits_above_the_machine_word() {
+    let ir = include_str!("fixtures/block_step.ir").replace("bits[2]", "bits[65]");
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    let high = IrValue::parse_typed("bits[65]:0x10000000000000000").unwrap();
+    let low = IrValue::parse_typed("bits[65]:1").unwrap();
+    let enabled = IrValue::make_ubits(1, 1).unwrap();
+    let trace = evaluator()
+        .eval_block_trace(
+            &package,
+            package.get_top_block().unwrap(),
+            &[high.clone(), low.clone()],
+            &[vec![enabled.clone(), enabled]],
+        )
+        .unwrap();
+    assert_eq!(trace[0].outputs, std::slice::from_ref(&high));
+    assert_eq!(trace[0].next_state, [low, high]);
 }
 
 #[test]
