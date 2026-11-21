@@ -23,6 +23,30 @@ pub(crate) struct GvEvalSequentialCellSpec {
     pub clock: SequentialClockSpec,
 }
 
+/// Identify a physical FF input that determines next_state in either polarity
+/// after binding the instance's constant inputs. Every other pin and prior
+/// state stay unknown. For example, (test & scan) | (!test & data) selects data
+/// when the actual test pin is wired to zero. An unbound test pin makes neither
+/// branch eligible. Unknown formula variables are never assigned defaults.
+pub(crate) fn classify_tied_ff_data(
+    next: &Term,
+    pin_names_and_constants: &HashMap<String, bool>,
+    inputs: &[String],
+) -> Option<String> {
+    // A tie may constrain a physical input only; state variables are not ties.
+    if pin_names_and_constants
+        .keys()
+        .any(|name| !inputs.contains(name))
+    {
+        return None;
+    }
+    let mut values = pin_names_and_constants.clone();
+    inputs
+        .iter()
+        .find(|pin| input_polarity(next, pin, &mut values).is_some())
+        .cloned()
+}
+
 /// Prove that the formula reduces to one untied pin or its complement.
 /// Unbound variables are unknown. Returns true for the inverted polarity.
 pub(crate) fn input_polarity(

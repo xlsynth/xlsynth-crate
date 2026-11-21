@@ -6,6 +6,7 @@ pub mod bench_synth_netlist;
 pub mod bit_ref;
 pub mod cone;
 pub mod connectivity;
+pub mod editability;
 pub mod electrical;
 pub mod emit;
 pub mod fanout_opt;

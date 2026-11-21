@@ -1348,6 +1348,92 @@ pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_model::Cell) -> 
         })
 }
 
+/// Requires both physical data transitions to have characterized timing on the
+/// actual active clock edge under the proven scalar ties of this instance.
+pub(crate) fn has_complete_register_pin_timing(
+    library: &Library,
+    cell: &crate::liberty_model::Cell,
+    pin: &Pin,
+    known_pin_values: &HashMap<String, bool>,
+) -> bool {
+    let Ok(Some(clock)) =
+        crate::netlist::sequential_liberty::get_sequential_ff_clock_spec(cell, library)
+    else {
+        return false;
+    };
+    let name = library.resolve_string(&pin.name);
+    if pin.is_clocking_pin
+        || name == clock.pin_name
+        || cell.sequential[0].clock_expr.is_empty()
+        || !cell.pins.iter().any(|p| {
+            p.direction == PinDirection::Input as i32
+                && library.resolve_string(&p.name) == clock.pin_name
+        })
+    {
+        return false;
+    }
+    let capture = pin.direction == PinDirection::Input as i32;
+    if !capture && pin.direction != PinDirection::Output as i32 {
+        return false;
+    }
+    let active = match (capture, clock.is_negated) {
+        (true, false) => StaTimingType::SetupRising,
+        (true, true) => StaTimingType::SetupFalling,
+        (false, false) => StaTimingType::RisingEdge,
+        (false, true) => StaTimingType::FallingEdge,
+    };
+    let query = if capture {
+        TimingTableQuery::ideal_clock_setup(0.0)
+    } else {
+        TimingTableQuery::ideal_clock_to_output(0.0)
+    };
+    let mut priced = [false; 2];
+    let mut evaluation = TimingEvaluationContext::new(library);
+    for arc in &pin.timing_arcs {
+        if StaTimingType::from_arc(arc, library) != active
+            || library.resolve_string(&arc.related_pin) != clock.pin_name
+        {
+            continue;
+        }
+        let guard = library.resolve_string(&arc.when);
+        if !guard.is_empty()
+            && !parse_formula(guard)
+                .is_ok_and(|t| t.evaluate_partial(known_pin_values) == Some(true))
+        {
+            continue;
+        }
+        for (edge, kinds) in [
+            [
+                StaTimingTableKind::RiseConstraint,
+                StaTimingTableKind::CellRise,
+                StaTimingTableKind::RiseTransition,
+            ],
+            [
+                StaTimingTableKind::FallConstraint,
+                StaTimingTableKind::CellFall,
+                StaTimingTableKind::FallTransition,
+            ],
+        ]
+        .iter()
+        .enumerate()
+        {
+            if priced[edge] {
+                continue;
+            }
+            let required = if capture { &kinds[..1] } else { &kinds[1..] };
+            priced[edge] = required.iter().all(|&kind| {
+                matches!(find_optional_unique_table(arc, kind, &name), Ok(Some(table))
+                    if validate_timing_table_structure(library, table, &name).is_ok()
+                    && evaluate_table_with_query_and_diagnostics(library, table, query, &mut evaluation, &name).is_ok_and(f64::is_finite))
+            });
+        }
+        if priced == [true, true] {
+            return true;
+        }
+    }
+    false
+}
+
 /// Launch-source policy for combinational or register-boundary timing.
 enum StaAnalysisMode<'a> {
     CombinationalOnly,
