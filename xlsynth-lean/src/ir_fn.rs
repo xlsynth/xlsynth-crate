@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Export a pure XLS call graph as Lean definitions shared by evaluators and
+//! proofs.
+//!
+//! Each function has local lets for its computations and refers to callees by
+//! name.
+
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -55,30 +61,20 @@ impl LeanFunction {
     }
 }
 
-/// Converts a selected pure function and its callees to executable Lean
-/// definitions. Every array dimension in these functions must be nonempty.
+/// Converts a selected pure function and its reachable callees to executable
+/// Lean definitions.
+///
+/// Supply `top` to select a function by name. With `None`, the package must
+/// have a function top or, if it has no top, a single function. The generated
+/// `eval` names that function and preserves its positional argument and result
+/// types.
+///
+/// Export fails on invalid IR or unsupported operations and types in the
+/// selected call graph, including zero-length arrays.
 pub fn export_ir_function(
     package: &Package,
     top: Option<&str>,
     module_name: &LeanModuleName,
-) -> Result<LeanFunction, LeanError> {
-    export_with_bindings(package, top, module_name, Bindings::LocalLets)
-}
-
-/// Named nodes give proof authors a stable, independently unfoldable
-/// declaration per SSA binding. Local lets share intermediate values during
-/// execution.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Bindings {
-    LocalLets,
-    NamedNodes,
-}
-
-pub(crate) fn export_with_bindings(
-    package: &Package,
-    top: Option<&str>,
-    module_name: &LeanModuleName,
-    bindings: Bindings,
 ) -> Result<LeanFunction, LeanError> {
     let entry = match top {
         Some(name) => package.get_named_or_top_or_sole_fn(name),
@@ -91,7 +87,7 @@ pub(crate) fn export_with_bindings(
         format!("{MODULE_HEADER}namespace {ns}\nset_option linter.unusedVariables false\n\n");
     write_elaboration_limits(&mut source, functions.iter().map(|f| &f.graph));
     for f in &functions {
-        emit_function(&mut source, f, bindings, &|name| Ok(function_name(name)))?;
+        emit_function(&mut source, f, &|name| Ok(function_name(name)))?;
     }
     let signature = entry.get_type();
     let mut input_width = 0usize;
@@ -218,43 +214,25 @@ fn check_supported(f: &IrFn, node: &Node) -> Result<(), LeanError> {
     })
 }
 
-/// Emits one typed binding per IR node, retaining shared operands and calls.
+/// Emits a verified function in dependency order with one typed let per
+/// computation.
+///
+/// Each operand refers to its producer's binding by node ID. Two invokes of the
+/// same callee with identical operands still bind distinct results.
 pub(crate) fn emit_function(
     out: &mut String,
     f: &IrFn,
-    bindings: Bindings,
     callee_name: &dyn Fn(&str) -> Result<String, LeanError>,
 ) -> Result<(), LeanError> {
     let renderer = LocalRenderer::Function;
     let function = callee_name(&f.name)?;
-    let parameters: Vec<_> = f.param_nodes().collect();
-    let signature = parameters
-        .iter()
+    let signature = f
+        .param_nodes()
         .map(|p| format!(" (n{} : {})", p.text_id, renderer.lean_type(&p.ty)))
         .collect::<String>();
-    let arguments = parameters
-        .iter()
-        .map(|p| format!(" n{}", p.text_id))
-        .collect::<String>();
     let result_type = renderer.lean_type(&f.ret_ty);
-    let name = |r: NodeRef| {
-        let node = f.get_node(r);
-        let local = format!("n{}", node.text_id);
-        if bindings == Bindings::NamedNodes
-            && !matches!(node.payload, P::Param)
-            && !arguments.is_empty()
-        {
-            LeanOperand::Expression(format!("{local}{arguments}"))
-        } else {
-            LeanOperand::Atom(local)
-        }
-    };
-    match bindings {
-        Bindings::LocalLets => {
-            writeln!(out, "def {function}{signature} : {result_type} :=").unwrap()
-        }
-        Bindings::NamedNodes => writeln!(out, "namespace {function}").unwrap(),
-    }
+    let name = |r: NodeRef| LeanOperand::Atom(format!("n{}", f.get_node(r).text_id));
+    writeln!(out, "def {function}{signature} : {result_type} :=").unwrap();
     for (index, n) in f.nodes.iter().enumerate() {
         let e = match &n.payload {
             P::Nil | P::Param => continue,
@@ -284,30 +262,10 @@ pub(crate) fn emit_function(
                 })?,
         };
         let ty = renderer.lean_type(&n.ty);
-        match bindings {
-            Bindings::LocalLets => writeln!(out, "  let n{} : {ty} := {e}", n.text_id).unwrap(),
-            Bindings::NamedNodes => {
-                writeln!(out, "def n{}{signature} : {ty} :=\n  {e}", n.text_id).unwrap();
-            }
-        }
+        writeln!(out, "  let n{} : {ty} := {e}", n.text_id).unwrap();
     }
     let result = f.ret_node_ref.expect("verified return");
-    match bindings {
-        Bindings::LocalLets => writeln!(out, "  {}\n", name(result).into_argument()).unwrap(),
-        Bindings::NamedNodes => {
-            let node = f.get_node(result);
-            let value = if matches!(node.payload, P::Param) {
-                format!("n{}", node.text_id)
-            } else {
-                format!("{function}.n{}{arguments}", node.text_id)
-            };
-            writeln!(
-                out,
-                "end {function}\n\ndef {function}{signature} : {result_type} :=\n  {value}\n"
-            )
-            .unwrap();
-        }
-    }
+    writeln!(out, "  {}\n", name(result).into_argument()).unwrap();
     Ok(())
 }
 
@@ -383,7 +341,7 @@ top block consumer(x: bits[4], a: bits[4][2], y: bits[8], ys: bits[8][2]) {
             std::iter::once(&block.graph).chain(functions.iter().map(|f| &f.graph)),
         );
         for f in &functions {
-            emit_function(&mut defs, f, Bindings::LocalLets, &helper_name).unwrap();
+            emit_function(&mut defs, f, &helper_name).unwrap();
         }
         let result = block.output_value(block.output_ports().next().unwrap());
         let P::Invoke { to_apply, operands } = &block.get_node(result).payload else {

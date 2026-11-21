@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Build a pointwise equality between the ordinary Lean exports of two XLS
+//! functions.
+//!
+//! The generated proof target applies both entrypoints to the same typed
+//! arguments.
+
 use std::path::Path;
 
 use xlsynth_pir::ir::Package;
 
-use crate::ir_fn::{Bindings, export_with_bindings};
 use crate::support::{IR_SUPPORT, write_file};
-use crate::{LeanError, LeanFunction, LeanModuleName};
+use crate::{LeanError, LeanFunction, LeanModuleName, export_ir_function};
 
 /// Trusted word-level proof libraries supplied by the checker.
 pub(crate) const FIXED_IR_PROOF_FILES: &[(&str, &[u8])] = &[
@@ -28,26 +33,21 @@ pub struct LeanIrFunctionEquivalenceTarget {
     rhs: LeanFunction,
 }
 
-/// Selects the two entrypoints and validates their full argument and result
-/// types.
+/// Prepares a pointwise equality between two independently selected XLS
+/// functions.
+///
+/// Each side uses [`export_ir_function`] with its own top selection.
+/// Preparation propagates export errors and rejects unequal positional argument
+/// or result types, even when the two signatures occupy the same total number
+/// of bits.
 pub fn prepare_ir_function_equivalence_target(
     lhs: &Package,
     lhs_top: Option<&str>,
     rhs: &Package,
     rhs_top: Option<&str>,
 ) -> Result<LeanIrFunctionEquivalenceTarget, LeanError> {
-    let lhs = export_with_bindings(
-        lhs,
-        lhs_top,
-        &LeanModuleName::new("Generated.Lhs")?,
-        Bindings::NamedNodes,
-    )?;
-    let rhs = export_with_bindings(
-        rhs,
-        rhs_top,
-        &LeanModuleName::new("Generated.Rhs")?,
-        Bindings::NamedNodes,
-    )?;
+    let lhs = export_ir_function(lhs, lhs_top, &LeanModuleName::new("Generated.Lhs")?)?;
+    let rhs = export_ir_function(rhs, rhs_top, &LeanModuleName::new("Generated.Rhs")?)?;
     if lhs.signature() != rhs.signature() {
         return Err(LeanError::InvalidIr(format!(
             "equivalence requires matching XLS signatures: lhs {:?}, rhs {:?}",
