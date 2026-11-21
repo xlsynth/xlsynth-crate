@@ -709,4 +709,4 @@ fn verify_timing(incremental: BoundaryDelays, full: BoundaryDelays) -> Result<()
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::netlist) mod tests;

@@ -12,6 +12,7 @@
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty_model::{Library, Pin, PinDirection};
 use crate::netlist::connectivity::PinConnection;
+use crate::netlist::electrical::{PinLimits, input_capacitance as pin_cap};
 use crate::netlist::io::resolve_symbol;
 use crate::netlist::mapped::MappedNetlist;
 use crate::netlist::parse::{
@@ -190,21 +191,6 @@ pub struct FanoutOptimizationReport {
     pub optimization_seconds: f64,
 }
 
-/// Computes edge-specific input capacitance with the same fallback as
-/// repository STA.
-fn pin_cap(pin: &Pin) -> [f64; 2] {
-    [
-        pin.rise_capacitance
-            .or(pin.capacitance)
-            .or(pin.fall_capacitance)
-            .unwrap_or(0.0),
-        pin.fall_capacitance
-            .or(pin.capacitance)
-            .or(pin.rise_capacitance)
-            .unwrap_or(0.0),
-    ]
-}
-
 /// Compiles exact signatures without assuming that cell names imply
 /// equivalence.
 #[cfg(test)]
@@ -319,28 +305,15 @@ fn table_bound(library: &Library, pin: &Pin, related: Option<&str>, load_axis: b
             continue;
         }
         for table in &arc.tables {
-            let shape = library.timing_table_shape(table);
-            let template = shape
-                .template_id
-                .checked_sub(1)
-                .and_then(|i| library.lu_table_templates.get(i as usize));
-            let explicit = library.timing_table_axes(table);
-            for axis in 0..2 {
-                let (name, fallback) = match (template, axis) {
-                    (Some(t), 0) => (t.variable_1_str(library), t.index_1.as_slice()),
-                    (Some(t), _) => (t.variable_2_str(library), t.index_2.as_slice()),
-                    _ => ("", &[][..]),
-                };
+            for (axis, (name, values)) in crate::liberty::lut::timing_axes::<2>(library, table)
+                .into_iter()
+                .enumerate()
+            {
                 let is_load =
                     name == "total_output_net_capacitance" || (name.is_empty() && axis == 1);
                 let is_slew = matches!(name, "input_net_transition" | "input_transition_time")
                     || (name.is_empty() && axis == 0);
                 if (load_axis && is_load) || (!load_axis && is_slew) {
-                    let values = if explicit[axis].is_empty() {
-                        fallback
-                    } else {
-                        explicit[axis]
-                    };
                     if let Some(v) = values.last() {
                         bound = bound.min(*v);
                     }
@@ -627,8 +600,11 @@ fn report_metrics(
         m.max_load = m.max_load.max(load);
         m.max_fanout = m.max_fanout.max(d.sinks.len());
         m.output_load_above_table_max += usize::from(load > table_bound(library, pin, None, true));
-        m.max_capacitance_violations += usize::from(pin.max_capacitance.is_some_and(|v| load > v));
-        m.max_transition_violations += usize::from(pin.max_transition.is_some_and(|v| slew > v));
+        let limits = PinLimits::for_pin(pin);
+        m.max_capacitance_violations +=
+            usize::from(crate::netlist::electrical::rule_excess(load, limits.capacitance) > 0.0);
+        m.max_transition_violations +=
+            usize::from(crate::netlist::electrical::rule_excess(slew, limits.transition) > 0.0);
         for sink in &d.sinks {
             let si = &netlist.module.instances[sink.binding.instance.0];
             let sn = resolve_symbol(&netlist.interner, si.type_name, "sink cell")?;
@@ -873,10 +849,11 @@ pub fn optimize_fanout(
                 .ok_or_else(|| anyhow!("missing pin"))?;
             let load = d.load[0].max(d.load[1]);
             let slew = t.rise.transition.max(t.fall.transition);
-            let overloaded = load > p.max_capacitance.unwrap_or(f64::INFINITY)
+            let limits = PinLimits::for_pin(p);
+            let overloaded = load > limits.capacitance.unwrap_or(f64::INFINITY)
                 || load > table_bound(library, p, None, true)
                 || slew > d.slew_bound
-                || slew > p.max_transition.unwrap_or(f64::INFINITY);
+                || slew > limits.transition.unwrap_or(f64::INFINITY);
             if d.sinks.len() >= options.fanout_trigger || overloaded {
                 targets.push((slew, d.binding.instance.0, d.clone(), c.clone()));
             }

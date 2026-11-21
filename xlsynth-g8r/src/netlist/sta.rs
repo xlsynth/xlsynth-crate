@@ -64,6 +64,7 @@ use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, StringId, TimingArc, TimingTable};
 use crate::liberty_proto::{TimingSense as WireTimingSense, TimingType as WireTimingType};
+use crate::netlist::bit_ref::NetBit;
 use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
@@ -1019,11 +1020,11 @@ impl<'a> PreparedStaLibrary<'a> {
             .electrical_pin_order
             .get_or_init(|| {
                 let cell = &self.library.cells[cell_idx];
-                if cell.pins.iter().all(|p| {
-                    p.max_capacitance.is_none()
-                        && p.max_transition.is_none()
-                        && p.max_fanout.is_none()
-                }) {
+                if cell
+                    .pins
+                    .iter()
+                    .all(|p| crate::netlist::electrical::PinLimits::for_pin(p).is_unconstrained())
+                {
                     return Vec::new();
                 }
                 let mut order: Vec<_> = (0..cell.pins.len()).collect();
@@ -1253,6 +1254,7 @@ impl PreparedStaLibrary<'_> {
             self,
             options,
             StaAnalysisMode::CombinationalOnly,
+            None,
         )
     }
 
@@ -1266,6 +1268,53 @@ impl PreparedStaLibrary<'_> {
         launch_primary_inputs: bool,
         launch_register_instances: &[usize],
     ) -> Result<StaReport> {
+        self.analyze_register_boundary(
+            module,
+            nets,
+            interner,
+            options,
+            launch_primary_inputs,
+            launch_register_instances,
+            None,
+        )
+    }
+
+    /// Measures the worst rise/fall transition on each requested bit in the
+    /// same analysis. An unlaunched bit has no slew; results follow input
+    /// order.
+    pub fn analyze_register_boundary_with_slews(
+        &self,
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        options: StaOptions,
+        launch_primary_inputs: bool,
+        launch_register_instances: &[usize],
+        observed: &[NetBit],
+    ) -> Result<(StaReport, Vec<Option<f64>>)> {
+        let mut slews = Vec::with_capacity(observed.len());
+        let report = self.analyze_register_boundary(
+            module,
+            nets,
+            interner,
+            options,
+            launch_primary_inputs,
+            launch_register_instances,
+            Some((observed, &mut slews)),
+        )?;
+        Ok((report, slews))
+    }
+
+    fn analyze_register_boundary(
+        &self,
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        options: StaOptions,
+        launch_primary_inputs: bool,
+        launch_register_instances: &[usize],
+        probes: Option<(&[NetBit], &mut Vec<Option<f64>>)>,
+    ) -> Result<StaReport> {
         let launch_register_instances: FxHashSet<usize> =
             launch_register_instances.iter().copied().collect();
         analyze_max_arrival_proto_with_mode(
@@ -1278,6 +1327,7 @@ impl PreparedStaLibrary<'_> {
                 launch_primary_inputs,
                 launch_register_instances: &launch_register_instances,
             },
+            probes,
         )
     }
 }
@@ -1351,6 +1401,7 @@ fn analyze_max_arrival_proto_with_mode(
     lib: &PreparedStaLibrary<'_>,
     options: StaOptions,
     analysis_mode: StaAnalysisMode<'_>,
+    probes: Option<(&[NetBit], &mut Vec<Option<f64>>)>,
 ) -> Result<StaReport> {
     if !options.primary_input_transition.is_finite() {
         return Err(anyhow!(
@@ -1987,7 +2038,26 @@ fn analyze_max_arrival_proto_with_mode(
         .map(|timing| timing.and_then(|timing| timing.register_path_breakdown))
         .collect();
 
-    Ok(StaReport {
+    if let Some((observed, slews)) = probes {
+        for &bit in observed {
+            let index = normalized.canonical_bit(normalized.bit_index(bit)?);
+            // Literals and unknowns have synthetic timings for reporting,
+            // but no launched transition for a probe to measure.
+            let ResolvedTimingSource::Bit(source) = resolved_timing_sources[index] else {
+                slews.push(None);
+                continue;
+            };
+            let slew = bit_timing_sets[source].as_ref().and_then(|set| {
+                set.rise
+                    .iter()
+                    .chain(set.fall.iter())
+                    .map(|edge| edge.timing.transition)
+                    .reduce(f64::max)
+            });
+            slews.push(slew);
+        }
+    }
+    let report = StaReport {
         net_timing,
         worst_output_arrival: worst_output
             .map(|timing| timing.timing.arrival)
@@ -2002,7 +2072,8 @@ fn analyze_max_arrival_proto_with_mode(
         register_input_breakdowns,
         timing_query_diagnostic_counts: evaluation.diagnostics,
         cell_levels,
-    })
+    };
+    Ok(report)
 }
 
 /// Immutable connectivity and cell metadata for the shared timing kernel.
@@ -2341,18 +2412,8 @@ fn effective_input_capacitance_by_edge(
 ) -> Result<EdgeLoadCapacitance> {
     // max_capacitance is a design-rule limit, not nominal pin capacitance.
     // Prefer edge-specific capacitance when provided; fall back to nominal.
-    let capacitance = EdgeLoadCapacitance {
-        rise: pin
-            .rise_capacitance
-            .or(pin.capacitance)
-            .or(pin.fall_capacitance)
-            .unwrap_or(0.0),
-        fall: pin
-            .fall_capacitance
-            .or(pin.capacitance)
-            .or(pin.rise_capacitance)
-            .unwrap_or(0.0),
-    };
+    let [rise, fall] = crate::netlist::electrical::input_capacitance(pin);
+    let capacitance = EdgeLoadCapacitance { rise, fall };
     validate_non_negative_finite(capacitance.rise, "rise capacitance", context)?;
     validate_non_negative_finite(capacitance.fall, "fall capacitance", context)?;
     Ok(capacitance)
@@ -3575,18 +3636,14 @@ fn timing_table_layout<'a>(
         Some(tmpl)
     };
 
-    let table_axes = library.timing_table_axes(table);
+    let axes = crate::liberty::lut::effective_axes::<3>(
+        library,
+        library.timing_table_axes(table),
+        template,
+    );
     Ok(TimingTableLayout {
-        axes: [
-            effective_axis(table_axes[0], template.map(|t| t.index_1.as_slice())),
-            effective_axis(table_axes[1], template.map(|t| t.index_2.as_slice())),
-            effective_axis(table_axes[2], template.map(|t| t.index_3.as_slice())),
-        ],
-        variables: [
-            template.map(|t| t.variable_1_str(library)).unwrap_or(""),
-            template.map(|t| t.variable_2_str(library)).unwrap_or(""),
-            template.map(|t| t.variable_3_str(library)).unwrap_or(""),
-        ],
+        axes: axes.map(|(_, knots)| knots),
+        variables: axes.map(|(name, _)| name),
     })
 }
 
@@ -4183,14 +4240,6 @@ fn validate_effective_axes(
         }
     }
     Ok(())
-}
-
-fn effective_axis<'a>(table_axis: &'a [f64], template_axis: Option<&'a [f64]>) -> &'a [f64] {
-    if table_axis.is_empty() {
-        template_axis.unwrap_or(&[])
-    } else {
-        table_axis
-    }
 }
 
 #[cfg(test)]
@@ -6560,6 +6609,62 @@ endmodule
             },
         ];
         builder.finish()
+    }
+
+    #[test]
+    fn register_slew_probes_distinguish_packed_bits_and_follow_aliases() -> Result<()> {
+        let library = crate::netlist::resize::tests::library()?;
+        let prepared = PreparedStaLibrary::new(&library)?;
+        let (module, nets, interner) = parse_single_module(
+            r#"module top(input clk, input d, output [7:8] q, output a);
+                wire low, x, alias;
+                assign low = 1'b0;
+                assign x = 1'bx;
+                assign alias = low;
+                DFF1 weak(.CLK(clk), .D(d), .Q(q[7]));
+                DFF4 strong(.CLK(clk), .D(d), .Q(q[8]));
+                assign a = q[8];
+            endmodule"#,
+        );
+        let q = find_net_index(&nets, &interner, "q");
+        let a = find_net_index(&nets, &interner, "a");
+        let input = find_net_index(&nets, &interner, "d");
+        let bit = |net, bit_number| NetBit { net, bit_number };
+        let scalar = |name| bit(find_net_index(&nets, &interner, name), 0);
+        let probes = [
+            bit(q, 7),
+            bit(q, 8),
+            bit(a, 0),
+            bit(input, 0),
+            scalar("low"),
+            scalar("x"),
+            scalar("alias"),
+        ];
+        let options = StaOptions::default();
+        let (observed, slews) = prepared.analyze_register_boundary_with_slews(
+            &module,
+            &nets,
+            &interner,
+            options,
+            false,
+            &[0, 1],
+            &probes,
+        )?;
+        let original = prepared.analyze_register_boundary_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            options,
+            false,
+            &[0, 1],
+        )?;
+        assert_eq!(observed, original);
+        assert!(slews[0].unwrap() > slews[1].unwrap());
+        assert_eq!(slews[1], slews[2]);
+        // Neither a primary input nor a constant/unknown starts a register
+        // path.
+        assert_eq!(slews[3..], [None; 4]);
+        Ok(())
     }
 
     #[test]
