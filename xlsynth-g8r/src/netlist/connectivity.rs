@@ -7,6 +7,8 @@
 //! continuous assigns, and plain `tran` aliases is lowered before cone-like
 //! consumers walk the graph.
 
+pub(crate) mod directed;
+
 use crate::liberty::IndexedLibrary;
 use crate::liberty_model::PinDirection;
 use crate::netlist::normalized::{BitIndex, BitSource, NormalizedNetlistModule};

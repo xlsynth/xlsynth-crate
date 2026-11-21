@@ -311,20 +311,6 @@ fn choices_prepared(
     Ok(out)
 }
 
-/// Resolves an alias chain, rejecting cycles instead of silently losing loads.
-fn root(index: usize, aliases: &BTreeMap<usize, Option<usize>>) -> Result<Option<usize>> {
-    let mut current = index;
-    let mut seen = BTreeSet::new();
-    while let Some(next) = aliases.get(&current) {
-        ensure!(seen.insert(current), "cyclic scalar alias");
-        match next {
-            Some(n) => current = *n,
-            None => return Ok(None),
-        }
-    }
-    Ok(Some(current))
-}
-
 /// Reads the scalar source of a connection; unsupported widths fail closed.
 fn source(reference: &NetRef, roots: &[Option<usize>]) -> Result<Option<usize>> {
     match reference {
@@ -405,32 +391,44 @@ fn graph(
         .map(|(i, c)| (c.name.as_str(), (i, c)))
         .collect();
     let mut cells = Vec::with_capacity(netlist.module.instances.len());
-    let mut aliases = BTreeMap::new();
-    for a in &netlist.module.assigns {
-        ensure!(
-            a.kind == NetlistAssignKind::Continuous,
-            "tran aliases are outside optimization scope"
-        );
-        let NetRef::Simple(lhs) = a.lhs else {
-            return Err(anyhow!("non-scalar alias lhs"));
-        };
-        let rhs = match &a.rhs {
-            AssignExpr::Leaf(NetRef::Simple(n)) => Some(n.0),
-            AssignExpr::Leaf(NetRef::Literal(v)) if v.get_bit_count() == 1 => None,
-            _ => {
-                return Err(anyhow!(
-                    "fanout optimization requires scalar wire/literal aliases"
-                ));
-            }
-        };
-        ensure!(
-            aliases.insert(lhs.0, rhs).is_none(),
-            "multiple alias drivers"
-        );
-    }
-    let roots = (0..netlist.nets.len())
-        .map(|i| root(i, &aliases))
-        .collect::<Result<Vec<_>>>()?;
+    use crate::netlist::connectivity::directed::{AssignedSource, ResolvedSource};
+    let roots = if netlist.module.assigns.is_empty() {
+        (0..netlist.nets.len()).map(Some).collect()
+    } else {
+        let mut aliases = vec![None; netlist.nets.len()];
+        for a in &netlist.module.assigns {
+            ensure!(
+                a.kind == NetlistAssignKind::Continuous,
+                "tran aliases are outside optimization scope"
+            );
+            let NetRef::Simple(lhs) = a.lhs else {
+                return Err(anyhow!("non-scalar alias lhs"));
+            };
+            let rhs = match &a.rhs {
+                AssignExpr::Leaf(NetRef::Simple(n)) => AssignedSource::Alias(n.0),
+                AssignExpr::Leaf(NetRef::Literal(v)) if v.get_bit_count() == 1 => {
+                    AssignedSource::Unknown
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "fanout optimization requires scalar wire/literal aliases"
+                    ));
+                }
+            };
+            ensure!(
+                aliases[lhs.0].replace(rhs).is_none(),
+                "multiple alias drivers"
+            );
+        }
+        crate::netlist::connectivity::directed::resolve(&aliases)
+            .map_err(|_| anyhow!("cyclic scalar alias"))?
+            .into_iter()
+            .map(|source| match source {
+                ResolvedSource::Bit(bit) => Some(bit),
+                ResolvedSource::Literal(_) | ResolvedSource::Unknown => None,
+            })
+            .collect::<Vec<_>>()
+    };
     let mut sinks: BTreeMap<usize, Vec<Sink>> = BTreeMap::new();
     let mut loads: BTreeMap<usize, [f64; 2]> = BTreeMap::new();
     let mut slew_bounds: BTreeMap<usize, f64> = BTreeMap::new();

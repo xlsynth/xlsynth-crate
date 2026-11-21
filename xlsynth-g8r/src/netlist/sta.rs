@@ -1188,26 +1188,9 @@ struct NetEndpoint {
     pin_name: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BitAssignSource {
-    Literal(bool),
-    Unknown,
-    Alias(usize),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResolvedTimingSource {
-    Literal(bool),
-    Unknown,
-    Bit(usize),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TimingSourceVisitState {
-    Unvisited,
-    Visiting,
-    Resolved(ResolvedTimingSource),
-}
+use crate::netlist::connectivity::directed::{
+    AssignedSource as BitAssignSource, ResolvedSource as ResolvedTimingSource,
+};
 
 #[derive(Clone, Debug)]
 struct UnsupportedAssignSource {
@@ -1465,16 +1448,14 @@ fn analyze_max_arrival_proto_with_mode(
                     pin_name
                 )
             })?;
-            let pin_bit_sources = connection.bits.clone();
             let pin_bit_sources = if pin.direction == PinDirection::Input as i32 {
-                pin_bit_sources
-                    .into_iter()
-                    .map(|source| {
-                        canonicalize_pin_bit_source(source, resolved_timing_sources.as_slice())
-                    })
+                connection
+                    .bits
+                    .iter()
+                    .map(|&source| canonicalize_pin_bit_source(source, &resolved_timing_sources))
                     .collect()
             } else {
-                pin_bit_sources
+                connection.bits.clone()
             };
             if pin_bit_sources.len() > 1 {
                 return Err(anyhow!(
@@ -2955,49 +2936,12 @@ fn resolve_timing_sources(
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<Vec<ResolvedTimingSource>> {
-    let mut visit_states = vec![TimingSourceVisitState::Unvisited; assign_sources.len()];
-    for start in 0..assign_sources.len() {
-        if matches!(visit_states[start], TimingSourceVisitState::Resolved(_)) {
-            continue;
-        }
-        let mut current = start;
-        let mut path = Vec::new();
-        let resolved = loop {
-            match visit_states[current] {
-                TimingSourceVisitState::Resolved(source) => break source,
-                TimingSourceVisitState::Visiting => {
-                    return Err(anyhow!(
-                        "continuous assign aliases contain a cycle involving net bit '{}'",
-                        normalized.render_bit(current, nets, interner)
-                    ));
-                }
-                TimingSourceVisitState::Unvisited => {
-                    visit_states[current] = TimingSourceVisitState::Visiting;
-                    path.push(current);
-                    match assign_sources[current] {
-                        Some(BitAssignSource::Literal(value)) => {
-                            break ResolvedTimingSource::Literal(value);
-                        }
-                        Some(BitAssignSource::Unknown) => break ResolvedTimingSource::Unknown,
-                        Some(BitAssignSource::Alias(next)) => current = next,
-                        None => break ResolvedTimingSource::Bit(current),
-                    }
-                }
-            }
-        };
-        for bit_idx in path {
-            visit_states[bit_idx] = TimingSourceVisitState::Resolved(resolved);
-        }
-    }
-    Ok(visit_states
-        .into_iter()
-        .map(|state| match state {
-            TimingSourceVisitState::Resolved(source) => source,
-            TimingSourceVisitState::Unvisited | TimingSourceVisitState::Visiting => {
-                unreachable!("every timing source path should be resolved")
-            }
-        })
-        .collect())
+    crate::netlist::connectivity::directed::resolve(assign_sources).map_err(|bit| {
+        anyhow!(
+            "continuous assign aliases contain a cycle involving net bit '{}'",
+            normalized.render_bit(bit, nets, interner)
+        )
+    })
 }
 
 fn timing_set_for_resolved_source<'a>(
