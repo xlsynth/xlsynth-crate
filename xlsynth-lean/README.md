@@ -134,11 +134,22 @@ as bitvectors, arrays and tuples.
 
 Public source declarations live under `XLS.<full logical module>`. For
 example, importing `left.bus` and `right.bus` gives the proof author distinct
-types `XLS.left.bus.Packet` and `XLS.right.bus.Packet`.
+types `XLS.left.bus.Packet` and `XLS.right.bus.Packet`. Readable DSLX functions
+use the same rule, including concrete specializations such as
+`XLS.left.bus.«choose<5>»`. Compiler-generated loop bodies take physical XLS
+values. If a loop body calls a source-declared function, the checked model
+applies that function at the call site through a generated adapter.
 
 Supply the BX module name as the first argument to `compile_bx`. For block
 `controller` in `common.bx`, `XLS.common.controller q x` evaluates the block
 on state `q` and input `x` and returns the complete `XlsReadable.Evaluation`.
+A DSLX module `common.x` can contribute other declarations under the same
+namespace, such as `XLS.common.inc`. Readable emission reports an error if the
+two modules claim the same declaration. Multiple imports of one DSLX module
+within the BX import graph can share its declarations. If a separately
+supplied checked DSLX module and the BX imports both include the same DSLX
+module, call the separately supplied function via a BX
+`extern`, or omit the separate DSLX input and use the BX import.
 
 A DSLX or BX field such as `recOn` retains its proof-facing spelling, so
 `p.recOn` reads the
@@ -159,6 +170,18 @@ the state. Inside the block, reads and writes use the physical element type.
 Reading index 2 returns the last slot. Writing index 2 leaves both slots
 unchanged.
 
+For a BX `use` of a DSLX function, readable emission recovers supported
+parameter and result types from the checked DSLX import, including concrete
+parametric calls. The BX linker records each function's final IR symbol.
+For example, if the destination package already has a function with the
+import's IR name, the renamed import still gets its own DSLX parameter names.
+At a checked call, the caller decodes its physical arguments into the callee's
+declared types, calls the named function, and encodes the returned value for
+the next IR operation. Thus a proof about a helper returning a packet can use
+`packet.valid` even when the helper computed that bit by selecting a tuple
+position. Helpers whose source signature cannot be represented and loop
+callbacks created during compilation take physical arguments.
+
 For large blocks the generator puts up to 160 graph computations in each
 leaf function. Each leaf reads the wires it needs and returns the values
 needed later. A balanced binary tree composes the leaves in dependency
@@ -169,7 +192,7 @@ assertions for both forms of the clock step.
 
 1. `Generated.lean` - the exact raw emission of the lowered block.
 1. `ReadableTypes.lean` - source types and total physical codecs.
-1. `ReadableGenerated.lean` - the typed clock-step interface.
+1. `ReadableGenerated.lean` - the typed clock-step interface and named helper calls.
 1. `ReadableRepresentation.lean` - state and result conversions.
 1. `ReadableCorrespondence.lean` - proofs relating both models and their traces.
 
@@ -179,9 +202,9 @@ result of one interface gives the result of the other. Both use the same
 physical computations. Comparing execution with XLS checks the translation
 itself, and application-specific properties need their own proofs.
 
-For a block equation, look for its IR node ID in `Generated.lean`.
-`ReadableGenerated.lean` defines the typed clock-step interface.
-`ReadableTypes.lean` defines the encoders and
+For a block equation, look for its IR node ID in `Generated.lean`. For a
+checked signature or a call across a typed boundary, start in
+`ReadableGenerated.lean`. `ReadableTypes.lean` defines the encoders and
 decoders for Boolean values and named source types.
 
 ## GateFn interface and graph contract

@@ -31,9 +31,12 @@ pub struct CompiledBx {
     checked: CheckedModule,
     block_symbols: xlsynth_bx::BlockSymbols,
     module_name: String,
+    imported_modules: BTreeSet<String>,
     imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
     source: Module,
     pub(super) package: ir::Package,
+    dslx: Option<super::helper_types::DslxLink>,
+    imports: Vec<super::helper_types::DslxLink>,
 }
 
 /// Check BX source with its import paths and lower it into the supplied IR
@@ -56,7 +59,9 @@ pub fn compile_bx(
         block_symbols,
         source,
         package,
+        imports,
         imported_structs,
+        imported_modules,
         ..
     } = xlsynth_bx::compile_with_source(source, package, reset, options)
         .map_err(anyhow::Error::msg)?;
@@ -64,9 +69,36 @@ pub fn compile_bx(
         checked,
         block_symbols,
         module_name: module_name.to_owned(),
+        imported_modules,
         imported_structs,
         source,
         package,
+        dslx: None,
+        imports: imports
+            .into_iter()
+            .map(super::helper_types::DslxLink::from_import)
+            .collect(),
+    })
+}
+
+/// Link the IR produced from this checked DSLX module and retain its source
+/// types for calls from the BX block.
+///
+/// `module_name` names the BX source. The checked DSLX module supplies its own
+/// logical name. When the two inputs independently import the same DSLX
+/// subject, [`CompiledBx::emit_readable`] reports the overlapping subject.
+pub fn compile_bx_with_dslx(
+    module_name: &str,
+    source: &str,
+    module: xlsynth::dslx::TypecheckedModule,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+) -> Result<CompiledBx> {
+    let (package, link) = super::helper_types::DslxLink::compile(module)?;
+    let compiled = compile_bx(module_name, source, package, reset, options)?;
+    Ok(CompiledBx {
+        dslx: Some(link),
+        ..compiled
     })
 }
 
@@ -109,12 +141,49 @@ impl CompiledBx {
     /// Select a block by its exact IR name in [`Self::package`] and emit
     /// readable Lean. With `None`, select the package's top or sole block.
     ///
-    /// The block and the types on its ports and registers keep their declaring
-    /// modules. Emission rejects competing declarations at the same Lean path.
+    /// The selected block and its reachable source types and functions keep
+    /// their declaring modules. Emission rejects competing declarations at
+    /// the same Lean path and independently checked copies of a DSLX
+    /// module. Multiple BX imports from a shared checked graph may refer to
+    /// the same declaration.
     pub fn emit_readable(&self, block_name: Option<&str>) -> Result<LeanBlockBundle> {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
-        let (declarations, interface) = self.readable_interface(&block)?;
+        let (mut declarations, mut interface) = self.readable_interface(&block)?;
+        let independent = |owner: &str| {
+            anyhow::anyhow!(
+                "DSLX module '{owner}' was checked independently by the supplied DSLX module and BX imports; use one source for '{owner}' (remove the redundant BX use and call the supplied helper via extern, or omit the separate DSLX input)"
+            )
+        };
+        let mut external = BTreeSet::new();
+        if let Some(link) = &self.dslx {
+            let mut bx_imports = self.imported_modules.clone();
+            bx_imports.extend(declarations.iter().filter_map(|decl| {
+                decl.name()
+                    .split_once("::")
+                    .map(|(owner, _)| owner.to_owned())
+            }));
+            link.module.collect_import_subjects(&mut external);
+            external.insert(link.module.get_module().get_name());
+            if let Some(owner) = bx_imports.intersection(&external).next() {
+                return Err(independent(owner));
+            }
+            link.add_signatures(&block, &mut declarations, &mut interface, |owner| {
+                if bx_imports.contains(owner) {
+                    return Err(independent(owner));
+                }
+                external.insert(owner.to_owned());
+                Ok(())
+            })?;
+        }
+        for link in &self.imports {
+            link.add_signatures(&block, &mut declarations, &mut interface, |owner| {
+                if external.contains(owner) {
+                    return Err(independent(owner));
+                }
+                Ok(())
+            })?;
+        }
         // Root and library BX keys are distinct from qualified DSLX keys,
         // but both languages can declare the same name in the same Lean
         // namespace.
@@ -135,11 +204,29 @@ impl CompiledBx {
             .iter()
             .map(TypeDecl::name)
             .filter_map(|name| name.split_once("::"))
+            .chain(
+                interface
+                    .helpers
+                    .values()
+                    .filter_map(|helper| helper.source_name.as_ref())
+                    .map(|(owner, local)| (owner.as_str(), local.as_str())),
+            )
         {
             ensure!(
                 !bx_names.contains(&(owner, local)),
                 "duplicate source declaration '{owner}::{local}' in BX '{owner}.bx' and DSLX '{owner}.x'; rename one declaration"
             );
+        }
+        // Two linked copies can share a checked declaration and specialization.
+        // Give it one public definition, keeping any other physical copy
+        // callable.
+        let mut names = std::collections::BTreeSet::new();
+        for signature in interface.helpers.values_mut() {
+            if let Some(name) = &signature.source_name
+                && !names.insert(name.clone())
+            {
+                signature.source_name = None;
+            }
         }
         readable::emit(&block, &declarations, &interface)
     }
@@ -319,6 +406,7 @@ impl CompiledBx {
                 inputs,
                 registers,
                 outputs,
+                helpers: Default::default(),
             },
         ))
     }

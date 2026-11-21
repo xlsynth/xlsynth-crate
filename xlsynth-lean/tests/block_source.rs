@@ -202,6 +202,32 @@ fn root_qualifier_is_rejected_for_explicit_lean_declarations() {
     }
 }
 
+// Negative test: Reject the checked DSLX helper `ops::_root_` by name.
+#[test]
+fn checked_dslx_function_cannot_use_the_root_qualifier_as_its_name() {
+    let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+    let module = xlsynth::dslx::parse_and_typecheck(
+        "pub fn _root_(x: u8) -> u8 { x + u8:1 }",
+        "ops.x",
+        "ops",
+        &mut imports,
+    )
+    .unwrap();
+    let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+        "design",
+        "extern fn ops::_root_(x: u8) -> u8; block run(clk, x: u8) -> u8 { ops::_root_(x) }",
+        module,
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    let err = compiled.emit_readable(None).err().unwrap();
+    assert!(
+        err.to_string().contains("function 'ops::_root_'"),
+        "{err:#}"
+    );
+}
+
 // Negative test: Reject ambiguous tops and linked blocks lacking a BX source.
 #[test]
 fn readable_emission_requires_a_selected_bx_declaration() {
@@ -226,4 +252,89 @@ fn readable_emission_requires_a_selected_bx_declaration() {
         diagnostic.contains("no checked BX declaration"),
         "{diagnostic}"
     );
+}
+
+// Verifies: Helpers accept inferred and explicit struct defaults.
+// Catches: Treating equal concrete struct bindings as different signatures.
+#[test]
+fn checked_helpers_accept_defaulted_struct_arguments() {
+    let source = r#"
+struct Packet<N: u32, M: u32 = {N * u32:2}> { x: bits[N], y: bits[M] }
+struct Tagged<N: u32 = {u32:9}> { value: u8 }
+fn copy(packet: Packet<3>, tag: Tagged) -> (Packet<3>, Tagged<9>) { (packet, tag) }
+fn advance(current: u6, value: u8) -> u6 {
+    let pair = copy(Packet<3> { x: u3:0, y: current }, Tagged<9> { value: value });
+    pair.0.y + (pair.1.value as u6)
+}
+"#;
+    let bx = r#"
+extern fn machine::advance(current: u6, value: u8) -> u6;
+block accumulate(clk, value: u8) -> u6 {
+    reg current: u6 = 0;
+    current := machine::advance(current, value);
+    current
+}
+"#;
+    let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+    let module =
+        xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports).unwrap();
+    let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+        "design",
+        bx,
+        module,
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    compiled.emit_readable(None).unwrap();
+}
+
+// Verifies: A checked function keeps its declared result and its named physical
+// locals. Catches: Inferring a nominal type for an indexed slot inside the
+// computation.
+#[test]
+fn checked_array_helper_uses_physical_locals() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("slots.x"),
+        "pub struct Write { data: u8 }
+         pub struct Slot { write: Write }
+         pub fn read(slots: Slot[2], index: u8) -> (Slot, u8) {
+             let slot = slots[index];
+             (slot, slot.write.data)
+         }",
+    )
+    .unwrap();
+    let compiled = compile_bx(
+        "design",
+        "use slots;
+         block picker(clk, p: slots::Slot[2], index: u8) -> (slots::Slot, u8) {
+             slots::read(p, index)
+         }",
+        xlsynth_bx::empty_package("example"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let bundle = compiled.emit_readable(None).unwrap();
+    let raw = &bundle.files[0].1;
+    let indexed = raw
+        .lines()
+        .find(|line| line.trim_start().starts_with("let ") && line.contains("_slot :"))
+        .unwrap();
+    assert!(
+        indexed.contains("((L.BitVec 8 × L.Unit) × L.Unit)"),
+        "{indexed}"
+    );
+    assert!(indexed.contains("arrayIndex"), "{indexed}");
+    let checked = &bundle.files[2].1;
+    let signature = checked
+        .lines()
+        .find(|line| line.starts_with("def _root_.XLS.«slots».«read» "))
+        .unwrap();
+    assert!(signature.contains("XLS.«slots».«Slot»"), "{signature}");
+    assert!(!checked.contains("let «slot» :"), "{checked}");
 }

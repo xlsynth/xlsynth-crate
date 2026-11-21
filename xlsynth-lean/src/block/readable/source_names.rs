@@ -34,6 +34,12 @@ pub(super) fn check_type_namespaces(
         .iter()
         .map(|&(owner, _)| owner)
         .chain([block_owner])
+        .chain(
+            interface
+                .helpers
+                .values()
+                .filter_map(|helper| helper.source_name.as_ref().map(|(owner, _)| owner.as_str())),
+        )
         .collect();
     for owner in owners {
         let mut prefix = owner;

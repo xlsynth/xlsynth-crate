@@ -93,9 +93,24 @@ pub(super) struct StatefulInterface {
     /// Written BX block name, qualified by the linker for a library
     /// declaration.
     pub(super) block_name: String,
+    /// Physical IR function names mapped to the source signatures available for
+    /// readable calls.
+    pub(super) helpers: BTreeMap<String, HelperSignature>,
     pub(super) inputs: BTreeMap<String, SourceType>,
     pub(super) registers: BTreeMap<String, SourceType>,
     pub(super) outputs: Vec<SourceType>,
+}
+
+/// Source names and types used to render a linked IR function in readable Lean.
+pub(super) struct HelperSignature {
+    /// Public declaring module and local name, including specialization
+    /// arguments.
+    ///
+    /// Additional linked copies of the same specialization retain their IR
+    /// symbol. Compiler-generated loop bodies have no checked signature.
+    pub(super) source_name: Option<(String, String)>,
+    pub(super) params: Vec<(String, SourceType)>,
+    pub(super) result: SourceType,
 }
 
 /// Resolve a name within the collected leaf declarations, rejecting unknowns.
