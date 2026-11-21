@@ -82,6 +82,31 @@ pub struct RegisterMappingPlan {
     pub bits: Vec<RegisterBitMapping>,
 }
 
+/// Physical register instances emitted by one assembly. The register order is
+/// the plan's bit order; indices refer to the assembled netlist snapshot and
+/// remain valid when new instances append. Deleting or reordering instances
+/// invalidates the indices. Cell mappings describe the original assembly;
+/// after resizing a register, query its current cell through the live netlist.
+#[derive(Clone, Copy)]
+pub struct AssembledRegisters<'a> {
+    pub(crate) first_instance: usize,
+    pub(crate) plan: &'a RegisterMappingPlan,
+}
+impl<'a> AssembledRegisters<'a> {
+    /// Physical instance indices in the assembly snapshot.
+    pub fn instances(&self) -> std::ops::Range<usize> {
+        self.first_instance..self.first_instance + self.plan.bits.len()
+    }
+    /// The cell and pin binding originally selected for one register instance.
+    pub fn initial_mapping(&self, instance: usize) -> Option<&'a RegisterCellMapping> {
+        let bit = self
+            .plan
+            .bits
+            .get(instance.checked_sub(self.first_instance)?)?;
+        self.plan.cells.get(bit.cell_index)
+    }
+}
+
 /// An unsupported sequential cell and the reason it cannot be selected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RejectedRegisterCell {
