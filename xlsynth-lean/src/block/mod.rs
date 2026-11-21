@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Emit Lean from verified XLS block IR.
+//! Emit Lean from XLS block IR or a checked BX block with a named interface.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::borrow::Cow;
@@ -9,11 +9,15 @@ use xlsynth_pir::ir::{self, MemberType, PackageMember};
 use xlsynth_pir::ir_inline::reachable_functions_in_dependency_order;
 use xlsynth_pir::ir_utils::direct_function_references;
 
+mod bx;
 pub(crate) mod library_notation;
 mod raw;
+mod readable;
 mod segments;
+mod source_types;
+pub use bx::{CompiledBx, compile_bx};
 
-pub use raw::{emit, write_to};
+pub use raw::{LeanBlockBundle, emit, write_to};
 pub(crate) use raw::{identifier, source_record_value};
 
 /// The block and its package-level context used during emission.

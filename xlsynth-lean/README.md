@@ -1,10 +1,11 @@
 # xlsynth-lean
 
-`xlsynth-lean` exports pure XLS IR functions and combinational `GateFn` graphs
-to executable Lean. Both exporters can evaluate batches of inputs and return
-typed results to Rust. The gate exporter also supports user-supplied Lean
-equivalence proofs. Native `.g8r` and `.g8rbin` files
-can be loaded with the existing `xlsynth-g8r` reader before calling this crate.
+`xlsynth-lean` exports pure XLS IR functions, combinational `GateFn` graphs and
+stateful XLS blocks to executable Lean. The function and gate exporters can
+evaluate batches and return typed results to Rust. The gate exporter also
+checks user-supplied equivalence proofs. The block exporter accepts block IR or
+BX source. With BX source it also emits a typed interface and correspondence
+proofs.
 
 The companion Lean library is tested with Lean 4.34.1. Building the Rust crate
 does not require Lean to be installed.
@@ -52,24 +53,7 @@ def eval (inputs : BitVec 3) : BitVec 1 :=
 ```
 
 The native file loader requires a clockless, register-free design for this
-combinational API. Stateful XLS block IR uses the separate API below.
-
-### Interface and graph contract
-
-Inputs and outputs are flattened in port-list order, then least-significant bit
-first within each port. The bundle retains every port name and width, including
-zero-width ports, so Rust evaluation results can be regrouped into the original
-`Vec<IrBits>` interface.
-
-The exporter accepts arbitrary node storage order and literal nodes at arbitrary
-indices. It requires:
-
-- All references to be in bounds and the complete graph to be acyclic.
-- Every input bit to bind a unique, non-negated `AigNode::Input`.
-- Every stored input node to be bound by the `GateFn` interface.
-
-Input bindings determine input identity; the name and bit-index metadata on an
-input node do not affect evaluation. Invalid graphs return `LeanError` values.
+combinational API. Use the block IR API below for stateful models.
 
 ## Export XLS block IR
 
@@ -115,6 +99,95 @@ does not invent initial values for registers without reset values.
 
 Every assertion remains an observable result, including disconnected ones;
 assertions never constrain the model's input or old-state domain.
+
+### Compile a BX block
+
+BX declares each register, its reset value, the data inputs and the output
+ports. For example, this block exposes its old count on output and increments
+it on each clock unless reset is asserted.
+
+```
+pub block counter(clk, take: bool) -> u8 {
+    reg count: u8 = 0;
+    if take { count := count + u8:1; }
+    count
+}
+```
+
+```rust
+use xlsynth_lean::block::compile_bx;
+
+let compiled = compile_bx("counter", &source, xlsynth_bx::empty_package("counter"),
+                          Default::default(), &Default::default())?;
+let bundle = compiled.emit_readable(None)?;
+```
+
+The readable interface preserves unsigned bits, Boolean fields, positional
+tuples, fixed-size arrays and named BX structs. A struct result exposes its fields
+as output ports in BX declaration order. One output becomes the value of `observe q x`;
+several outputs become a Lean product in port order. The register and port
+types come from checked declarations. The current state argument and the next
+state returned by `step` have the same named fields. A proof can read a
+register field on either state and pass the result of one step directly to
+the next. Inside each function, the generator represents ordinary XLS values
+as bitvectors, arrays and tuples.
+
+Supply the BX module name as the first argument to `compile_bx`. For block
+`controller` in `common.bx`, `XLS.common.controller q x` evaluates the block
+on state `q` and input `x` and returns the complete `XlsReadable.Evaluation`.
+
+A BX field such as `recOn` retains its proof-facing spelling, so
+`p.recOn` reads the
+source field. For a struct with such a collision, use positional construction
+and pattern matching, for example `(⟨41, true⟩ : XLS.bus.Packet)` for two fields
+declared in that order.
+
+A register declared as `Slot[2]` exposes a Lean vector of two `Slot` values in
+the state. Inside the block, reads and writes use the physical element type.
+Reading index 2 returns the last slot. Writing index 2 leaves both slots
+unchanged.
+
+For large blocks the generator puts up to 160 graph computations in each
+leaf function. Each leaf reads the wires it needs and returns the values
+needed later. A balanced binary tree composes the leaves in dependency
+order. The physical computations supply the outputs, register updates and
+assertions for both forms of the clock step.
+
+`LeanBlockBundle::files` contains these five files in dependency order:
+
+1. `Generated.lean` - the exact raw emission of the lowered block.
+1. `ReadableTypes.lean` - source types and total physical codecs.
+1. `ReadableGenerated.lean` - the typed clock-step interface.
+1. `ReadableRepresentation.lean` - state and result conversions.
+1. `ReadableCorrespondence.lean` - proofs relating both models and their traces.
+
+Callers choose where to write the files and compile them in the listed order
+to check the correspondence proofs. The proof establishes that converting the
+result of one interface gives the result of the other. Both use the same
+physical computations. Comparing execution with XLS checks the translation
+itself, and application-specific properties need their own proofs.
+
+For a block equation, look for its IR node ID in `Generated.lean`.
+`ReadableGenerated.lean` defines the typed clock-step interface.
+`ReadableTypes.lean` defines the encoders and
+decoders for Boolean values and named source types.
+
+## GateFn interface and graph contract
+
+Inputs and outputs are flattened in port-list order, then least-significant bit
+first within each port. The bundle retains every port name and width, including
+zero-width ports, so Rust evaluation results can be regrouped into the original
+`Vec<IrBits>` interface.
+
+The exporter accepts arbitrary node storage order and literal nodes at arbitrary
+indices. It requires:
+
+- All references to be in bounds and the complete graph to be acyclic.
+- Every input bit to bind a unique, non-negated `AigNode::Input`.
+- Every stored input node to be bound by the `GateFn` interface.
+
+Input bindings determine input identity; the name and bit-index metadata on an
+input node do not affect evaluation. Invalid graphs return `LeanError` values.
 
 ## Evaluate through Lean
 
@@ -421,13 +494,15 @@ Run the Rust-only tests with
 cargo test -p xlsynth-lean
 ```
 
-To also run the AIG and XLS IR evaluation and proof tests, enable `lean-tests`
+To also run the AIG, XLS IR and block trace evaluation and proof tests, enable `lean-tests`
 and set `XLSYNTH_LEAN` to the executable from the [pinned toolchain](lean/lean-toolchain).
 
 ```sh
 XLSYNTH_LEAN=/path/to/lean/bin/lean \
   cargo test -p xlsynth-lean --features lean-tests
 ```
+
+The block tests check BX field order across a BX constructor and a separately compiled DSLX selector.
 
 Ubuntu 24.04 CI runs this suite with the official Linux x86-64 Lean release.
 When updating `lean/lean-toolchain`, update the [release checksum](../scripts/lean_linux_x64.sha256) to match.
@@ -457,4 +532,4 @@ XLSYNTH_LEAN=/path/to/lean/bin/lean \
     -- -max_total_time=300
 ```
 
-See the repository's `FUZZ.md` for the target's coverage and failure diagnostics.
+See the repository's `FUZZ.md` for fuzz target coverage and failure diagnostics.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exports pure XLS IR functions and combinational gate graphs to executable
-//! Lean.
+//! Export pure XLS IR functions, combinational gate graphs and stateful blocks
+//! to executable Lean.
 //!
 //! The word-level exporter preserves the XLS function signature and is checked
 //! against the PIR evaluator. Word-level proof targets compare the exported
@@ -9,7 +9,10 @@
 //! bindings in each function body. Gate proofs use an evaluator proved
 //! equivalent to Lean's stock AIG semantics.
 //!
-//! [`block`] separately exports stateful block models as Lean source text.
+//! [`block`] emits transition equations from block IR. For BX source it also
+//! emits equations with BX field names and types, and Lean proof source
+//! relating the two models. Callers check those proofs by compiling the emitted
+//! modules.
 
 pub mod block;
 
