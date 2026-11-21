@@ -2,11 +2,9 @@
 
 //! Explicit native checks for generated readable block correspondence proofs.
 
-#[cfg(feature = "lean-tests")]
-use std::fmt::Write as _;
-use std::{fs, path::Path};
+use std::{fmt::Write as _, fs, path::Path};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use xlsynth_lean::block::{LeanBlockBundle, compile_bx, emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
 
@@ -25,6 +23,73 @@ fn bx_bundle(source: &str) -> LeanBlockBundle {
     .unwrap()
     .emit_readable(None)
     .unwrap()
+}
+
+// Verifies: Imported public records expose their private nested field type.
+// Catches: dropping private types that a public helper needs.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_packet_keeps_private_field_type() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ops.x"),
+        r#"
+struct Internal { value: u8 }
+pub struct Packet { inner: Internal }
+pub fn pick(x: Packet) -> u8 { x.inner.value }
+"#,
+    )?;
+    let mut bundle = compile_bx(
+        "design",
+        "use ops; block demo(clk, p: ops::Packet) -> u8 { ops::pick(p) }",
+        xlsynth_bx::empty_package("example"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    bundle.files.push((
+        "PrivateField.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+namespace XLS
+example (p : ops.Packet) : ops.Internal := p.inner
+example (p : ops.Packet) : ops.pick p = p.inner.value := rfl
+#guard observe {} {p := {inner := {value := 37}}} == 37
+end XLS
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "public BX port with a private DSLX field type");
+    Ok(())
+}
+
+// Verifies: A BX type named succ coexists with Lean's Nat.succ in module Nat.
+// Catches: A declaration or an XLS port capturing a qualified reference.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_module_and_struct_names_can_coincide_with_a_lean_declaration() -> Result<()> {
+    for module in ["Circuit", "Nat", "hw.Nat"] {
+        let mut bundle = compile_bx(
+            module,
+            "struct succ { value: u8 } block demo(clk, XLS: u8, p: succ) -> u8 { p.value + XLS }",
+            xlsynth_bx::empty_package("example"),
+            Default::default(),
+            &Default::default(),
+        )?
+        .emit_readable(None)?;
+        bundle.files.push((
+            "SourceName.lean".into(),
+            format!(
+                "import ReadableGenerated\nexample (x : XlsReadable.Input) : XLS.{module}.succ := x.p\nexample : _root_.Nat.succ 0 = 1 := rfl\n"
+            ),
+        ));
+        check_bundle(bundle, module);
+    }
+    Ok(())
 }
 
 // Verifies: Each port retains its record or alias name in either order.
@@ -152,6 +217,466 @@ example (q : State) (x : Input) : observe q x = (q.stored, x.src.narrow) := rfl
     Ok(())
 }
 
+// Verifies: Imported aliases connect a nested BX field to state and output.
+// Catches: Erasing the field's alias or misconnecting the helper result.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_struct_alias_survives_bx_register_and_nested_ports() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ops.x"),
+        r#"
+pub struct Packet { zebra: u8, apple: u8 }
+pub type Inner = Packet;
+pub type Alias = Inner;
+pub fn id(x: Alias) -> Alias { x }
+"#,
+    )?;
+    let mut bundle = compile_bx(
+        "design",
+        r#"
+use ops;
+struct Envelope { item: ops::Alias }
+block hold(clk, src: Envelope) -> (ops::Alias, u8) {
+    reg stored: ops::Alias;
+    stored := ops::id(src.item);
+    (stored, src.item.zebra)
+}
+"#,
+        xlsynth_bx::empty_package("example"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    let types = &bundle.files[1].1;
+    assert!(types.contains("«item» : XLS.«ops».«Alias»"), "{types}");
+    bundle.files.push((
+        "PublicInterface.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+example : XLS.ops.Alias = XLS.ops.Inner := rfl
+example : XLS.ops.Inner = XLS.ops.Packet := rfl
+example (q : State) (x : Input) : (step q x).stored = x.src.item := rfl
+example (q : State) (x : Input) : observe q x = (q.stored, x.src.item.zebra) := rfl
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "BX fields, registers and outputs with a linked DSLX alias",
+    );
+    Ok(())
+}
+
+// Verifies: BX and imported field names select the declared positions.
+// Catches: A Packet field hiding its type in later accessors.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_and_imported_dslx_fields_keep_their_source_names() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("field0.x"),
+        r#"
+pub struct Packet { Packet: u8, recOn: u8, valid: bool }
+pub fn read(p: Packet) -> u8 { p.recOn }
+"#,
+    )?;
+    let compiled = compile_bx(
+        "design",
+        r#"
+use field0;
+struct Outputs { seen: bool }
+struct Report { result: Outputs, packet: field0::Packet }
+struct Packet { Outputs: u8, design: u8, result: Outputs }
+struct Result { recOn: u8, other_seen: bool, report_seen: bool }
+block monitor(clk, p: field0::Packet, other: Packet, report: Report) -> Result {
+    Result { recOn: field0::read(p), other_seen: other.result.seen, report_seen: report.result.seen }
+}
+"#,
+        xlsynth_bx::empty_package("linked_ir"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?;
+    let mut bundle = compiled.emit_readable(None)?;
+    let types = &bundle.files[1].1;
+    assert!(types.contains("«result» : «Outputs»"), "{types}");
+    bundle.files.push((
+        "SourceFields.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+open XLS.field0 (Packet)
+def packet : Packet := ⟨13, 41, true⟩
+#guard packet.Packet == 13 && packet.recOn == 41 && packet.valid
+example (p : Packet) : (p.Packet, p.recOn) = (Packet.Packet p, Packet.recOn p) := rfl
+example : Packet.recOn ⟨13, 41, true⟩ = 41 := rfl
+example (p : Packet) : (match p with | ⟨_, n, _⟩ => n) = p.recOn := by cases p; rfl
+example (q : State) (x : Input) :
+    observe q x = (x.p.recOn, x.other.result.seen, x.report.result.seen) := rfl
+example (q : XlsBlock.State) (x : XlsBlock.Input) :
+    (XlsBlock.observe q x).recOn = x.p.2.1 := rfl
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "BX and imported DSLX field names");
+    Ok(())
+}
+
+// Verifies: A BX block and DSLX helper can be called in one Lean namespace.
+// Catches: Rejecting distinct declarations because their modules share a name.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn selected_bx_block_and_dslx_function_share_a_module() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("common.x"),
+        "pub fn inc(x: u8) -> u8 { x + u8:1 }",
+    )?;
+    let mut bundle = compile_bx(
+        "common",
+        "use common; block controller(clk, x: u8) -> u8 { common::inc(x) }",
+        xlsynth_bx::empty_package("pkg"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    bundle.files.push((
+        "PublicBlock.lean".into(),
+        r#"import ReadableCorrespondence
+example (q : XlsReadable.State) (x : XlsReadable.Input) :
+    XLS.common.controller q x = XlsReadable.eval q x := rfl
+#guard XLS.common.inc 41 == 42
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "public BX and DSLX declarations");
+    Ok(())
+}
+
+// Verifies: the root and imported BX library each expose their own Packet type.
+// Catches: qualifying a library record with the importing module's name.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_library_record_keeps_its_declaring_module() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("lib.bx"), "pub struct Packet { value: u8 }")?;
+    let mut bundle = compile_bx(
+        "design",
+        "use lib; struct Packet { count: u8 }
+         block demo(clk, p: lib::Packet, q: Packet) -> u8 { p.value + q.count }",
+        xlsynth_bx::empty_package("pkg"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    bundle.files.push((
+        "LibraryRecord.lean".into(),
+        "import ReadableCorrespondence
+example (x : XlsReadable.Input) : XLS.lib.Packet := x.p
+example (x : XlsReadable.Input) : XLS.design.Packet := x.q
+#guard XlsReadable.observe {} {p := {value := 5}, q := {count := 7}} == 12
+"
+        .into(),
+    ));
+    check_bundle(bundle, "BX library and root records with the same name");
+    Ok(())
+}
+
+// Negative test: Reject a BX type and DSLX helper with the same qualified name.
+#[test]
+fn bx_library_record_conflicts_with_a_dslx_declaration_of_the_same_name() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("lib.bx"), "pub struct Packet { value: u8 }")?;
+    let options = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    let emit = |function| {
+        let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+        let dslx = xlsynth::dslx::parse_and_typecheck(
+            &format!("pub fn {function}(x: u8) -> u8 {{ x }}"),
+            "lib.x",
+            "lib",
+            &mut imports,
+        )?;
+        xlsynth_lean::block::compile_bx_with_dslx(
+            "design",
+            &format!(
+                "use lib::Packet; extern fn lib::{function}(x: u8) -> u8;
+                 block demo(clk, p: Packet) -> u8 {{ lib::{function}(p.value) }}"
+            ),
+            dslx,
+            Default::default(),
+            &options,
+        )?
+        .emit_readable(None)
+    };
+    emit("read")?;
+    assert_eq!(
+        emit("Packet").err().unwrap().to_string(),
+        "duplicate source declaration 'lib::Packet' in BX 'lib.bx' and DSLX 'lib.x'; rename one declaration"
+    );
+    Ok(())
+}
+
+// Verifies: Lean resolves functions, the block, and their named children.
+// Catches: hidden source declarations or needless relocation for `hcongr_one`.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn callable_children_keep_their_source_names() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let pkg = dir.path().join("pkg");
+    fs::create_dir_all(pkg.join("a"))?;
+    fs::write(
+        pkg.join("a.x"),
+        "
+        pub fn f(x: u8) -> u8 { x + u8:1 }
+        pub fn arr(x: u8) -> u8[1] { [x] }
+        pub fn plain(x: u8) -> u8 { x }
+    ",
+    )?;
+    fs::write(
+        pkg.join("a/f.x"),
+        "
+        import pkg.a as parent;
+        pub fn eq_1(x: u8) -> u8 { parent::f(x) + u8:2 }
+    ",
+    )?;
+    fs::write(
+        pkg.join("a/arr.x"),
+        "
+        import pkg.a as parent;
+        pub fn _proof_1(x: u8) -> u8[1] { parent::arr(x) }
+    ",
+    )?;
+    fs::write(
+        pkg.join("a/plain.x"),
+        "
+        import pkg.a as parent;
+        pub fn hcongr_one(x: u8) -> u8 { parent::plain(x) }
+        pub fn eq_def(x: u8) -> u8 { x }
+    ",
+    )?;
+    // The selected block is emitted after this child. Its abbreviation
+    // reserves equation names just as a helper definition does.
+    fs::write(
+        pkg.join("a/controller.x"),
+        "pub fn eq_unfold(x: u8) -> u8 { x }",
+    )?;
+    fs::write(pkg.join("_root_.x"), "pub fn id(x: u8) -> u8 { x }")?;
+    let mut bundle = compile_bx(
+        "pkg.a",
+        "
+        use pkg::a::f::eq_1; use pkg::a::arr::_proof_1;
+        use pkg::a::plain::hcongr_one; use pkg::a::controller::eq_unfold;
+        use pkg::_root_::id;
+        block controller(clk, x: u8) -> (u8, u8[1], u8, u8) {
+            (eq_1(id(x)), _proof_1(x), hcongr_one(x), eq_unfold(x))
+        }",
+        xlsynth_bx::empty_package("pkg"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    bundle.files.push((
+        "SourceCallables.lean".into(),
+        r#"import ReadableCorrespondence
+example (x : BitVec 8) : XLS.pkg.a.f x = x + 1 := rfl
+example : _root_.XLS.pkg.a.f.eq_1 7 = 10 := rfl
+example (x : BitVec 8) : _root_.XLS.pkg.a.arr x = #v[x] := rfl
+example (x : BitVec 8) : _root_.XLS.pkg.a.arr._proof_1 x = #v[x] := rfl
+example (x : BitVec 8) : _root_.XLS.pkg.a.plain x = x := rfl
+#check _root_.XLS.pkg.a.plain.eq_1
+#check_failure XLS.pkg.a.«xls:implementation».plain
+example (x : BitVec 8) : _root_.XLS.pkg.a.plain.hcongr_one x = x := rfl
+example (x : BitVec 8) : _root_.XLS.pkg.«_root_».id x = x := rfl
+example (q : XlsReadable.State) (x : XlsReadable.Input) :
+    XLS.pkg.a.controller q x = XlsReadable.eval q x := rfl
+example : _root_.XLS.pkg.a.controller.eq_unfold 7 = 7 := rfl
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "source declarations under functions and the selected block",
+    );
+    Ok(())
+}
+
+// Verifies: Lean evaluates a helper and the block named `hcongr_1` beneath it.
+// Catches: the helper's congruence theorem reserving the block's name.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn selected_block_can_use_a_helpers_congruence_theorem_name() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("a.x"), "pub fn f(x: u8) -> u8 { x + u8:1 }")?;
+    let mut bundle = compile_bx(
+        "a.f",
+        "use a; block hcongr_1(clk, x: u8) -> u8 { a::f(x) }",
+        xlsynth_bx::empty_package("pkg"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    bundle.files.push((
+        "BlockChild.lean".into(),
+        r#"import ReadableCorrespondence
+example : XLS.a.f 7 = 8 := rfl
+example (q : XlsReadable.State) (x : XlsReadable.Input) :
+    (_root_.XLS.a.f.hcongr_1 q x).output = XLS.a.f x.x := rfl
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "selected block named after a generated congruence theorem",
+    );
+    Ok(())
+}
+
+// Verifies: BX and DSLX can share a module when emitted names are distinct.
+// Catches: Reserving unused names or missing an emitted alias target collision.
+#[test]
+fn module_owner_can_be_shared_by_disjoint_bx_and_dslx_declarations() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("bus.x"),
+        "pub struct Packet { data: u8 } pub type Message = Packet;",
+    )?;
+    let emit = |source| {
+        compile_bx(
+            "bus",
+            source,
+            xlsynth_bx::empty_package("linked_ir"),
+            Default::default(),
+            &xlsynth_bx::ImportOptions {
+                additional_search_paths: vec![dir.path()],
+                ..Default::default()
+            },
+        )?
+        .emit_readable(None)
+    };
+    emit(
+        "use bus; struct Local { x: u8 }
+          block copy(clk, a: Local, b: bus::Packet) -> (u8, u8) { (a.x, b.data) }",
+    )?;
+    emit(
+        "use bus::Message; struct Packet { x: u8 }
+          block copy(clk, p: Packet) -> u8 { p.x }",
+    )?;
+    let collision = emit(
+        "use bus; struct Packet { value: u8 }
+          block copy(clk, a: Packet, b: bus::Message) -> (u8, u8) { (a.value, b.data) }",
+    );
+    assert_eq!(
+        collision.err().unwrap().to_string(),
+        "duplicate source declaration 'bus::Packet' in BX 'bus.bx' and DSLX 'bus.x'; rename one declaration"
+    );
+    Ok(())
+}
+
+// Negative test: A type and module sharing a namespace must report a conflict.
+#[test]
+fn module_owner_cannot_supply_declarations_under_a_source_type() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::create_dir(dir.path().join("design"))?;
+    fs::write(
+        dir.path().join("design/Packet.x"),
+        "pub fn get() -> u8 { u8:7 }",
+    )?;
+    fs::write(dir.path().join("design.x"), "pub struct Packet { get: u8 }")?;
+    fs::write(
+        dir.path().join("ops.x"),
+        "import design.Packet as packet; pub fn call() -> u8 { packet::get() }",
+    )?;
+    let emit = |owner, source| {
+        compile_bx(
+            owner,
+            source,
+            xlsynth_bx::empty_package("pkg"),
+            Default::default(),
+            &xlsynth_bx::ImportOptions {
+                additional_search_paths: vec![dir.path()],
+                ..Default::default()
+            },
+        )?
+        .emit_readable(None)
+    };
+    // Only emitted declarations claim a public namespace.
+    emit(
+        "design",
+        "use ops; struct Packet { get: u8 }
+         block demo(clk, p: Packet) -> u8 { p.get }",
+    )?;
+    for (owner, source) in [
+        (
+            "design",
+            "use ops; struct Packet { get: u8 }
+         block demo(clk, p: Packet) -> u8 { p.get + ops::call() }",
+        ),
+        (
+            "design.Packet",
+            "use design; block get(clk, p: design::Packet) -> u8 { p.get }",
+        ),
+    ] {
+        let err = emit(owner, source).err().unwrap().to_string();
+        assert_eq!(
+            err,
+            "source module 'design.Packet' would emit declarations under the Lean namespace of source type 'design::Packet' (XLS.design.Packet); rename the type or module"
+        );
+    }
+    Ok(())
+}
+
+// Verifies: two imports may reach the same DSLX module from one checked graph.
+// Catches: treating a shared transitive import as a second independent module.
+#[test]
+fn module_owner_is_shared_by_transitive_imports() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("bus.x"), "pub fn get() -> u8 { u8:3 }")?;
+    for name in ["left", "right"] {
+        fs::write(
+            dir.path().join(format!("{name}.x")),
+            "import bus; pub fn get() -> u8 { bus::get() }",
+        )?;
+    }
+    let bx = "use left; use right; block both(clk) -> u8 { left::get() + right::get() }";
+    let options = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    for module in ["design", "bus"] {
+        let compiled = compile_bx(
+            module,
+            bx,
+            xlsynth_bx::empty_package("pkg"),
+            Default::default(),
+            &options,
+        )?;
+        compiled.emit_readable(None)?;
+    }
+    Ok(())
+}
+
 // Negative test: Reject duplicate unused modules on either DSLX import path.
 #[test]
 fn module_owner_cannot_come_from_independent_dslx_inputs() -> Result<()> {
@@ -190,6 +715,56 @@ fn module_owner_cannot_come_from_independent_dslx_inputs() -> Result<()> {
         );
         assert!(err.contains("remove the redundant BX use"), "{err}");
     }
+    Ok(())
+}
+
+// Verifies: Same-named DSLX modules under left and right have distinct helpers.
+// Catches: Losing a module prefix or rejecting repeated uses of one owner.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn module_owner_uses_the_full_dotted_subject() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    for package in ["left", "right"] {
+        let root = dir.path().join(package);
+        fs::create_dir(&root)?;
+        fs::write(
+            root.join("myarbiter.x"),
+            format!(
+                "pub fn compute() -> u8 {{ u8:7 }} pub fn {package}_value() -> u8 {{ compute() }}"
+            ),
+        )?;
+    }
+    let options = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    let emit = |name, uses: &str| -> Result<_> {
+        let source = format!("{uses} block demo(clk, x: u8) -> u8 {{ x }}");
+        compile_bx(
+            name,
+            &source,
+            xlsynth_bx::empty_package("pkg"),
+            Default::default(),
+            &options,
+        )?
+        .emit_readable(None)
+    };
+    let repeated = "use left::myarbiter; use left::myarbiter::left_value;";
+    emit("design", repeated)?;
+    emit("myarbiter", repeated)?;
+    let source = "use right::myarbiter::right_value; use left::myarbiter::left_value;
+                  block demo(clk) -> u8 { right_value() + left_value() }";
+    let mut bundle = compile_bx(
+        "myarbiter",
+        source,
+        xlsynth_bx::empty_package("pkg"),
+        Default::default(),
+        &options,
+    )?
+    .emit_readable(None)?;
+    bundle.files.push(("DottedOwners.lean".into(),
+        "import ReadableGenerated\n#check XLS.left.myarbiter.compute\n#check XLS.right.myarbiter.compute\n".into()));
+    check_bundle(bundle, "separate dotted DSLX owners with the same basename");
     Ok(())
 }
 
@@ -273,6 +848,60 @@ example (q : State) (x : Input) : observe q x = (x.packet.zebra, x.flag) := by
     Ok(())
 }
 
+// Verifies: All 64 lane reads project a single field in a segmented reduction.
+// Catches: Reconstructing the whole positional tuple for each field read.
+#[test]
+fn bx_segmented_eval_projects_a_wide_positional_tuple() {
+    let lanes = ["u8"; 64].join(", ");
+    let mut bx = format!(
+        "block reduce(clk, lane: ({lanes}), biases: u8[2], i: u1) -> u8 {{\nlet bias = biases[i];\n"
+    );
+    let mut previous = "bias".to_string();
+    // The 40 additions place the 160-op cut inside the lane reduction.
+    for (i, operand) in std::iter::repeat_n("bias".to_string(), 40)
+        .chain((0..64).map(|i| format!("lane.{i}")))
+        .enumerate()
+    {
+        writeln!(bx, "let v{i} = {previous} + {operand};").unwrap();
+        previous = format!("v{i}");
+    }
+    writeln!(bx, "{previous}\n}}").unwrap();
+    let bundle = bx_bundle(&bx);
+    let physical = &bundle.files[0].1;
+    // Each tuple_index reads one word. Rebuilding the entire tuple at every
+    // read emits a tuple constructor (and its commas) in every binding.
+    let direct_reads = physical
+        .lines()
+        .zip(physical.lines().skip(1))
+        .filter(|(node, binding)| node.contains("op=tuple_index,") && !binding.contains(','))
+        .count();
+    assert_eq!(direct_reads, 64);
+    #[cfg(feature = "lean-tests")]
+    check_bundle(
+        bundle,
+        "64-field tuple crossing a cut with a separately indexed bias",
+    );
+}
+
+fn boolean_chain(operations: usize, operator: &str) -> LeanBlockBundle {
+    let mut bx = String::from("block chain(clk, a: bool, b: bool) -> bool { let v0 = a;\n");
+    for i in 1..=operations {
+        writeln!(bx, "let v{i} = v{} {operator} b;", i - 1).unwrap();
+    }
+    writeln!(bx, "v{operations}\n}}").unwrap();
+    bx_bundle(&bx)
+}
+
+// Verifies: Lean checks XOR-chain correspondence on both sides of the limit.
+// Catches: A Boolean proof that fails when a wire crosses a cut.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn bx_boolean_xor_chain_corresponds_before_and_after_the_cut() {
+    for operations in [150, 161] {
+        check_bundle(boolean_chain(operations, "^"), "Boolean XOR chain");
+    }
+}
+
 // Verifies: Forwarded Boolean fields reduce by reflexivity. The step and
 // empty assertions proofs both project the public evaluation theorem.
 // Catches: A codec blocking reduction or simplification erasing that
@@ -317,6 +946,106 @@ run_cmd do
     );
 }
 
+// Verifies: The shared physical evaluator splits at 640 and 641 gates.
+// Catches: An off-by-one boundary or a misplaced partial fifth leaf.
+#[test]
+fn bx_segmented_boolean_chain_splits_after_160_operations_and_composes_halves() {
+    // Four full leaves meet at the middle cut. One more operation needs a
+    // fifth leaf. At 192 operations per leaf the Boolean proof exceeded
+    // Lean's default recursion limit.
+    for (operations, root_body) in [
+        (640, "  xls_segment_2_4 (xls_segment_0_2 w)"),
+        (641, "  xls_segment_2_5 (xls_segment_0_2 w)"),
+    ] {
+        let bundle = boolean_chain(operations, "&");
+        let (_, physical) = &bundle.files[0];
+        let last_join = physical
+            .lines()
+            .rfind(|line| line.starts_with("  xls_segment_"));
+        assert_eq!(last_join, Some(root_body), "{operations} operations");
+        assert!(!bundle.files[2].1.contains("def xls_segment_"));
+        #[cfg(feature = "lean-tests")]
+        if operations == 641 {
+            check_bundle(bundle, "Boolean chain with a partial fifth leaf");
+        }
+    }
+}
+
+// Verifies: The readable model returns 159 across a cut with over 512 words.
+// Catches: Excessive product depth or incorrect wiring in a wide cut.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn bx_segmented_eval_with_more_than_512_live_words() {
+    // Every seed is used again after the last one is produced. At the
+    // 640-operation boundary more than 512 distinct words are still live.
+    const N: usize = 600;
+    let mut bx = String::from("block wide(clk, x: u8) -> u8 {\nlet seed0 = u8:3;\n");
+    for i in 1..=N {
+        writeln!(bx, "let seed{i} = seed{} + x;", i - 1).unwrap();
+    }
+    writeln!(bx, "let tail0 = seed{N};").unwrap();
+    for i in 1..=N {
+        writeln!(bx, "let tail{i} = seed{i} - tail{};", i - 1).unwrap();
+    }
+    writeln!(bx, "tail{N}\n}}").unwrap();
+    let mut bundle = bx_bundle(&bx);
+    // Two successive subtractions add x to the running tail. With x = 7
+    // the result is seed600 + 300 * 7 = 159 modulo 256.
+    bundle.files.push((
+        "PublicInterface.lean".into(),
+        "import ReadableCorrespondence\n#guard XlsReadable.observe {} { x := 7 } == 159\n".into(),
+    ));
+    check_bundle(bundle, "wide live words");
+}
+
+// Verifies: The selected packet supplies the output fields and write enable.
+// Catches: Lost packet fields or an incorrect conditional write across cuts.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn bx_segmented_eval_preserves_source_typed_output_and_write_enable() {
+    let mut bx = String::from(
+        r#"
+struct Packet { sample: (bool, u8) }
+block choose(clk, advance: bool, incoming: Packet) -> (Packet, u8) {
+    reg saved: Packet;
+    let selected = if advance { incoming } else { saved };
+    let data = incoming.sample.1;
+    let word0 = saved.sample.1;
+"#,
+    );
+    for i in 1..=173 {
+        writeln!(bx, "let word{i} = word{} + data;", i - 1).unwrap();
+    }
+    bx.push_str("if selected.sample.0 { saved := incoming; }\n(selected, word173)\n}");
+    let mut bundle = bx_bundle(&bx);
+    bundle.files.push((
+        "PublicInterface.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+
+private def check (advance : Bool) (output next : Bool × BitVec 8) : Bool :=
+  let q : State := { saved := { sample := (true, 11) } }
+  let x : Input := { advance := advance, incoming := { sample := (false, 3) } }
+  let result := eval q x
+  result.output.1.sample == output && result.output.2 == 18 && result.next.saved.sample == next
+
+#guard check true (false, 3) (true, 11)
+#guard check false (true, 11) (false, 3)
+
+-- Selecting the incoming word still reduces on symbolic state and input.
+example (q : State) (x : Input) :
+    (observe q { x with advance := true }).1.sample.2 = x.incoming.sample.2 := by rfl
+example (q : XlsBlock.State) (x : XlsBlock.Input) :
+    (XlsBlock.observe q { x with advance := 1 }).out_0.1.2.1 = x.incoming.1.2.1 := by rfl
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "source-shaped values across a cut");
+}
+
+// Inline the external DSLX function with XLS so the straight-line raw
+// exporter sees its field projection in the same graph as the BX constructor.
 // Verifies: An inlined DSLX projection reads the intended BX-built field.
 // Catches: Swapping equal-width fields in construction or projection.
 #[test]
@@ -358,6 +1087,40 @@ fn bx_field_order_across_linked_dslx() {
         },
         "BX field order through linked DSLX",
     );
+}
+
+// Verifies: Renaming a BX local preserves named fields and tuple positions.
+// Catches: Swapped fields when constructor and declaration order differ.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_fields_keep_declaration_order_after_local_rename() {
+    const BX: &str = r#"
+struct Pair { zebra: bool, apple: bool }
+struct Ports { pair: Pair, selected: bool }
+pub block machine(clk, left: bool, right: bool) -> Ports {
+    let assembled = Pair { apple: right, zebra: left };
+    Ports { selected: assembled.zebra, pair: assembled }
+}
+"#;
+    const PROOF: &str = r#"
+import ReadableCorrespondence
+open XlsReadable
+example (q : State) (x : Input) :
+    (observe q x).1.zebra = x.left ∧ (observe q x).1.apple = x.right ∧
+    (observe q x).2 = x.left := by
+  rcases x with ⟨left, right⟩
+  cases left <;> cases right <;> exact ⟨rfl, rfl, rfl⟩
+example (q : XlsBlock.State) (x : XlsBlock.Input) :
+    (XlsBlock.observe q x).pair = (x.left, x.right, ()) ∧
+    (XlsBlock.observe q x).selected = x.left := ⟨rfl, rfl⟩
+"#;
+    for name in ["assembled", "renamed"] {
+        let mut bundle = bx_bundle(&BX.replace("assembled", name));
+        bundle
+            .files
+            .push(("PublicInterface.lean".into(), PROOF.into()));
+        check_bundle(bundle, name);
+    }
 }
 
 // Verifies: Both reset polarities reset the next count and output old count.
@@ -469,6 +1232,64 @@ example (q : State) (x : Input) : (step q { x with rst := false }).one.1 = x.x.1
     check_bundle(bx_bundle("block empty(clk) -> () { () }"), "empty block");
 }
 
+// Verifies: Fields named mk and _root_ coexist with constructors and Repr.
+// Catches: A generated constructor or instance taking a declaration's name.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_fields_keep_lean_names() {
+    let mut bundle = bx_bundle(
+        r#"
+struct Word { mk: u8 }
+struct Packet { design: u8, _root_: u8, word: Word }
+block instReprPacket(clk, BitVec: u8, packet: Packet) -> (u8, Packet) {
+    reg mk: Packet;
+    mk := packet;
+    (BitVec, mk)
+}
+"#,
+    );
+    bundle.files.push((
+        "PublicInterface.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+#check XLS.design.Word.Constructors.mk
+#synth Repr XLS.design.Packet
+example : XLS.design.instReprPacket = eval := rfl
+example (q : State) (x : Input) : (observe q x).2.word.mk = q.mk.word.mk := by rfl
+example (q : State) (x : Input) : (step q x).mk.«_root_» = x.packet.«_root_» := by rfl
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "qualified constructors and fields");
+}
+
+// Verifies: Later fields compile after raw fields named Bool and BitVec.
+// Catches: A preceding field capturing the type of another output or assertion.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn raw_assertion_field_named_bool_compiles() {
+    let block = r#"
+package flags
+top block flags(en: bits[1], BitVec: bits[1], other: bits[1]) {
+  en: bits[1] = input_port(name=en, id=1)
+  tok: token = literal(value=token, id=2)
+  Bool: token = assert(tok, en, message="first", label="first", id=3)
+  second: token = assert(Bool, en, message="second", label="second", id=4)
+  BitVec: () = output_port(en, name=BitVec, id=5)
+  other: () = output_port(en, name=other, id=6)
+}
+"#;
+    let package = Parser::new(block).parse_and_validate_package().unwrap();
+    let source = emit(&package, select_block(&package, None).unwrap()).unwrap();
+    check_bundle(
+        LeanBlockBundle {
+            files: vec![("Generated.lean".into(), source)],
+        },
+        "raw output and assertion field types",
+    );
+}
+
 // Verifies: Nested prelinked helpers compute the next register from old state.
 // Catches: Dropping a transitive helper or feeding next state into the call.
 #[test]
@@ -540,6 +1361,34 @@ fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<Lean
         &Default::default(),
     )?
     .emit_readable(None)
+}
+
+// Verifies: Both models return 74 with counted-loop calls in separate leaves.
+// Catches: A leaf proof that cannot use the loop helper's correspondence lemma.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn segmented_block_calls_a_counted_loop_helper() -> Result<()> {
+    let helper = "fn fold(x: u8) -> u8 { for (_, acc) in u32:0..u32:3 { acc + u8:1 }(x) }";
+    let mut bx = String::from(
+        "extern fn machine::fold(x: u8) -> u8;
+         block cutting(clk, x: u8) -> u8 { let v0 = machine::fold(x);\n",
+    );
+    for i in 1..=161 {
+        writeln!(bx, "let v{i} = v{} + x;", i - 1)?;
+    }
+    bx.push_str("machine::fold(v161) }");
+    let mut bundle = checked_helper_bundle(&bx, helper, &[])?;
+    // For input 2, each call adds 3 and the 161 additions contribute 322.
+    bundle.files.push((
+        "CheckLoop.lean".into(),
+        r#"import ReadableCorrespondence
+#guard XlsReadable.observe {} { x := 2 } == 74
+#guard (XlsBlock.observe {} { x := 2 }).out == 74
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "counted loop calls in different leaves");
+    Ok(())
 }
 
 // Verifies: A checked DSLX helper reads the intended equal-width BX field.
@@ -675,6 +1524,314 @@ open XlsReadable
     check_bundle(bundle, "typed helper reached by a nested invocation");
 }
 
+// Verifies: DSLX names like `recOn` work in Lean patterns and constructors.
+// Catches: Broken `cases` proofs or missing errors for reserved `_root_`.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn source_enum_constructors_keep_lean_generated_names() -> Result<()> {
+    let source = r#"
+enum Tag : u2 { Tag = 3, recOn = 2, ofNat = 0 }
+fn route(tag: Tag, a: bool, b: bool, c: bool) -> (u2, bool) {
+    let result = match tag { Tag::recOn => a, Tag::ofNat => b, _ => c };
+    (tag as u2, result)
+}
+"#;
+    let bx = r#"
+extern fn machine::route(tag: u2, a: bool, b: bool, c: bool) -> (u2, bool);
+block router(clk, tag: u2, a: bool, b: bool, c: bool) -> (u2, bool) {
+    machine::route(tag, a, b, c)
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[])?;
+    bundle.files.push((
+        "EnumNames.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XLS.machine (Tag)
+def expected : Tag → Bool → Bool → Bool → BitVec 2 × Bool
+  | .recOn, a, _, _ => (2, a)
+  | .ofNat, _, b, _ => (0, b)
+  | .Tag, _, _, c => (3, c)
+  | .encoding1, _, _, c => (1, c)
+example : Tag := _root_.XLS.machine.Tag.recOn
+example : (match Tag.recOn with | .recOn => true | .Tag | .ofNat | .encoding1 => false) = true := rfl
+example (t : Tag) (a b c : Bool) : XLS.machine.route t a b c = expected t a b c := by
+  cases t <;> exact Prod.ext rfl (XlsCodec.decode_encodeBool _)
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "source enum constructors that overlap Lean declarations",
+    );
+    let unsupported = source.replace("Tag = 3", "_root_ = 3");
+    let diagnostic = format!(
+        "{:#}",
+        checked_helper_bundle(bx, &unsupported, &[]).err().unwrap()
+    );
+    assert!(
+        diagnostic.contains("Tag._root_") && diagnostic.contains("constructor abbreviation"),
+        "{diagnostic}"
+    );
+    Ok(())
+}
+
+// Verifies: Lean checks dispatch on a selected enum and its original sender.
+// Catches: Missing constructor patterns or matching on the wrong value.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn computed_enum_dispatch_in_checked_helper() {
+    for (control, choose, subject) in [
+        (
+            "use_new: bool",
+            "if use_new { incoming } else { sender }",
+            "chosen",
+        ),
+        (
+            "mode: u2",
+            "match mode { u2:0 => incoming, u2:1 => sender, _ => Sender::C }",
+            "chosen",
+        ),
+        (
+            "use_new: bool",
+            "if use_new { incoming } else { sender }",
+            "sender",
+        ),
+    ] {
+        let control_name = control.split_once(':').unwrap().0;
+        let source = format!(
+            r#"
+enum Sender : u2 {{ A = 0, B = 1, C = 2 }}
+fn route({control}, incoming: Sender, a: bool, b: bool, c: bool,
+         sender: Sender) -> (bool, Sender) {{
+    let chosen = {choose};
+    let payload = match {subject} {{ Sender::A => a, Sender::B => b, _ => c }};
+    (payload, chosen)
+}}
+"#
+        );
+        let bx = format!(
+            r#"
+extern fn machine::route({control}, incoming: u2, a: bool, b: bool, c: bool, sender: u2) -> (bool, u2);
+block router(clk, {control}, incoming: u2, a: bool, b: bool, c: bool) -> bool {{
+    reg sender: u2 = 0;
+    let pair = machine::route({control_name}, incoming, a, b, c, sender);
+    sender := pair.1;
+    pair.0
+}}
+"#
+        );
+        let mut bundle = checked_helper_bundle(&bx, &source, &[]).unwrap();
+        let (use_incoming, use_register) = if control_name == "mode" {
+            ("0", "1")
+        } else {
+            ("true", "false")
+        };
+        // Incoming 3 is the unnamed physical encoding; stored 1 is Sender::B.
+        let payload = subject == "sender";
+        bundle.files.push((
+            "CheckRoute.lean".into(),
+            format!(
+                r#"import ReadableCorrespondence
+open XlsReadable
+private def q : State := {{ sender := 1 }}
+private def x : Input := {{ rst := false, {control_name} := {use_incoming}, incoming := 3, a := false, b := true, c := false }}
+#guard observe q x == {payload} && (step q x).sender == 3
+#guard observe q {{ x with {control_name} := {use_register} }} == true
+#guard (step q {{ x with {control_name} := {use_register} }}).sender == 1
+"#
+            ),
+        ));
+        check_bundle(bundle, choose);
+    }
+}
+
+// Verifies: Lean proves correspondence for ten enum inputs passed in a tuple.
+// Catches: generating case splits over all combinations of independent inputs.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn independent_enum_inputs_pass_through_symbolically() {
+    let source = r#"
+enum Tag : u2 { A = 0, B = 1, C = 2 }
+fn pass(a: Tag, b: Tag, c: Tag, d: Tag, e: Tag,
+        f: Tag, g: Tag, h: Tag, i: Tag, j: Tag)
+        -> (Tag, Tag, Tag, Tag, Tag, Tag, Tag, Tag, Tag, Tag) {
+    (a, b, c, d, e, f, g, h, i, j)
+}
+"#;
+    let bx = r#"
+extern fn machine::pass(a: u2, b: u2, c: u2, d: u2, e: u2, f: u2, g: u2, h: u2, i: u2, j: u2)
+    -> (u2, u2, u2, u2, u2, u2, u2, u2, u2, u2);
+block tags(clk, a: u2, b: u2, c: u2, d: u2, e: u2, f: u2, g: u2, h: u2, i: u2, j: u2)
+    -> (u2, u2, u2, u2, u2, u2, u2, u2, u2, u2) {
+    machine::pass(a, b, c, d, e, f, g, h, i, j)
+}
+"#;
+    let bundle = checked_helper_bundle(bx, source, &[]).unwrap();
+    let (_, correspondence) = bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "ReadableCorrespondence.lean")
+        .unwrap();
+    // Fail before asking Lean to elaborate 4^10 combinations of the inputs.
+    assert!(
+        !correspondence.contains("all_goals cases"),
+        "pass-through correspondence splits independent enum inputs"
+    );
+    check_bundle(bundle, "ten independent enum inputs");
+}
+
+/// Compile the block and its DSLX reference function for comparing Lean with
+/// the XLS interpreter.
+fn compile_lean_and_xls_machine(
+    bx: &str,
+    source: &str,
+) -> Result<(LeanBlockBundle, xlsynth::IrFunction)> {
+    let bundle = checked_helper_bundle(bx, source, &[]).context("compile BX and emit Lean")?;
+    Ok((bundle, xls_machine(source)?))
+}
+
+/// Compile a fixture as `machine.x` and look up its `machine` entry point for
+/// XLS interpretation.
+fn xls_machine(source: &str) -> Result<xlsynth::IrFunction> {
+    let package = xlsynth::convert_dslx_to_ir(source, Path::new("machine.x"), &Default::default())
+        .context("convert DSLX to XLS IR")?;
+    package
+        .ir
+        .get_function("__machine__machine")
+        .context("look up __machine__machine in XLS IR")
+}
+
+// Verifies: Both Lean models match the XLS fold after either reset polarity.
+// Catches: Using the wrong index, carry, or reset branch for a register write.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn counted_loop_matches_xls() {
+    let source = r#"
+fn fold(seed: u8, mask: u8, offset: u8) -> u8 {
+    for (i, carry): (u8, u8) in u8:1..u8:5 {
+        (carry & mask) + offset + i
+    }(seed)
+}
+fn machine(mask: u8, offset: u8, current_count: u8) -> (u8, u8) {
+    (current_count, fold(current_count, mask, offset))
+}
+"#;
+    let bx = r#"
+extern fn machine::fold(seed: u8, mask: u8, offset: u8) -> u8;
+block counter(clk, mask: u8, offset: u8) -> u8 {
+    reg count: u8 = 3;
+    count := machine::fold(count, mask, offset);
+    count
+}
+"#;
+    let machine = xls_machine(source).unwrap();
+    for active_low in [false, true] {
+        let reset = xlsynth_bx::ResetBehavior {
+            active_low,
+            ..Default::default()
+        };
+        let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+        let module =
+            xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports)
+                .unwrap();
+        let mut bundle = xlsynth_lean::block::compile_bx_with_dslx(
+            "design",
+            bx,
+            module,
+            reset,
+            &Default::default(),
+        )
+        .unwrap()
+        .emit_readable(None)
+        .unwrap();
+        let mut checks = String::from(
+            r#"import ReadableCorrespondence
+open XlsReadable
+private def readableClock (seed mask offset : BitVec 8) (rst : Bool) :=
+  let e := eval { count := seed } { rst, mask, offset }
+  (e.output, e.next.count)
+private def rawClock (seed mask offset : BitVec 8) (rst : BitVec 1) :=
+  let e := XlsBlock.eval { count := seed } { rst, mask, offset }
+  (e.output.out, e.next.count)
+"#,
+        );
+        for (seed, mask, offset) in [(1, 3, 2), (255, 1, 0), (128, 255, 5)] {
+            let args = [mask, offset, seed].map(|n| xlsynth::XlsIrValue::make_ubits(8, n).unwrap());
+            let folded = machine
+                .interpret(&args)
+                .unwrap()
+                .get_element(1)
+                .unwrap()
+                .to_u64()
+                .unwrap();
+            for (rst, next) in [(!active_low, 3), (active_low, folded)] {
+                writeln!(
+                    checks,
+                    "#guard readableClock {seed} {mask} {offset} {rst} == ({seed}, {next})"
+                )
+                .unwrap();
+                writeln!(
+                    checks,
+                    "#guard rawClock {seed} {mask} {offset} {} == ({seed}, {next})",
+                    u8::from(rst)
+                )
+                .unwrap();
+            }
+        }
+        bundle.files.push(("CheckLoop.lean".into(), checks));
+        check_bundle(
+            bundle,
+            &format!("counted loop with active_low={active_low}"),
+        );
+    }
+}
+
+// Verifies: Lean checks enum dispatch after a loop, inline and in a callee.
+// Catches: A failing proof when a match arm uses a counted-loop result.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn counted_loop_proves_computed_enum_dispatch_in_linked_helpers() {
+    let choose = r#"
+        let chosen = if fresh { incoming } else { current };
+        let routed = match chosen { Sender::A => a, Sender::B => b, _ => c };
+        (routed, chosen)"#;
+    let helper = format!(
+        "fn choose(fresh: bool, incoming: Sender, current: Sender,
+        a: bool, b: bool, c: bool) -> (bool, Sender) {{ {choose} }}"
+    );
+    for (name, definition, result) in [
+        ("in the clocked helper", "", choose),
+        (
+            "helper",
+            helper.as_str(),
+            "choose(fresh, incoming, current, a, b, c)",
+        ),
+    ] {
+        let source = format!(
+            r#"
+enum Sender : u2 {{ A = 0, B = 1, C = 2 }}
+{definition}
+fn route(fresh: bool, incoming: Sender, current: Sender, a: bool, b: bool, c: bool)
+         -> (bool, Sender) {{
+    let c = for (i, acc) in u32:0..u32:2 {{ if i == u32:0 {{ acc }} else {{ !acc }} }}(c);
+    {result}
+}}
+"#
+        );
+        let bx = r#"
+extern fn machine::route(fresh: bool, incoming: u2, current: u2, a: bool, b: bool, c: bool) -> (bool, u2);
+block router(clk, fresh: bool, incoming: u2, a: bool, b: bool, c: bool) -> bool {
+    reg sender: u2 = 0;
+    let result = machine::route(fresh, incoming, sender, a, b, c);
+    sender := result.1;
+    result.0
+}
+"#;
+        check_bundle(checked_helper_bundle(bx, &source, &[]).unwrap(), name);
+    }
+}
+
 // Verifies: Each imported helper computes at its concrete specialization.
 // Catches: Merging different value arguments or erasing nominal types.
 #[test]
@@ -740,6 +1897,192 @@ private def fallback : XLS.packets.«Fallback<5>» := {value := 17, enabled := t
     check_bundle(bundle, "parametric");
 }
 
+// Verifies: Lean accepts Tagged<2> and rejects same-shaped Tagged<1>.
+// Catches: choosing a nominal specialization solely by its field layout.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn helpers_distinguish_equal_layout_struct_instances() {
+    let source = r#"
+const TWO = u32:2;
+struct Tagged<N: u32> { value: u8 }
+fn take_two(x: Tagged<TWO>) -> u8 { x.value }
+fn combine(one: Tagged<1>, two: Tagged<2>) -> u8 { one.value + take_two(two) }
+fn machine(one: u8, two: u8) -> u8 {
+    combine(Tagged<1> { value: one }, Tagged<2> { value: two })
+}
+"#;
+    let bx = r#"
+extern fn machine::machine(one: u8, two: u8) -> u8;
+block distinguish(clk, one: u8, two: u8) -> u8 {
+    reg last: u8 = 0;
+    last := machine::machine(one, two);
+    last
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[]).unwrap();
+    bundle.files.push((
+        "Check.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+variable (one : XLS.machine.«Tagged<1>») (two : XLS.machine.«Tagged<2>»)
+example : XLS.machine.take_two two = two.value := rfl
+#check_failure XLS.machine.take_two one
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "equal-layout struct instances");
+}
+
+// Verifies: Explicit and omitted dependent defaults use the same record type.
+// Catches: Separating equal bindings or merging a distinct final argument.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn compose_helpers_across_dependent_struct_defaults() {
+    let source = r#"
+struct Packet<N: u32, M: u32 = {N * u32:2}, K: u32 = {M + u32:1}> { data: bits[M] }
+fn pack(x: u6) -> Packet<3> { Packet<3> { data: x } }
+fn relay(p: Packet<3, 6>) -> Packet<3, 6> { p }
+fn unpack(p: Packet<3, 6, 7>) -> u6 { p.data }
+fn other(p: Packet<3, 6, 8>) -> u6 { p.data }
+fn advance(x: u6) -> u6 {
+    unpack(relay(pack(x))) + other(Packet<3, 6, 8> { data: x })
+}
+"#;
+    let bx = r#"
+extern fn machine::advance(x: u6) -> u6;
+block pass(clk, x: u6) -> u6 { machine::advance(x) }
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[]).unwrap();
+    bundle.files.push((
+        "Compose.lean".into(),
+        r#"import ReadableGenerated
+open XlsReadable
+variable (x : BitVec 6)
+example : XLS.machine.«Packet<3,6,7>» := XLS.machine.pack x
+example : XLS.machine.unpack (XLS.machine.relay (XLS.machine.pack x)) = x := rfl
+example (p : XLS.machine.«Packet<3,6,8>») : XLS.machine.other p = p.data := rfl
+#check_failure XLS.machine.other (XLS.machine.pack x)
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "omitted, partial and fully explicit struct bindings",
+    );
+}
+
+// Verifies: Lean matches XLS for five-bit negation shifted by 0, 1, 5 or 2^60.
+// Catches: Wrong modular negation or truncating the shift count.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn neg_and_left_shift_match_xls() {
+    let source = r#"
+fn shift_value(min: u64, value: u5) -> u5 { (-value) << min }
+fn machine(amount: u64, current_value: u5) -> (u5, u5) {
+    (current_value, shift_value(amount, current_value))
+}
+"#;
+    let bx = r#"
+extern fn machine::shift_value(min: u64, value: u5) -> u5;
+block shift(clk, amount: u64) -> u5 {
+    reg value: u5 = 0;
+    value := machine::shift_value(amount, value);
+    value
+}
+"#;
+    let (mut bundle, machine) = compile_lean_and_xls_machine(bx, source)
+        .expect("negation and left shift fixture (machine.x)");
+    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
+    for amount in [0, 1, 5, 1 << 60] {
+        let args = [
+            xlsynth::XlsIrValue::make_ubits(64, amount).unwrap(),
+            xlsynth::XlsIrValue::make_ubits(5, 3).unwrap(),
+        ];
+        let expected = machine
+            .interpret(&args)
+            .unwrap()
+            .get_element(1)
+            .unwrap()
+            .to_u64()
+            .unwrap();
+        writeln!(
+            checks,
+            "#guard (step {{ value := 3 }} {{ rst := false, amount := {amount} }}).value == {expected}"
+        )
+        .unwrap();
+    }
+    bundle.files.push(("CheckShift.lean".into(), checks));
+    check_bundle(bundle, "negation and variable left shift");
+}
+
+// Verifies: Indexing returns either input Vector or the Vector field of L.
+// Catches: A library alias capturing a source binding or field projection.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn library_names_coexist_with_source_bindings_and_record_fields() {
+    let bx = r#"
+struct Packet { Vector: u8 }
+block pick(clk, Vector: u8, L: Packet, index: u8) -> u8 {
+    let slots = [(Vector, u8:0), (L.Vector, u8:0)];
+    slots[index].0
+}
+"#;
+    let mut bundle = bx_bundle(bx);
+    bundle.files.push((
+        "CheckPick.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def pickAt (index : BitVec 8) :=
+  let L : XLS.design.Packet := { Vector := 37 }
+  observe {} { Vector := 11, L, index }
+#guard pickAt 0 == 11
+#guard pickAt 1 == 37
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "library calls and a source projection on L");
+}
+
+// Verifies: Nested fields survive, reads clamp, and writes respect bounds.
+// Catches: A helper update changing the last slot for an out-of-range index.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn arrays_keep_record_elements_and_xls_index_bounds() {
+    let source = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+fn replace(slots: Slot[2], index: u8, replacement: Slot) -> Slot[2] {
+    update(slots, index, replacement)
+}
+"#;
+    let bx = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+extern fn machine::replace(slots: Slot[2], index: u8, replacement: Slot) -> Slot[2];
+block storage(clk, index: u8, replacement: Slot) -> u8 {
+    reg slots: Slot[2];
+    slots := machine::replace(slots, index, replacement);
+    slots[index].write.data
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[]).unwrap();
+    bundle.files.push((
+        "CheckArray.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def clock (index : BitVec 8) :=
+  let q : State := { slots := #v[⟨⟨7⟩⟩, ⟨⟨13⟩⟩] }
+  let x : Input := { index, replacement := ⟨⟨19⟩⟩ }
+  let next := step q x
+  (observe q x, next.slots[0].write.data, next.slots[1].write.data, observe next x)
+#guard clock 0 == (7, 19, 13, 19)
+#guard clock 255 == (13, 7, 13, 13)
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "array of nested records");
+}
+
 // Verifies: The checked call agrees with its physical body for every frame.
 // Catches: A record codec round trip stranded inside a selected, indexed array.
 #[test]
@@ -772,6 +2115,335 @@ block demo(clk, frame: Frame, index: u1) -> Frame {
 "#;
     let bundle = checked_helper_bundle(bx, source, &[])?;
     lean_bundle::check_bundle(&bundle)
+}
+
+// Verifies: Lean proves correspondence for indexing a selected record array.
+// Catches: Field projections that fail to agree across the two representations.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn constructed_and_selected_record_arrays_prove_correspondence() {
+    let bx = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+block pick(clk, choose: bool, a: Slot, b: Slot, supplied: Slot[2], index: u8) -> u8 {
+    reg last: Slot;
+    let slots = if choose { [a, b] } else { supplied };
+    let slot = slots[index];
+    last := slot;
+    slot.write.data
+}
+"#;
+    check_bundle(bx_bundle(bx), "indexed field of a selected record array");
+}
+
+// Verifies: Lean checks the model and proof for a 2048-element Bool literal.
+// Catches: Vector construction or conversion exceeding Lean's limits.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn large_constructed_bool_array_elaborates() {
+    let elements = vec!["flag"; 2048].join(", ");
+    let bx = format!(
+        "block pick(clk, flag: bool, index: u11) -> bool {{
+            let slots = [{elements}];
+            slots[index]
+        }}"
+    );
+    check_bundle(bx_bundle(&bx), "large constructed Bool array");
+}
+
+// Verifies: Lean and XLS agree on slice reads and writes at four indices.
+// Catches: Wrapping wide indices or mishandling slices past the high bit.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn dynamic_slices_match_xls_at_and_beyond_the_boundary() {
+    let source = r#"
+fn replace(data: u8, index: u64) -> u8 { bit_slice_update(data, index, u3:2) }
+fn machine(index: u64, data: u8) -> (u8, u8) {
+    (data[index+:u3] as u8, replace(data, index))
+}
+"#;
+    let bx = r#"
+extern fn machine::replace(data: u8, index: u64) -> u8;
+block slices(clk, index: u64) -> u8 {
+    reg data: u8 = 0;
+    data := machine::replace(data, index);
+    data[index+:u3] as u8
+}
+"#;
+    let (mut bundle, machine) =
+        compile_lean_and_xls_machine(bx, source).expect("dynamic bit slices fixture (machine.x)");
+    let mut checks = String::from(
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def clock (index : BitVec 64) :=
+  let q : State := { data := 165 }
+  let x : Input := { rst := false, index }
+  (observe q x, (step q x).data)
+"#,
+    );
+    for index in [0, 2, 7, 1 << 60] {
+        let result = machine
+            .interpret(&[
+                xlsynth::XlsIrValue::make_ubits(64, index).unwrap(),
+                xlsynth::XlsIrValue::make_ubits(8, 165).unwrap(),
+            ])
+            .unwrap();
+        let read = result.get_element(0).unwrap().to_u64().unwrap();
+        let updated = result.get_element(1).unwrap().to_u64().unwrap();
+        writeln!(checks, "#guard clock {index} == ({read}, {updated})").unwrap();
+    }
+    bundle.files.push(("CheckSlices.lean".into(), checks));
+    check_bundle(bundle, "dynamic bit slice and update");
+}
+
+// Verifies: Lean and XLS encode zero, one, and multiple changed bits alike.
+// Catches: Priority encoding or losing the source parameter named List.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn encode_changed_bits_matches_xls_for_multihot_masks() {
+    let source = "fn encode_mask(List: u8) -> u3 { encode(List) }
+    fn machine(mask: u8, current_previous: u8) -> (u3, u8) {
+        (encode_mask(mask ^ current_previous), mask)
+    }";
+    let bx = r#"
+extern fn machine::encode_mask(List: u8) -> u3;
+block changed(clk, mask: u8) -> u3 {
+    reg previous: u8 = 0;
+    previous := mask;
+    machine::encode_mask(mask ^ previous)
+}
+"#;
+    let (mut bundle, machine) =
+        compile_lean_and_xls_machine(bx, source).expect("changed-bit mask fixture (machine.x)");
+    assert!(
+        bundle.files[2]
+            .1
+            .contains("def _root_.XLS.«machine».«encode_mask» («List»"),
+        "{}",
+        bundle.files[2].1
+    );
+    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
+    let previous = 0b0000_0100;
+    // No change, clear bit 2, set bit 4, then flip both bits relative to
+    // previous.
+    for mask in [0b0000_0100, 0, 0b0001_0100, 0b0001_0000] {
+        let args = [mask, previous].map(|v| xlsynth::XlsIrValue::make_ubits(8, v).unwrap());
+        let index = machine
+            .interpret(&args)
+            .unwrap()
+            .get_element(0)
+            .unwrap()
+            .to_u64()
+            .unwrap();
+        writeln!(
+            checks,
+            "#guard observe {{ previous := {previous} }} {{ rst := false, mask := {mask} }} == {index}"
+        )
+        .unwrap();
+    }
+    bundle.files.push(("CheckEncode.lean".into(), checks));
+    check_bundle(bundle, "encode changed mask bits");
+}
+
+// Verifies: Lean and XLS agree on outputs and next state in three u5 cases.
+// Catches: Signed comparison, faulty wraparound, or wrong division by zero.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn unsigned_arithmetic_matches_xls_at_width_boundaries() {
+    let source = "fn machine(a: u5, b: u5, current_value: u5) -> (bool, u5, u5, u5) {
+        (a < b, a - b, a / b, current_value * a)
+    }";
+    let bx = r#"
+block arithmetic(clk, a: u5, b: u5) -> (bool, u5, u5) {
+    reg value: u5 = 0;
+    value := value * a;
+    (a < b, a - b, a / b)
+}
+"#;
+    let (mut bundle, machine) =
+        compile_lean_and_xls_machine(bx, source).expect("unsigned arithmetic fixture (machine.x)");
+    let mut checks = String::from(
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def clock (a b : BitVec 5) :=
+  let q : State := { value := 7 }
+  let x : Input := { rst := false, a, b }
+  (observe q x, (step q x).value)
+"#,
+    );
+    for (a, b) in [(3, 8), (31, 0), (19, 3)] {
+        let args = [a, b, 7].map(|v| xlsynth::XlsIrValue::make_ubits(5, v).unwrap());
+        let result = machine.interpret(&args).unwrap();
+        let [lt, diff, quot, prod] =
+            [0, 1, 2, 3].map(|i| result.get_element(i).unwrap().to_u64().unwrap());
+        writeln!(
+            checks,
+            "#guard clock {a} {b} == (({}, {diff}, {quot}), {prod})",
+            lt != 0
+        )
+        .unwrap();
+    }
+    bundle.files.push(("CheckArith.lean".into(), checks));
+    check_bundle(bundle, "unsigned fixed-width arithmetic");
+}
+
+/// Typecheck the loop fixture with its sibling DSLX modules on the import path.
+fn checked_nonzero_range() -> xlsynth::dslx::TypecheckedModule {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bx_loop_bindings");
+    let mut imports = xlsynth::dslx::ImportData::new(None, &[&root]);
+    xlsynth::dslx::parse_and_typecheck(
+        include_str!("fixtures/bx_loop_bindings/machine.x"),
+        "machine.x",
+        "machine",
+        &mut imports,
+    )
+    .unwrap()
+}
+
+// Verifies: A nonzero-range loop still calls its rebased body after BX linking.
+// Catches: Calling the function that occupied the original body symbol.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_imported_loop_executes_the_renamed_body() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    fs::write(
+        root.path().join("sum.x"),
+        r#"
+struct Row { value: u8 }
+pub fn lanes(xs: u8[3]) -> u8 {
+    let row = for (lane, carry): (u32, Row) in u32:1..u32:3 {
+        Row { value: carry.value + xs[lane] }
+    }(Row { value: u8:0 });
+    row.value
+}
+"#,
+    )?;
+    let source = "use sum; block rows(clk, xs: u8[3]) -> u8 { sum::lanes(xs) }";
+    let imports = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let plain = compile_bx(
+        "rows",
+        source,
+        xlsynth_bx::empty_package("plain"),
+        Default::default(),
+        &imports,
+    )?;
+    fn loop_body(compiled: &xlsynth_lean::block::CompiledBx) -> &str {
+        compiled
+            .package()
+            .members
+            .iter()
+            .flat_map(|m| &m.graph().nodes)
+            .find_map(|n| match &n.payload {
+                xlsynth_pir::ir::NodePayload::CountedFor { body, .. } => Some(body.as_str()),
+                _ => None,
+            })
+            .unwrap()
+    }
+    let body = loop_body(&plain);
+    let reserved = format!(
+        "package occupied\nfn {body}(a: bits[8] id=500) -> bits[8] {{ ret n: bits[8] = not(a, id=501) }}"
+    );
+    let compiled = compile_bx(
+        "rows",
+        source,
+        Parser::new(&reserved).parse_and_validate_package()?,
+        Default::default(),
+        &imports,
+    )?;
+    let linked = loop_body(&compiled);
+    assert_ne!(linked, body);
+    assert!(
+        compiled
+            .package()
+            .get_fn(linked)
+            .unwrap()
+            .param_nodes()
+            .all(|p| p.text_id > 501)
+    );
+    let mut bundle = compiled.emit_readable(None)?;
+    bundle.files.push((
+        "CheckImport.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+#guard observe {} { xs := #v[100, 3, 5] } == (8 : BitVec 8)
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "imported nonzero loop with colliding IDs and symbol",
+    );
+    Ok(())
+}
+
+// Verifies: A nonzero-range loop computes both mode results without bindings.
+// Catches: Making ordinary loop emission depend on optional binding records.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn nonzero_range_without_loop_records() {
+    let mut bundle = xlsynth_lean::block::compile_bx_with_dslx(
+        "counter",
+        include_str!("fixtures/bx_loop_bindings/counter.bx"),
+        checked_nonzero_range(),
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap()
+    .emit_readable(None)
+    .unwrap();
+    bundle.files.push((
+        "CheckLoop.lean".into(),
+        include_str!("fixtures/bx_loop_bindings/CheckLoop.lean").into(),
+    ));
+    check_bundle(bundle, "nonzero range without loop records");
+}
+
+// Verifies: The block and its loop body index arrays in opposite orders.
+// Catches: Reading the wrong nested field or failing to clamp the loop index.
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn counted_loop_proves_indexed_record_fields_in_block_and_body() {
+    let source = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+fn fold(index: u8, a: Slot, b: Slot, last: u8) -> u8 {
+    for (i, acc) in u32:0..u32:3 {
+        let inner_slots = [b, a];
+        let inner_slot = inner_slots[index + (i as u8)];
+        acc + inner_slot.write.data
+    }(last)
+}
+"#;
+    let bx = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+extern fn machine::fold(index: u8, a: Slot, b: Slot, last: u8) -> u8;
+block indexed(clk, index: u8, a: Slot, b: Slot) -> u8 {
+    reg last: u8 = 0;
+    let slots = [a, b];
+    last := machine::fold(index, a, b, last);
+    slots[index].write.data
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[]).unwrap();
+    bundle.files.push((
+        "LoopIndex.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def check (index : BitVec 8) (port next : BitVec 8) :=
+  let q : State := { last := 11 }
+  let x : Input := { rst := false, index, a := ⟨⟨3⟩⟩, b := ⟨⟨5⟩⟩ }
+  observe q x == port && (step q x).last == next
+#guard check 0 3 22
+#guard check 1 5 20
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "indexed records in a block and its loop body");
 }
 
 /// Checks the complete bundle and names the fixture in any compilation failure.
