@@ -261,26 +261,9 @@ fn choices_prepared(
         {
             continue;
         }
-        let mut truth = 0u64;
-        let mut bound = true;
-        for assignment in 0..(1usize << inputs.len()) {
-            let bindings: HashMap<_, _> = inputs
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.clone(), assignment & (1 << i) != 0))
-                .collect();
-            match formula.evaluate_partial(&bindings) {
-                Some(true) => truth |= 1 << assignment,
-                Some(false) => {} // False assignments leave this truth-table bit clear.
-                None => {
-                    bound = false;
-                    break;
-                }
-            }
-        }
-        if !bound {
+        let Some(truth) = formula.truth_table(&inputs) else {
             continue;
-        }
+        };
         // Constant functions and cells without a complete timing interface are
         // not replacement/replication candidates; the existing netlist stays
         // intact.

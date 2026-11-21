@@ -15,7 +15,7 @@
 //! deterministic order.
 
 use crate::liberty::IndexedLibrary;
-use crate::liberty_model::{PinDirection, SequentialKind};
+use crate::liberty_model::PinDirection;
 use crate::netlist::connectivity::NetlistConnectivity;
 use crate::netlist::normalized::BitIndex;
 use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
@@ -162,9 +162,7 @@ impl<'a> ModuleConeContext<'a> {
 
             if let Some(cell) = lib.get_cell(type_name.as_str()) {
                 let is_dff = if dff_cell_names.is_empty() {
-                    cell.sequential
-                        .iter()
-                        .any(|state| state.kind == SequentialKind::Ff as i32)
+                    cell.has_ff_group()
                 } else {
                     dff_cell_names.contains(&cell.name)
                 };

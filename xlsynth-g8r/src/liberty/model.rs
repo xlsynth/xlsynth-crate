@@ -502,6 +502,14 @@ pub struct Cell {
 }
 
 impl Cell {
+    /// Whether Liberty declares an `ff` group; this does not establish mapping
+    /// legality or timing coverage.
+    pub(crate) fn has_ff_group(&self) -> bool {
+        self.sequential
+            .iter()
+            .any(|group| group.kind == wire::SequentialKind::Ff as i32)
+    }
+
     /// Validates metadata without requiring this consumer to support the cell.
     pub(crate) fn validate_import_metadata(&self) -> std::result::Result<(), String> {
         for issue in &self.unsupported_semantics {
