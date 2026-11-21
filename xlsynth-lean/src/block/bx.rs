@@ -148,7 +148,7 @@ impl CompiledBx {
     /// the same declaration.
     pub fn emit_readable(&self, block_name: Option<&str>) -> Result<LeanBlockBundle> {
         let graph = select_block(&self.package, block_name)?;
-        let block = BlockContext::new(&self.package, graph)?;
+        let mut block = BlockContext::new(&self.package, graph)?;
         let (mut declarations, mut interface) = self.readable_interface(&block)?;
         let independent = |owner: &str| {
             anyhow::anyhow!(
@@ -208,8 +208,7 @@ impl CompiledBx {
                 interface
                     .helpers
                     .values()
-                    .filter_map(|helper| helper.source_name.as_ref())
-                    .map(|(owner, local)| (owner.as_str(), local.as_str())),
+                    .map(|helper| (helper.source_name.0.as_str(), helper.source_name.1.as_str())),
             )
         {
             ensure!(
@@ -217,17 +216,16 @@ impl CompiledBx {
                 "duplicate source declaration '{owner}::{local}' in BX '{owner}.bx' and DSLX '{owner}.x'; rename one declaration"
             );
         }
-        // Two linked copies can share a checked declaration and specialization.
-        // Give it one public definition, keeping any other physical copy
-        // callable.
-        let mut names = std::collections::BTreeSet::new();
-        for signature in interface.helpers.values_mut() {
-            if let Some(name) = &signature.source_name
-                && !names.insert(name.clone())
-            {
-                signature.source_name = None;
-            }
-        }
+        // Imports can link the same specialization under several IR symbols.
+        // Emit its first body in dependency order; every symbol still has
+        // its checked signature and resolves to that same source definition.
+        let mut definitions = BTreeSet::new();
+        block.helpers.retain(|function| {
+            interface
+                .helpers
+                .get(&function.name)
+                .is_none_or(|signature| definitions.insert(&signature.source_name))
+        });
         readable::emit(&block, &declarations, &interface)
     }
 

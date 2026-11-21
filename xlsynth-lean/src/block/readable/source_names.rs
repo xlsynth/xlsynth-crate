@@ -38,7 +38,7 @@ pub(super) fn check_type_namespaces(
             interface
                 .helpers
                 .values()
-                .filter_map(|helper| helper.source_name.as_ref().map(|(owner, _)| owner.as_str())),
+                .map(|helper| helper.source_name.0.as_str()),
         )
         .collect();
     for owner in owners {

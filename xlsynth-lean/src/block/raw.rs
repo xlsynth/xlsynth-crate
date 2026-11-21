@@ -7,10 +7,9 @@
 //! registers, and every source assertion, including disconnected assertions.
 //! No assertion narrows the input/state domain. Tuples remain typed products;
 //! no enum decoding or payload projection is part of this translation.
-//! Each reachable IR function becomes a definition under `Helpers` in the
-//! block's namespace. A caller's physical equations take its direct callees
-//! as arguments so a checked model can supply source-typed calls at those
-//! sites.
+//! Standalone equations can take replacement callees as arguments. In a
+//! checked bundle, each call goes directly to the source-typed function or
+//! to the physical helper that owns the corresponding IR equations.
 
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeSet;
@@ -33,7 +32,7 @@ use crate::support::write_file;
 pub struct LeanBlockBundle {
     /// File names and UTF-8 source in dependency order.
     ///
-    /// The order is `Generated.lean`, `ReadableTypes.lean`,
+    /// The order is `ReadableTypes.lean`, `Generated.lean`,
     /// `ReadableGenerated.lean`, `ReadableRepresentation.lean`, then
     /// `ReadableCorrespondence.lean`.
     pub files: Vec<(String, String)>,
@@ -66,7 +65,7 @@ pub struct LeanBlockBundle {
 /// without a reset value still depend on the supplied old state.
 pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
     let block = BlockContext::new(package, block)?;
-    let mut module = emit_with_context(&block, "XlsBlock")?;
+    let mut module = emit_with_calls(&block, "XlsBlock", None)?;
     super::library_notation::add_to_module(&mut module);
     Ok(module)
 }
@@ -85,17 +84,58 @@ pub fn write_to(
     root: &Path,
 ) -> Result<PathBuf> {
     let block = BlockContext::new(package, block)?;
-    let mut source = emit_with_context(&block, &module_name.lean_identifier())?;
+    let mut source = emit_with_calls(&block, &module_name.lean_identifier(), None)?;
     super::library_notation::add_to_module(&mut source);
     let path = module_name.source_path();
     write_file(root, &path, source.as_bytes())?;
     Ok(root.join(path))
 }
 
-/// Select the physical equation layout for both raw exports and checked
-/// bundles.
-pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
-    emit_block(block, namespace, Segments::new(block).as_ref()).with_context(|| {
+/// Render source-declared functions using their checked types. A callee
+/// without a source declaration keeps its physical signature.
+pub(super) trait CheckedCalls {
+    /// Return the physical result of applying the source function to these
+    /// physical arguments, or `None` for a physical-only helper.
+    fn call(&self, physical: &str, args: &[String]) -> Result<Option<String>>;
+
+    /// Write the source function in place of its raw definition. Return
+    /// `false` to let the physical emitter write a compiler-only helper.
+    fn write_helper(&self, out: &mut String, function: &ir::Fn) -> Result<bool>;
+}
+
+/// Render the block and its reachable functions, importing the checked
+/// interface's types and codecs from `ReadableTypes`.
+pub(super) fn emit_checked(
+    block: &BlockContext<'_>,
+    namespace: &str,
+    calls: &dyn CheckedCalls,
+) -> Result<String> {
+    emit_with_calls(block, namespace, Some(calls))
+}
+
+/// Selects how emitted block and helper bodies call their callees.
+///
+/// With `checked: None`, standalone bodies receive a callback parameter for
+/// each distinct direct callee. With `checked: Some(_)`, bodies call checked
+/// source declarations directly. If `CheckedCalls::call` returns `None` for
+/// a physical-only helper, they call that helper in `namespace.Helpers`.
+#[derive(Clone, Copy)]
+struct CallTargets<'a> {
+    namespace: &'a str,
+    checked: Option<&'a dyn CheckedCalls>,
+}
+
+fn emit_with_calls(
+    block: &BlockContext<'_>,
+    namespace: &str,
+    checked: Option<&dyn CheckedCalls>,
+) -> Result<String> {
+    emit_block(
+        block,
+        CallTargets { namespace, checked },
+        Segments::new(block).as_ref(),
+    )
+    .with_context(|| {
         format!(
             "Lean emission of block {} in package {}",
             block.graph.name, block.package_name
@@ -111,9 +151,10 @@ pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Re
 /// cut and forwards direct input or old-state projections separately.
 fn emit_block(
     block: &BlockContext<'_>,
-    namespace: &str,
+    calls: CallTargets<'_>,
     segments: Option<&Segments>,
 ) -> Result<String> {
+    let namespace = calls.namespace;
     ensure!(
         block.graph.instantiations.is_empty(),
         "block instances are outside the supported Lean subset"
@@ -181,10 +222,20 @@ fn emit_block(
          -- Exact BitVec values; tuple elements end in Unit.\n\
          -- Outputs read old registers; all writes commit together.\n\
          -- Source assertions are results, never assumptions.\n\n\
-         import XlsynthLean.IR\n\nnamespace {namespace}\n\n",
+         import XlsynthLean.IR\n",
         comment(&graph.name),
         comment(block.package_name)
     );
+    if calls.checked.is_some() {
+        source.push_str("import ReadableTypes\n");
+    }
+    source.push('\n');
+    // A checked callable may temporarily leave the block namespace to
+    // declare a source module named `_root_`; keep its limits file-wide.
+    let enter_namespace = format!("namespace {namespace}\n\n");
+    if calls.checked.is_none() {
+        source.push_str(&enter_namespace);
+    }
     let largest_body = match segments {
         None => graph.nodes.len(),
         Some(plan) => graph
@@ -200,6 +251,9 @@ fn emit_block(
         std::iter::once((&graph.graph, largest_body))
             .chain(block.helpers.iter().map(|f| (&f.graph, f.nodes.len()))),
     );
+    if calls.checked.is_some() {
+        source.push_str(&enter_namespace);
+    }
     if graph
         .nodes
         .iter()
@@ -214,18 +268,24 @@ fn emit_block(
 ",
         );
     }
-    if graph
-        .nodes
-        .iter()
-        .chain(block.helpers.iter().flat_map(|f| &f.nodes))
-        .any(|n| matches!(n.payload, NodePayload::BitSliceUpdate { .. }))
+    if calls.checked.is_none()
+        && graph
+            .nodes
+            .iter()
+            .chain(block.helpers.iter().flat_map(|f| &f.nodes))
+            .any(|n| matches!(n.payload, NodePayload::BitSliceUpdate { .. }))
     {
         source.push_str(
             "abbrev bitSliceUpdate {n s w : L.Nat} (value : L.BitVec n) (start : L.BitVec s) (update : L.BitVec w) : L.BitVec n :=\n  _root_.XlsynthLean.IR.bitSliceUpdate value start update\n\n",
         );
     }
     for helper in &block.helpers {
-        write_helper(&mut source, namespace, helper)?;
+        if let Some(checked) = calls.checked
+            && checked.write_helper(&mut source, helper)?
+        {
+            continue;
+        }
+        write_helper(&mut source, calls, helper)?;
     }
     source.push_str(&record_type(
         namespace,
@@ -281,9 +341,9 @@ fn emit_block(
          \x20 assertions : Assertions\n\
          \x20 deriving L.Repr\n\n",
     );
-    let callees = direct_callees(graph);
+    let callees = calls.parameters(graph);
     let stage_args = match segments {
-        Some(plan) => write_stages(&mut source, namespace, block, plan, &names)?,
+        Some(plan) => write_stages(&mut source, calls, block, plan, &names)?,
         None => String::new(),
     };
     if callees.is_empty() {
@@ -296,7 +356,7 @@ fn emit_block(
     let entry_value = |reference| {
         // The first cut contains old registers, input ports, or the unit
         // value of a write/output used as a data operand.
-        node_expression(namespace, graph, reference, |_| {
+        node_expression(calls, graph, reference, |_| {
             unreachable!("entry values have no operands")
         })
         .with_context(|| node_context(block, reference))
@@ -314,7 +374,7 @@ fn emit_block(
             if !matches!(graph.get_node(reference).payload, NodePayload::Nil) {
                 write_node_binding(
                     &mut source,
-                    namespace,
+                    calls,
                     block,
                     reference,
                     &names[reference.index],
@@ -329,7 +389,7 @@ fn emit_block(
         match finished {
             None => Ok(names[reference.index].clone()),
             Some(_) if is_interface_projection(graph, reference) => {
-                interface_value(namespace, graph, reference)
+                interface_value(calls, graph, reference)
             }
             Some(wires) => {
                 let index = wires
@@ -431,24 +491,29 @@ pub(super) fn helper_path(namespace: &str, physical: &str) -> Result<String> {
     ))
 }
 
-/// Absolute name of the physical equations of a helper with direct calls.
-pub(super) fn body_path(namespace: &str, physical: &str) -> Result<String> {
-    Ok(format!(
-        "_root_.{namespace}.Bodies.{}",
-        helper_identifier(physical)?
-    ))
-}
+impl CallTargets<'_> {
+    /// Standalone bodies expose one parameter per direct callee in IR order.
+    /// Checked bodies call their declarations in the generated module.
+    fn parameters(self, graph: &ir::NodeGraph) -> Vec<&str> {
+        if self.checked.is_some() {
+            return Vec::new();
+        }
+        let mut seen = BTreeSet::new();
+        graph
+            .nodes
+            .iter()
+            .filter_map(callee_name)
+            .filter(|name| seen.insert(*name))
+            .collect()
+    }
 
-/// Distinct direct calls in IR node order, also the order of a body's
-/// parameters.
-pub(super) fn direct_callees(graph: &ir::NodeGraph) -> Vec<&str> {
-    let mut seen = BTreeSet::new();
-    graph
-        .nodes
-        .iter()
-        .filter_map(callee_name)
-        .filter(|name| seen.insert(*name))
-        .collect()
+    fn physical_target(self, physical: &str) -> Result<String> {
+        if self.checked.is_some() {
+            helper_path(self.namespace, physical)
+        } else {
+            Ok(call_parameter(physical))
+        }
+    }
 }
 
 fn callee_name(node: &ir::Node) -> Option<&str> {
@@ -508,28 +573,65 @@ pub(super) fn helper_identifier(physical: &str) -> Result<String> {
     }
 }
 
-/// Emit one copy of the equations and instantiate any calls with raw helpers.
-fn write_helper(source: &mut String, namespace: &str, function: &ir::Fn) -> Result<()> {
+/// Emit equations for a helper with a physical signature.
+fn write_helper(source: &mut String, calls: CallTargets<'_>, function: &ir::Fn) -> Result<()> {
+    let namespace = calls.namespace;
     let name = helper_identifier(&function.name)?;
-    let callees = direct_callees(function);
+    let callees = calls.parameters(function);
     if callees.is_empty() {
         write!(source, "def Helpers.{name}")?;
     } else {
         write!(source, "abbrev Bodies.{name}")?;
         write_call_binders(source, namespace, &callees)?;
     }
-    let names = (0..function.nodes.len())
-        .map(|index| node_name(function, NodeRef { index }))
-        .collect::<Vec<_>>();
-    for param in &function.params {
+    let params: Vec<_> = function
+        .params
+        .iter()
+        .map(|&param| node_name(function, param))
+        .collect();
+    for (param, param_name) in function.params.iter().zip(&params) {
         write!(
             source,
-            " ({} : {})",
-            names[param.index],
+            " ({param_name} : {})",
             lean_type(&function.get_node(*param).ty)?
         )?;
     }
     writeln!(source, " : {} :=", lean_type(&function.ret_ty)?)?;
+    let result = write_helper_equations(source, namespace, function, calls.checked, &params)?;
+    writeln!(source, "  {result}\n")?;
+    if !callees.is_empty() {
+        writeln!(
+            source,
+            "def Helpers.{name} := _root_.{namespace}.Bodies.{name}{}\n",
+            raw_call_arguments(namespace, &callees)?
+        )?;
+    }
+    Ok(())
+}
+
+/// Write a function's IR equations under a physical or source-typed
+/// signature. `physical_params` supplies an atomic Lean term for each
+/// parameter in signature order. Return the physical result's term so the
+/// enclosing definition can decode it when needed.
+pub(super) fn write_helper_equations(
+    source: &mut String,
+    namespace: &str,
+    function: &ir::Fn,
+    checked: Option<&dyn CheckedCalls>,
+    physical_params: &[String],
+) -> Result<String> {
+    let calls = CallTargets { namespace, checked };
+    let mut names = (0..function.nodes.len())
+        .map(|index| node_name(function, NodeRef { index }))
+        .collect::<Vec<_>>();
+    ensure!(
+        function.params.len() == physical_params.len(),
+        "wrong number of physical arguments for {}",
+        function.name
+    );
+    for (param, name) in function.params.iter().zip(physical_params) {
+        names[param.index].clone_from(name);
+    }
     for reference in ir_utils::get_topological_nodes(&function.nodes) {
         let node = function.get_node(reference);
         if !matches!(node.payload, NodePayload::Nil | NodePayload::Param) {
@@ -538,7 +640,7 @@ fn write_helper(source: &mut String, namespace: &str, function: &ir::Fn) -> Resu
                 "assertion in helper {} is unsupported",
                 function.name
             );
-            let expr = node_expression(namespace, function, reference, |operand| {
+            let expr = node_expression(calls, function, reference, |operand| {
                 Ok(LeanOperand::Atom(names[operand.index].clone()))
             })
             .with_context(|| format!("function {}, node {}", function.name, node.text_id))?;
@@ -553,37 +655,32 @@ fn write_helper(source: &mut String, namespace: &str, function: &ir::Fn) -> Resu
         }
     }
     let result = function.ret_node_ref.context("helper has no return node")?;
-    writeln!(source, "  {}\n", names[result.index])?;
-    if !callees.is_empty() {
-        writeln!(
-            source,
-            "def Helpers.{name} := {}{}\n",
-            body_path(namespace, &function.name)?,
-            raw_call_arguments(namespace, &callees)?
-        )?;
-    }
-    Ok(())
+    Ok(names.swap_remove(result.index))
 }
 
 /// Emit each computation once in a bounded leaf, passing live values directly
 /// across its boundary. Internal stages compose two earlier definitions.
 fn write_stages(
     source: &mut String,
-    namespace: &str,
+    calls: CallTargets<'_>,
     block: &BlockContext<'_>,
     plan: &Segments,
     names: &[String],
 ) -> Result<String> {
-    let leaf_callees = plan
-        .leaves
-        .iter()
-        .map(|leaf| {
-            leaf.iter()
-                .filter_map(|&r| callee_name(block.graph.get_node(r)))
-                .collect::<BTreeSet<_>>()
-        })
-        .collect::<Vec<_>>();
+    let leaf_callees = calls.checked.is_none().then(|| {
+        plan.leaves
+            .iter()
+            .map(|leaf| {
+                leaf.iter()
+                    .filter_map(|&r| callee_name(block.graph.get_node(r)))
+                    .collect::<BTreeSet<_>>()
+            })
+            .collect::<Vec<_>>()
+    });
     let stage_calls = |stage: Stage| -> Result<(String, String)> {
+        let Some(leaf_callees) = &leaf_callees else {
+            return Ok((String::new(), String::new()));
+        };
         let callees: BTreeSet<_> = leaf_callees[stage.start..stage.end]
             .iter()
             .flatten()
@@ -593,7 +690,11 @@ fn write_stages(
         let mut args = String::new();
         for name in callees {
             let param = call_parameter(name);
-            write!(binders, " ({param} := {})", helper_path(namespace, name)?)?;
+            write!(
+                binders,
+                " ({param} := {})",
+                helper_path(calls.namespace, name)?
+            )?;
             write!(args, " {param}")?;
         }
         Ok((binders, args))
@@ -609,7 +710,7 @@ fn write_stages(
         for &reference in &plan.leaves[leaf] {
             write_node_binding(
                 source,
-                namespace,
+                calls,
                 block,
                 reference,
                 &names[reference.index],
@@ -627,7 +728,7 @@ fn write_stages(
 /// operands.
 fn write_node_binding(
     source: &mut String,
-    namespace: &str,
+    calls: CallTargets<'_>,
     block: &BlockContext<'_>,
     reference: NodeRef,
     name: &str,
@@ -635,7 +736,7 @@ fn write_node_binding(
 ) -> Result<()> {
     let context = node_context(block, reference);
     let ty = lean_type(block.graph.get_node_ty(reference)).with_context(|| context.clone())?;
-    let expression = node_expression(namespace, &block.graph, reference, |arg| {
+    let expression = node_expression(calls, &block.graph, reference, |arg| {
         Ok(LeanOperand::Atom(operand(arg)))
     })
     .with_context(|| context.clone())?;
@@ -849,18 +950,29 @@ fn predicate(value: &str) -> String {
 /// For a counted loop, bind the invariant operands in IR order, leaving the
 /// body's index and carry parameters for the fold to supply on each iteration.
 fn node_expression(
-    namespace: &str,
+    calls: CallTargets<'_>,
     graph: &ir::NodeGraph,
     reference: NodeRef,
     operand: impl Fn(NodeRef) -> Result<LeanOperand>,
 ) -> Result<String> {
     let node = graph.get_node(reference);
+    let arguments = |args: &[NodeRef]| {
+        args.iter()
+            .map(|&arg| operand(arg).map(LeanOperand::into_argument))
+            .collect::<Result<Vec<_>>>()
+    };
     match &node.payload {
         NodePayload::InputPort { name, .. } => Ok(format!("x.{}", identifier(name)?)),
         NodePayload::Invoke { to_apply, operands } => {
-            let mut call = call_parameter(to_apply);
-            for arg in operands {
-                write!(call, " {}", operand(*arg)?.into_argument())?;
+            let args = arguments(operands)?;
+            if let Some(checked) = calls.checked
+                && let Some(expr) = checked.call(to_apply, &args)?
+            {
+                return Ok(expr);
+            }
+            let mut call = calls.physical_target(to_apply)?;
+            for arg in args {
+                write!(call, " {arg}")?;
             }
             Ok(call)
         }
@@ -871,15 +983,32 @@ fn node_expression(
             body,
             invariant_args,
         } => {
-            let mut step = call_parameter(body);
-            if !invariant_args.is_empty() {
-                step.push_str(" · ·");
-                for arg in invariant_args {
-                    write!(step, " {}", operand(*arg)?.into_argument())?;
+            let invariants = arguments(invariant_args)?;
+            // Quoted binders containing spaces cannot capture a source name
+            // or a generated wire used by an invariant.
+            let checked_step = if let Some(checked) = calls.checked {
+                let mut args = vec!["«xls loop index»".into(), "«xls loop carry»".into()];
+                args.extend_from_slice(&invariants);
+                checked
+                    .call(body, &args)?
+                    .map(|expr| format!("fun «xls loop index» «xls loop carry» => {expr}"))
+            } else {
+                None
+            };
+            let step = match checked_step {
+                Some(step) => step,
+                None => {
+                    let target = calls.physical_target(body)?;
+                    if invariants.is_empty() {
+                        target
+                    } else {
+                        format!("{target} · · {}", invariants.join(" "))
+                    }
                 }
-            }
+            };
             Ok(format!(
-                "_root_.{namespace}.countedFor {trip_count} {stride} ({step}) {}",
+                "_root_.{}.countedFor {trip_count} {stride} ({step}) {}",
+                calls.namespace,
                 operand(*init)?.into_argument()
             ))
         }
@@ -903,9 +1032,13 @@ fn node_expression(
 }
 
 /// Replay a verified field projection against the public inputs or old state.
-fn interface_value(namespace: &str, graph: &ir::NodeGraph, reference: NodeRef) -> Result<String> {
-    node_expression(namespace, graph, reference, |operand| {
-        interface_value(namespace, graph, operand).map(LeanOperand::Expression)
+fn interface_value(
+    calls: CallTargets<'_>,
+    graph: &ir::NodeGraph,
+    reference: NodeRef,
+) -> Result<String> {
+    node_expression(calls, graph, reference, |operand| {
+        interface_value(calls, graph, operand).map(LeanOperand::Expression)
     })
 }
 

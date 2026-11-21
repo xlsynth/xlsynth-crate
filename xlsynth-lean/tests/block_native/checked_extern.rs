@@ -56,11 +56,7 @@ fn same_layout_extern_uses_the_selected_modules_declarations() {
         )
         .unwrap();
         let mut bundle = compiled.emit_readable(Some("circuit")).unwrap();
-        let (_, executable) = bundle
-            .files
-            .iter()
-            .find(|(name, _)| name == "ReadableGenerated.lean")
-            .unwrap();
+        let executable = super::bundle_file(&bundle, "Generated.lean");
         let signature = executable
             .lines()
             .find(|line| line.starts_with(&format!("def _root_.XLS.«{owner}».«step»")))

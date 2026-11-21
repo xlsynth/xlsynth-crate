@@ -1104,7 +1104,7 @@ block delay(clk, x: u8) -> u8 {
     Ok(())
 }
 
-// Verifies: BX emits five files and its raw model matches saved-IR output.
+// Verifies: BX emits five files and this counter's equations match saved IR.
 // Catches: Reusing a directory or creating one for an unknown block.
 #[test]
 fn bx_to_lean_emits_the_selected_block_and_preserves_existing_output() -> Result<()> {
@@ -1143,7 +1143,7 @@ block counter(clk, x: u8) -> Outputs {
         stdout(root, &[&["bx2ir"][..], &options].concat())?,
     )?;
     assert_eq!(
-        fs::read_to_string(root.join("lean/Generated.lean"))?,
+        fs::read_to_string(root.join("lean/Generated.lean"))?.replace("import ReadableTypes\n", ""),
         stdout(root, &["ir-block-to-lean", "saved.ir"])?
     );
     fs::write(root.join("lean/Generated.lean"), "keep")?;

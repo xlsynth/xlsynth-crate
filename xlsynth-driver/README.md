@@ -623,7 +623,7 @@ xlsynth-driver bx-to-lean counter.bx --output-dir lean
 
 - `--output-dir <NEW_DIR>` is required. Its parent must exist and the directory
   itself must be new. The command generates the complete model before creating
-  the directory. It writes `Generated.lean`, `ReadableTypes.lean`,
+  the directory. It writes `ReadableTypes.lean`, `Generated.lean`,
   `ReadableGenerated.lean`, `ReadableRepresentation.lean`, and
   `ReadableCorrespondence.lean`. To check the generated correspondence proof,
   build the repository module `XlsynthLean.IR` in your Lean project, add its build output to the module search path, and compile these files in order.
@@ -635,7 +635,9 @@ xlsynth-driver bx-to-lean counter.bx --output-dir lean
 - `--link-dslx <MODULE.x>` takes a DSLX source file in place of `--link-ir`.
   It compiles the module to implement BX extern functions. When a helper's
   declared signature is supported, readable Lean uses its DSLX parameter
-  names and types, including types declared in imports. Other helpers use
+  names and types, including types declared in imports. The function's public
+  definition in `Generated.lean` contains its equations. Callers use that
+  definition for both clock interfaces. Other helpers use
   their IR types. For example, a block declaring
   `extern fn arithmetic::twice(x: u8) -> u8;` can link the implementation
   with `--link-dslx arithmetic.x`.

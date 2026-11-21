@@ -52,23 +52,14 @@ fn wrong_specialization_in_caller_fails_the_oracle() {
         let (_, source) = bundle
             .files
             .iter_mut()
-            .find(|(name, _)| name == "ReadableGenerated.lean")
+            .find(|(name, _)| name == "Generated.lean")
             .unwrap();
         let first = "_root_.XLS.«machine».«outer<2,5>»";
         let second = "_root_.XLS.«machine».«outer<5,2>»";
-        let declaration = |name| source.find(&format!("def {name} ")).unwrap();
-        let (earlier, later) = if declaration(first) < declaration(second) {
-            (first, second)
-        } else {
-            (second, first)
-        };
-        // Redirect an executable call after both definitions, preserving the
-        // two independently callable specializations. If the checked caller
-        // bypasses this call, the retained native guards will all pass.
-        let start = declaration(later) + "def ".len() + later.len();
-        let (definitions, calls) = source.split_at(start);
-        assert!(calls.contains(later));
-        *source = format!("{definitions}{}", calls.replacen(later, earlier, 1));
+        // Redirect a call inside g, preserving both helper definitions.
+        let caller = source.find("def _root_.XLS.«machine».«g» ").unwrap();
+        let call = caller + source[caller..].find(first).unwrap();
+        source.replace_range(call..call + first.len(), second);
         let error = lean_bundle::check_bundle(&bundle).unwrap_err().to_string();
         assert!(error.contains("CheckParametric.lean"), "{error}");
         assert!(error.contains("did not evaluate to `true`"), "{error}");
