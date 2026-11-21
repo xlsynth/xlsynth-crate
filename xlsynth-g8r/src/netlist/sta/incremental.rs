@@ -10,7 +10,7 @@ use super::{
     TimingQueryDiagnosticCounts, analyze_assign_sources, canonicalize_pin_bit_source,
     combinational_output_pin_evaluation_order, effective_input_capacitance_by_edge,
     evaluate_instance_outputs, evaluate_register_setup_capture_arrival,
-    is_sequential_boundary_cell, resolve_symbol, resolve_timing_sources,
+    is_sequential_boundary_cell, register_output_pin_order, resolve_symbol, resolve_timing_sources,
     validate_constraint_tables_once, validate_instance_functional_timing_coverage,
 };
 use crate::liberty::Library;
@@ -446,15 +446,7 @@ impl<'lib> IncrementalSta<'lib> {
             }
             let sequential = register_boundaries && is_sequential_boundary_cell(cell);
             let order = if sequential {
-                cell.pins
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, p)| {
-                        p.direction == PinDirection::Output as i32
-                            && pins.contains_key(library.resolve_string(&p.name))
-                    })
-                    .map(|(i, _)| i)
-                    .collect()
+                register_output_pin_order(library, cell_idx, &pins)
             } else {
                 combinational_output_pin_evaluation_order(&lib, cell_idx, &pins)?
             };

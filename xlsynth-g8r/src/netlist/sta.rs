@@ -1565,7 +1565,7 @@ fn analyze_max_arrival_proto_with_mode(
 
         let mut pin_sources: HashMap<String, Vec<PinBitSource>> = HashMap::new();
         let mut known_pin_values = HashMap::new();
-        for connection in &inst.connections {
+        for (position, connection) in inst.connections.iter().enumerate() {
             let pin_name = resolve_symbol(interner, connection.port, "pin name")?;
             if pin_sources.contains_key(pin_name.as_str()) {
                 return Err(anyhow!(
@@ -1607,6 +1607,18 @@ fn analyze_max_arrival_proto_with_mode(
             if pin.direction == PinDirection::Output as i32
                 && !matches!(pin_bit_sources.as_slice(), [PinBitSource::Bit(_)])
             {
+                // An explicitly open register output (e.g. .QN()) drives
+                // no path. Keep its binding for duplicate-pin validation.
+                if analysis_mode.uses_register_boundaries()
+                    && is_sequential
+                    && matches!(
+                        module.instances[inst.raw_index.0].connections[position].1,
+                        crate::netlist::parse::NetRef::Unconnected
+                    )
+                {
+                    pin_sources.insert(pin_name, Vec::new());
+                    continue;
+                }
                 return Err(anyhow!(
                     "instance '{}' output pin '{}.{}' uses unsupported literal or unconnected binding",
                     resolve_symbol(interner, inst.instance_name, "instance name")
@@ -1657,16 +1669,7 @@ fn analyze_max_arrival_proto_with_mode(
             pin_sources.insert(pin_name, pin_bit_sources);
         }
         let output_pin_order = if analysis_mode.uses_register_boundaries() && is_sequential {
-            lib.library.cells[cell_idx]
-                .pins
-                .iter()
-                .enumerate()
-                .filter(|(_, pin)| {
-                    pin.direction == PinDirection::Output as i32
-                        && pin_sources.contains_key(lib.library.resolve_string(&pin.name))
-                })
-                .map(|(pin_idx, _)| pin_idx)
-                .collect()
+            register_output_pin_order(lib.library, cell_idx, &pin_sources)
         } else {
             combinational_output_pin_evaluation_order(&lib, cell_idx, &pin_sources)?
         };
@@ -2797,6 +2800,27 @@ enum OutputPinVisitState {
     Unvisited,
     Visiting,
     Done,
+}
+
+/// In library order, launch only from pins wired to a net. An explicit
+/// open binding stays in the pin map so duplicate validation still sees it.
+fn register_output_pin_order(
+    library: &Library,
+    cell_idx: usize,
+    pins: &HashMap<String, Vec<PinBitSource>>,
+) -> Vec<usize> {
+    library.cells[cell_idx]
+        .pins
+        .iter()
+        .enumerate()
+        .filter(|(_, pin)| {
+            pin.direction == PinDirection::Output as i32
+                && pins
+                    .get(library.resolve_string(&pin.name))
+                    .is_some_and(|bits| !bits.is_empty())
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Orders connected outputs and their output-pin dependencies for local STA.
