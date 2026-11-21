@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Library for generating Rust code that reflects the types and callables in a
-//! DSLX module subtree.
+//! Visit checked DSLX declarations and pass their source annotations and types
+//! to a bridge builder.
 //!
-//! We walk the type definitions and callable interfaces present in the DSLX
-//! module and generate corresponding Rust code that can be `use`'d into a Rust
-//! module.
+//! Builders can generate bindings or collect type information. Visit an entire
+//! module in source order, or resolve individual declarations in their owning
+//! module when following an imported type or function.
 
 use crate::{XlsIrValue, XlsynthError, dslx};
 
@@ -238,6 +238,49 @@ fn convert_type_alias(
     builder.add_alias_typed(&alias_name, type_info, &type_annotation, &alias_type)
 }
 
+/// Visit the enum, struct, or alias named `name` in `module`.
+///
+/// For an imported type, pass the imported module, its type information, and
+/// the local declaration name. Parametric struct definitions are skipped.
+///
+/// # Errors
+///
+/// Returns an error if the name does not identify a type declaration of a
+/// supported kind or the builder rejects the declaration.
+///
+/// # Panics
+///
+/// Type conversion assumes the supplied type information belongs to the
+/// module. Missing checked types or unevaluated enum values can panic.
+pub fn convert_named_type_definition(
+    module: &dslx::Module,
+    type_info: &dslx::TypeInfo,
+    name: &str,
+    builder: &mut dyn BridgeBuilder,
+) -> Result<(), XlsynthError> {
+    for i in 0..module.get_member_count() {
+        match module.get_member(i).to_matchable() {
+            Some(dslx::MatchableModuleMember::EnumDef(def)) if def.get_identifier() == name => {
+                return convert_enum(&def, type_info, builder);
+            }
+            Some(dslx::MatchableModuleMember::StructDef(def)) if def.get_identifier() == name => {
+                return convert_struct(&def, type_info, builder);
+            }
+            Some(dslx::MatchableModuleMember::TypeAlias(def)) if def.get_identifier() == name => {
+                return convert_type_alias(&def, type_info, builder);
+            }
+            _ => {
+                // A different name or member kind cannot satisfy this lookup.
+                // Keep searching for the requested type declaration.
+            }
+        }
+    }
+    Err(XlsynthError(format!(
+        "no type declaration {name} in module {}",
+        module.get_name()
+    )))
+}
+
 fn convert_constant(
     constant_def: &dslx::ConstantDef,
     type_info: &dslx::TypeInfo,
@@ -250,7 +293,16 @@ fn convert_constant(
     builder.add_constant(&constant_def.get_name(), constant_def, &ty, &ir_value)
 }
 
-fn convert_function(
+/// Pass a function's declared signature to the builder in parameter order.
+///
+/// Use the declaring module's type information, including for imported
+/// functions. Each parameter retains its annotation even when a concrete type
+/// is unavailable. The return annotation and its resolved type are optional.
+///
+/// # Errors
+///
+/// Propagates the error if the builder rejects the signature.
+pub fn convert_function(
     function: &dslx::Function,
     type_info: &dslx::TypeInfo,
     builder: &mut dyn BridgeBuilder,
