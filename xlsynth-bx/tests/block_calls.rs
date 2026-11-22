@@ -141,6 +141,45 @@ block delay(clk, x: u8, en: bool) -> u8 {
 }
 
 #[test]
+fn shadowed_child_results_keep_both_clocked_instances() {
+    let source = r#"
+        block delay(clk, x: u8) -> u8 {
+            reg q: u8 = 0;
+            q := x;
+            q
+        }
+        pub block cascade(clk, x: u8) -> (u8, u8) {
+            let x = delay(x);
+            let first = x;
+            let x = delay(x);
+            (first, x)
+        }
+    "#;
+    let mut package = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
+    let instances = &package.get_block("cascade").unwrap().instantiations;
+    assert_eq!(instances.len(), 2);
+    assert_ne!(instances[0].name, instances[1].name);
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
+    inline_all_blocks_in_package(&mut package).unwrap();
+    let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
+    let module = compile_pipeline_module(&rtl.system_verilog).unwrap();
+    let mut runner = FixtureRunner::new(&module).unwrap();
+    let ports = runner.port_bindings();
+    let reset = ports.input("rst").unwrap();
+    let data = ports.input("x").unwrap();
+    for (rst, input, first, second) in [(true, 9, 0, 0), (false, 17, 17, 0), (false, 31, 31, 17)] {
+        let edge = runner
+            .step_cycle_with_drive(&mut [], |drive| {
+                drive.set_bool(&reset, rst)?;
+                drive.set_u64(&data, input)
+            })
+            .unwrap();
+        assert_eq!(edge.outputs["out_0"].to_u64_if_known(), Some(first));
+        assert_eq!(edge.outputs["out_1"].to_u64_if_known(), Some(second));
+    }
+}
+
+#[test]
 fn unrolled_and_explicit_delay_arrays_agree_across_cycles() {
     let source = r#"
 pub block delay_array(clk, data: u8[4], enable: bool[4]) -> u8[4] {

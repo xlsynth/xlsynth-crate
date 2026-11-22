@@ -43,6 +43,54 @@ fn block_tuple_patterns_can_rebind_previous_values_in_lexical_order() -> Result<
 }
 
 #[test]
+fn ordinary_block_lets_capture_previous_bindings_across_type_changes() -> Result<(), Box<dyn Error>>
+{
+    let body = r#"
+        let before = x;
+        let x = x + u8:1;
+        let after = x;
+        let x: bool = x == u8:6;
+        (before, after, x)
+    "#;
+    let result = "(u8, u8, bool)";
+    let bx = format!("block sample(clk, x: u8) -> {result} {{ {body} }}");
+    let dslx = format!("fn sample(x: u8) -> {result} {{ {body} }}");
+    let evaluator = ExpressionEvaluator::compile_block(
+        &bx,
+        &ImportOptions::default(),
+        compile_dslx_module(&dslx, &[]),
+    )?;
+    for (input, expected) in [
+        (5, "(bits[8]:5, bits[8]:6, bits[1]:1)"),
+        (255, "(bits[8]:255, bits[8]:0, bits[1]:0)"),
+    ] {
+        let actual = evaluator.compare(&[IrValue::make_ubits(8, input)?])?;
+        assert_eq!(actual, IrValue::parse_typed(expected)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn guarded_ordinary_let_restores_the_outer_value_and_its_stage() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+        block sample(clk, en: bool, x: u8, late: u8 @1)
+            -> (u8, u8, u8) @(out_0: 0, out_1: 1, out_2: 1) {
+            reg q: u8;
+            let before = x;
+            let x = late + u8:1;
+            if en {
+                let x = before + u8:2;
+                q := x;
+            }
+            (before, x, q)
+        }
+    "#;
+    let package = compile(source, empty_package("stages"), ResetBehavior::default())?;
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
+    Ok(())
+}
+
+#[test]
 fn destructured_inferred_bits_can_widen_at_each_use() -> Result<(), Box<dyn Error>> {
     let helper = "fn use_part(x:s3)->s3 { x }";
     let body = r#"
