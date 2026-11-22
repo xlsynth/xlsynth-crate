@@ -1362,24 +1362,35 @@ pub block circuit(clk, data: u8) -> u8 { let y = device::stage(data); y }
 }
 
 #[test]
-fn a_simple_block_let_rebinding_a_tuple_pattern_still_shadows_an_extern()
--> Result<(), Box<dyn Error>> {
+fn block_let_rebindings_shadow_externs_in_roots_and_libraries() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    write_module(
-        dir.path(),
-        "device.bx",
-        r#"
+    let options = search_paths(&[dir.path()]);
+    for (input, bindings) in [
+        ("chip", "let chip = chip(chip);"),
+        ("x", "let chip = x; let chip = chip(chip);"),
+        ("x", "let (chip, _) = (x, x); let chip = x;"),
+    ] {
+        let library = format!(
+            r#"
 extern fn chip(x: u8) -> u8;
-pub block stage(clk, x: u8) -> u8 {
-    let (chip, _) = (x, x);
-    let chip = x;
+pub block stage(clk, {input}: u8) -> u8 {{
+    {bindings}
     chip(chip)
-}
-"#,
-    )?;
-    let module = parse_module("use device;")?;
-    let error = check_module_with_options(&module, &search_paths(&[dir.path()])).unwrap_err();
-    assert!(error.contains("'chip' names a local value here"), "{error}");
+}}
+"#
+        );
+        write_module(dir.path(), "device.bx", &library)?;
+        for (source, stage) in [
+            (library.as_str(), "stage"),
+            ("use device;", "device::stage"),
+        ] {
+            let error = check_source_with_options(source, &options).unwrap_err();
+            assert_eq!(
+                error,
+                format!("block '{stage}': result: 'chip' names a local value here")
+            );
+        }
+    }
     Ok(())
 }
 

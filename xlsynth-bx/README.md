@@ -1202,9 +1202,11 @@ stages 1 and 0, and BX reports the mismatch at the adder.
 
 ### Calling a block
 
-An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. Either kind of parent can instantiate a clockless child. A clocked child requires a clocked parent, and BX connects the child's clock and any required reset automatically. Reading the binding multiple times reads the same instance's outputs.
+An unconditional `let` with a child-block call as its initializer creates one persistent child instance. Pass the data inputs in declaration order. Either kind of parent can instantiate a clockless child. A clocked child requires a clocked parent, and BX connects the child's clock and any required reset automatically. Reading the binding multiple times reads the same instance's outputs.
 
-Block lets accept DSLX tuple patterns. For example, `let (valid, (first, .., last)) = packet;` binds the valid bit and the first and last members of the nested tuple. Use `_` to discard one member and `..` to skip zero or more members at that tuple level. An optional annotation after the pattern gives the type of the entire initializer. Each nested pattern must match a tuple of the corresponding shape. A pattern may rebind a data value. In `let (x, previous) = (x + u8:1, x);`, both uses on the right read the previous `x`.
+An ordinary block `let` or a tuple pattern can shadow a data input or an earlier `let`. The initializer reads the bindings visible before the statement. For example, `let previous = x; let x = x + u8:1;` keeps the original input in `previous` and makes the sum available as `x`. A binding inside a guarded update is visible only in that guard's body. Clock, reset, register, and deferred wire names remain reserved.
+
+Block lets accept DSLX tuple patterns. For example, `let (valid, (first, .., last)) = packet;` binds the valid bit and the first and last members of the nested tuple. Use `_` to discard one member and `..` to skip zero or more members at that tuple level. An optional annotation after the pattern gives the type of the entire initializer. Each nested pattern must match a tuple of the corresponding shape. In `let (x, previous) = (x + u8:1, x);`, both uses on the right read the previous `x`.
 
 A pattern can also bind a child's tuple result directly, as in `let (valid_out, data_out) = pipe_reg(valid, payload);`. This instantiates the child once, and both bindings read that instance's outputs. Patterns also work in guarded register updates, value-producing `if` arms, and `unroll_for!` bodies.
 

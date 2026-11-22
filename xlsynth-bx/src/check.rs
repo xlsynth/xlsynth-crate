@@ -3316,7 +3316,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         conditional: bool,
     ) -> Result<(), String> {
         let mut locals = Vec::new();
-        let mut pattern_bindings = Vec::new();
+        let mut lexical_bindings = Vec::new();
         for (index, stmt) in statements.iter().enumerate() {
             if !conditional {
                 self.statement_span = block
@@ -3410,16 +3410,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     ty,
                     value: initializer,
                 } => {
-                    if self.function_values.contains_key(name) {
-                        // Rebinding a pattern leaf uses the previous lexical
-                        // value in the initializer and gives a child its own
-                        // name.
-                        let init =
-                            self.block_initializer(None, ty.as_ref(), initializer, !conditional)?;
+                    if self.names.contains(name) {
+                        if self.is_fixed_block_name(block, name) {
+                            return Err(format!("duplicate name '{name}'"));
+                        }
+                        // The previous producer keeps its checked name. A
+                        // direct child call also needs its own instance name.
+                        let init = self
+                            .block_initializer(None, ty.as_ref(), initializer, !conditional)
+                            .map_err(|e| format!("let '{name}': {e}"))?;
                         let value = self.share_scoped_value(init.value);
-                        self.bind_scoped_value(name, value, init.widths, &mut pattern_bindings);
+                        self.bind_scoped_value(name, value, init.widths, &mut lexical_bindings);
                         if !conditional {
-                            pattern_bindings.clear();
+                            lexical_bindings.clear();
                         }
                         continue;
                     }
@@ -3432,11 +3435,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     let init = self.pattern_initializer(binding, !conditional)?;
                     let mut collision = None;
                     binding.pattern.visit_names(&mut |name| {
-                        if block.clock.as_deref() == Some(name)
-                            || block.reset.as_deref() == Some(name)
-                            || self.regs.contains_key(name)
-                            || self.wires.contains_key(name)
-                        {
+                        if self.is_fixed_block_name(block, name) {
                             collision = Some(name.to_owned());
                         }
                     });
@@ -3447,12 +3446,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         &binding.pattern,
                         init.value,
                         init.widths,
-                        &mut pattern_bindings,
+                        &mut lexical_bindings,
                     )?;
                     if !conditional {
                         // A top-level rebinding stays visible in the block
                         // result.
-                        pattern_bindings.clear();
+                        lexical_bindings.clear();
                     }
                     continue;
                 }
@@ -3490,7 +3489,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             };
             self.statements.push(checked);
         }
-        self.leave_scope(pattern_bindings);
+        self.leave_scope(lexical_bindings);
         for name in locals {
             self.names.remove(name);
             self.values.remove(name);
@@ -3499,6 +3498,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             self.inferred_bindings.remove(name);
         }
         Ok(())
+    }
+
+    /// Clock, reset, register, and deferred-wire names denote hardware in the
+    /// block.
+    fn is_fixed_block_name(&self, block: &Block, name: &str) -> bool {
+        block.clock.as_deref() == Some(name)
+            || block.reset.as_deref() == Some(name)
+            || self.regs.contains_key(name)
+            || self.wires.contains_key(name)
     }
 
     /// Resolve an initializer against the previous scope before installing
@@ -6618,6 +6626,33 @@ block child<T>(clk, x: T) -> T { reg q: T; q := x; q }"#;
                 check_module(&parse_module(source).unwrap()).is_err(),
                 "{source}"
             );
+        }
+    }
+
+    #[test]
+    fn block_let_initializer_errors_identify_fresh_and_shadowing_bindings() {
+        for name in ["fresh", "x"] {
+            let source = format!("block b(x: u8) -> u8 {{ let {name}: bool = x; x }}");
+            assert_eq!(
+                check_bx(&source).unwrap_err(),
+                format!("block 'b': let '{name}': expected bool, got u8")
+            );
+        }
+    }
+
+    #[test]
+    fn block_lets_reject_shadowing_hardware_names() {
+        for name in ["clk", "rst", "q", "w"] {
+            for binding in [format!("let {name} = w;"), format!("let ({name},) = (w,);")] {
+                let source = format!(
+                    r#"#![allow(block_reset_signal)]
+block b(clk, rst) -> u8 {{ reg q: u8; let w: u8; w = u8:1; q := w; {binding} q }}"#
+                );
+                assert_eq!(
+                    check_bx(&source).unwrap_err(),
+                    format!("block 'b': duplicate name '{name}'")
+                );
+            }
         }
     }
 

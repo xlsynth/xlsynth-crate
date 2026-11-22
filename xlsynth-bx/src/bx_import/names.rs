@@ -826,9 +826,14 @@ impl<'a> Scope<'a> {
             Stmt::Let { name, ty, value } => {
                 let ty = self.optional_type(ty)?;
                 let value = self.expr(value)?;
-                // Rebinding a tuple-pattern leaf in a block creates another
-                // lexical value, including when the new let has a simple name.
-                if self.locals.get(name) != Some(&Local::Lexical) {
+                // After the initializer, a rebound data name also hides a
+                // same-named structural callee, just like a tuple-pattern leaf.
+                if matches!(
+                    self.locals.get(name),
+                    Some(Local::Hardware | Local::Lexical)
+                ) {
+                    self.bind(name);
+                } else {
                     self.bind_as(name, local);
                 }
                 Stmt::Let {

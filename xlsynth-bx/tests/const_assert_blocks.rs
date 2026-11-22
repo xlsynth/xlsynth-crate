@@ -122,6 +122,27 @@ fn block_assertion_requires_a_visible_boolean_constant() -> Result<(), String> {
 }
 
 #[test]
+fn block_let_shadowing_preserves_earlier_dimensions_and_constant_values() -> Result<(), String> {
+    let source = r#"block stage(width: u32) -> u32 {
+    let input = width;
+    let width = u32:3;
+    let first: uN[width] = 7;
+    let width = width + u32:2;
+    let second: uN[width] = 31;
+    let width = input;
+    const_assert!(first == u3:7 && second == u5:31);
+    width
+}"#;
+    check_module(&parse_module(source)?)?;
+    let dynamic = source.replace("first == u3:7 && second == u5:31", "width == u32:5");
+    assert_eq!(
+        check_module(&parse_module(&dynamic)?).unwrap_err(),
+        "block 'stage': 8:5: const_assert!: predicate must evaluate to a compile-time constant"
+    );
+    Ok(())
+}
+
+#[test]
 fn assertion_rechecks_dependencies_of_a_block_let_annotation() -> Result<(), String> {
     let source = r#"
 block stage(clk, x: bool) -> bool {
