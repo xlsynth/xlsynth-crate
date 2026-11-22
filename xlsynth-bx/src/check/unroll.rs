@@ -1082,7 +1082,7 @@ impl BodyChecker<'_, '_> {
                                 return Err(format!("pure function cannot call block '{name}'"));
                             }
                             self.check_block_call_signature(name, 0, false)?;
-                            self.requires_hardware.set(true);
+                            self.has_block_only_behavior.set(true);
                         } else if self.kind != BodyKind::Function
                             && !locals.in_lambda
                             && local.is_some_and(|scope| scope.parent.is_none())
@@ -1093,7 +1093,7 @@ impl BodyChecker<'_, '_> {
                             // child's name. A nearer lexical or iteration
                             // binder shadows it.
                             self.check_block_call_signature(name, 0, false)?;
-                            self.requires_hardware.set(true);
+                            self.has_block_only_behavior.set(true);
                         }
                     }
                     if self.callback_index(name).is_none() || local.is_some() {
@@ -1117,7 +1117,7 @@ impl BodyChecker<'_, '_> {
                         parametrics.len(),
                         locals.contains(name),
                     )?;
-                    self.requires_hardware.set(true);
+                    self.has_block_only_behavior.set(true);
                     if self.kind == BodyKind::Function || locals.in_lambda {
                         return Err(format!("pure function cannot call block '{name}'"));
                     }

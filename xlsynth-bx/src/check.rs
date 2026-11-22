@@ -2138,7 +2138,7 @@ pub(crate) fn check_sources_with_tests(
         declarations
             .warnings
             .borrow_mut()
-            .record_block(&block.name, body.requires_hardware);
+            .record_block(&block.name, body.has_block_only_behavior);
         checked.push(body.block);
     }
     let mut test_functions = Vec::new();
@@ -2233,7 +2233,7 @@ pub(crate) fn check_sources_with_tests(
         declarations
             .warnings
             .borrow_mut()
-            .record_block(&spec.block.name, block.requires_hardware);
+            .record_block(&spec.block.name, block.has_block_only_behavior);
         specialized_blocks.insert(spec.name.clone());
         checked.push(block.block);
     }
@@ -2464,7 +2464,7 @@ struct MapScope {
 /// references resolved inside structural iterations that were skipped.
 struct BlockBody {
     block: CheckedBlock,
-    requires_hardware: bool,
+    has_block_only_behavior: bool,
 }
 
 /// Lexical values, loop elaboration, and any hardware declared in one body.
@@ -2475,7 +2475,7 @@ struct BodyChecker<'a, 'm> {
     /// Runtime names that shadow module declarations in a type annotation.
     enclosing_type_locals: Option<&'a dyn Fn(&str) -> bool>,
     kind: BodyKind,
-    requires_hardware: Cell<bool>,
+    has_block_only_behavior: Cell<bool>,
     /// A clockless source block requires every hardware operation to be
     /// combinational.
     clockless_block: Option<&'m Block>,
@@ -2799,7 +2799,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             resolver,
             enclosing_type_locals: None,
             kind,
-            requires_hardware: Cell::new(false),
+            has_block_only_behavior: Cell::new(false),
             clockless_block: None,
             source_kind: kind,
             specializations: None,
@@ -3020,7 +3020,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         } else {
             main
         };
-        let requires_hardware = c.requires_hardware.get();
+        let has_block_only_behavior = c.has_block_only_behavior.get();
         let block = CheckedBlock {
             name: specialization.map_or(&block.name, |s| &s.name).clone(),
             source_name: block.name.clone(),
@@ -3039,7 +3039,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         };
         Ok(BlockBody {
             block,
-            requires_hardware,
+            has_block_only_behavior,
         })
     }
 
@@ -3188,7 +3188,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.replaying_body() || !parametrics.is_empty() {
             self.charge_expansion("child block wiring", child.port_type_nodes)?;
         }
-        self.requires_hardware.set(true);
+        self.has_block_only_behavior.set(true);
         if let Some(ty) = expected
             && !compatible(ty, &child.result)
         {
@@ -3337,7 +3337,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                             position.line, position.column
                         )
                     })?;
-                    self.requires_hardware.set(true);
+                    self.has_block_only_behavior.set(true);
                     CheckedStmt::Assert {
                         predicate,
                         message: message.clone().unwrap_or_else(|| {
@@ -3356,7 +3356,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     continue;
                 }
                 Stmt::Reg { name, ty, reset } => {
-                    self.requires_hardware.set(true);
+                    self.has_block_only_behavior.set(true);
                     if block.clock.is_none() {
                         return Err(self.clock_error(block, format!(
                             "clockless block cannot declare register '{name}'; add `clk` to the block signature"

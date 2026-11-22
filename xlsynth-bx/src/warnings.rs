@@ -140,8 +140,8 @@ impl<'m> WarningCollector<'m> {
         self.splats.entry(owner).or_default().insert(position);
     }
 
-    pub(crate) fn record_block(&mut self, name: &'m str, requires_hardware: bool) {
-        *self.hardware.entry(name).or_default() |= requires_hardware;
+    pub(crate) fn record_block(&mut self, name: &'m str, has_block_only_behavior: bool) {
+        *self.hardware.entry(name).or_default() |= has_block_only_behavior;
     }
 
     /// Include warnings from unused imports and uninstantiated block
