@@ -37,3 +37,7 @@ path = "src/lib.rs"
 [[bench]]
 name = "aot_performance"
 harness = false
+
+[[bench]]
+name = "block_performance"
+harness = false

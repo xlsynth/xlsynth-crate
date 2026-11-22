@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package design
+
+fn tap(v: bits[1] id=1) -> bits[1] {
+  watched: () = cover(v, label="call", id=2)
+  ret result: bits[1] = identity(v, id=3)
+}
+
+block leaf(x: bits[1]) {
+  x: bits[1] = input_port(name=x, id=4)
+  called: bits[1] = invoke(x, to_apply=tap, id=5)
+  hit: () = cover(called, label="child", id=6)
+}
+
+top block pair(a: bits[1], b: bits[1]) {
+  instantiation left(block=leaf, kind=block)
+  instantiation right(block=leaf, kind=block)
+  a: bits[1] = input_port(name=a, id=7)
+  b: bits[1] = input_port(name=b, id=8)
+  l: () = instantiation_input(a, instantiation=left, port_name=x, id=9)
+  r: () = instantiation_input(b, instantiation=right, port_name=x, id=10)
+}
