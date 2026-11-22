@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package design
+
+top block store(clk: clock, d: (bits[129], bits[3][2], bits[0]), out: (bits[129], bits[3][2], bits[0])) {
+  reg data((bits[129], bits[3][2], bits[0]))
+  d: (bits[129], bits[3][2], bits[0]) = input_port(name=d, id=1)
+  q: (bits[129], bits[3][2], bits[0]) = register_read(register=data, id=2)
+  w: () = register_write(d, register=data, id=3)
+  out: () = output_port(q, name=out, id=4)
+}

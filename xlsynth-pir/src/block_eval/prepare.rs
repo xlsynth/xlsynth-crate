@@ -346,7 +346,22 @@ pub(super) fn prepare(package: &Package, top: &str) -> Result<Prepared, String> 
             .map(|_| RegisterUpdate::default())
             .collect(),
     };
-    let mut graph = NodeGraph::new(top);
+    // A block and a package function can share a name. The projected cycle
+    // function must not shadow an ordinary callee when the backend packages it.
+    let function_name = if package.get_fn(top).is_some() {
+        let names: HashSet<_> = package
+            .members
+            .iter()
+            .map(|m| m.graph().name.as_str())
+            .collect();
+        (0..=names.len())
+            .map(|n| format!("{top}__cycle_{n}"))
+            .find(|name| !names.contains(name.as_str()))
+            .expect("more candidate cycle names than occupied member names")
+    } else {
+        top.to_owned()
+    };
+    let mut graph = NodeGraph::new(function_name);
     let mut origins = vec![None];
     // Projected text IDs must never collide with real function callees, whose
     // observers use their own node-index space and whose cover counters are

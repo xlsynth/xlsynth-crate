@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package design
+
+top block pair(clk: clock, rst_n: bits[1], en_a: bits[1], en_b: bits[1], left: bits[8], right: bits[8]) {
+  #![reset(port="rst_n", asynchronous=false, active_low=true)]
+  reg a(bits[8], reset_value=7)
+  reg b(bits[8])
+  rst_n: bits[1] = input_port(name=rst_n, id=1)
+  en_a: bits[1] = input_port(name=en_a, id=2)
+  en_b: bits[1] = input_port(name=en_b, id=9)
+  qa: bits[8] = register_read(register=a, id=3)
+  qb: bits[8] = register_read(register=b, id=4)
+  wa: () = register_write(qb, register=a, load_enable=en_a, reset=rst_n, id=5)
+  wb: () = register_write(qa, register=b, load_enable=en_b, id=6)
+  left: () = output_port(qa, name=left, id=7)
+  right: () = output_port(qb, name=right, id=8)
+}

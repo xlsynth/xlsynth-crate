@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package design
+
+block leaf(clk: clock, d: bits[32], out: bits[32]) {
+  reg r(bits[32])
+  d: bits[32] = input_port(name=d, id=1)
+  q: bits[32] = register_read(register=r, id=2)
+  w: () = register_write(d, register=r, id=3)
+  out: () = output_port(q, name=out, id=4)
+}
+
+top block pair(clk: clock, x: bits[32], y: bits[32]) {
+  instantiation left(block=leaf, kind=block)
+  instantiation right(block=leaf, kind=block)
+  a: bits[32] = instantiation_output(instantiation=left, port_name=out, id=5)
+  b: bits[32] = instantiation_output(instantiation=right, port_name=out, id=6)
+  w1: () = instantiation_input(b, instantiation=left, port_name=d, id=7)
+  w2: () = instantiation_input(a, instantiation=right, port_name=d, id=8)
+  x: () = output_port(a, name=x, id=9)
+  y: () = output_port(b, name=y, id=10)
+}

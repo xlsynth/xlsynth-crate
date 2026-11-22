@@ -1037,6 +1037,8 @@ struct ContextState {
     trace_messages: Vec<TraceMessage>,
     // None entries distinguish unexecuted sites from encountered false covers.
     event_counts: Option<Vec<Option<u64>>>,
+    // Block execution reports sites in first-encounter order across calls.
+    cover_order: Option<Vec<usize>>,
 }
 
 /// Rust-owned event collector used for one or more compiled executions.
@@ -1071,9 +1073,21 @@ impl<'metadata> ExecutionContext<'metadata> {
                 assumption_failures: Vec::new(),
                 trace_messages: Vec::new(),
                 event_counts,
+                cover_order: None,
             }),
             marker: PhantomData,
         }
+    }
+
+    /// Creates a collector that reports cover sites in first-encounter order,
+    /// including covers reached through nested calls.
+    pub fn new_in_execution_order(
+        metadata: &'metadata CompiledFunctionMetadata,
+        options: ExecutionOptions,
+    ) -> Self {
+        let mut context = Self::new_with_options(metadata, options);
+        context.state.cover_order = Some(Vec::new());
+        context
     }
 
     /// Returns an opaque ABI object valid while this context is mutably
@@ -1092,19 +1106,19 @@ impl<'metadata> ExecutionContext<'metadata> {
             .event_counts
             .as_ref()
             .map(|event_counts| {
-                metadata
-                    .event_sites
-                    .iter()
-                    .zip(event_counts)
-                    .filter(|(site, _)| site.kind == EventKind::Cover)
-                    .filter_map(|(site, count)| {
-                        count.map(|count| CoverCount {
-                            node_text_id: site.node_text_id,
-                            label: site.label.clone().unwrap_or_default(),
-                            count,
-                        })
+                let cover_count = |index: usize| {
+                    let count = event_counts[index]?;
+                    let site = &metadata.event_sites[index];
+                    Some(CoverCount {
+                        node_text_id: site.node_text_id,
+                        label: site.label.clone().unwrap_or_default(),
+                        count,
                     })
-                    .collect()
+                };
+                match &self.state.cover_order {
+                    Some(order) => order.iter().copied().filter_map(cover_count).collect(),
+                    None => (0..event_counts.len()).filter_map(cover_count).collect(),
+                }
             })
             .unwrap_or_default();
         ExecutionResult {
@@ -1136,6 +1150,9 @@ impl<'metadata> ExecutionContext<'metadata> {
         self.state.assertion_failures.clear();
         self.state.assumption_failures.clear();
         self.state.trace_messages.clear();
+        if let Some(order) = &mut self.state.cover_order {
+            order.clear();
+        }
         self.state.options = options;
         if options.collect_covers {
             match &mut self.state.event_counts {
@@ -1269,6 +1286,11 @@ pub unsafe extern "C" fn xlsynth_pir_record_cover_predicate(
         .as_mut()
         .and_then(|event_counts| event_counts.get_mut(site_id as usize))
     {
+        if count.is_none()
+            && let Some(order) = &mut state.cover_order
+        {
+            order.push(site_id as usize);
+        }
         let count = count.get_or_insert(0);
         *count = count.saturating_add(u64::from(predicate != 0));
     }

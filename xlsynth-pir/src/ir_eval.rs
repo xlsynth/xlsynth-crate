@@ -268,6 +268,12 @@ fn eval_order(f: &ir::Fn, order_policy: EvalOrderPolicy) -> EvalOrder {
     }
 }
 
+/// Returns the order in which the interpreter evaluates a verified function,
+/// including unused calls that can emit events.
+pub fn evaluation_order(f: &ir::Fn) -> impl Iterator<Item = ir::NodeRef> {
+    eval_order(f, EvalOrderPolicy::Checked)
+}
+
 #[derive(Clone, Copy)]
 enum ShiftKind {
     Shll,

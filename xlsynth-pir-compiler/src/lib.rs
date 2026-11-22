@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Native compilation and in-memory execution for the supported subset of PIR
-//! functions.
+//! functions and synchronous blocks.
 
 pub mod aot;
+pub mod block;
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -39,6 +40,19 @@ use xlsynth_pir_compiler_runtime::{
 };
 
 type NativeEntrypoint = CompiledEntrypoint;
+
+/// Selects the order in which native code evaluates PIR nodes in the entry
+/// function and its callees.
+#[derive(Clone, Copy)]
+enum NodeSchedule {
+    /// Among nodes whose operands are ready, prefer those that free scalar
+    /// temporaries to reduce register pressure.
+    PressureAware,
+    /// Follow [`xlsynth_pir::ir_eval::evaluation_order`] so a compiled clock
+    /// reports traces and failures in the same sequence as an interpreted
+    /// clock, even across independent calls whose return values are unused.
+    Interpreter,
+}
 
 /// Describes the native scalar carrier used for one bits-typed PIR value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,7 +454,7 @@ impl PirFunctionCompiler {
             .map_err(CompilerError::InvalidFunction)?;
         xlsynth_pir::ir_verify::verify_function(function)
             .map_err(|e| CompilerError::InvalidFunction(e.to_string()))?;
-        Self::compile_functions(None, function)
+        Self::compile_functions(None, function, NodeSchedule::PressureAware)
     }
 
     /// Compiles a package's selected top function and its referenced callees.
@@ -463,14 +477,15 @@ impl PirFunctionCompiler {
                 "package has no function named '{function_name}'"
             ))
         })?;
-        Self::compile_functions(Some(package), function)
+        Self::compile_functions(Some(package), function, NodeSchedule::PressureAware)
     }
 
     fn compile_functions(
         package: Option<&ir::Package>,
         top: &ir::Fn,
+        schedule: NodeSchedule,
     ) -> Result<Self, CompilerError> {
-        let planned = plan_reachable_functions(package, top)?;
+        let planned = plan_reachable_functions(package, top, schedule)?;
         let top_plan = planned.plans.get(&top.name).ok_or_else(|| {
             CompilerError::InvalidFunction(format!("missing compilation plan for '{}'", top.name))
         })?;
@@ -816,8 +831,18 @@ impl PirFunctionCompiler {
                 args.len()
             )));
         }
+        let mut context = ExecutionContext::new_with_options(&self.metadata, options);
+        self.run_ir_values_with_context(args.iter(), &mut context)
+    }
+
+    /// Marshal arguments after the caller has checked their number against the
+    /// signature.
+    fn run_ir_values_with_context<'a>(
+        &self,
+        args: impl Iterator<Item = &'a IrValue>,
+        context: &mut ExecutionContext<'_>,
+    ) -> Result<IrExecutionResult, CompilerError> {
         let inputs = args
-            .iter()
             .zip(&self.param_layouts)
             .map(|(arg, layout)| NativeValueStorage::from_ir_value(layout, arg))
             .collect::<Result<Vec<_>, _>>()?;
@@ -826,10 +851,9 @@ impl PirFunctionCompiler {
             .map(NativeValueStorage::as_ptr)
             .collect::<Vec<_>>();
         let mut output = NativeValueStorage::zeroed(&self.result_layout);
-        let mut context = ExecutionContext::new_with_options(&self.metadata, options);
         // SAFETY: each `NativeValueStorage` owns aligned storage with exactly
         // the corresponding published native layout and lives across the call.
-        unsafe { self.run_native_with_context(&pointers, output.as_mut_ptr(), &mut context)? };
+        unsafe { self.run_native_with_context(&pointers, output.as_mut_ptr(), context)? };
         Ok(IrExecutionResult {
             value: output.to_ir_value(&self.result_layout)?,
             events: context.result(),
@@ -931,6 +955,7 @@ fn referenced_function_postorder(
 fn plan_reachable_functions<'a>(
     package: Option<&'a ir::Package>,
     top: &'a ir::Fn,
+    schedule: NodeSchedule,
 ) -> Result<PlannedFunctions<'a>, CompilerError> {
     let function_names = referenced_function_postorder(package, top)?;
     let function_param_layouts = function_names
@@ -952,7 +977,12 @@ fn plan_reachable_functions<'a>(
         let function = resolve_function(package, top, function_name)?;
         let param_layouts = function_param_layouts[function_name].clone();
         let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
-        let order = reachable_scheduled_order(function)?;
+        let order = match schedule {
+            NodeSchedule::PressureAware => reachable_scheduled_order(function)?,
+            NodeSchedule::Interpreter => xlsynth_pir::ir_eval::evaluation_order(function)
+                .filter(|nr| !matches!(function.get_node(*nr).payload, NodePayload::Nil))
+                .collect(),
+        };
         for node_ref in &order {
             NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
         }
@@ -1068,7 +1098,11 @@ pub fn compile_aot_package(
         planned_entrypoints.push(PlannedAotEntrypoint {
             top_name: function.name.clone(),
             entrypoint_symbol: entrypoint.entrypoint_symbol.to_string(),
-            planned: plan_reachable_functions(Some(entrypoint.package), function)?,
+            planned: plan_reachable_functions(
+                Some(entrypoint.package),
+                function,
+                NodeSchedule::PressureAware,
+            )?,
         });
     }
 
@@ -1220,7 +1254,7 @@ fn compile_reachable_aot(
             "AOT entrypoint symbol must not be empty".into(),
         ));
     }
-    let planned = plan_reachable_functions(package, top)?;
+    let planned = plan_reachable_functions(package, top, NodeSchedule::PressureAware)?;
     let top_plan = planned.plans.get(&top.name).ok_or_else(|| {
         CompilerError::InvalidFunction(format!("missing compilation plan for '{}'", top.name))
     })?;
@@ -1338,7 +1372,7 @@ enum NativeScalar {
     U64(u64),
 }
 
-/// Aligned native storage used by the dynamic-value test/fuzz adapter.
+/// Aligned native storage for typed calls and reusable block instances.
 struct NativeValueStorage {
     words: Vec<u64>,
 }
@@ -3065,7 +3099,7 @@ fn lower_function(
                 function_targets,
                 pointer_type,
             )?,
-            NodePayload::Unop(Unop::Identity, arg) if layout.is_memory_backed() => {
+            NodePayload::Unop(Unop::Identity, arg) if layout.as_scalar().is_none() => {
                 computed_value_for(&values, *arg)?
             }
             NodePayload::Unop(op @ (Unop::Not | Unop::Neg | Unop::Reverse), arg)

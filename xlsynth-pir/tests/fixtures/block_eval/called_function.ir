@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package design
+
+fn increment(v: bits[8] id=20) -> bits[8] {
+  one: bits[8] = literal(value=1, id=21)
+  ret sum: bits[8] = add(v, one, id=22)
+}
+
+top block observed(b: bits[8], out: bits[8], s: bits[1], a: bits[8]) {
+  a: bits[8] = input_port(name=a, id=1)
+  b: bits[8] = input_port(name=b, id=2)
+  s: bits[1] = input_port(name=s, id=3)
+  incremented: bits[8] = invoke(b, to_apply=increment, id=4)
+  chosen: bits[8] = sel(s, cases=[a, incremented], id=5)
+  dead: bits[8] = sub(b, a, id=6)
+  out: () = output_port(chosen, name=out, id=7)
+}

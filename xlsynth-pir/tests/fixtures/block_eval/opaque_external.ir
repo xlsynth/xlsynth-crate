@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package opaque_eval
+
+block child(pad: bits[1]) {
+  ext_inout_net bus(bits[1])
+  pad: () = ext_inout_port(name=pad, net=bus, id=1)
+  instantiation black_box(module_name=vendor_io, ports={pad:inout bits[1]}, parameters={PAD_WIDTH:"1 << 0"}, kind=opaque_extern_block)
+  vendor_pad: () = ext_instantiation_inout(instantiation=black_box, port_name=pad, net=bus, id=2)
+}
+
+block wrapper() {
+  ext_inout_net bus(bits[1])
+  instantiation leaf(block=child, kind=block)
+  child_pad: () = ext_instantiation_inout(instantiation=leaf, port_name=pad, net=bus, id=3)
+}
+
+top block independent() {
+}

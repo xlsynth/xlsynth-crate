@@ -30,27 +30,23 @@
 //! ```
 
 mod observe;
+mod plan;
 mod prepare;
+#[doc(hidden)]
+pub mod test_fixtures;
 
-use std::collections::HashMap;
+pub use plan::{BlockCycleEvents, BlockRegisterSource, PreparedBlock};
 use std::fmt;
 use std::sync::Arc;
 
-use rand::SeedableRng;
-use rand_pcg::Pcg64Mcg;
-
 use self::observe::BlockObserver;
-use self::prepare::{Prepared, RegisterUpdate};
 use crate::IrValue;
-use crate::block_inline::reject_reachable_opaque_extern_blocks;
-use crate::ir::{NodePayload, Package, Type};
+use crate::ir::{Package, Type};
 use crate::ir_eval::{
     AssertionFailure, AssumptionFailureKind, EvalObserver, FnEvalResult, TraceMessage,
     eval_fn_in_package_with_observer,
 };
-use crate::ir_value_utils::zero_ir_value_for_type;
-use crate::ir_verify::{VerifyError, verify_package};
-use crate::random_inputs::generate_uniform_value_with_rng;
+use crate::ir_verify::VerifyError;
 
 /// A data port or qualified register in the evaluator's ordered interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +159,12 @@ pub enum BlockEvalError {
         actual: Type,
     },
     ForeignState,
+    /// The evaluated value has a different type than the prepared function
+    /// returns.
+    CycleResultType {
+        expected: Type,
+        actual: Type,
+    },
     ConflictingWrites {
         register: String,
         first: usize,
@@ -188,6 +190,10 @@ impl fmt::Display for BlockEvalError {
                 expected,
                 actual,
             } => write!(f, "{kind} '{name}': expected {expected}, got {actual}"),
+            Self::CycleResultType { expected, actual } => write!(
+                f,
+                "cycle function expected result of type {expected}, got {actual}"
+            ),
             Self::ForeignState => {
                 f.write_str("register state belongs to a different block evaluator")
             }
@@ -223,92 +229,38 @@ impl fmt::Display for BlockEvalError {
 
 impl std::error::Error for BlockEvalError {}
 
-/// A reusable execution plan and register layout for one elaborated block.
+/// An interpreter for one prepared block and its package functions.
 pub struct BlockEvaluator<'p> {
     package: &'p Package,
-    prepared: Prepared,
-    owner: Arc<()>,
-    origin_by_id: HashMap<usize, usize>,
+    plan: PreparedBlock,
 }
 
 impl<'p> BlockEvaluator<'p> {
-    /// Validate the package and prepare the selected block and its block
-    /// instances.
+    /// Validate and prepare the selected block and its reachable instances.
     pub fn prepare(package: &'p Package, top: &str) -> Result<Self, BlockEvalError> {
-        reject_reachable_opaque_extern_blocks(package, Some(top))
-            .map_err(BlockEvalError::Preparation)?;
-        verify_package(package).map_err(|err| BlockEvalError::InvalidPackage(Box::new(err)))?;
-        let prepared = prepare::prepare(package, top).map_err(BlockEvalError::Preparation)?;
-        let origin_by_id = prepared
-            .function
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, node)| {
-                matches!(
-                    node.payload,
-                    NodePayload::Cover { .. }
-                        | NodePayload::ArrayIndex {
-                            assumed_in_bounds: true,
-                            ..
-                        }
-                        | NodePayload::ArrayUpdate {
-                            assumed_in_bounds: true,
-                            ..
-                        }
-                )
-            })
-            .map(|(i, node)| (node.text_id, i))
-            .collect();
-        Ok(Self {
-            package,
-            prepared,
-            owner: Arc::new(()),
-            origin_by_id,
-        })
+        let plan = PreparedBlock::prepare(package, top)?;
+        Ok(Self { package, plan })
     }
 
     /// Data inputs in port order, including reset pins. The clock is implicit.
     pub fn inputs(&self) -> &[BlockEvalField] {
-        &self.prepared.inputs
+        self.plan.inputs()
     }
 
     /// Outputs in port order.
     pub fn outputs(&self) -> &[BlockEvalField] {
-        &self.prepared.outputs
+        self.plan.outputs()
     }
 
     /// Register layout in declaration order, followed by child instances in
     /// preorder.
     pub fn registers(&self) -> &[BlockEvalField] {
-        &self.prepared.registers
+        self.plan.registers()
     }
 
-    /// Create register state independent of each register's synchronous reset
-    /// value.
+    /// Initialize registers independently of their synchronous reset values.
     pub fn initial_state(&self, init: RegisterInit) -> Result<BlockState, BlockEvalError> {
-        let values = match init {
-            RegisterInit::AllZeros => self
-                .registers()
-                .iter()
-                .map(|r| zero_ir_value_for_type(&r.ty))
-                .collect(),
-            RegisterInit::Random { seed } => {
-                let mut rng = Pcg64Mcg::seed_from_u64(seed);
-                self.registers()
-                    .iter()
-                    .map(|r| generate_uniform_value_with_rng(&mut rng, &r.ty))
-                    .collect()
-            }
-            RegisterInit::Supplied(values) => {
-                validate_values(BlockValueKind::Register, self.registers(), &values)?;
-                values
-            }
-        };
-        Ok(BlockState {
-            owner: self.owner.clone(),
-            values,
-        })
+        self.plan.initial_state(init)
     }
 
     /// Sample one cycle and commit all enabled register writes simultaneously.
@@ -342,6 +294,7 @@ impl<'p> BlockEvaluator<'p> {
     ) -> Result<BlockCycleResult, BlockEvalError> {
         if !instance.is_empty()
             && !self
+                .plan
                 .prepared
                 .origins
                 .iter()
@@ -352,163 +305,45 @@ impl<'p> BlockEvaluator<'p> {
         }
         let mut observer = BlockObserver {
             instance,
-            prepared: &self.prepared,
+            prepared: &self.plan.prepared,
             inner: observer,
         };
         self.step_impl(state, inputs, Some(&mut observer))
     }
 
-    /// Resolve a projected event back to its instance, retaining package IDs of
-    /// called functions.
-    fn site(&self, id: usize) -> BlockEvalSite {
-        match self
-            .origin_by_id
-            .get(&id)
-            .and_then(|i| self.prepared.origins[*i].as_ref())
-        {
-            Some(origin) => BlockEvalSite {
-                instance: origin.instance.to_string(),
-                node_text_id: origin.text_id,
-            },
-            None => BlockEvalSite {
-                instance: String::new(),
-                node_text_id: id,
-            },
-        }
-    }
-
-    fn cover_counts(&self, counts: Vec<crate::ir_eval::CoverCount>) -> Vec<BlockCoverCount> {
-        counts
-            .into_iter()
-            .map(|c| BlockCoverCount {
-                site: self.site(c.node_text_id),
-                label: c.label,
-                count: c.count,
-            })
-            .collect()
-    }
-
-    /// Evaluate the cycle's dataflow once, then resolve writes from those
-    /// sampled values.
+    /// Evaluate the prepared cycle function and resolve its sampled register
+    /// writes.
     fn step_impl(
         &self,
         state: &BlockState,
         inputs: &[IrValue],
         observer: Option<&mut dyn EvalObserver>,
     ) -> Result<BlockCycleResult, BlockEvalError> {
-        if !Arc::ptr_eq(&self.owner, &state.owner) {
-            return Err(BlockEvalError::ForeignState);
-        }
-        validate_values(BlockValueKind::Input, self.inputs(), inputs)?;
-        let args: Vec<_> = inputs.iter().chain(&state.values).cloned().collect();
-        let eval = eval_fn_in_package_with_observer(
-            self.package,
-            &self.prepared.function,
-            &args,
-            observer,
-        );
-        let success = match eval {
-            FnEvalResult::Failure(failure) => {
-                return Err(BlockEvalError::Runtime(Box::new(BlockRuntimeFailure {
-                    assertion_failures: failure.assertion_failures,
-                    assumption_failures: failure
-                        .assumption_failures
-                        .into_iter()
-                        .map(|a| BlockAssumptionFailure {
-                            site: self.site(a.node_text_id),
-                            kind: a.kind,
-                        })
-                        .collect(),
-                    trace_messages: failure.trace_messages,
-                    cover_counts: self.cover_counts(failure.cover_counts),
-                })));
-            }
-            FnEvalResult::Success(success) => success,
+        self.plan.validate_state(state)?;
+        self.plan.validate_inputs(inputs)?;
+        let args: Vec<_> = inputs.iter().chain(state.values()).cloned().collect();
+        let result =
+            eval_fn_in_package_with_observer(self.package, self.plan.function(), &args, observer);
+        let (samples, events) = match result {
+            FnEvalResult::Success(success) => (
+                success.value,
+                self.plan.check_events(
+                    Vec::new(),
+                    Vec::new(),
+                    success.trace_messages,
+                    success.cover_counts,
+                )?,
+            ),
+            FnEvalResult::Failure(failure) => (
+                failure.value,
+                self.plan.check_events(
+                    failure.assertion_failures,
+                    failure.assumption_failures,
+                    failure.trace_messages,
+                    failure.cover_counts,
+                )?,
+            ),
         };
-        let IrValue::Tuple(results) = success.value else {
-            unreachable!("prepared block function returns a tuple")
-        };
-        let mut values = state.values.clone();
-        for ((value, reg), update) in values
-            .iter_mut()
-            .zip(self.registers())
-            .zip(&self.prepared.updates)
-        {
-            if let Some(next) = next_register_value(&reg.name, update, &results)? {
-                value.clone_from(next);
-            }
-        }
-        Ok(BlockCycleResult {
-            outputs: results[..self.outputs().len()].to_vec(),
-            next_state: BlockState {
-                owner: self.owner.clone(),
-                values,
-            },
-            trace_messages: success.trace_messages,
-            cover_counts: self.cover_counts(success.cover_counts),
-        })
+        self.plan.finish_cycle(state, samples, events)
     }
-}
-
-/// Reset takes priority only when wired to this register; otherwise one enabled
-/// write may win.
-fn next_register_value<'a>(
-    name: &str,
-    update: &'a RegisterUpdate,
-    samples: &'a [IrValue],
-) -> Result<Option<&'a IrValue>, BlockEvalError> {
-    if let Some((index, active_low, reset_value)) = &update.reset {
-        if samples[*index]
-            .to_bool()
-            .expect("verified one-bit reset operand")
-            != *active_low
-        {
-            return Ok(Some(reset_value));
-        }
-    }
-    let mut enabled = None;
-    for write in &update.writes {
-        if write.enable.is_none_or(|index| {
-            samples[index]
-                .to_bool()
-                .expect("verified one-bit load enable")
-        }) {
-            if let Some((first, _)) = enabled {
-                return Err(BlockEvalError::ConflictingWrites {
-                    register: name.to_owned(),
-                    first,
-                    second: write.node_id,
-                });
-            }
-            enabled = Some((write.node_id, &samples[write.data]));
-        }
-    }
-    Ok(enabled.map(|(_, data)| data))
-}
-
-/// Check both arity and exact structural type at the public boundary.
-fn validate_values(
-    kind: BlockValueKind,
-    fields: &[BlockEvalField],
-    values: &[IrValue],
-) -> Result<(), BlockEvalError> {
-    if fields.len() != values.len() {
-        return Err(BlockEvalError::ValueCount {
-            kind,
-            expected: fields.len(),
-            actual: values.len(),
-        });
-    }
-    for (field, value) in fields.iter().zip(values) {
-        let actual = value.type_();
-        if actual != field.ty {
-            return Err(BlockEvalError::ValueType {
-                kind,
-                name: field.name.clone(),
-                expected: field.ty.clone(),
-                actual,
-            });
-        }
-    }
-    Ok(())
 }
