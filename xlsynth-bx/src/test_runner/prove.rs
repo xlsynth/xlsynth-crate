@@ -126,6 +126,9 @@ pub(super) fn check_transition_contracts(package: &Package) -> Result<(), String
         let graph = member.graph();
         for node in &graph.nodes {
             let reason = match &node.payload {
+                NodePayload::Assert { label, message, .. } if label.is_empty() => {
+                    format!("hardware assertion with message {message:?}")
+                }
                 NodePayload::Assert { label, .. } => format!("hardware assertion '{label}'"),
                 NodePayload::Binop(Binop::Umulp | Binop::Smulp, ..) => {
                     "partial-product multiply".to_owned()

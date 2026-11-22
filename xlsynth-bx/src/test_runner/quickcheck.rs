@@ -2,19 +2,21 @@
 
 //! Seeded concrete execution of clocked BX properties.
 
-use std::collections::{BTreeMap, HashMap, hash_map::Entry};
+use std::collections::{BTreeMap, HashMap, HashSet, hash_map::Entry};
 use std::path::Path;
 
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg64Mcg;
 use xlsynth_pir::block_inline::flatten_block_hierarchy;
 use xlsynth_pir::block_transition::{BlockTransition, lower_block_transition};
-use xlsynth_pir::ir::{NodePayload, NodeRef, Package, Type as IrType};
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
+use xlsynth_pir::ir::{Fn, NodePayload, NodeRef, Package, Type as IrType};
+use xlsynth_pir::ir_eval::{FnEvalFailure, FnEvalResult, eval_fn_in_package};
+use xlsynth_pir::ir_inline::reachable_functions_in_dependency_order;
 use xlsynth_pir::ir_value_utils::zero_ir_value_for_type;
 use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
 use xlsynth_pir::{IrBits, IrValue};
 
+use super::proof_bounds::executed_callee;
 use super::simulation::{Observed, Simulation};
 use super::{
     AssertionTiming, BxTestResult, ClockedHarness, Execution, ExecutionError, Failure,
@@ -148,6 +150,8 @@ pub(super) struct PirCircuit<'a> {
     args: Vec<IrValue>,
     settled: Option<FnEvalResult>,
     expressions: HashMap<NodeRef, TestExpression>,
+    /// The combined dependencies of assertions sampled at the clock edge.
+    assertion_bounds: Option<TestExpression>,
 }
 
 impl<'a> PirCircuit<'a> {
@@ -175,6 +179,7 @@ impl<'a> PirCircuit<'a> {
             args,
             settled: None,
             expressions: HashMap::new(),
+            assertion_bounds: None,
         }
     }
 
@@ -255,17 +260,35 @@ impl<'a> PirCircuit<'a> {
         Ok(())
     }
 
-    fn tick(&mut self) -> Result<(), ExecutionError> {
-        let first = self.transition.outputs.len();
-        let count = self.transition.registers.len();
-        // The emitted RTL clocks all assertions in the flattened block and
-        // disables them while its physical reset is asserted.
+    /// Return evaluation failures on edges that sample hardware assertions.
+    fn edge_failure(&mut self) -> Option<&FnEvalFailure> {
         let in_reset = self.transition.reset.as_ref().is_some_and(|reset| {
             self.args[self.inputs[&reset.name]].bits_equals_u64_value(u64::from(!reset.active_low))
         });
         if !in_reset && let FnEvalResult::Failure(failure) = self.settle() {
-            check_ir_assertions(failure)?;
+            Some(failure)
+        } else {
+            None
         }
+    }
+
+    /// Attribute a failed bounds assumption to the sampled predicates, sharing
+    /// dependencies between assertions and ignoring unrelated outputs.
+    fn check_assertion_predicate_bounds(&mut self) -> Result<(), ExecutionError> {
+        let expression = match &mut self.assertion_bounds {
+            Some(expression) => expression,
+            slot @ None => slot.insert(assertion_bounds_expression(
+                self.package,
+                &self.transition.function,
+            )?),
+        };
+        expression.evaluate(self.package, &self.args)?;
+        Ok(())
+    }
+
+    fn advance_registers(&mut self) -> Result<(), ExecutionError> {
+        let first = self.transition.outputs.len();
+        let count = self.transition.registers.len();
         let next = (first..first + count)
             .map(|i| self.sample(i))
             .collect::<Result<Vec<_>, _>>()?;
@@ -274,6 +297,55 @@ impl<'a> PirCircuit<'a> {
         self.settled = None;
         Ok(())
     }
+}
+
+/// Projects block predicates and the calls that execute a hardware assertion.
+/// Sampling a linked call checks its evaluated body, just as sampling its
+/// return value does. Other calls and unrelated block outputs stay outside
+/// the cone.
+fn assertion_bounds_expression(
+    package: &Package,
+    transition: &Fn,
+) -> Result<TestExpression, String> {
+    let roots: Vec<_> = transition
+        .nodes
+        .iter()
+        .filter_map(executed_callee)
+        .collect();
+    let mut asserting = HashSet::new();
+    for f in reachable_functions_in_dependency_order(package, &roots)? {
+        if f.nodes.iter().any(|node| {
+            matches!(node.payload, NodePayload::Assert { .. })
+                || executed_callee(node).is_some_and(|name| asserting.contains(name))
+        }) {
+            asserting.insert(f.name.as_str());
+        }
+    }
+    let sinks: Vec<_> = transition
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match &node.payload {
+            NodePayload::Assert { activate, .. } => Some(*activate),
+            _ if executed_callee(node).is_some_and(|name| asserting.contains(name)) => {
+                Some(NodeRef { index })
+            }
+            _ => None,
+        })
+        .collect();
+    let mut function = transition.clone();
+    let ret = function.ret_node_ref.expect("transition result");
+    let ty = IrType::Tuple(
+        sinks
+            .iter()
+            .map(|&r| Box::new(function.get_node_ty(r).clone()))
+            .collect(),
+    );
+    function.ret_ty = ty.clone();
+    let result = function.get_node_mut(ret);
+    result.ty = ty;
+    result.payload = NodePayload::Tuple(sinks);
+    TestExpression::extract(&function, ret, AssertionTiming::ClockEdge)
 }
 
 /// Drive the two concrete engines in lockstep and compare each sampled
@@ -292,11 +364,36 @@ impl ClockedHarness for Concrete<'_, '_> {
         Ok(())
     }
     fn tick(&mut self) -> Result<(), ExecutionError> {
-        self.pir.tick()?;
-        if let Some(rtl) = &mut self.rtl {
-            rtl.tick()?;
+        let failure = self.pir.edge_failure();
+        let check_bounds = failure.is_some_and(|f| !f.assumption_failures.is_empty());
+        let pir = failure.map_or(Ok(()), check_ir_assertions);
+        if check_bounds {
+            // An invalid index in a sampled predicate makes its RTL value
+            // unsuitable for a cross-check.
+            self.pir.check_assertion_predicate_bounds()?;
         }
-        Ok(())
+        if let Some(rtl) = &mut self.rtl {
+            match (&pir, rtl.tick()) {
+                (Err(ExecutionError::Assertion(message)), Ok(())) => {
+                    return Err(format!(
+                        "Vastly cross-check mismatch: PIR reported {message}, Vastly passed"
+                    )
+                    .into());
+                }
+                (Ok(()), Err(ExecutionError::Assertion(message))) => {
+                    return Err(format!(
+                        "Vastly cross-check mismatch: PIR passed, Vastly reported {message}"
+                    )
+                    .into());
+                }
+                (_, Ok(())) | (Err(_), Err(ExecutionError::Assertion(_))) => {
+                    // Both backends agreed on whether an assertion fired.
+                }
+                (_, Err(error)) => return Err(error),
+            }
+        }
+        pir?;
+        self.pir.advance_registers()
     }
     fn sample(&mut self, index: usize) -> Result<Observed, ExecutionError> {
         let value = self.pir.sample(index)?;
@@ -707,6 +804,160 @@ extern block resetless(clk, good: bool) -> bool;
                 )
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn clocked_hardware_assertions_check_their_predicate_bounds_on_active_edges()
+    -> Result<(), String> {
+        let package = parse_xls_ir_package(
+            r#"package linked
+fn lookup(xs: bits[8][2] id=1, i: bits[8] id=2) -> bits[8] {
+  ret selected: bits[8] = array_index(xs, indices=[i], assumed_in_bounds=true, id=3)
+}"#,
+        )
+        .map_err(|e| e.to_string())?;
+        let source = r#"extern fn lookup(xs: u8[2], i: u8) -> u8;
+const DATA: u8[2] = [u8:17, u8:29];
+block monitor(clk, i: u8) -> bool {
+    assert!(lookup(DATA, i) == u8:29);
+    true
+}
+#[quickcheck] block bad_predicate() -> bool {
+    let ok = monitor(u8:2);
+    tick!();
+    ok
+}
+#[quickcheck] block masked() -> bool {
+    let ok = monitor(u8:2);
+    tick!(rst: true);
+    ok
+}
+#[quickcheck] block unrelated() -> bool {
+    let ok = monitor(u8:1);
+    tick!();
+    if false { assert_eq(lookup(DATA, u8:2), u8:29); }
+    ok
+}"#;
+        let report = run_tests_with_quickcheck(
+            source,
+            Path::new("predicates.bx"),
+            package,
+            ResetBehavior::default(),
+            &ImportOptions::default(),
+            true,
+            QuickCheckOptions {
+                trials: std::num::NonZeroUsize::MIN,
+                cross_check_vastly: true,
+                ..Default::default()
+            },
+        )?;
+        let diagnostics: Vec<_> = report
+            .tests
+            .iter()
+            .map(|test| {
+                test.failure
+                    .as_deref()
+                    .and_then(|failure| failure.lines().next())
+            })
+            .collect();
+        assert_eq!(
+            diagnostics,
+            [
+                Some(
+                    "predicates.bx:9:5: test 'bad_predicate' at tick 0: IR array_index at node 3 was out of bounds despite assumed_in_bounds=true"
+                ),
+                None,
+                None,
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn edge_checks_bounds_in_executed_linked_assertion_calls() -> Result<(), String> {
+        let package = parse_xls_ir_package(
+            r#"package linked
+fn read(i: bits[8] id=1) -> bits[8] {
+  xs: bits[8][2] = literal(value=[17, 29], id=2)
+  ret selected: bits[8] = array_index(xs, indices=[i], assumed_in_bounds=true, id=3)
+}
+fn checked(i: bits[8] id=4) -> bits[8] {
+  selected: bits[8] = invoke(i, to_apply=read, id=5)
+  last: bits[8] = literal(value=29, id=6)
+  good: bits[1] = eq(selected, last, id=7)
+  start: token = after_all(id=8)
+  checked: token = assert(start, good, message="bad word", label="word_ok", id=9)
+  ret pass: bits[8] = literal(value=0, id=10)
+}
+fn body(j: bits[1] id=11, acc: bits[8] id=12, i: bits[8] id=13) -> bits[8] {
+  indices: bits[8][1] = array(i, id=14)
+  checks: bits[8][1] = map(indices, to_apply=checked, id=15)
+  ret carry: bits[8] = identity(acc, id=16)
+}
+fn repeated(init: bits[8] id=17, i: bits[8] id=18) -> bits[8] {
+  ret run: bits[8] = counted_for(init, trip_count=1, stride=1, body=body, invariant_args=[i], id=19)
+}
+block monitor(clk: clock, i: bits[8], later: bits[8], out: bits[1]) {
+  i: bits[8] = input_port(name=i, id=20)
+  later: bits[8] = input_port(name=later, id=21)
+  init: bits[8] = literal(value=0, id=22)
+  check: bits[8] = invoke(init, i, to_apply=repeated, id=23)
+  unrelated: bits[8] = invoke(later, to_apply=read, id=24)
+  empty: bits[8] = counted_for(unrelated, trip_count=0, stride=1, body=body, invariant_args=[later], id=25)
+  yes: bits[1] = literal(value=1, id=26)
+  out: () = output_port(yes, name=out, id=27)
+}"#,
+        )
+        .map_err(|e| e.to_string())?;
+        let source = r#"extern block monitor(clk, i: u8, later: u8) -> bool;
+#[quickcheck] block bad_index() -> bool {
+    let ok = monitor(u8:2, u8:1);
+    tick!();
+    ok
+}
+#[quickcheck] block masked() -> bool {
+    let ok = monitor(u8:2, u8:1);
+    tick!(rst: true);
+    ok
+}
+#[quickcheck] block unrelated() -> bool {
+    let ok = monitor(u8:1, u8:2);
+    tick!();
+    ok
+}"#;
+        let report = run_tests_with_quickcheck(
+            source,
+            Path::new("linked.bx"),
+            package,
+            ResetBehavior::default(),
+            &ImportOptions::default(),
+            true,
+            QuickCheckOptions {
+                trials: std::num::NonZeroUsize::MIN,
+                cross_check_vastly: true,
+                ..Default::default()
+            },
+        )?;
+        let diagnostics: Vec<_> = report
+            .tests
+            .iter()
+            .map(|test| {
+                test.failure
+                    .as_deref()
+                    .and_then(|failure| failure.lines().next())
+            })
+            .collect();
+        assert_eq!(
+            diagnostics,
+            [
+                Some(
+                    "linked.bx:4:5: test 'bad_index' at tick 0: IR array_index at node 3 was out of bounds despite assumed_in_bounds=true"
+                ),
+                None,
+                None,
+            ]
+        );
         Ok(())
     }
 

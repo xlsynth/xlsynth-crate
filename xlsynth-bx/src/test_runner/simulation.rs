@@ -7,7 +7,8 @@ use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog_with_register_nam
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block_inline::flatten_block_hierarchy;
 use xlsynth_pir::block_invoke_inline::BlockInvokeInliner;
-use xlsynth_pir::ir::{NodePayload, Package, Type};
+use xlsynth_pir::ir::{Block, NaryOp, Node, NodePayload, NodeRef, Package, Type};
+use xlsynth_pir::ir_rebase_ids::package_max_emitted_node_id;
 use xlsynth_pir::ir_value_utils::{
     flatten_ir_value_to_lsb0_bits_for_type, ir_value_from_lsb0_bits_with_layout,
 };
@@ -16,13 +17,13 @@ use xlsynth_vastly::{
     compile_pipeline_module_without_spans,
 };
 
+use super::{ExecutionError, ir_assertion_diagnostic};
+
 /// One typed stimulus input and its current drive. Zero-width inputs have no
 /// corresponding RTL port.
 struct Input {
     ty: Type,
     drive: Option<(InputPortHandle, Value4)>,
-    /// Physical level of a deasserted reset for this port, if it is reset.
-    inactive_reset: Option<bool>,
 }
 
 /// Connects a flattened PIR register to its packed RTL signal. A zero-width
@@ -30,6 +31,13 @@ struct Input {
 struct Register {
     ty: Type,
     rtl_name: Option<String>,
+}
+
+/// A simulation-only output packing each assertion predicate into one bit.
+struct AssertionProbes {
+    port: String,
+    /// Failure message for each bit, starting at bit zero.
+    diagnostics: Vec<String>,
 }
 
 /// A settled output or the four-state diagnostic for an unknown observation.
@@ -46,6 +54,9 @@ pub(super) struct Simulation {
     inputs: BTreeMap<String, Input>,
     registers: BTreeMap<String, Register>,
     outputs: Vec<(String, Type)>,
+    assertion_probes: Option<AssertionProbes>,
+    /// Physical reset port and its inactive level, if the block declares one.
+    reset: Option<(String, bool)>,
     settled: Option<BTreeMap<String, Value4>>,
 }
 
@@ -83,10 +94,20 @@ impl Simulation {
         unroll_budget: Option<usize>,
     ) -> Result<Self, String> {
         let mut inliner = BlockInvokeInliner::new(&package)?;
-        let block = match unroll_budget {
+        let mut block = match unroll_budget {
             Some(limit) => inliner.inline_block_with_unrolling(top, limit)?,
             None => inliner.inline_block(top)?,
         };
+        let outputs = block
+            .output_ports()
+            .map(|port| {
+                (
+                    block.port_name(port).to_owned(),
+                    block.port_type(port).clone(),
+                )
+            })
+            .collect();
+        let assertion_probes = add_assertion_probes(&mut block, &package)?;
         if let Cow::Owned(expanded) = block {
             package.to_mut().replace_block(top, expanded)?;
         }
@@ -104,6 +125,7 @@ impl Simulation {
             &package,
             &BlockCodegenOptions {
                 emit_sv_types: false,
+                emit_asserts: false, // The fixture checks predicates at the active edge.
                 ..Default::default()
             },
         )
@@ -140,19 +162,9 @@ impl Simulation {
                 Input {
                     ty: ty.clone(),
                     drive,
-                    inactive_reset,
                 },
             );
         }
-        let outputs = block
-            .output_ports()
-            .map(|port| {
-                (
-                    block.port_name(port).to_owned(),
-                    block.port_type(port).clone(),
-                )
-            })
-            .collect();
         let mut rtl_names = rtl.top_register_names;
         let registers = block
             .registers
@@ -179,6 +191,8 @@ impl Simulation {
             inputs,
             registers,
             outputs,
+            assertion_probes,
+            reset: reset.map(|r| (block.port_name(r.port).to_owned(), r.active_low)),
             settled: None,
         })
     }
@@ -219,13 +233,13 @@ impl Simulation {
         }
         // Both QuickCheck executions begin with identical testbench drives.
         // Only the DUT register state differs between concrete and X trials.
-        for input in self.inputs.values_mut() {
+        for (name, input) in &mut self.inputs {
             if let Some((handle, drive)) = &mut input.drive {
-                *drive = Value4::from_u64(
-                    handle.width(),
-                    handle.signedness(),
-                    u64::from(input.inactive_reset.unwrap_or(false)),
-                );
+                let level = self
+                    .reset
+                    .as_ref()
+                    .is_some_and(|(port, inactive)| name == port && *inactive);
+                *drive = Value4::from_u64(handle.width(), handle.signedness(), u64::from(level));
             }
         }
         self.settled = None;
@@ -253,12 +267,29 @@ impl Simulation {
     }
 
     /// Advances every connected instance on the same rising edge.
-    pub(super) fn tick(&mut self) -> Result<(), String> {
+    pub(super) fn tick(&mut self) -> Result<(), ExecutionError> {
         let edge = self
             .runner
             .step_cycle_with_drive(&mut [], |ctx| apply_drives(&self.inputs, ctx))
             .map_err(|e| format!("test clock edge failed: {e:?}"))?;
         self.settled = Some(edge.outputs);
+        if let Some(probes) = &self.assertion_probes
+            && self.reset.as_ref().is_none_or(|(port, inactive)| {
+                edge.inputs[port].to_u64_if_known() == Some(u64::from(*inactive))
+            })
+        {
+            let values = edge
+                .pre_outputs
+                .get(&probes.port)
+                .ok_or_else(|| format!("test RTL has no assertion probe '{}'", probes.port))?;
+            if let Some(index) = values
+                .bits_lsb_first()
+                .iter()
+                .position(|bit| *bit == LogicBit::Zero)
+            {
+                return Err(ExecutionError::Assertion(probes.diagnostics[index].clone()));
+            }
+        }
         Ok(())
     }
 
@@ -308,6 +339,63 @@ impl Simulation {
     }
 }
 
+/// Exposes assertion predicates on the private simulation module. Vastly
+/// samples these just before ticking, as the emitted SystemVerilog does.
+fn add_assertion_probes(
+    block: &mut Cow<'_, Block>,
+    package: &Package,
+) -> Result<Option<AssertionProbes>, String> {
+    let (mut predicates, diagnostics): (Vec<_>, Vec<_>) = block
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.payload {
+            NodePayload::Assert {
+                activate,
+                label,
+                message,
+                ..
+            } => Some((*activate, ir_assertion_diagnostic(label, message))),
+            _ => None,
+        })
+        .unzip();
+    if predicates.is_empty() {
+        return Ok(None);
+    }
+
+    let block = block.to_mut();
+    let occupied = block.occupied_names();
+    let port = (0usize..)
+        .map(|i| format!("__bx_assert_probe_{i}"))
+        .find(|name| !occupied.contains(name))
+        .ok_or("no available probe name")?;
+    // The inliner can allocate IDs above the original package's maximum.
+    let max_id = package_max_emitted_node_id(package).max(
+        block
+            .nodes
+            .iter()
+            .map(|node| node.text_id)
+            .max()
+            .unwrap_or(0),
+    );
+    // Concat takes its most significant input first. Bit zero reports the
+    // first assertion in source graph order.
+    predicates.reverse();
+    let packed = NodeRef {
+        index: block.nodes.len(),
+    };
+    block.nodes.push(Node {
+        text_id: max_id
+            .checked_add(1)
+            .ok_or("assertion probe node IDs overflow usize")?,
+        name: None,
+        ty: Type::Bits(predicates.len()),
+        payload: NodePayload::Nary(NaryOp::Concat, predicates),
+        pos: None,
+    });
+    block.add_output_port(&port, packed)?;
+    Ok(Some(AssertionProbes { port, diagnostics }))
+}
+
 /// Packs tuple tails and array heads into the least significant RTL bits.
 fn packed_value(value: &IrValue, ty: &Type, signedness: Signedness) -> Result<Value4, String> {
     let width = u32::try_from(ty.bit_count()).map_err(|_| "RTL value is too wide")?;
@@ -355,7 +443,40 @@ pub block sample(clk, rst, data: Payload) -> (Payload, Payload, bool, ()) {
 "#;
 
     #[test]
-    fn drive_settles_aggregates_without_clocking_the_child() -> Result<(), String> {
+    fn assertion_probe_checks_each_bit_before_the_edge() -> Result<(), ExecutionError> {
+        let source = r#"pub block sample(clk, __bx_assert_probe_0: bool, good: bool) -> bool {
+            reg q: bool;
+            q := __bx_assert_probe_0;
+            assert!(q, "first");
+            assert!(good, "second");
+            q
+        }"#;
+        let package = compile(source, empty_package("sample"), ResetBehavior::default())?;
+        let mut sim = Simulation::new(&package, "sample")?;
+        sim.drive("__bx_assert_probe_0", &IrValue::bool(false))?;
+        sim.drive("good", &IrValue::bool(false))?;
+        // q is X before this first edge, but the second assertion is false.
+        assert_eq!(
+            sim.tick(),
+            Err(ExecutionError::Assertion(
+                "IR assertion 'second' failed: assertion failed at 5:13".into()
+            ))
+        );
+        sim.drive("__bx_assert_probe_0", &IrValue::bool(true))?;
+        sim.drive("good", &IrValue::bool(true))?;
+        // q will become true at this edge, but the sampled value is false.
+        assert_eq!(
+            sim.tick(),
+            Err(ExecutionError::Assertion(
+                "IR assertion 'first' failed: assertion failed at 4:13".into()
+            ))
+        );
+        sim.tick()?;
+        Ok(())
+    }
+
+    #[test]
+    fn drive_settles_aggregates_without_clocking_the_child() -> Result<(), ExecutionError> {
         let zero = IrValue::parse_typed("(bits[80]:0, [bits[4]:0, bits[4]:0], ())")
             .map_err(|e| e.to_string())?;
         let first =
@@ -421,7 +542,7 @@ pub block sample(clk, rst, data: Payload) -> (Payload, Payload, bool, ()) {
     }
 
     #[test]
-    fn trials_restart_aggregate_registers_drives_and_observations() -> Result<(), String> {
+    fn trials_restart_aggregate_registers_drives_and_observations() -> Result<(), ExecutionError> {
         let package = compile(SOURCE, empty_package("sample"), ResetBehavior::default())?;
         let flat = flatten_block_hierarchy(&package, "sample")?;
         let register = &flat.get_block("sample").unwrap().registers[0];
@@ -596,7 +717,7 @@ block sample(clk, words: u8[2]) -> u8 {
     }
 
     #[test]
-    fn quickcheck_rtl_unrolls_counted_loops_inside_a_mapped_helper() -> Result<(), String> {
+    fn quickcheck_rtl_unrolls_counted_loops_inside_a_mapped_helper() -> Result<(), ExecutionError> {
         let source = r#"
 fn advance(x: u8) -> u8 {
     for (i, a) in u8:0..u8:3 { a + x + i }(u8:1)

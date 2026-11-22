@@ -190,6 +190,44 @@ array read in a helper called only by an untaken arm does not fail the
 assertion. The DSLX typechecker can reject both forms in a direct predicate,
 even when it accepts the same expression inside a constexpr helper.
 
+### Runtime assertions in blocks
+
+Write `assert!(predicate, "label");` in an ordinary block to check a
+`bool` computed from inputs, registers, or local values. The optional label
+names the assertion in Block IR and generated SystemVerilog. Choose a name
+unique within the block, such as `reserved_payload`. It must start with an
+ASCII letter or underscore and contain only ASCII letters, digits, and
+underscores. SystemVerilog keywords are reserved.
+You can also write `assert!(predicate);`. Failures report the BX line and column
+and include the source filename when available.
+
+```text
+block capture(clk, valid: bool, payload: u8) -> u8 {
+    reg q: u8 = u8:0;
+    if valid {
+        assert!(payload != u8:255, "reserved_payload");
+        q := payload;
+    }
+    q
+}
+```
+
+On a rising edge, `capture` checks the incoming payload only when `valid`
+is true and reset is inactive. Predicates that read a register see its
+pre-edge value. BX emits a native Block IR assertion. In SystemVerilog, a
+clocked block uses `assert property`, and a clockless block uses `assert final`
+in `always_comb` so its signals can settle. The generated checks skip unknown predicates
+and are excluded when `SYNTHESIS` is defined.
+
+The stock XLS v0.63.0 emitter also reserves the module name and names it
+generates for internal signals, such as `xs_unflattened` for an array port
+named `xs`. Using one of those as a label works with `block2sv` but can fail
+with the stock emitter.
+
+Inside a clocked `bx-test` harness, `tick!()` checks assertions in its
+flattened DUT, including child blocks. An assertion written directly in the
+test body executes when the test reaches that statement.
+
 ### Constants in concrete dimensions
 
 Use an earlier `u32` constant as a bit width or array length in a concrete type.
@@ -667,8 +705,14 @@ The PIR interpreter starts each trial with independently drawn bits in every
 DUT register, including registers with a synchronous reset value. A reset edge
 loads that value. Testbench stimulus registers use their declared initializers
 or typed zero. Enum parameters draw from their declared members. PIR checks
-linked hardware assertions on rising edges with the flattened block's reset
+hardware assertions on rising edges with the flattened block's reset
 deasserted. Procedural BX assertions sample at their source statement.
+If a hardware predicate depends on a linked array operation marked
+`assumed_in_bounds=true`, PIR checks that contract when sampling the
+predicate. A block-level `if` guards the assertion, while the array
+operation remains part of the predicate's combinational logic.
+When a linked IR function executes a hardware assertion, PIR also checks
+the bounds contracts in that invocation, including its executed loop iterations.
 A failed concrete trial reports its seed, trial number, parameters, initial
 register values, and stimulus trace. If a clock edge fails, the trace includes
 the attempted tick and its reset setting.
@@ -682,9 +726,8 @@ condition. The four-valued counts are reported separately from the concrete
 property result. A failed concrete property, backend error, or concrete
 mismatch makes `bx-test` exit unsuccessfully. For the optional RTL run,
 maps and counted loops are expanded with a limit of 65,536 additional IR
-nodes per property harness, including nested body copies. Use the PIR backend
-for linked hardware that emits SystemVerilog `assert property` statements.
-Vastly currently cannot parse this syntax.
+nodes per property harness, including nested body copies. The Vastly test
+harness samples hardware assertion predicates on the same edges as PIR.
 
 ### Bounded proofs for clocked properties
 
@@ -716,9 +759,10 @@ For `array_index` and `array_update` marked `assumed_in_bounds=true`, the
 solver proves that every index fits its array dimension whenever the test
 samples the expression or clocks a register update that depends on it. This
 includes operations in called functions. A violated bound disproves the
-property even when the sampled values compare equal. Reachable hardware
-assertions in linked IR and partial-product multiplies (`umulp` and `smulp`)
-are currently unsupported. A solver counterexample is replayed through the
+property even when the sampled values compare equal. The bounded and inductive
+provers currently reject reachable hardware assertions, including `assert!`
+in ordinary BX blocks. Bounded proof also rejects partial-product multiplies
+(`umulp` and `smulp`). A solver counterexample is replayed through the
 concrete BX runner to report the failing observation, clock edge, and stimulus
 trace. The proof covers the edges executed by the property.
 
@@ -867,8 +911,8 @@ The linker checks argument order, widths, aggregate shapes, and result type befo
 `compile`, `compile_with_options`, `bx-test`, `bx2ir`, and `bx2gv` treat BX warnings as
 errors by default. The `combinational_block` warning points to a block that
 only computes a value. Prefer a `fn` for this kind of helper. A block with a
-register or a child instance already serves a hardware role. A helper that
-only reads the `rst` declared in its signature can take the normalized reset as an explicit
+register, a child instance, or a runtime assertion already serves a hardware
+role. A helper that only reads the `rst` declared in its signature can take the normalized reset as an explicit
 `bool` function argument. Clocked type-generic blocks retain their exemption.
 
 For an intentional combinational RTL leaf, omit `clk` and add

@@ -1126,7 +1126,7 @@ impl BlockEmitter<'_, '_> {
         Ok(result)
     }
 
-    /// Emits a clocked assertion without altering synthesizable datapath logic.
+    /// Samples assertions on a clock edge or after combinational logic settles.
     fn emit_assertion(
         &mut self,
         predicate: NodeRef,
@@ -1135,7 +1135,8 @@ impl BlockEmitter<'_, '_> {
     ) -> Result<(), BlockCodegenError> {
         let condition = self.required_value(predicate)?.expr;
         let predicate = self.file.emit_expression(&condition);
-        let escaped = escape_sv_string(message);
+        // $error interprets its argument as a format string.
+        let escaped = escape_sv_string(message).replace('%', "%%");
         if !label.is_empty() {
             validate_external_identifier(label, "assertion label")?;
         }
@@ -1144,27 +1145,26 @@ impl BlockEmitter<'_, '_> {
         } else {
             format!("{label}: ")
         };
-        let unknown = format!("$isunknown({predicate})");
+        let clock = self.block.clock_port_name();
+        // Sample unknownness with the predicate. Asynchronous reset stays live.
+        let unknown = if clock.is_some() {
+            format!("$sampled($isunknown({predicate}))")
+        } else {
+            format!("$isunknown({predicate})")
+        };
         let disabled = if let Some(reset) = &self.block.reset {
             let inactive = if reset.active_low { "1'b1" } else { "1'b0" };
-            format!(
-                "{} !== {inactive} || {unknown}",
-                self.block.port_name(reset.port)
-            )
+            let in_reset = format!("{} !== {inactive}", self.block.port_name(reset.port));
+            let in_reset = if clock.is_some() && !reset.asynchronous {
+                format!("$sampled({in_reset})")
+            } else {
+                in_reset
+            };
+            format!("{in_reset} || {unknown}")
         } else {
             unknown
         };
-        let statement = if let Some(clock) = self.block.clock_port_name() {
-            let disabled = if self
-                .block
-                .reset
-                .as_ref()
-                .is_some_and(|reset| reset.asynchronous)
-            {
-                disabled
-            } else {
-                format!("$sampled({disabled})")
-            };
+        let statement = if let Some(clock) = clock {
             format!(
                 "`ifndef SYNTHESIS\n{label_prefix}assert property (@(posedge {clock}) \
                  disable iff ({disabled}) {predicate}) else $error(\"{escaped}\");\n`endif"
@@ -1177,7 +1177,7 @@ impl BlockEmitter<'_, '_> {
             };
             format!(
                 "`ifndef SYNTHESIS\nalways_comb begin{label_suffix}\n  \
-                 if (!({disabled})) assert ({predicate}) \
+                 assert final ({disabled} || ({predicate})) \
                  else $error(\"{escaped}\");\nend\n`endif"
             )
         };
@@ -1309,8 +1309,16 @@ fn verilog_trace_format(
 
 /// Escapes a public diagnostic string for use in a SystemVerilog literal.
 fn escape_sv_string(text: &str) -> String {
-    text.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_ascii_control() => escaped.push_str(&format!("\\{:03o}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }

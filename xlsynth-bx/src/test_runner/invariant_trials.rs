@@ -414,6 +414,56 @@ block count_bound(clk, rst, enable: bool) -> bool {
 }"#;
 
     #[test]
+    fn child_runtime_assertion_fails_a_concrete_invariant_and_blocks_its_proof()
+    -> Result<(), String> {
+        let source = r#"block monitored(clk, ok: bool) -> bool {
+    assert!(ok, "child_contract");
+    ok
+}
+#[invariant]
+block observe(clk) -> bool {
+    let ok = monitored(false);
+    !ok
+}"#;
+        let path = Path::new("contract.bx");
+        let reset = ResetBehavior::default();
+        let imports = ImportOptions::default();
+        let tests = run_tests_with_options(
+            source,
+            path,
+            empty_package("contract"),
+            reset,
+            &imports,
+            true,
+            BxTestOptions::default(),
+        )?;
+        assert_eq!(
+            tests.tests[0]
+                .failure
+                .as_deref()
+                .and_then(|message| message.lines().next()),
+            Some(
+                "contract.bx:6:7: invariant 'observe' at cycle 0: IR assertion 'child_contract' failed: assertion failed at contract.bx:2:5"
+            )
+        );
+        let suite = prepare_invariant_proofs(
+            source,
+            path,
+            empty_package("contract"),
+            reset,
+            &imports,
+            true,
+        )?;
+        assert_eq!(
+            suite.properties[0].proof.as_ref().err().map(String::as_str),
+            Some(
+                "contract.bx:6:7: invariant 'observe': bounded proof does not yet support reachable hardware assertion 'child_contract' in 'bx_test_observe'"
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
     fn base_replay_locates_a_later_false_lemma_for_both_reset_polarities() -> Result<(), String> {
         for active_low in [false, true] {
             let suite = prepare_invariant_proofs(

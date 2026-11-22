@@ -10,8 +10,8 @@ use xlsynth_pir::{
 };
 
 use crate::ast::{
-    BinaryOp, ExternBlock, ExternFn, OutputCycles, Param, SourceFile, SourceSpan, StructDef, Type,
-    UnaryOp,
+    BinaryOp, ExternBlock, ExternFn, OutputCycles, Param, SourceFile, SourcePosition, SourceSpan,
+    StructDef, Type, UnaryOp,
 };
 use crate::builtin::BuiltinOp;
 use crate::bx_import::library_item;
@@ -265,10 +265,15 @@ pub struct CheckedBlock {
     pub output: TypedExpr,
 }
 
-/// A structural declaration or a single driver with its complete enable
-/// condition.
+/// A checked statement in a block, including guarded hardware effects.
 #[derive(Clone, Debug)]
 pub enum CheckedStmt {
+    /// A runtime assertion, enabled by the enclosing block statement guards.
+    Assert {
+        predicate: TypedExpr,
+        position: SourcePosition,
+        label: Option<String>,
+    },
     Reg {
         name: String,
         ty: Type,

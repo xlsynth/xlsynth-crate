@@ -14,8 +14,8 @@ use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, BlockStages, CallbackParam, Expr, ExternBlock, ExternFn, Function,
     FunctionParametricRef, InvariantDecl, InvariantLemma, LetBinding, MatchArm, MatchPattern,
-    Module, Param, SourceSpan, Stmt, StructDef, StructLiteralArgs, StructSplat, Type, UnaryOp,
-    WidthSliceType,
+    Module, Param, SourcePosition, SourceSpan, Stmt, StructDef, StructLiteralArgs, StructSplat,
+    Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -2138,7 +2138,7 @@ pub(crate) fn check_sources_with_tests(
         declarations
             .warnings
             .borrow_mut()
-            .record_block(&block.name, body.requires_hardware);
+            .record_block(&block.name, body.has_block_only_behavior);
         checked.push(body.block);
     }
     let mut test_functions = Vec::new();
@@ -2233,7 +2233,7 @@ pub(crate) fn check_sources_with_tests(
         declarations
             .warnings
             .borrow_mut()
-            .record_block(&spec.block.name, block.requires_hardware);
+            .record_block(&spec.block.name, block.has_block_only_behavior);
         specialized_blocks.insert(spec.name.clone());
         checked.push(block.block);
     }
@@ -2265,7 +2265,7 @@ pub(crate) fn check_sources_with_tests(
         .flat_map(|suite| &suite.invariants)
         .map(|invariant| invariant.harness.as_str())
         .collect();
-    infer_block_resets(&mut blocks, &extern_blocks, &invariant_harnesses)?;
+    check_block_names_and_infer_resets(&mut blocks, &extern_blocks, &invariant_harnesses)?;
     // A parent may call a generic child defined later in the file. At this
     // point its concrete specialization appears before the parent in `blocks`.
     timing::check_blocks(&mut blocks, &structs, &invariant_harnesses)?;
@@ -2328,9 +2328,9 @@ pub(crate) fn check_sources_with_tests(
     Ok(checked)
 }
 
-/// Propagate reset demand in child-first order, after specialization and
-/// structural unrolling determine which instances actually exist.
-fn infer_block_resets(
+/// Check labels against the elaborated hardware and propagate reset demand
+/// in child-first order, allocating each inferred port a free name.
+fn check_block_names_and_infer_resets(
     blocks: &mut [CheckedBlock],
     externs: &[ExternBlock],
     invariant_harnesses: &BTreeSet<&str>,
@@ -2341,6 +2341,19 @@ fn infer_block_resets(
         .map(|b| (b.name.as_str(), b.name.as_str()))
         .collect();
     for block in blocks {
+        let mut labels = BTreeMap::new();
+        collect_assertion_labels(&block.statements, &mut labels)
+            .map_err(|e| format!("block '{}': {e}", block.source_name))?;
+        if !labels.is_empty()
+            && let Some((name, kind, position)) = fixed_hardware_names(block)
+                .find_map(|(name, kind)| labels.get(name).map(|position| (name, kind, position)))
+        {
+            return Err(format!(
+                "block '{}': {}: assertion label '{name}' collides with a {kind}",
+                block.source_name,
+                position.location(block.source.as_ref())
+            ));
+        }
         if block.reset.is_none() {
             for stmt in &block.statements {
                 match stmt {
@@ -2375,7 +2388,10 @@ fn infer_block_resets(
                     // demand.
                     _ => continue,
                 }
-                block.reset = Some(inferred_reset_port(block));
+                let names = fixed_hardware_names(block)
+                    .map(|(name, _)| name)
+                    .chain(labels.keys().copied());
+                block.reset = Some(inferred_reset_port(names));
                 break;
             }
         }
@@ -2386,13 +2402,39 @@ fn infer_block_resets(
     Ok(())
 }
 
-/// Keep source port, register, and instance names when introducing a reset
-/// into a block whose author could use `rst` as an ordinary name.
-fn inferred_reset_port(block: &CheckedBlock) -> String {
-    let names = block
+/// Named assertions under any statement guard occupy the same module scope.
+fn collect_assertion_labels<'a>(
+    statements: &'a [CheckedStmt],
+    labels: &mut BTreeMap<&'a str, SourcePosition>,
+) -> Result<(), String> {
+    for stmt in statements {
+        match stmt {
+            CheckedStmt::Assert {
+                label: Some(label),
+                position,
+                ..
+            } => {
+                // check_module also accepts ASTs built directly by its callers.
+                let duplicate = labels.insert(label, *position).is_some();
+                crate::parser::validate_block_assertion_label(label, duplicate)?;
+            }
+            CheckedStmt::If { body, .. } => collect_assertion_labels(body, labels)?,
+            _ => { /* Other statements introduce no assertion label. */ }
+        }
+    }
+    Ok(())
+}
+
+/// Port, register and instance names reserved in the block's hardware
+/// namespace.
+fn fixed_hardware_names(
+    block: &CheckedBlock,
+) -> impl Iterator<Item = (&str, &'static str)> + Clone {
+    block
         .clock
         .as_deref()
         .into_iter()
+        .chain(block.reset.as_deref())
         .chain(
             block
                 .params
@@ -2400,10 +2442,16 @@ fn inferred_reset_port(block: &CheckedBlock) -> String {
                 .chain(&block.output_ports)
                 .map(|p| p.name.as_str()),
         )
+        .map(|name| (name, "port"))
         .chain(block.statements.iter().filter_map(|s| match s {
-            CheckedStmt::Reg { name, .. } | CheckedStmt::Inst { name, .. } => Some(name.as_str()),
+            CheckedStmt::Reg { name, .. } => Some((name.as_str(), "register")),
+            CheckedStmt::Inst { name, .. } => Some((name.as_str(), "block instance")),
             _ => None,
-        }));
+        }))
+}
+
+/// Keep all fixed hardware names when adding an inferred reset port.
+fn inferred_reset_port<'a>(names: impl Iterator<Item = &'a str> + Clone) -> String {
     if !names.clone().any(|name| name == "rst") {
         return "rst".into();
     }
@@ -2418,8 +2466,8 @@ fn inferred_reset_port(block: &CheckedBlock) -> String {
     }
 }
 
-/// Reserve source bindings before allocating instance or observation port
-/// names.
+/// Reserve source bindings and assertion labels before allocating instance
+/// or observation port names.
 fn block_binding_names(block: &Block) -> BTreeSet<String> {
     let mut names: BTreeSet<_> = block
         .clock
@@ -2431,7 +2479,12 @@ fn block_binding_names(block: &Block) -> BTreeSet<String> {
     let mut pending: Vec<_> = block.statements.iter().collect();
     while let Some(statement) = pending.pop() {
         match statement {
-            Stmt::Reg { name, .. } | Stmt::Let { name, .. } | Stmt::Wire { name, .. } => {
+            Stmt::Reg { name, .. }
+            | Stmt::Let { name, .. }
+            | Stmt::Wire { name, .. }
+            | Stmt::Assert {
+                label: Some(name), ..
+            } => {
                 names.insert(name.clone());
             }
             Stmt::LetPattern(binding) => {
@@ -2440,7 +2493,7 @@ fn block_binding_names(block: &Block) -> BTreeSet<String> {
                 });
             }
             Stmt::If { body, .. } => pending.extend(body),
-            _ => { /* Drivers and assertions introduce no local bindings. */ }
+            _ => { /* Other statements introduce no names to reserve. */ }
         }
     }
     names
@@ -2464,7 +2517,7 @@ struct MapScope {
 /// references resolved inside structural iterations that were skipped.
 struct BlockBody {
     block: CheckedBlock,
-    requires_hardware: bool,
+    has_block_only_behavior: bool,
 }
 
 /// Lexical values, loop elaboration, and any hardware declared in one body.
@@ -2475,7 +2528,7 @@ struct BodyChecker<'a, 'm> {
     /// Runtime names that shadow module declarations in a type annotation.
     enclosing_type_locals: Option<&'a dyn Fn(&str) -> bool>,
     kind: BodyKind,
-    uses_child: Cell<bool>,
+    has_block_only_behavior: Cell<bool>,
     /// A clockless source block requires every hardware operation to be
     /// combinational.
     clockless_block: Option<&'m Block>,
@@ -2799,7 +2852,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             resolver,
             enclosing_type_locals: None,
             kind,
-            uses_child: Cell::new(false),
+            has_block_only_behavior: Cell::new(false),
             clockless_block: None,
             source_kind: kind,
             specializations: None,
@@ -3020,7 +3073,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         } else {
             main
         };
-        let requires_hardware = !c.regs.is_empty() || c.uses_child.get();
+        let has_block_only_behavior = c.has_block_only_behavior.get();
         let block = CheckedBlock {
             name: specialization.map_or(&block.name, |s| &s.name).clone(),
             source_name: block.name.clone(),
@@ -3039,7 +3092,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         };
         Ok(BlockBody {
             block,
-            requires_hardware,
+            has_block_only_behavior,
         })
     }
 
@@ -3188,7 +3241,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.replaying_body() || !parametrics.is_empty() {
             self.charge_expansion("child block wiring", child.port_type_nodes)?;
         }
-        self.uses_child.set(true);
+        self.has_block_only_behavior.set(true);
         if let Some(ty) = expected
             && !compatible(ty, &child.result)
         {
@@ -3326,6 +3379,24 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .copied();
             }
             let checked = match stmt {
+                Stmt::Assert {
+                    predicate,
+                    label,
+                    position,
+                } => {
+                    let predicate = self.expr(predicate, Some(&Type::Bool)).map_err(|err| {
+                        format!(
+                            "{}:{}: assert! predicate: {err}",
+                            position.line, position.column
+                        )
+                    })?;
+                    self.has_block_only_behavior.set(true);
+                    CheckedStmt::Assert {
+                        predicate,
+                        position: *position,
+                        label: label.clone(),
+                    }
+                }
                 Stmt::ConstAssert(assertion) => {
                     if conditional {
                         return Err(format!(
@@ -3337,6 +3408,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     continue;
                 }
                 Stmt::Reg { name, ty, reset } => {
+                    self.has_block_only_behavior.set(true);
                     if block.clock.is_none() {
                         return Err(self.clock_error(block, format!(
                             "clockless block cannot declare register '{name}'; add `clk` to the block signature"
@@ -5594,6 +5666,77 @@ mod tests {
 
     fn check_bx(source: &str) -> Result<CheckedModule, String> {
         check_module(&parse_module(source)?)
+    }
+
+    #[test]
+    fn runtime_assertions_check_boolean_predicates_outside_the_timed_output_cone()
+    -> Result<(), String> {
+        let source = r#"block hold(clk, input: u8 @0, enable: bool @0) -> u8 @1 {
+    reg saved: u8;
+    saved := input;
+    if enable {
+        let old_matches = saved == input;
+        assert!(old_matches, "value_changed");
+    }
+    saved
+}"#;
+        check_bx(source)?;
+        let error = check_bx(&source.replace("assert!(old_matches", "assert!(saved")).unwrap_err();
+        assert_eq!(
+            error,
+            "block 'hold': 6:9: assert! predicate: expected bool, got u8"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn block_assertion_labels_share_the_hardware_namespace() -> Result<(), String> {
+        let child = "block child(clk, x: bool) -> bool { x }";
+        for (label, kind) in [
+            ("clk", "port"),
+            ("rst", "port"),
+            ("x", "port"),
+            ("out", "port"),
+            ("q", "register"),
+            ("u", "block instance"),
+        ] {
+            let check = format!(r#"if x {{ assert!(x, "{label}"); }}"#);
+            let hardware = "reg q: bool; q := x; let u = child(q);";
+            for (body, line) in [
+                (format!("{check}\n{hardware}"), 4),
+                (format!("{hardware}\n{check}"), 5),
+            ] {
+                let source = format!(
+                    "#![allow(block_reset_signal)]\n{child}\nblock top(clk, rst, x: bool) -> bool {{\n{body}\nu }}"
+                );
+                assert_eq!(
+                    check_bx(&source).unwrap_err(),
+                    format!(
+                        "block 'top': {line}:8: assertion label '{label}' collides with a {kind}"
+                    )
+                );
+            }
+        }
+        let source = r#"block child(clk, x: bool) -> bool { assert!(x, "same"); x }
+block top(clk, x: bool) -> bool {
+    reg q: bool = false;
+    q := x;
+    let same = x;
+    assert!(same, "same");
+    if same { assert!(q, "rst"); }
+    let out = child(x);
+    assert!(out, "out_inst");
+    out
+}"#;
+        let checked = check_bx(source)?;
+        let top = checked.blocks().iter().find(|b| b.name == "top").unwrap();
+        assert_eq!(top.reset.as_deref(), Some("rst_1"));
+        assert!(
+            top.statements
+                .iter()
+                .any(|stmt| matches!(stmt, CheckedStmt::Inst { name, .. } if name == "out_inst_1"))
+        );
+        Ok(())
     }
 
     #[test]

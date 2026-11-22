@@ -12,6 +12,7 @@ use xlsynth_codegen::{
 };
 use xlsynth_pir::ir::{BlockReset, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_test_helpers::assert_valid_sv;
 use xlsynth_vastly::{
     FixtureRunner, LogicBit, Signedness, Value4, compile_combo_module, compile_pipeline_module,
     eval_combo, plan_combo_eval,
@@ -1697,7 +1698,7 @@ top block debug_events(clk: clock, predicate: bits[1], value: bits[8], result: b
   predicate: bits[1] = input_port(name=predicate, id=1)
   value: bits[8] = input_port(name=value, id=2)
   start_token: token = after_all(id=3)
-  checked: token = assert(start_token, predicate, message="bad value", label="value_is_valid", id=4)
+  checked: token = assert(start_token, predicate, message="value is 50% of \"limit\"\n\000end", label="value_is_valid", id=4)
   observed: token = trace(checked, predicate, format="value={}", data_operands=[value], verbosity=0, id=5)
   covered: () = cover(predicate, label="value_was_observed", id=6)
   result: () = output_port(value, name=result, id=7)
@@ -1705,6 +1706,7 @@ top block debug_events(clk: clock, predicate: bits[1], value: bits[8], result: b
 "#;
     assert_stock_xls_accepts(ir);
     let enabled = emit(ir, &BlockCodegenOptions::default());
+    assert_valid_sv(&enabled);
     let assertions = enabled
         .lines()
         .filter(|line| line.contains("assert property"))
@@ -1713,7 +1715,7 @@ top block debug_events(clk: clock, predicate: bits[1], value: bits[8], result: b
     assert_eq!(
         assertions,
         [
-            "value_is_valid: assert property (@(posedge clk) disable iff ($sampled($isunknown(predicate))) predicate) else $error(\"bad value\");"
+            r#"value_is_valid: assert property (@(posedge clk) disable iff ($sampled($isunknown(predicate))) predicate) else $error("value is 50%% of \"limit\"\n\000end");"#
         ]
     );
     let covers = enabled
@@ -1761,6 +1763,7 @@ top block assertion({clock}predicate: bits[1], result: bits[1]) {{
         );
         assert_stock_xls_accepts(&ir);
         let generated = emit(&ir, &BlockCodegenOptions::default());
+        assert_valid_sv(&generated);
         if clocked {
             let assertions = generated
                 .lines()
@@ -1779,7 +1782,7 @@ top block assertion({clock}predicate: bits[1], result: bits[1]) {{
                 generated
                     .lines()
                     .any(|line| line.trim()
-                        == "if (!($isunknown(predicate))) assert (predicate) else $error(\"condition failed\");")
+                        == "assert final ($isunknown(predicate) || (predicate)) else $error(\"condition failed\");")
             );
         }
         assert!(!generated.contains("begin : \n"));
@@ -1834,22 +1837,22 @@ top block guarded(clk: clock, {reset}: bits[1], predicate: bits[1], result: bits
             );
             assert_stock_xls_accepts(&ir);
             let generated = emit(&ir, &BlockCodegenOptions::default());
+            assert_valid_sv(&generated);
             let assertions = generated
                 .lines()
                 .filter(|line| line.contains("assert property"))
                 .map(str::trim)
                 .collect::<Vec<_>>();
             let inactive = if active_low { "1'b1" } else { "1'b0" };
-            let disabled = format!("{reset} !== {inactive} || $isunknown(predicate)");
-            let disabled = if asynchronous {
-                disabled
+            let reset_check = if asynchronous {
+                format!("{reset} !== {inactive}")
             } else {
-                format!("$sampled({disabled})")
+                format!("$sampled({reset} !== {inactive})")
             };
             assert_eq!(
                 assertions,
                 [format!(
-                    "assert property (@(posedge clk) disable iff ({disabled}) predicate) else $error(\"condition failed\");"
+                    "assert property (@(posedge clk) disable iff ({reset_check} || $sampled($isunknown(predicate))) predicate) else $error(\"condition failed\");"
                 )],
                 "asynchronous={asynchronous}, active_low={active_low}"
             );
@@ -2080,7 +2083,7 @@ top block fixed_label(data: bits[1], out: bits[1]) {
   assign check__1 = ~data;
   `ifndef SYNTHESIS
   always_comb begin : check
-    if (!($isunknown(check__1))) assert (check__1) else $error("check");
+    assert final ($isunknown(check__1) || (check__1)) else $error("check");
   end
   `endif
   assign out = check__1;

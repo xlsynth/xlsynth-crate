@@ -814,6 +814,15 @@ impl<'a> Scope<'a> {
     fn statement(&mut self, stmt: &Stmt, local: Local) -> Result<Stmt, String> {
         Ok(match stmt {
             Stmt::ConstAssert(assertion) => Stmt::ConstAssert(self.const_assert(assertion)?),
+            Stmt::Assert {
+                predicate,
+                label,
+                position,
+            } => Stmt::Assert {
+                predicate: self.expr(predicate)?,
+                label: label.clone(),
+                position: *position,
+            },
             Stmt::Reg { name, ty, reset } => {
                 let ty = self.ty(ty)?;
                 self.bind_as(name, local);

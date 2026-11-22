@@ -312,6 +312,21 @@ mismatch reports both generated programs.
 
 Run from `xlsynth-bx` with `XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_clocked_test`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_runtime_assert.rs
+
+Compares the first failing edge of an ordinary BX block's guarded `assert!`
+in PIR and Vastly with the pinned DSLX interpreter on the same trace. The
+DSLX test checks the predicate against its own pre-edge register state and
+then applies reset or an enabled write. Each edge has a distinct DSLX
+assertion source line. The target
+varies the explicit assertion label, comparison, input data, guard, register
+load, reset value, and reset polarity. On the first failing edge, both BX
+backends must report the generated label and its source file, line, and column.
+This catches lost or altered labels, skipped or spurious assertions, and
+failures sampled on the wrong edge.
+
+Run from `xlsynth-bx` with `XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_runtime_assert`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_pure_test.rs
 
 Runs identical `#[test] fn` source through the BX test runner and the pinned

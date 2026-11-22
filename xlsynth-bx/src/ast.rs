@@ -757,6 +757,12 @@ pub enum WidthSliceType {
 pub enum Stmt {
     /// Check a Boolean constexpr when elaborating this block.
     ConstAssert(ConstAssert),
+    /// Check a Boolean hardware signal when the enclosing guard is active.
+    Assert {
+        predicate: Expr,
+        label: Option<String>,
+        position: SourcePosition,
+    },
     Reg {
         name: String,
         ty: Type,
@@ -795,6 +801,20 @@ pub enum Stmt {
 pub struct SourcePosition {
     pub line: usize,
     pub column: usize,
+}
+
+impl SourcePosition {
+    /// Include the source basename when available, keeping lowered diagnostics
+    /// portable.
+    pub(crate) fn location(self, source: Option<&SourceFile>) -> String {
+        let file = source
+            .and_then(|file| file.path.as_ref())
+            .and_then(|path| path.file_name());
+        match file {
+            Some(name) => format!("{}:{}:{}", name.to_string_lossy(), self.line, self.column),
+            None => format!("{}:{}", self.line, self.column),
+        }
+    }
 }
 
 /// Function tests evaluate pure expressions. Block tests can drive and clock
@@ -952,8 +972,8 @@ pub struct Block {
     pub name: String,
     /// Location of the declared name, when parsed from a source file.
     pub name_position: Option<SourcePosition>,
-    /// Source text and ranges for clockless blocks and blocks with deferred
-    /// bindings.
+    /// Source text and ranges for clockless blocks, deferred bindings and
+    /// runtime assertions.
     pub source: Option<BlockSource>,
     /// Warning kinds suppressed for this definition by `#[allow(...)]`.
     pub allowed_warnings: BTreeSet<BxWarningKind>,

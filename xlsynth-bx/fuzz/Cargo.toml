@@ -48,6 +48,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_runtime_assert"
+path = "fuzz_targets/fuzz_bx_dslx_runtime_assert.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_pure_test"
 path = "fuzz_targets/fuzz_bx_dslx_pure_test.rs"
 test = false
