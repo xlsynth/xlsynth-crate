@@ -17,7 +17,7 @@ use xlsynth_pir::{
     RegisterWriteOptions, ResetBehavior,
 };
 
-use crate::ast::{BinaryOp, Param, Type, UnaryOp};
+use crate::ast::{BinaryOp, Param, SourceFile, Type, UnaryOp};
 use crate::bx_import::library_item;
 use crate::check::{
     CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind,
@@ -858,7 +858,13 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 resources.instances.insert(name.clone(), instance);
             }
         }
-        self.wire_statements(&block.statements, &mut resources, reset, None)?;
+        self.wire_statements(
+            &block.statements,
+            &mut resources,
+            reset,
+            None,
+            block.source.as_ref(),
+        )?;
         let ports = &block.output_ports;
         if let TypedExprKind::Tuple(fields) = &block.output.kind {
             // Drive fields separately to preserve their feedback dependencies.
@@ -896,10 +902,15 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
         resources: &mut BlockResources,
         reset: Option<BValue>,
         guard: Option<BValue>,
+        source: Option<&SourceFile>,
     ) -> Result<(), BuilderError> {
         for statement in statements {
             match statement {
-                CheckedStmt::Assert { predicate, message } => {
+                CheckedStmt::Assert {
+                    predicate,
+                    position,
+                    label,
+                } => {
                     let mut condition = self.expr(predicate)?;
                     if let Some(active) = guard {
                         let inactive = self.builder.not(active)?;
@@ -912,8 +923,12 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                         Some(previous) => previous,
                         None => self.builder.after_all(&[])?,
                     };
-                    resources.assertion_token =
-                        Some(self.builder.assert(token, condition, message, "")?);
+                    resources.assertion_token = Some(self.builder.assert(
+                        token,
+                        condition,
+                        &format!("assertion failed at {}", position.location(source)),
+                        label.as_deref().unwrap_or_default(),
+                    )?);
                 }
                 CheckedStmt::Reg {
                     name,
@@ -1012,7 +1027,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                         Some(parent) => self.builder.and(parent, condition)?,
                         None => condition,
                     };
-                    self.wire_statements(body, resources, reset, Some(active))?;
+                    self.wire_statements(body, resources, reset, Some(active), source)?;
                 }
                 CheckedStmt::Inst { .. } => {
                     // Instance outputs were made available before wiring any

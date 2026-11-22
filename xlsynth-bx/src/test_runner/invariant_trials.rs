@@ -417,7 +417,7 @@ block count_bound(clk, rst, enable: bool) -> bool {
     fn child_runtime_assertion_fails_a_concrete_invariant_and_blocks_its_proof()
     -> Result<(), String> {
         let source = r#"block monitored(clk, ok: bool) -> bool {
-    assert!(ok, "child contract");
+    assert!(ok, "child_contract");
     ok
 }
 #[invariant]
@@ -443,7 +443,7 @@ block observe(clk) -> bool {
                 .as_deref()
                 .and_then(|message| message.lines().next()),
             Some(
-                "contract.bx:6:7: invariant 'observe' at cycle 0: IR assertion failed: child contract"
+                "contract.bx:6:7: invariant 'observe' at cycle 0: IR assertion 'child_contract' failed: assertion failed at contract.bx:2:5"
             )
         );
         let suite = prepare_invariant_proofs(
@@ -457,7 +457,7 @@ block observe(clk) -> bool {
         assert_eq!(
             suite.properties[0].proof.as_ref().err().map(String::as_str),
             Some(
-                r#"contract.bx:6:7: invariant 'observe': bounded proof does not yet support reachable hardware assertion with message "child contract" in 'bx_test_observe'"#
+                "contract.bx:6:7: invariant 'observe': bounded proof does not yet support reachable hardware assertion 'child_contract' in 'bx_test_observe'"
             )
         );
         Ok(())

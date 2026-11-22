@@ -196,7 +196,7 @@ impl Parser<'_> {
             return Ok(TestStmtKind::Tick { reset });
         }
         if self.eat("assert!") {
-            let (predicate, label) = self.assert_arguments()?;
+            let (predicate, label) = self.assert_arguments(None)?;
             return Ok(TestStmtKind::Assert { predicate, label });
         }
         if self.eat("assert_eq") {

@@ -816,11 +816,11 @@ impl<'a> Scope<'a> {
             Stmt::ConstAssert(assertion) => Stmt::ConstAssert(self.const_assert(assertion)?),
             Stmt::Assert {
                 predicate,
-                message,
+                label,
                 position,
             } => Stmt::Assert {
                 predicate: self.expr(predicate)?,
-                message: message.clone(),
+                label: label.clone(),
                 position: *position,
             },
             Stmt::Reg { name, ty, reset } => {

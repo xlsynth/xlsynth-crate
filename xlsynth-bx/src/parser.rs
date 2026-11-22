@@ -34,6 +34,15 @@ pub(crate) struct Token<'s> {
 
 const SOURCE_START: SourcePosition = SourcePosition { line: 1, column: 1 };
 
+/// Keep the source file for deferred wire diagnostics and assertion locations.
+fn needs_block_source(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Wire { .. } | Stmt::Assert { .. } => true,
+        Stmt::If { body, .. } => body.iter().any(needs_block_source),
+        _ => false,
+    }
+}
+
 /// Advance a diagnostic position across UTF-8 source text.
 fn advance_position(start: SourcePosition, text: &str) -> SourcePosition {
     let line = start.line + text.bytes().filter(|&b| b == b'\n').count();
@@ -68,6 +77,20 @@ pub(crate) fn is_identifier_word(text: &str) -> bool {
     let mut bytes = text.bytes();
     bytes.next().is_some_and(identifier_start)
         && bytes.all(|b| identifier_start(b) || b.is_ascii_digit())
+}
+
+/// Validate one label in the enclosing block's XLS and SystemVerilog namespace.
+pub(crate) fn validate_block_assertion_label(label: &str, duplicate: bool) -> Result<(), String> {
+    // XLS requires an identifier word even though SV allows '$'.
+    if !is_identifier_word(label) || xlsynth_vast::is_system_verilog_keyword(label) {
+        return Err(format!(
+            "invalid block assertion label {label:?}: expected a non-keyword SystemVerilog identifier matching [A-Za-z_][A-Za-z0-9_]*"
+        ));
+    }
+    if duplicate {
+        return Err(format!("duplicate block assertion label '{label}'"));
+    }
+    Ok(())
 }
 
 /// Path components are identifier tokens in the DSLX `use` grammar.
@@ -1740,9 +1763,12 @@ impl<'s> Parser<'s> {
         ))
     }
 
-    /// Parse the predicate and optional diagnostic text shared by block and
-    /// test assertions.
-    fn assert_arguments(&mut self) -> Result<(Expr, Option<String>), String> {
+    /// Parse a block's optional hardware label or a test's optional diagnostic
+    /// string. Guarded assertions share their enclosing block's label set.
+    fn assert_arguments(
+        &mut self,
+        block_labels: Option<&mut HashSet<String>>,
+    ) -> Result<(Expr, Option<String>), String> {
         self.expect("(")?;
         let predicate = self.expr()?.value;
         let label = if self.eat(",") {
@@ -1755,6 +1781,10 @@ impl<'s> Parser<'s> {
             // diagnostics.
             let label = String::from_utf8(bytes)
                 .unwrap_or_else(|_| literal[1..literal.len() - 1].to_owned());
+            if let Some(labels) = block_labels {
+                validate_block_assertion_label(&label, !labels.insert(label.clone()))
+                    .map_err(|e| diagnostic(self.source, self.tokens[self.pos].start, &e))?;
+            }
             self.pos += 1;
             Some(label)
         } else {
@@ -2000,29 +2030,26 @@ impl<'s> Parser<'s> {
             self.shadow_callable(&port.name);
         }
         self.dependent_types = !params.value_parametrics.is_empty();
-        let body =
-            self.with_name_scope(|p| p.block_body_contents(lemmas, /* guarded= */ false))?;
+        let body = self.with_name_scope(|p| {
+            p.block_body_contents(lemmas, /* guarded= */ false, &mut HashSet::new())
+        })?;
         self.dependent_types = false;
         self.type_params.clear();
         let (output, output_span) = body
             .output
             .ok_or_else(|| self.error("block requires an output expression"))?;
-        let source = (signature.clock.is_none()
-            || body
-                .statements
-                .iter()
-                .any(|stmt| matches!(stmt, Stmt::Wire { .. })))
-        .then(|| BlockSource {
-            file: SourceFile {
-                text: self
-                    .diagnostic_source
-                    .get_or_insert_with(|| Arc::from(self.source))
-                    .clone(),
-                path: None,
-            },
-            statements: body.statement_spans,
-            output: output_span,
-        });
+        let source = (signature.clock.is_none() || body.statements.iter().any(needs_block_source))
+            .then(|| BlockSource {
+                file: SourceFile {
+                    text: self
+                        .diagnostic_source
+                        .get_or_insert_with(|| Arc::from(self.source))
+                        .clone(),
+                    path: None,
+                },
+                statements: body.statement_spans,
+                output: output_span,
+            });
         Ok(Block {
             name: signature.name,
             name_position: Some(name_position),
@@ -2420,6 +2447,7 @@ impl<'s> Parser<'s> {
         &mut self,
         mut lemmas: Option<&mut Vec<InvariantLemma>>,
         guarded: bool,
+        assertion_labels: &mut HashSet<String>,
     ) -> Result<Body, String> {
         let mut statements = Vec::new();
         let mut statement_spans = Vec::new();
@@ -2483,10 +2511,10 @@ impl<'s> Parser<'s> {
                 // spelling consumes a standalone call and its semicolon.
                 self.pos += 1;
                 let position = self.position_at(start);
-                let (predicate, message) = self.assert_arguments()?;
+                let (predicate, label) = self.assert_arguments(Some(assertion_labels))?;
                 statements.push(Stmt::Assert {
                     predicate,
-                    message,
+                    label,
                     position,
                 });
             } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) && self.peek(2) == ":" {
@@ -2525,7 +2553,9 @@ impl<'s> Parser<'s> {
                     });
                 }
                 let then_body = self.nested(|p| {
-                    p.with_name_scope(|p| p.block_body_contents(None, /* guarded= */ true))
+                    p.with_name_scope(|p| {
+                        p.block_body_contents(None, /* guarded= */ true, assertion_labels)
+                    })
                 })?;
                 if then_body.output.is_some() {
                     return Err(self.error("value-producing if requires an else arm"));
@@ -4682,12 +4712,12 @@ mod tests {
     }
 
     #[test]
-    fn block_assertion_statements_preserve_value_calls_and_decode_messages() -> Result<(), String> {
+    fn block_assertion_statements_preserve_value_calls_and_decode_labels() -> Result<(), String> {
         let module = parse_module(
             r#"fn assert!(x: bool) -> bool { x }
 block checked(clk, x: bool) -> bool {
     assert!(assert!(x));
-    if x { assert!({ let en = x; const_assert!(true); en }, "enable\x20must be (set)"); }
+    if x { assert!({ let en = x; const_assert!(true); en }, "enable\x5fset"); }
     assert!(x) && x
 }"#,
         )?;
@@ -4695,7 +4725,7 @@ block checked(clk, x: bool) -> bool {
         let [
             Stmt::Assert {
                 predicate,
-                message,
+                label,
                 position,
             },
             Stmt::If { body, .. },
@@ -4704,15 +4734,45 @@ block checked(clk, x: bool) -> bool {
             panic!("expected an assertion followed by a guarded assertion");
         };
         assert!(matches!(predicate, Expr::Call { name, .. } if name == "assert!"));
-        assert!(message.is_none());
+        assert!(label.is_none());
         assert_eq!(*position, SourcePosition { line: 3, column: 5 });
         assert!(
-            matches!(body.as_slice(), [Stmt::Assert { message, .. }] if message.as_deref() == Some("enable must be (set)"))
+            matches!(body.as_slice(), [Stmt::Assert { label, .. }] if label.as_deref() == Some("enable_set"))
         );
         assert!(
             matches!(&block.output, Expr::Binary { left, .. } if matches!(left.as_ref(), Expr::Call { name, .. } if name == "assert!"))
         );
         Ok(())
+    }
+
+    #[test]
+    fn unused_block_templates_validate_decoded_assertion_labels() {
+        for (literal, decoded) in [
+            (r#""""#, ""),
+            (r#""1foo""#, "1foo"),
+            (r#""two\x20words""#, "two words"),
+            (r#""a$b""#, "a$b"),
+            (r#""log\x69c""#, "logic"),
+            (r#""\xff""#, r"\xff"),
+        ] {
+            let source =
+                format!("block unused<T>(x: T) -> T {{\n    assert!(true, {literal});\n    x\n}}");
+            assert_eq!(
+                parse_module(&source).unwrap_err(),
+                format!(
+                    "2:19: invalid block assertion label {decoded:?}: expected a non-keyword SystemVerilog identifier matching [A-Za-z_][A-Za-z0-9_]*"
+                )
+            );
+        }
+        let duplicate = r#"block unused<T>(x: T) -> T {
+    if true { assert!(true, "valid"); }
+    if false { assert!(false, "val\x69d"); }
+    x
+}"#;
+        assert_eq!(
+            parse_module(duplicate).unwrap_err(),
+            "3:31: duplicate block assertion label 'valid'"
+        );
     }
 
     #[test]

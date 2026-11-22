@@ -459,7 +459,7 @@ pub block sample(clk, rst, data: Payload) -> (Payload, Payload, bool, ()) {
         assert_eq!(
             sim.tick(),
             Err(ExecutionError::Assertion(
-                "IR assertion failed: second".into()
+                "IR assertion 'second' failed: assertion failed at 5:13".into()
             ))
         );
         sim.drive("__bx_assert_probe_0", &IrValue::bool(true))?;
@@ -468,7 +468,7 @@ pub block sample(clk, rst, data: Payload) -> (Payload, Payload, bool, ()) {
         assert_eq!(
             sim.tick(),
             Err(ExecutionError::Assertion(
-                "IR assertion failed: first".into()
+                "IR assertion 'first' failed: assertion failed at 4:13".into()
             ))
         );
         sim.tick()?;

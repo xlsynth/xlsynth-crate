@@ -21,6 +21,12 @@ pub fn check_runtime_assert(data: &[u8]) -> Result<Option<usize>, String> {
         "!d.check"
     };
     let active_low = config & 0x80 != 0;
+    let prefix = if active_low {
+        "_Sample"
+    } else {
+        "sampled_value_"
+    };
+    let label = format!("{prefix}{config}");
     // Start with a reset edge to initialize the BX register. The payload and
     // guard still reach the assertion on that edge if reset masking breaks.
     let edges = std::iter::once(config | 0xc0).chain(trace.iter().copied().take(16));
@@ -48,7 +54,7 @@ const ROWS: Drive[{row_count}] = [
 block checked(clk, d: Drive) -> u4 {{
     reg q: u4 = u4:{reset_value};
     if d.load {{ q := d.value; }}
-    if {guard} {{ assert!(predicate(q, d), "sampled value"); }}
+    if {guard} {{ assert!(predicate(q, d), "{label}"); }}
     q
 }}
 #[quickcheck]
@@ -68,7 +74,7 @@ block edges() -> bool {{
         writeln!(dslx, "    let d = ROWS[u32:{tick}];").unwrap();
         writeln!(
             dslx,
-            r#"    if !d.reset && ({guard}) {{ assert!(predicate(q{tick}, d), "sampled value"); }};"#,
+            r#"    if !d.reset && ({guard}) {{ assert!(predicate(q{tick}, d), "{label}"); }};"#,
         )
         .unwrap();
         if tick + 1 < row_count {
@@ -82,13 +88,18 @@ block edges() -> bool {{
     }
     dslx.push_str("}\n");
 
-    compare_first_failure(&bx, &dslx, active_low)
+    compare_first_failure(&bx, &dslx, &label, active_low)
         .map_err(|error| format!("{error}\nBX (active_low={active_low}):\n{bx}\nDSLX:\n{dslx}"))
 }
 
 /// Each generated DSLX assertion has its own source line. BX reports its
 /// sampled edge in the tick failure from the hardware assertion.
-fn compare_first_failure(bx: &str, dslx: &str, active_low: bool) -> Result<Option<usize>, String> {
+fn compare_first_failure(
+    bx: &str,
+    dslx: &str,
+    label: &str,
+    active_low: bool,
+) -> Result<Option<usize>, String> {
     let outcomes = pure_test_oracle::observe(dslx, &["edges"])?;
     let expected_tick = outcomes[0]
         .map(|line| {
@@ -118,8 +129,14 @@ fn compare_first_failure(bx: &str, dslx: &str, active_low: bool) -> Result<Optio
     let [test] = report.tests.as_slice() else {
         return Err(format!("expected one BX test, got {}", report.tests.len()));
     };
-    let expected = expected_tick
-        .map(|tick| format!(": test 'edges' at tick {tick}: IR assertion failed: sampled value"));
+    let (row, column) = bx
+        .lines()
+        .enumerate()
+        .find_map(|(row, text)| text.find("assert!(").map(|column| (row + 1, column + 1)))
+        .ok_or("missing generated BX assertion")?;
+    let expected = expected_tick.map(|tick| {
+        format!(": test 'edges' at tick {tick}: IR assertion '{label}' failed: assertion failed at runtime_assert.bx:{row}:{column}")
+    });
     let four = test
         .quickcheck
         .as_ref()
@@ -173,6 +190,14 @@ mod tests {
                 None
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn labeled_failure_after_a_negated_guard_skips_one_edge() -> Result<(), String> {
+        // The second edge disables the check. On the third edge the register
+        // still holds 3, so comparing to 4 must report the generated label.
+        assert_eq!(check_runtime_assert(&[0xc3, 0x23, 0x14])?, Some(2));
         Ok(())
     }
 }

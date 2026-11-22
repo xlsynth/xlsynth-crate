@@ -17,7 +17,7 @@ fn clockless_block_checks_each_enabled_assertion_and_preserves_its_output()
 -> Result<(), Box<dyn Error>> {
     let source = r#"pub block inspect(valid: bool, value: u8) -> u8 {
     if valid {
-        assert!(value != u8:0, "zero payload");
+        assert!(value != u8:0, "nonzero_payload");
         if value != u8:1 { assert!(value < u8:8); }
     }
     value
@@ -31,7 +31,7 @@ fn clockless_block_checks_each_enabled_assertion_and_preserves_its_output()
         (false, 8, None),
         (true, 1, None),
         (true, 7, None),
-        (true, 0, Some("zero payload")),
+        (true, 0, Some("assertion failed at 3:9")),
         (true, 8, Some("assertion failed at 4:28")),
     ] {
         let value = IrValue::make_ubits(8, data)?;
@@ -48,7 +48,14 @@ fn clockless_block_checks_each_enabled_assertion_and_preserves_its_output()
         }
     }
     let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default())?;
-    assert_eq!(rtl.system_verilog.matches("always_comb begin").count(), 2);
+    assert_eq!(
+        rtl.system_verilog
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("always_comb begin"))
+            .collect::<Vec<_>>(),
+        ["always_comb begin : nonzero_payload", "always_comb begin"]
+    );
     Ok(())
 }
 
@@ -56,7 +63,7 @@ fn clockless_block_checks_each_enabled_assertion_and_preserves_its_output()
 fn block_ir_masks_assertions_during_its_own_physical_reset() -> Result<(), Box<dyn Error>> {
     let source = r#"pub block hold(clk, enable: bool) -> bool {
     reg q: bool = false;
-    assert!(enable, "enable required");
+    assert!(enable, "enable_required");
     q := enable;
     q
 }"#;
@@ -74,8 +81,16 @@ fn block_ir_masks_assertions_during_its_own_physical_reset() -> Result<(), Box<d
         let inputs = |reset: bool| [IrValue::bool(reset ^ active_low), IrValue::bool(false)];
         let reset = eval.step(&state, &inputs(true))?;
         let err = eval.step(&reset.next_state, &inputs(false)).unwrap_err();
+        let BlockEvalError::Runtime(failure) = err else {
+            panic!("{err}");
+        };
+        let assertion = &failure.assertion_failures[0];
+        assert_eq!(assertion.label, "enable_required");
+        assert_eq!(assertion.message, "assertion failed at 3:5");
+        let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default())?;
         assert!(
-            matches!(err, BlockEvalError::Runtime(f) if f.assertion_failures[0].message == "enable required")
+            rtl.system_verilog
+                .contains("enable_required: assert property (@(posedge clk)")
         );
     }
     Ok(())
@@ -90,7 +105,7 @@ fn imported_child_assertions_sample_before_each_unmasked_test_edge() -> Result<(
 fn allowed(x: u8) -> bool { x != RESERVED }
 pub block stage<T>(clk, x: T) -> T {
     reg q: T = zero!<T>();
-    assert!(allowed(q as u8), "reserved payload");
+    assert!(allowed(q as u8), "reserved_payload");
     q := x;
     q
 }"#,
@@ -138,7 +153,9 @@ pub block stage<T>(clk, x: T) -> T {
         assert_eq!(report.tests.len(), 2);
         assert_eq!(
             report.tests[0].failure.as_deref(),
-            Some("checks.bx:12:5: test 'unit' at tick 4: IR assertion failed: reserved payload")
+            Some(
+                "checks.bx:12:5: test 'unit' at tick 4: IR assertion 'reserved_payload' failed: assertion failed at lib.bx:5:5"
+            )
         );
         assert_eq!(
             report.tests[1]
@@ -146,7 +163,7 @@ pub block stage<T>(clk, x: T) -> T {
                 .as_deref()
                 .and_then(|s| s.lines().next()),
             Some(
-                "checks.bx:18:5: test 'property' at tick 2: IR assertion failed: reserved payload"
+                "checks.bx:18:5: test 'property' at tick 2: IR assertion 'reserved_payload' failed: assertion failed at lib.bx:5:5"
             )
         );
         let four_valued = report.tests[1]

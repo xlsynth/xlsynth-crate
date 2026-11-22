@@ -192,15 +192,20 @@ even when it accepts the same expression inside a constexpr helper.
 
 ### Runtime assertions in blocks
 
-Write `assert!(predicate, "message");` in an ordinary block to check a
-`bool` computed from inputs, registers, or local values. The message is
-optional. Without one, BX reports the line and column of the assertion.
+Write `assert!(predicate, "label");` in an ordinary block to check a
+`bool` computed from inputs, registers, or local values. The optional label
+names the assertion in Block IR and generated SystemVerilog. Choose a name
+unique within the block, such as `reserved_payload`. It must start with an
+ASCII letter or underscore and contain only ASCII letters, digits, and
+underscores. SystemVerilog keywords are reserved.
+You can also write `assert!(predicate);`. Failures report the BX line and column
+and include the source filename when available.
 
 ```text
 block capture(clk, valid: bool, payload: u8) -> u8 {
     reg q: u8 = u8:0;
     if valid {
-        assert!(payload != u8:255, "reserved payload");
+        assert!(payload != u8:255, "reserved_payload");
         q := payload;
     }
     q
@@ -213,6 +218,11 @@ pre-edge value. BX emits a native Block IR assertion. In SystemVerilog, a
 clocked block uses `assert property`, and a clockless block uses `assert final`
 in `always_comb` so its signals can settle. The generated checks skip unknown predicates
 and are excluded when `SYNTHESIS` is defined.
+
+The stock XLS v0.63.0 emitter also reserves the module name and names it
+generates for internal signals, such as `xs_unflattened` for an array port
+named `xs`. Using one of those as a label works with `block2sv` but can fail
+with the stock emitter.
 
 Inside a clocked `bx-test` harness, `tick!()` checks assertions in its
 flattened DUT, including child blocks. An assertion written directly in the
