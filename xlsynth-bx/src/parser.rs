@@ -1740,6 +1740,30 @@ impl<'s> Parser<'s> {
         ))
     }
 
+    /// Parse the predicate and optional diagnostic text shared by block and
+    /// test assertions.
+    fn assert_arguments(&mut self) -> Result<(Expr, Option<String>), String> {
+        self.expect("(")?;
+        let predicate = self.expr()?.value;
+        let label = if self.eat(",") {
+            let literal = self.peek(0);
+            if !literal.starts_with('"') {
+                return Err(self.error("expected a string literal for the assertion label"));
+            }
+            let bytes = decode_byte_string(literal).map_err(|e| self.error(e))?;
+            // An escaped byte outside UTF-8 retains its written spelling in
+            // diagnostics.
+            let label = String::from_utf8(bytes)
+                .unwrap_or_else(|_| literal[1..literal.len() - 1].to_owned());
+            self.pos += 1;
+            Some(label)
+        } else {
+            None
+        };
+        self.expect(")")?;
+        Ok((predicate, label))
+    }
+
     /// Parse nested tuple binders, with at most one rest marker per tuple.
     fn binding_pattern(
         &mut self,
@@ -2451,6 +2475,20 @@ impl<'s> Parser<'s> {
                 self.pos += 1;
                 let (assertion, _) = self.with_value_grammar(Self::const_assert_predicate)?;
                 statements.push(Stmt::ConstAssert(assertion));
+            } else if self.peek(0) == "assert!"
+                && self.peek(1) == "("
+                && self.delimited_followed_by(2, "(", ")", ";")
+            {
+                // A BX function may also be named assert!. Only the statement
+                // spelling consumes a standalone call and its semicolon.
+                self.pos += 1;
+                let position = self.position_at(start);
+                let (predicate, message) = self.assert_arguments()?;
+                statements.push(Stmt::Assert {
+                    predicate,
+                    message,
+                    position,
+                });
             } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) && self.peek(2) == ":" {
                 return Err(self.error("use `let name = child(args);` to instantiate a block"));
             } else if self.peek(1) == ":=" {
@@ -2473,7 +2511,7 @@ impl<'s> Parser<'s> {
                 ));
             } else if self.eat("if") {
                 let condition = self.condition()?;
-                if self.arm_has_else() {
+                if self.delimited_followed_by(0, "{", "}", "else") {
                     let then_value = self.nested(Self::expression_scope)?;
                     self.expect("else")?;
                     let expr = self.if_tail(condition, then_value)?;
@@ -2527,17 +2565,18 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// A block-level `if` with an `else` has two pure value scopes. A guard
-    /// without an `else` can contain register writes and other statements.
-    /// The opening brace of the first arm has already been consumed.
-    fn arm_has_else(&self) -> bool {
+    /// Look past the contents of a delimited group to distinguish an expression
+    /// from a block statement. The offset starts just past the opening token.
+    fn delimited_followed_by(&self, offset: usize, open: &str, close: &str, after: &str) -> bool {
         let mut depth = 0;
-        for (i, token) in self.tokens[self.pos..].iter().enumerate() {
-            match token.text {
-                "{" => depth += 1,
-                "}" if depth == 0 => return self.peek(i + 1) == "else",
-                "}" => depth -= 1,
-                _ => { /* Only braces delimit the arm. */ }
+        for (i, token) in self.tokens[self.pos + offset..].iter().enumerate() {
+            if token.text == open {
+                depth += 1;
+            } else if token.text == close {
+                if depth == 0 {
+                    return self.peek(offset + i + 1) == after;
+                }
+                depth -= 1;
             }
         }
         false
@@ -4640,6 +4679,40 @@ mod tests {
 
     fn names<const N: usize>(names: [&str; N]) -> [Expr; N] {
         names.map(|name| Expr::Name(name.to_owned()))
+    }
+
+    #[test]
+    fn block_assertion_statements_preserve_value_calls_and_decode_messages() -> Result<(), String> {
+        let module = parse_module(
+            r#"fn assert!(x: bool) -> bool { x }
+block checked(clk, x: bool) -> bool {
+    assert!(assert!(x));
+    if x { assert!({ let en = x; const_assert!(true); en }, "enable\x20must be (set)"); }
+    assert!(x) && x
+}"#,
+        )?;
+        let block = &module.blocks[0];
+        let [
+            Stmt::Assert {
+                predicate,
+                message,
+                position,
+            },
+            Stmt::If { body, .. },
+        ] = &block.statements[..]
+        else {
+            panic!("expected an assertion followed by a guarded assertion");
+        };
+        assert!(matches!(predicate, Expr::Call { name, .. } if name == "assert!"));
+        assert!(message.is_none());
+        assert_eq!(*position, SourcePosition { line: 3, column: 5 });
+        assert!(
+            matches!(body.as_slice(), [Stmt::Assert { message, .. }] if message.as_deref() == Some("enable must be (set)"))
+        );
+        assert!(
+            matches!(&block.output, Expr::Binary { left, .. } if matches!(left.as_ref(), Expr::Call { name, .. } if name == "assert!"))
+        );
+        Ok(())
     }
 
     #[test]

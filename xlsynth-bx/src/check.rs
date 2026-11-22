@@ -2475,7 +2475,7 @@ struct BodyChecker<'a, 'm> {
     /// Runtime names that shadow module declarations in a type annotation.
     enclosing_type_locals: Option<&'a dyn Fn(&str) -> bool>,
     kind: BodyKind,
-    uses_child: Cell<bool>,
+    requires_hardware: Cell<bool>,
     /// A clockless source block requires every hardware operation to be
     /// combinational.
     clockless_block: Option<&'m Block>,
@@ -2799,7 +2799,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             resolver,
             enclosing_type_locals: None,
             kind,
-            uses_child: Cell::new(false),
+            requires_hardware: Cell::new(false),
             clockless_block: None,
             source_kind: kind,
             specializations: None,
@@ -3020,7 +3020,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         } else {
             main
         };
-        let requires_hardware = !c.regs.is_empty() || c.uses_child.get();
+        let requires_hardware = c.requires_hardware.get();
         let block = CheckedBlock {
             name: specialization.map_or(&block.name, |s| &s.name).clone(),
             source_name: block.name.clone(),
@@ -3188,7 +3188,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.replaying_body() || !parametrics.is_empty() {
             self.charge_expansion("child block wiring", child.port_type_nodes)?;
         }
-        self.uses_child.set(true);
+        self.requires_hardware.set(true);
         if let Some(ty) = expected
             && !compatible(ty, &child.result)
         {
@@ -3326,6 +3326,25 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .copied();
             }
             let checked = match stmt {
+                Stmt::Assert {
+                    predicate,
+                    message,
+                    position,
+                } => {
+                    let predicate = self.expr(predicate, Some(&Type::Bool)).map_err(|err| {
+                        format!(
+                            "{}:{}: assert! predicate: {err}",
+                            position.line, position.column
+                        )
+                    })?;
+                    self.requires_hardware.set(true);
+                    CheckedStmt::Assert {
+                        predicate,
+                        message: message.clone().unwrap_or_else(|| {
+                            format!("assertion failed at {}:{}", position.line, position.column)
+                        }),
+                    }
+                }
                 Stmt::ConstAssert(assertion) => {
                     if conditional {
                         return Err(format!(
@@ -3337,6 +3356,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     continue;
                 }
                 Stmt::Reg { name, ty, reset } => {
+                    self.requires_hardware.set(true);
                     if block.clock.is_none() {
                         return Err(self.clock_error(block, format!(
                             "clockless block cannot declare register '{name}'; add `clk` to the block signature"
@@ -5594,6 +5614,27 @@ mod tests {
 
     fn check_bx(source: &str) -> Result<CheckedModule, String> {
         check_module(&parse_module(source)?)
+    }
+
+    #[test]
+    fn runtime_assertions_check_boolean_predicates_outside_the_timed_output_cone()
+    -> Result<(), String> {
+        let source = r#"block hold(clk, input: u8 @0, enable: bool @0) -> u8 @1 {
+    reg saved: u8;
+    saved := input;
+    if enable {
+        let old_matches = saved == input;
+        assert!(old_matches, "value changed");
+    }
+    saved
+}"#;
+        check_bx(source)?;
+        let error = check_bx(&source.replace("assert!(old_matches", "assert!(saved")).unwrap_err();
+        assert_eq!(
+            error,
+            "block 'hold': 6:9: assert! predicate: expected bool, got u8"
+        );
+        Ok(())
     }
 
     #[test]

@@ -122,7 +122,7 @@ impl<'a> BlockInvokeInliner<'a> {
             return Ok(Cow::Borrowed(block));
         };
         let mut expanded = block.clone();
-        let mut names = block_names(block);
+        let mut names = block.occupied_names();
         let mut last_id = self.last_id;
         // Appended callees may contain further calls. Each node is visited
         // once; restore operand-before-user order only after the last
@@ -349,40 +349,6 @@ fn copy_callee(
         .ret_node_ref
         .expect("verified function has a return node")
         .index])
-}
-
-/// Reserves user-visible names before assigning names to copied operations and
-/// debug labels.
-fn block_names(block: &Block) -> HashSet<String> {
-    let mut names: HashSet<_> = block
-        .nodes
-        .iter()
-        .filter_map(|node| node.name.clone())
-        .collect();
-    names.extend(block.clock_port_name().map(str::to_owned));
-    names.extend(block.registers.iter().map(|reg| reg.name.clone()));
-    names.extend(
-        block
-            .instantiations
-            .iter()
-            .map(|instance| instance.name.clone()),
-    );
-    names.extend(block.inout_nets.iter().map(|net| net.name.clone()));
-    for node in &block.nodes {
-        match &node.payload {
-            NodePayload::InputPort { name, .. }
-            | NodePayload::ExtInoutPort { name, .. }
-            | NodePayload::OutputPort { name, .. }
-            | NodePayload::Assert { label: name, .. }
-            | NodePayload::Cover { label: name, .. } => {
-                names.insert(name.clone());
-            }
-            _ => {
-                // Other operations have no additional module-scoped names.
-            }
-        }
-    }
-    names
 }
 
 /// Qualifies local names by the unique call site, including labels that will

@@ -114,7 +114,7 @@ fn empty_iteration_result(node: &Node) -> Option<NodePayload> {
 }
 
 /// Identifies calls whose body is evaluated at least once.
-fn executed_callee(node: &Node) -> Option<&str> {
+pub(super) fn executed_callee(node: &Node) -> Option<&str> {
     if empty_iteration_result(node).is_some() {
         return None;
     }

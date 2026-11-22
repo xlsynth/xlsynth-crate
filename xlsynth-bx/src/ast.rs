@@ -757,6 +757,12 @@ pub enum WidthSliceType {
 pub enum Stmt {
     /// Check a Boolean constexpr when elaborating this block.
     ConstAssert(ConstAssert),
+    /// Check a Boolean hardware signal when the enclosing guard is active.
+    Assert {
+        predicate: Expr,
+        message: Option<String>,
+        position: SourcePosition,
+    },
     Reg {
         name: String,
         ty: Type,

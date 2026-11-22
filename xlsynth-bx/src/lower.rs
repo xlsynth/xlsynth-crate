@@ -594,6 +594,8 @@ struct BlockResources {
     registers: BTreeMap<String, Register>,
     instances: BTreeMap<String, BInstantiation>,
     cycle_sources: CycleSources,
+    asserted_reset: Option<BValue>,
+    assertion_token: Option<BValue>,
 }
 
 /// The destination package and symbols reserved for user definitions and
@@ -835,6 +837,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 physical
             };
             self.values.insert(name.clone(), asserted);
+            resources.asserted_reset = Some(asserted);
             Some(physical)
         } else {
             None
@@ -886,8 +889,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
         Ok((self.builder, resources.cycle_sources))
     }
 
-    /// Wires register updates using one shared load-enable node for each
-    /// conditional scope.
+    /// Wires register updates and assertions under their enclosing guards.
     fn wire_statements(
         &mut self,
         statements: &[CheckedStmt],
@@ -897,6 +899,22 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
     ) -> Result<(), BuilderError> {
         for statement in statements {
             match statement {
+                CheckedStmt::Assert { predicate, message } => {
+                    let mut condition = self.expr(predicate)?;
+                    if let Some(active) = guard {
+                        let inactive = self.builder.not(active)?;
+                        condition = self.builder.or(inactive, condition)?;
+                    }
+                    if let Some(asserted) = resources.asserted_reset {
+                        condition = self.builder.or(asserted, condition)?;
+                    }
+                    let token = match resources.assertion_token {
+                        Some(previous) => previous,
+                        None => self.builder.after_all(&[])?,
+                    };
+                    resources.assertion_token =
+                        Some(self.builder.assert(token, condition, message, "")?);
+                }
                 CheckedStmt::Reg {
                     name,
                     ty,

@@ -2,6 +2,7 @@
 
 //! Blocks have graph-resident data ports and explicit sequential resources.
 
+use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 
 use crate::ir::{Fn, Instantiation, Node, NodeGraph, NodePayload, NodeRef, Register, Type};
@@ -61,6 +62,38 @@ impl DerefMut for Block {
 }
 
 impl Block {
+    /// Collects the names already in use when adding ports or inlining nodes.
+    pub fn occupied_names(&self) -> HashSet<String> {
+        let mut names: HashSet<_> = self
+            .nodes
+            .iter()
+            .filter_map(|node| node.name.clone())
+            .collect();
+        names.extend(self.clock_port_name().map(str::to_owned));
+        names.extend(self.registers.iter().map(|reg| reg.name.clone()));
+        names.extend(
+            self.instantiations
+                .iter()
+                .map(|instance| instance.name.clone()),
+        );
+        names.extend(self.inout_nets.iter().map(|net| net.name.clone()));
+        for node in &self.nodes {
+            match &node.payload {
+                NodePayload::InputPort { name, .. }
+                | NodePayload::ExtInoutPort { name, .. }
+                | NodePayload::OutputPort { name, .. }
+                | NodePayload::Assert { label: name, .. }
+                | NodePayload::Cover { label: name, .. } => {
+                    names.insert(name.clone());
+                }
+                _ => {
+                    // Other operations have no additional module-scoped names.
+                }
+            }
+        }
+        names
+    }
+
     /// Converts a function interface into actual block input and output nodes.
     ///
     /// Without explicit names, the entire return value becomes one `out` port,

@@ -474,14 +474,22 @@ enum AssertionTiming {
 }
 
 /// Reports the first linked IR assertion triggered in one evaluation.
-fn check_ir_assertions(failure: &FnEvalFailure) -> Result<(), String> {
+fn check_ir_assertions(failure: &FnEvalFailure) -> Result<(), ExecutionError> {
     if let Some(assertion) = failure.assertion_failures.first() {
-        return Err(format!(
-            "IR assertion '{}' failed: {}",
-            assertion.label, assertion.message
-        ));
+        return Err(ExecutionError::Assertion(ir_assertion_diagnostic(
+            &assertion.label,
+            &assertion.message,
+        )));
     }
     Ok(())
+}
+
+fn ir_assertion_diagnostic(label: &str, message: &str) -> String {
+    if label.is_empty() {
+        format!("IR assertion failed: {message}")
+    } else {
+        format!("IR assertion '{label}' failed: {message}")
+    }
 }
 
 /// An expression's IR dependencies and the harness input ports they read.
@@ -578,7 +586,7 @@ impl ClockedHarness for Simulation {
         Simulation::drive(self, name, value)
     }
     fn tick(&mut self) -> Result<(), ExecutionError> {
-        Simulation::tick(self).map_err(ExecutionError::Runtime)
+        Simulation::tick(self)
     }
     fn sample(&mut self, index: usize) -> Result<Observed, ExecutionError> {
         self.output_observed(index).map_err(ExecutionError::Runtime)

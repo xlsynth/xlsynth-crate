@@ -52,6 +52,7 @@ impl<'a> SourceNode<'a> {
             },
             Statement(stmt) => match stmt {
                 Stmt::ConstAssert(assertion) => pending.push(Expression(&assertion.predicate)),
+                Stmt::Assert { predicate, .. } => pending.push(Expression(predicate)),
                 Stmt::Reg { ty, reset, .. } => {
                     pending.push(Annotation(ty));
                     pending.extend(reset.iter().map(Expression));
