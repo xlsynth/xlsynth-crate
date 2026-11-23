@@ -4,7 +4,7 @@ use super::unroll::Shadowed;
 use super::{BodyChecker, CheckedStmt, K, TemporaryConstantBindings, Type, TypedExpr};
 use crate::ast::{
     BinaryOp, BindingPattern, ConstAssert, ConstDef, Expr, ForIterable, LetBinding, ScopeStatement,
-    Stmt, WidthSliceType,
+    Stmt, StructArgument, WidthSliceType,
 };
 use crate::infer_literal::{BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type};
 use crate::typed::TEST_DISCARD_PREFIX;
@@ -201,7 +201,7 @@ impl BodyChecker<'_, '_> {
             // Callback-only templates have a checked abstract body. Its
             // callback has no concrete target until specialization, so only
             // names can be required here.
-            self.check_deferred_predicate_names(&assertion.predicate)
+            self.check_deferred_expr_names(&assertion.predicate)
         } else {
             self.with_erased_declaration(|checker| {
                 let expr = checker.dslx_argument(&assertion.predicate, &Type::Bool)?;
@@ -652,6 +652,38 @@ impl BodyChecker<'_, '_> {
                             unreachable!()
                         };
                         items[i] = item;
+                    }
+                }
+            }
+            Expr::Struct { fields, base, .. }
+            | Expr::AppliedStruct { fields, base, .. }
+            | Expr::ParametricStruct { fields, base, .. }
+            | Expr::MixedAppliedStruct { fields, base, .. }
+                if self.contextual_struct_constructor(expr).is_some() =>
+            {
+                // An inferred constructor shares type and value witnesses
+                // across its fields. Capture their scoped bindings before
+                // collecting those witnesses and retain them for elaboration.
+                let base = base.iter().map(|splat| (None, &splat.value));
+                let fields = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, value))| (Some(i), value));
+                for (index, value) in base.chain(fields) {
+                    let Cow::Owned(value) = self.prepare_scopes(value, false, before_scope)? else {
+                        continue;
+                    };
+                    let (Expr::Struct { fields, base, .. }
+                    | Expr::AppliedStruct { fields, base, .. }
+                    | Expr::ParametricStruct { fields, base, .. }
+                    | Expr::MixedAppliedStruct { fields, base, .. }) = prepared.to_mut()
+                    else {
+                        unreachable!("prepared struct constructor");
+                    };
+                    if let Some(index) = index {
+                        fields[index].1 = value;
+                    } else {
+                        base.as_mut().expect("prepared splat").value = value;
                     }
                 }
             }
@@ -1247,6 +1279,14 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             name.clone_from(alias);
         }
     }
+    fn rename_args(args: &mut [StructArgument], aliases: &mut BTreeMap<String, String>) {
+        for arg in args {
+            match arg {
+                StructArgument::Type(ty) => rename_type(ty, aliases),
+                StructArgument::Value(value) => capture_names(value, aliases),
+            }
+        }
+    }
     fn rename_type(ty: &mut Type, aliases: &mut BTreeMap<String, String>) {
         match ty {
             Type::Named(name) | Type::Applied { name, .. } => rename(name, aliases),
@@ -1255,6 +1295,10 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                 for arg in args {
                     capture_names(arg, aliases);
                 }
+            }
+            Type::MixedApplied { name, args } => {
+                rename(name, aliases);
+                rename_args(args, aliases);
             }
             Type::TypeApplied { name, args } => {
                 rename(name, aliases);
@@ -1345,6 +1389,9 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         }
         | Expr::TypeAppliedStruct {
             name, fields, base, ..
+        }
+        | Expr::MixedAppliedStruct {
+            name, fields, base, ..
         } => {
             rename(name, aliases);
             for (_, value) in fields {
@@ -1359,6 +1406,7 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                         capture_names(arg, aliases);
                     }
                 }
+                Expr::MixedAppliedStruct { args, .. } => rename_args(args, aliases),
                 Expr::TypeAppliedStruct { args, .. } => {
                     for arg in args {
                         rename_type(arg, aliases);

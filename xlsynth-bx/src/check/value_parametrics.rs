@@ -14,14 +14,17 @@ use super::function_specializations::{
 };
 use super::generic_blocks::{Bindings, callback_argument_name, validate_inference_sources};
 use super::generic_inputs::{Input, InputPattern};
+use super::struct_parametrics::{
+    BoundStructArgument, StructApplication, StructLiteralError, struct_field_map,
+};
 use super::{
     BodyChecker, BodyKind, CallbackFormal, CallbackTarget, Declarations, FunctionInterface, K,
     MAX_ELABORATION_DEPTH, StructTable, TypeResolver, TypeShape, bits, child_type_budget,
     compatible, declare, literal_copy_work, minimum_type, resolve_type, source_type_nodes,
 };
 use crate::ast::{
-    CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding,
-    StructLiteralArgs, Type,
+    CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding, StructArgument,
+    StructArgumentRef, StructLiteralArgs, StructParametricRef, Type,
 };
 use crate::dslx_import::ImportResolver;
 use crate::typed::{BoundParametricValue, TypedExpr};
@@ -32,7 +35,7 @@ pub(super) fn dimension_type() -> Type {
 
 /// Total source storage copied from bound type parameters in one annotation.
 #[derive(Default)]
-struct TypeArgumentCopies {
+pub(super) struct TypeArgumentCopies {
     nodes: usize,
     name_bytes: usize,
 }
@@ -80,6 +83,7 @@ impl<'m> Declarations<'m> {
                 | Type::Named(_)
                 | Type::Applied { .. }
                 | Type::ParametricStruct { .. }
+                | Type::MixedApplied { .. }
                 | Type::TypeApplied { .. } => {
                     // Resolve dependent widths and nominal enum or struct
                     // annotations in the template's declaration scope.
@@ -271,6 +275,10 @@ impl<'f> InferredBindings<'f> {
             Type::Tuple(fields) | Type::TypeApplied { args: fields, .. } => {
                 fields.iter().any(|f| self.needs_witness(f))
             }
+            Type::MixedApplied { args, .. } => args.iter().any(|arg| match arg {
+                StructArgument::Type(ty) => self.needs_witness(ty),
+                StructArgument::Value(expr) => self.missing(expr).is_some(),
+            }),
             Type::ParametricStruct { args, .. } => {
                 args.iter().any(|arg| self.missing(arg).is_some())
             }
@@ -388,19 +396,39 @@ impl<'f> InferredBindings<'f> {
                     self.infer(field, actual, structs, resolver)?;
                 }
             }
-            (Type::ParametricStruct { name, args }, Type::Named(canonical)) => {
+            (formal, Type::Named(canonical))
+                if let Some((name, args)) = formal.struct_application()
+                    && !matches!(args, StructLiteralArgs::Integers(_)) =>
+            {
                 if let Some(instance) = structs.instances.get(canonical) {
-                    if instance.template.name == *name {
-                        for (arg, bound) in args.iter().zip(&instance.values) {
-                            self.bind_witness(
-                                arg,
-                                &bound.ty,
-                                bound.value.clone(),
-                                WitnessType::Exact,
-                            )?;
+                    if instance.template.name != name {
+                        return Ok(());
+                    }
+                    for (arg, bound) in args.iter().zip(&instance.args) {
+                        match (arg, bound) {
+                            (StructArgumentRef::Type(ty), BoundStructArgument::Type(actual)) => {
+                                self.infer(ty, actual, structs, resolver)?;
+                            }
+                            (StructArgumentRef::Value(expr), BoundStructArgument::Value(bound)) => {
+                                self.bind_witness(
+                                    expr,
+                                    &bound.ty,
+                                    bound.value.clone(),
+                                    WitnessType::Exact,
+                                )?;
+                            }
+                            _ if matches!(args, StructLiteralArgs::Mixed(_)) => {
+                                return Err(format!("argument kind mismatch for struct '{name}'"));
+                            }
+                            _ => {
+                                // Homogeneous lists supply witnesses only for
+                                // their own kind.
+                            }
                         }
                     }
-                } else if let Some(values) = resolver.struct_parametric_values(name, canonical)? {
+                } else if let StructLiteralArgs::Expressions(args) = args
+                    && let Some(values) = resolver.struct_parametric_values(name, canonical)?
+                {
                     for (arg, &value) in args.iter().zip(values) {
                         self.bind_witness(
                             arg,
@@ -411,39 +439,140 @@ impl<'f> InferredBindings<'f> {
                     }
                 }
             }
-            (Type::TypeApplied { name, args }, Type::Named(canonical)) => {
-                if let Some(instance) = structs.instances.get(canonical)
-                    && instance.template.name == *name
-                {
-                    for (arg, actual) in args.iter().zip(&instance.types) {
-                        self.infer(arg, actual, structs, resolver)?;
-                    }
-                }
-            }
             _ => { /* Concrete constraints are checked against the final signature. */ }
         }
         Ok(())
     }
 
-    /// An array literal provides its length even when its element needs the
-    /// formal parameter's width as context. An untyped empty literal needs its
-    /// complete array type from context before it can supply a length.
-    pub(super) fn literal_lengths(&mut self, pattern: &Type, expr: &Expr) -> Result<(), String> {
+    /// Gather array lengths and explicit constructor values while their
+    /// contextual elements or fields await a type witness.
+    pub(super) fn infer_literal_values(
+        &mut self,
+        pattern: &Type,
+        expr: &Expr,
+        checker: &mut BodyChecker<'_, '_>,
+        remaining: usize,
+    ) -> Result<(), String> {
         match (pattern, expr) {
+            (_, Expr::Scope { result, .. }) if !expr.needs_scope_preparation() => {
+                // Discarded operands remain attached for constexpr evaluation.
+                // The captured trailing value supplies the dimension witness.
+                self.infer_literal_values(pattern, result, checker, child_type_budget(remaining)?)?;
+            }
             (Type::ParametricArray { size, element }, Expr::Array(items)) => {
                 if let Some(first) = items.first() {
                     self.bind_size(size, items.len(), WitnessType::Exact)?;
-                    self.literal_lengths(element, first)?;
+                    self.infer_literal_values(
+                        element,
+                        first,
+                        checker,
+                        child_type_budget(remaining)?,
+                    )?;
                 }
             }
             (Type::Array { element, .. }, Expr::Array(items)) => {
                 if let Some(first) = items.first() {
-                    self.literal_lengths(element, first)?;
+                    self.infer_literal_values(
+                        element,
+                        first,
+                        checker,
+                        child_type_budget(remaining)?,
+                    )?;
                 }
             }
             (Type::Tuple(fields), Expr::Tuple(items)) => {
                 for (field, item) in fields.iter().zip(items) {
-                    self.literal_lengths(field, item)?;
+                    self.infer_literal_values(field, item, checker, child_type_budget(remaining)?)?;
+                }
+            }
+            (Type::MixedApplied { name, args }, _) if self.needs_witness(pattern) => {
+                let depth = child_type_budget(remaining)?;
+                match expr {
+                    Expr::If {
+                        then_value,
+                        else_value,
+                        ..
+                    } => {
+                        self.infer_literal_values(pattern, then_value, checker, depth)?;
+                        self.infer_literal_values(pattern, else_value, checker, depth)?;
+                    }
+                    Expr::Match { arms, .. } => {
+                        for arm in arms {
+                            self.infer_literal_values(pattern, &arm.value, checker, depth)?;
+                        }
+                    }
+                    _ => {
+                        let Some(literal) = expr.struct_literal().filter(|s| s.name == name) else {
+                            return Ok(());
+                        };
+                        let Some(template) = checker.structs.template(name) else {
+                            return Ok(());
+                        };
+                        // The length of S { lanes: [1, 2] } supplies N in S<T,
+                        // N> even while T awaits a sibling witness. Do not
+                        // force the unsized elements to adopt a width during
+                        // this pass.
+                        let count = match literal.args {
+                            StructLiteralArgs::Omitted => 0,
+                            StructLiteralArgs::Mixed(args) => args.len(),
+                            _ => return Ok(()),
+                        };
+                        let mut nested =
+                            InferredBindings::for_struct(&template.value_parametrics, count);
+                        let needs_prefix = args.iter().take(count).any(|arg| match arg {
+                            StructArgument::Value(expr) => self.missing(expr).is_some(),
+                            StructArgument::Type(_) => false,
+                        });
+                        if needs_prefix {
+                            // The final constructor check retains assertion
+                            // operands. This pass only needs their constexpr
+                            // values.
+                            let operands = checker.assert_operands.take();
+                            let prefix = checker.struct_prefix_at(
+                                name,
+                                literal.args,
+                                remaining,
+                                checker.function_position,
+                            );
+                            checker.assert_operands = operands;
+                            let values = prefix?.into_iter().filter_map(|arg| match arg {
+                                BoundStructArgument::Value(bound) => Some(bound),
+                                BoundStructArgument::Type(_) => None,
+                            });
+                            for (slot, value) in nested.values.iter_mut().zip(values) {
+                                *slot = Some(value);
+                            }
+                        }
+                        if let Some(base) = literal.base {
+                            self.infer_literal_values(pattern, &base.value, checker, depth)?;
+                        } else {
+                            let fields: BTreeMap<_, _> = literal
+                                .fields
+                                .iter()
+                                .map(|(name, value)| (name.as_str(), value))
+                                .collect();
+                            for field in &template.fields {
+                                if let Some(value) = fields.get(field.name.as_str()) {
+                                    nested
+                                        .infer_literal_values(&field.ty, value, checker, depth)?;
+                                    nested.finish_argument();
+                                }
+                            }
+                        }
+                        for (formal, bound) in template.value_parametrics.iter().zip(nested.values)
+                        {
+                            if let (Some(StructArgument::Value(expr)), Some(bound)) =
+                                (args.get(formal.index), bound)
+                            {
+                                self.bind_witness(
+                                    expr,
+                                    &bound.ty,
+                                    bound.value,
+                                    WitnessType::Exact,
+                                )?;
+                            }
+                        }
+                    }
                 }
             }
             _ => { /* Nonliteral arguments provide their checked type instead. */ }
@@ -462,7 +591,7 @@ enum DataArgument<'e> {
 /// evaluates each constexpr actual with the type of the next formal.
 #[derive(Default)]
 pub(super) struct ExplicitScope {
-    types: Option<Bindings>,
+    pub(super) types: Option<Bindings>,
     names: BTreeSet<String>,
     values: BTreeMap<String, Type>,
     literals: BTreeMap<String, TypedExpr>,
@@ -600,7 +729,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve dimensions and aliases, keeping formals symbolic when checking
     /// an inference pattern. Concrete annotations budget all copied formals
     /// together before cloning their bound types.
-    fn resolve_annotation(
+    pub(super) fn resolve_annotation(
         &mut self,
         ty: &Type,
         remaining: usize,
@@ -650,9 +779,34 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     )
                 })
             }
+            Type::MixedApplied { name, args } => {
+                if copies.is_none()
+                    && self
+                        .type_bindings()
+                        .is_some_and(|b| b.has_unbound_variable(ty))
+                {
+                    let depth = child_type_budget(remaining)?;
+                    let args = args
+                        .iter()
+                        .map(|arg| match arg {
+                            StructArgument::Type(ty) => self
+                                .resolve_annotation(ty, depth, copies)
+                                .map(StructArgument::Type),
+                            StructArgument::Value(_) => Ok(arg.clone()),
+                        })
+                        .collect::<Result<_, _>>()?;
+                    return Ok(Type::MixedApplied {
+                        name: name.clone(),
+                        args,
+                    });
+                }
+                let args =
+                    self.struct_prefix_at(name, StructLiteralArgs::Mixed(args), remaining, None)?;
+                self.struct_applied_type(name, &args, remaining)
+            }
             Type::ParametricStruct { name, args } => {
-                let args = self.struct_value_prefix(name, StructLiteralArgs::Expressions(args))?;
-                self.struct_value_type(name, &args, remaining)
+                let args = self.struct_prefix(name, StructLiteralArgs::Expressions(args))?;
+                self.struct_applied_type(name, &args, remaining)
             }
             Type::ParametricBits { signed, width } => {
                 let signed = match self.struct_dimension(signed)? {
@@ -1214,7 +1368,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         for (arg, param) in args.into_iter().zip(&f.params) {
             let input = match arg {
                 DataArgument::Source(expr) => {
-                    inferred.literal_lengths(&param.ty, expr)?;
+                    inferred.infer_literal_values(&param.ty, expr, self, MAX_ELABORATION_DEPTH)?;
                     let mut input = self
                         .dimension_input_group(
                             &param.ty,
@@ -1284,6 +1438,165 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         Ok(checked)
     }
 
+    /// A contextual constructor can supply a defaulted value once other data
+    /// or callbacks have determined the types used to evaluate that default.
+    pub(super) fn infer_contextual_defaults<'p>(
+        &mut self,
+        inputs: &mut [Input<'_>],
+        params: impl IntoIterator<Item = &'p Param>,
+        owner: &str,
+        types: &Bindings,
+        inferred: &mut InferredBindings<'_>,
+    ) -> Result<(), String> {
+        if inferred.values.iter().all(Option::is_some) {
+            return Ok(());
+        }
+        for (input, param) in inputs.iter_mut().zip(params) {
+            input.visit_leaves(&param.ty, &mut |pattern, leaf| {
+                if let Input::Contextual {
+                    expr,
+                    prepared: None,
+                } = leaf
+                {
+                    self.infer_constructor_default(
+                        pattern,
+                        expr,
+                        owner,
+                        types,
+                        inferred,
+                        MAX_ELABORATION_DEPTH,
+                    )?;
+                }
+                Ok(())
+            })?;
+            inferred.finish_argument();
+        }
+        Ok(())
+    }
+
+    /// Follow the actual's nominal type through a prepared scope, branch, or
+    /// update. Only an omitted default can supply a new value witness here.
+    fn infer_constructor_default(
+        &mut self,
+        pattern: &Type,
+        expr: &Expr,
+        owner: &str,
+        types: &Bindings,
+        inferred: &mut InferredBindings<'_>,
+        remaining: usize,
+    ) -> Result<(), String> {
+        let Type::MixedApplied { name, args } = pattern else {
+            return Ok(());
+        };
+        let depth = child_type_budget(remaining)?;
+        match expr {
+            Expr::Scope { result, .. } if !expr.needs_scope_preparation() => {
+                return self
+                    .infer_constructor_default(pattern, result, owner, types, inferred, depth);
+            }
+            Expr::If {
+                then_value,
+                else_value,
+                ..
+            } => {
+                self.infer_constructor_default(pattern, then_value, owner, types, inferred, depth)?;
+                return self
+                    .infer_constructor_default(pattern, else_value, owner, types, inferred, depth);
+            }
+            Expr::Match { arms, .. } => {
+                for arm in arms {
+                    self.infer_constructor_default(
+                        pattern, &arm.value, owner, types, inferred, depth,
+                    )?;
+                }
+                return Ok(());
+            }
+            _ => { /* A constructor can supply its own specialization. */ }
+        }
+        let Some(literal) = expr.struct_literal().filter(|s| s.name == name) else {
+            return Ok(());
+        };
+        if let Some(base) = literal.base {
+            return self.infer_constructor_default(
+                pattern,
+                &base.value,
+                owner,
+                types,
+                inferred,
+                depth,
+            );
+        }
+        let Some(template) = self.structs.template(name) else {
+            return Ok(());
+        };
+        let count = literal.args.len();
+        let needs_default = template.value_parametrics.iter().any(|param| {
+            param.index >= count
+                && param.default.is_some()
+                && matches!(args.get(param.index), Some(StructArgument::Value(expr)) if inferred.missing(expr).is_some())
+        });
+        if !needs_default {
+            return Ok(());
+        }
+        // The pattern's type arguments belong to the enclosing formal,
+        // including its imports and previously inferred dimensions.
+        let mut child_types = Bindings::new(&template.type_params);
+        {
+            let mut definition = BodyChecker::struct_type_scope(
+                self.decls.module_dimensions(owner),
+                self.resolver,
+                self.structs,
+                self.function_registry.as_deref_mut(),
+            );
+            definition.in_struct_definition = definition.structs.template(owner).is_some();
+            definition.function_type_bindings = Some(types.clone());
+            for (formal, bound) in inferred.formals.iter().zip(&inferred.values) {
+                if let Some(bound) = bound {
+                    definition.bind_parametric_value(&formal.name, bound);
+                }
+            }
+            for (formal, arg) in template.parametric_bindings().zip(args).skip(count) {
+                if let (StructParametricRef::Type(name), StructArgument::Type(ty)) = (formal, arg)
+                    && !types.has_unbound_variable(ty)
+                    && !inferred.needs_witness(ty)
+                {
+                    let actual = definition.source_type(ty)?;
+                    child_types.match_input(
+                        &Type::Named(name.to_owned()),
+                        &actual,
+                        definition.structs,
+                    )?;
+                }
+            }
+        }
+        if count == 0
+            && !template
+                .type_params
+                .iter()
+                .any(|p| child_types.get(p).is_some())
+        {
+            // An earlier unconstrained probe already tried these fields.
+            return Ok(());
+        }
+        // The final field check in the caller keeps its own statements
+        // and assertion operands. Only the nominal type is a witness.
+        let start = self.statements.len();
+        let operands = self.assert_operands.take();
+        let result = (|| {
+            let prefix = self.struct_prefix(name, literal.args)?;
+            let source = StructApplication::Applied(name, &prefix);
+            let row = struct_field_map(source, literal.fields)?;
+            self.infer_struct_rows(source, template, [&row], child_types)
+        })();
+        self.assert_operands = operands;
+        self.discard_temporary_statements(start);
+        match result {
+            Ok((ty, _)) => inferred.infer(pattern, &ty, self.structs, self.resolver),
+            Err(StructLiteralError::Unbound(_)) => Ok(()),
+            Err(error) => Err(error.into_message()),
+        }
+    }
+
     /// Infer type variables from the result context, data and callbacks before
     /// checking contextual arguments and the specialized body.
     fn instantiate_type_function(
@@ -1306,6 +1619,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let mut inputs = self.infer_function_inputs(f, args, &mut types, &mut inferred)?;
         self.infer_input_groups(&mut inputs, &f.params, &mut types, &format!("'{}'", f.name))?;
         let (types, targets) = self.infer_explicit_formals(f, types, actuals, &mut inferred)?;
+        self.infer_contextual_defaults(&mut inputs, &f.params, &f.name, &types, &mut inferred)?;
         let bound = self.specialized_signature(f, types, inferred.values)?;
         let checked = self.finish_function_inputs(f, inputs, &bound.interface.params)?;
         let result = bound.interface.result.clone();
@@ -1483,6 +1797,25 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .expect("generic function bindings");
         let mut results = Bindings::new(&bindings.referenced_parameters([&pattern]));
         results.match_input(&pattern, &result, self.structs)?;
+        if super::has_mixed_application(&pattern) {
+            let mut completed = bindings.clone();
+            completed.merge_callback_results(&results, |work| {
+                self.function_registry
+                    .as_deref_mut()
+                    .expect("module function registry")
+                    .charge_bindings(work)
+            })?;
+            let previous = self.function_type_bindings.replace(completed);
+            let expected = self.source_type(&callback.result);
+            self.function_type_bindings = previous;
+            let expected = expected?;
+            if !compatible(&expected, &result) {
+                return Err(format!(
+                    "callback '{}' returns {result}, expected {expected}",
+                    callback.name
+                ));
+            }
+        }
         Ok(InferredCallback { target, results })
     }
 
@@ -1543,7 +1876,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
         }
         let mut types = Bindings::new(&[]);
-        let inputs = self.infer_function_inputs(f, args, &mut types, &mut inferred)?;
+        let mut inputs = self.infer_function_inputs(f, args, &mut types, &mut inferred)?;
+        self.infer_contextual_defaults(&mut inputs, &f.params, &f.name, &types, &mut inferred)?;
         let bound = self.specialized_signature(f, types, inferred.values)?;
         let interface = &bound.interface;
         let mut targets = Vec::new();
@@ -1630,6 +1964,155 @@ const ANSWER = apply<widen,37,add>(u8:5);
             checked.constants()[0].value,
             IrValue::make_ubits(16, 42).map_err(|e| e.to_string())?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_array_literal_supplies_a_length_while_its_element_type_awaits_context()
+    -> Result<(), String> {
+        let source = r#"
+struct S<T, N:u32> { values:T[N] }
+struct Outer<N:u32,T> { item:S<T,N> }
+fn first<T,N:u32>(outer:Outer<N,T>, other:T)->T { outer.item.values[u32:0] }
+fn sample(x:u8)->u8 { first(Outer { item:S { values:[1] } }, x) }
+const RESULT = sample(u8:42);
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::make_ubits(8, 1).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn partial_struct_prefix_supplies_values_before_a_sibling_binds_the_type() -> Result<(), String>
+    {
+        let source = r#"
+struct S<N:u32,T> { xs:T[N] }
+struct W<N:u32,T> { item:S<N,T>, anchor:T }
+struct Tag<U,N:U,T> { x:T }
+fn read<N:u32,T>(s:S<N,T>, anchor:T)->T { s.xs[u32:1] }
+fn tag_value<V:u8,T>(s:Tag<u8,V,T>, anchor:T)->u8 { V }
+fn sample(t:u8)->(u8,u8,u8,u8) {
+    const NUM = u32:2;
+    let from_prefix = read(S<NUM>{xs:[1,2]}, t);
+    let from_base = read(S{..S<2>{xs:[3,4]}}, t);
+    let outer = W{item:S<2>{xs:[5,6]}, anchor:t};
+    let phantom = tag_value(Tag<u8,7>{x:1}, t);
+    (from_prefix, from_base, outer.item.xs[u32:1], phantom)
+}
+const RESULT = sample(u8:0);
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::parse_typed("(bits[8]:2, bits[8]:4, bits[8]:6, bits[8]:7)")
+                .map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn contextual_constructor_evaluates_a_default_after_other_types_bind() -> Result<(), String> {
+        let source = r#"
+struct S<T, N:u32={bit_count<T>()}> { x:T }
+struct W<T, N:u32> { inner:S<T,N>, witness:T }
+fn read<T, N:u32>(p:S<T,N>, y:T)->u32 { N }
+fn read_reversed<T, N:u32>(y:T, p:S<T,N>)->u32 { N }
+fn read_fixed<N:u32>(p:S<u8,N>)->u32 { N }
+fn outer<T, N:u32>(p:W<T,N>)->u32 { N }
+fn sample(y:u8)->(u32,u32,u32,u32) {
+    let a = read(S{x:1}, y);
+    let b = read_reversed(y, S{..S{x:1}});
+    let c = outer(W{inner:S{x:1}, witness:y});
+    let d = read_fixed(S{x:1});
+    (a,b,c,d)
+}
+const RESULT = sample(u8:42);
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::parse_typed("(bits[32]:8, bits[32]:8, bits[32]:8, bits[32]:8)")
+                .map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_generic_block_type_can_supply_only_a_struct_value_argument() -> Result<(), String> {
+        let source = r#"
+struct Tag<U, N:u32> { data:U }
+fn wrap(x:u8)->Tag<u8,8> { Tag { data:x } }
+#[allow(combinational_block)]
+block unpack<T>(clk, x:T, tag:Tag<u8,{bit_count<T>()}>)->u8 { tag.data }
+#[allow(combinational_block)]
+block call<T, U, F:fn(u8)->Tag<U,{bit_count<T>()}>>(clk, x:T, arg:u8)->U { F(arg).data }
+pub block sample(clk, x:u8, y:u16)->(u8,u8) {
+    let a = unpack(x,wrap(x));
+    let b = call<wrap>(x,x);
+    (a,b)
+}
+"#;
+        check_module(&parse_module(source)?)?;
+        // Reuse the callback with the same data signature. The distinct T
+        // changes the required phantom argument and therefore the cache key.
+        let mismatch = source.replace("(a,b)", "let c = call<wrap>(y,x); (a,c)");
+        let error = check_module(&parse_module(&mismatch)?).unwrap_err();
+        assert!(
+            error.contains("returns Tag<u8, 8>, expected Tag<u8, 16>"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_constructor_siblings_share_the_typed_field() -> Result<(), String> {
+        let source = r#"
+struct S<T,N:u32> { values:T[N] }
+fn sample(x:u8) -> (u8,u8) {
+    let branch = if x == u8:1 { S { values:[x] } } else { S { values:[255] } };
+    let array = [S { values:[x] }, S { values:[255] }];
+    (branch.values[u32:0], array[u32:1].values[u32:0])
+}
+const RESULT = sample(u8:42);
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::parse_typed("(bits[8]:255, bits[8]:255)").map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn callback_result_infers_a_mixed_struct_type_and_checks_its_phantom_value()
+    -> Result<(), String> {
+        let declarations = r#"
+struct Tag<T, N:u32> { data:T }
+fn wrap(x:u8)->Tag<u8,3> { Tag { data:x } }
+"#;
+        for caller in [
+            r#"
+fn apply<T, F:fn(u8)->Tag<T,3>>(x:u8)->T { F(x).data }
+const RESULT = apply<wrap>(u8:42);
+"#,
+            r#"
+#[allow(combinational_block)]
+block apply<T, F:fn(u8)->Tag<T,3>>(clk, x:u8)->T { F(x).data }
+pub block sample(clk, x:u8)->u8 { let result = apply<wrap>(x); result }
+"#,
+        ] {
+            let source = format!("{declarations}{caller}");
+            check_module(&parse_module(&source)?)?;
+            let mismatch = source.replace("Tag<T,3>", "Tag<T,4>");
+            let error = check_module(&parse_module(&mismatch)?).unwrap_err();
+            assert!(
+                error.contains("returns Tag<u8, 3>, expected Tag<u8, 4>"),
+                "{error}"
+            );
+        }
         Ok(())
     }
 

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    Expr, ForIterable, LetBinding, ScopeStatement, Stmt, TestStmt, TestStmtKind, Type,
-    WidthSliceType,
+    Expr, ForIterable, LetBinding, ScopeStatement, Stmt, StructArgument, TestStmt, TestStmtKind,
+    Type, WidthSliceType,
 };
 use SourceNode::{Annotation, Expression, Iterable, Statement, TestStatement};
 
@@ -16,6 +16,13 @@ pub(crate) enum SourceNode<'a> {
 }
 
 impl<'a> SourceNode<'a> {
+    fn struct_argument(arg: &'a StructArgument) -> Self {
+        match arg {
+            StructArgument::Type(ty) => Annotation(ty),
+            StructArgument::Value(value) => Expression(value),
+        }
+    }
+
     /// Queue a node's children for an iterative walk over source expressions.
     pub(crate) fn push_children(self, pending: &mut Vec<Self>) {
         match self {
@@ -86,6 +93,9 @@ impl<'a> SourceNode<'a> {
                     pending.extend(args.iter().map(Expression));
                 }
                 Type::TypeApplied { args, .. } => pending.extend(args.iter().map(Annotation)),
+                Type::MixedApplied { args, .. } => {
+                    pending.extend(args.iter().map(Self::struct_argument));
+                }
                 Type::Array { element, .. } => pending.push(Annotation(element)),
                 Type::Tuple(fields) => pending.extend(fields.iter().map(Annotation)),
                 Type::Bits { .. }
@@ -196,13 +206,17 @@ impl<'a> SourceNode<'a> {
                 Expr::Struct { fields, base, .. }
                 | Expr::AppliedStruct { fields, base, .. }
                 | Expr::ParametricStruct { fields, base, .. }
-                | Expr::TypeAppliedStruct { fields, base, .. } => {
+                | Expr::TypeAppliedStruct { fields, base, .. }
+                | Expr::MixedAppliedStruct { fields, base, .. } => {
                     match expr {
                         Expr::ParametricStruct { args, .. } => {
                             pending.extend(args.iter().map(Expression));
                         }
                         Expr::TypeAppliedStruct { args, .. } => {
                             pending.extend(args.iter().map(Annotation));
+                        }
+                        Expr::MixedAppliedStruct { args, .. } => {
+                            pending.extend(args.iter().map(Self::struct_argument));
                         }
                         _ => { /* This constructor has no source arguments to visit. */ }
                     }

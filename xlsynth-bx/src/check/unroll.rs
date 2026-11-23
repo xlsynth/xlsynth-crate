@@ -3,7 +3,8 @@
 use super::generic_blocks::callback_argument_name;
 use super::*;
 use crate::ast::{
-    BindingPattern, ForIterable, FunctionParametricRef, MapExpr, ScopeStatement, UnrollFor,
+    BindingPattern, ForIterable, FunctionParametricRef, MapExpr, ScopeStatement, StructArgumentRef,
+    StructParametricRef, UnrollFor,
 };
 use crate::infer_literal::BindingWidths;
 use std::cell::Cell;
@@ -612,19 +613,26 @@ impl BodyChecker<'_, '_> {
     pub(super) fn check_struct_template_names(&mut self, def: &StructDef) -> Result<(), String> {
         self.function_position = self.decls.positions.get(def.name.as_str()).copied();
         self.zero_binding = self.decls.zero_binding(&def.name);
-        if !def.type_params.is_empty() {
-            self.function_type_bindings = Some(super::Bindings::new(&def.type_params));
-        }
         self.template_name_depth = Some(Cell::new(0));
         let visited = Cell::new(0);
         let mut locals = LexicalScope::root(&self.names, &visited);
-        for binding in &def.value_parametrics {
-            // The formal hides an outer type even in its own annotation.
-            locals.bind(&binding.name, LexicalKind::Constant);
-            self.check_type_names(&binding.ty, &locals)?;
-            self.constant_pattern_names.insert(binding.name.clone());
-            if let Some(default) = &binding.default {
-                self.check_expr_names(default, &locals)?;
+        for formal in def.parametric_bindings() {
+            match formal {
+                StructParametricRef::Type(name) => {
+                    self.function_type_bindings
+                        .get_or_insert_with(|| super::Bindings::new(&[]))
+                        .declare_type_parameter(name);
+                }
+                StructParametricRef::Value(binding) => {
+                    // The formal hides an outer type even in its own
+                    // annotation.
+                    locals.bind(&binding.name, LexicalKind::Constant);
+                    self.check_type_names(&binding.ty, &locals)?;
+                    self.constant_pattern_names.insert(binding.name.clone());
+                    if let Some(default) = &binding.default {
+                        self.check_expr_names(default, &locals)?;
+                    }
+                }
             }
         }
         for field in &def.fields {
@@ -815,11 +823,11 @@ impl BodyChecker<'_, '_> {
         Ok(())
     }
 
-    /// Resolve a deferred assertion in an abstract callback template's current
-    /// scope.
-    pub(super) fn check_deferred_predicate_names(&self, predicate: &Expr) -> Result<(), String> {
+    /// Resolve lexical names before a template has the bindings to evaluate the
+    /// expression.
+    pub(super) fn check_deferred_expr_names(&self, expr: &Expr) -> Result<(), String> {
         let visited = Cell::new(0);
-        self.check_expr_names(predicate, &LexicalScope::root(&self.names, &visited))
+        self.check_expr_names(expr, &LexicalScope::root(&self.names, &visited))
     }
 
     fn check_body_names(
@@ -854,6 +862,20 @@ impl BodyChecker<'_, '_> {
         self.check_expr_names(&fold.result, locals)
     }
 
+    /// An enclosing block port shadows a module name inside a symbolic type
+    /// argument.
+    fn reject_enclosing_type_local(&self, head: &str) -> Result<(), String> {
+        if self
+            .enclosing_type_locals
+            .is_some_and(|contains| contains(head))
+        {
+            return Err(format!(
+                "'{head}' names a local value in this type argument"
+            ));
+        }
+        Ok(())
+    }
+
     /// Resolve the base name of an annotation or constructor without
     /// instantiating a type in a lexical-only walk.
     fn check_nominal_name(
@@ -877,6 +899,9 @@ impl BodyChecker<'_, '_> {
             };
         }
         let head = name.split_once("::").map_or(name, |(head, _)| head);
+        if !locals.contains(head) {
+            self.reject_enclosing_type_local(head)?;
+        }
         if self.callback_index(head).is_some() {
             return Err(format!(
                 "callable parameter '{head}' may only be used as a callee"
@@ -939,6 +964,23 @@ impl BodyChecker<'_, '_> {
         }
     }
 
+    /// Resolve the names in a struct application using each argument's kind.
+    fn check_struct_argument_names(
+        &self,
+        args: StructLiteralArgs<'_>,
+        locals: &LexicalScope<'_>,
+        usage: NominalUse,
+    ) -> Result<(), String> {
+        for arg in args.iter() {
+            match arg {
+                StructArgumentRef::Type(ty) => self.check_annotation_names(ty, locals, usage)?,
+                StructArgumentRef::Value(value) => self.check_expr_names(value, locals)?,
+                StructArgumentRef::Integer(_) => { /* A literal has no names to resolve. */ }
+            }
+        }
+        Ok(())
+    }
+
     fn check_type_names(&self, ty: &Type, locals: &LexicalScope<'_>) -> Result<(), String> {
         self.check_annotation_names(ty, locals, NominalUse::Annotation)
     }
@@ -961,20 +1003,13 @@ impl BodyChecker<'_, '_> {
         locals.visited.set(locals.visited.get().saturating_add(1));
         match ty {
             Type::Named(name) => self.check_nominal_name(name, usage, locals)?,
-            Type::Applied { name, .. } => {
-                self.check_nominal_name(name, NominalUse::AppliedStruct, locals)?
-            }
-            Type::ParametricStruct { name, args } => {
+            Type::Applied { .. }
+            | Type::ParametricStruct { .. }
+            | Type::TypeApplied { .. }
+            | Type::MixedApplied { .. } => {
+                let (name, args) = ty.struct_application().expect("struct application");
                 self.check_nominal_name(name, NominalUse::AppliedStruct, locals)?;
-                for arg in args {
-                    self.check_expr_names(arg, locals)?;
-                }
-            }
-            Type::TypeApplied { name, args } => {
-                self.check_nominal_name(name, NominalUse::AppliedStruct, locals)?;
-                for arg in args {
-                    self.check_annotation_names(arg, locals, usage)?;
-                }
+                self.check_struct_argument_names(args, locals, usage)?;
             }
             Type::Tuple(items) => {
                 for item in items {
@@ -1030,6 +1065,9 @@ impl BodyChecker<'_, '_> {
         }
         if locals.contains(name) {
             return Ok(());
+        }
+        if !locals.contains(head) {
+            self.reject_enclosing_type_local(head)?;
         }
         if self.callback_index(head).is_some() {
             return Err(format!(
@@ -1120,6 +1158,7 @@ impl BodyChecker<'_, '_> {
                                     .check_nominal_name(name, NominalUse::Constructor, &names)
                                     .is_ok(),
                                 Type::Applied { .. }
+                                | Type::MixedApplied { .. }
                                 | Type::TypeApplied { .. }
                                 | Type::ParametricStruct { .. } => true,
                                 _ => false,
@@ -1257,36 +1296,23 @@ impl BodyChecker<'_, '_> {
                     self.check_expr_names(arg, locals)?;
                 }
             }
-            Expr::Struct { name, fields, base }
-            | Expr::AppliedStruct {
-                name, fields, base, ..
-            }
-            | Expr::ParametricStruct {
-                name, fields, base, ..
-            }
-            | Expr::TypeAppliedStruct {
-                name, fields, base, ..
-            } => {
+            Expr::Struct { .. }
+            | Expr::AppliedStruct { .. }
+            | Expr::ParametricStruct { .. }
+            | Expr::TypeAppliedStruct { .. }
+            | Expr::MixedAppliedStruct { .. } => {
                 locals.visited.set(locals.visited.get().saturating_add(1));
-                let usage = match expr {
-                    Expr::Struct { .. } => NominalUse::Constructor,
+                let literal = expr.struct_literal().expect("struct constructor");
+                let usage = match literal.args {
+                    StructLiteralArgs::Omitted => NominalUse::Constructor,
                     _ => NominalUse::AppliedStruct,
                 };
-                self.check_nominal_name(name, usage, locals)?;
-                if let Expr::ParametricStruct { args, .. } = expr {
-                    for arg in args {
-                        self.check_expr_names(arg, locals)?;
-                    }
-                }
-                if let Expr::TypeAppliedStruct { args, .. } = expr {
-                    for arg in args {
-                        self.check_type_names(arg, locals)?;
-                    }
-                }
-                for (_, value) in fields {
+                self.check_nominal_name(literal.name, usage, locals)?;
+                self.check_struct_argument_names(literal.args, locals, NominalUse::Annotation)?;
+                for (_, value) in literal.fields {
                     self.check_expr_names(value, locals)?;
                 }
-                if let Some(base) = base {
+                if let Some(base) = literal.base {
                     self.check_expr_names(&base.value, locals)?;
                 }
             }

@@ -6,9 +6,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
-use crate::ast::{Block, CallbackParam, Expr, FunctionParametricRef, Param, Type};
+use crate::ast::{
+    Block, CallbackParam, Expr, FunctionParametricRef, Param, SourceNode, StructArgument,
+    StructArgumentRef, StructLiteralArgs, Type,
+};
 use crate::parser::{is_identifier, is_use_identifier};
 
+use super::struct_parametrics::BoundStructArgument;
 use super::{
     BlockCallbackFormal, BlockInterface, BlockTemplate, MAX_ELABORATION_DEPTH, ModuleDimensions,
     StructTable, TypeResolver, TypeShape, compatible, resolve_type, type_parameter_references,
@@ -306,6 +310,25 @@ enum TypePattern {
     SourceProjection,
 }
 
+/// Type names used by a constexpr expression, including casts and builtins.
+fn value_type_names(expr: &Expr) -> impl Iterator<Item = &str> {
+    let mut pending = vec![SourceNode::Expression(expr)];
+    std::iter::from_fn(move || {
+        while let Some(node) = pending.pop() {
+            let name = match &node {
+                SourceNode::Annotation(Type::Named(name)) => Some(name.as_str()),
+                SourceNode::Expression(expr) => expr.struct_literal().map(|s| s.name),
+                _ => None,
+            };
+            node.push_children(&mut pending);
+            if name.is_some() {
+                return name;
+            }
+        }
+        None
+    })
+}
+
 impl Bindings {
     pub(super) fn new(type_params: &[String]) -> Self {
         Self {
@@ -314,6 +337,11 @@ impl Bindings {
                 .map(|name| (name.clone(), None))
                 .collect(),
         }
+    }
+
+    /// Introduce a type formal for the annotations and defaults that follow it.
+    pub(super) fn declare_type_parameter(&mut self, name: &str) {
+        self.types.insert(name.to_owned(), None);
     }
 
     pub(super) fn get(&self, name: &str) -> Option<&Type> {
@@ -340,6 +368,11 @@ impl Bindings {
         match pattern {
             Type::Named(name) => self.types.get(name).is_some_and(Option::is_none),
             Type::Tuple(fields) => fields.iter().any(|field| self.has_unbound_variable(field)),
+            Type::MixedApplied { args, .. } => args.iter().any(|arg| match arg {
+                StructArgument::Type(ty) => self.has_unbound_variable(ty),
+                StructArgument::Value(expr) => value_type_names(expr)
+                    .any(|name| self.types.get(name).is_some_and(Option::is_none)),
+            }),
             Type::TypeApplied { args, .. } => args.iter().any(|arg| self.has_unbound_variable(arg)),
             Type::Array { element, .. } | Type::ParametricArray { element, .. } => {
                 self.has_unbound_variable(element)
@@ -453,20 +486,28 @@ impl Bindings {
             return Ok(());
         }
         match (formal, actual) {
-            (Type::TypeApplied { name, args }, Type::Named(actual)) => {
-                if let Some(instance) = structs.instances.get(actual)
-                    && instance.template.name == *name
-                    && instance.types.len() == args.len()
-                {
-                    for (formal, actual) in args.iter().zip(&instance.types) {
-                        self.match_pattern(formal, actual, structs, pattern)?;
+            (formal, Type::Named(canonical))
+                if let Some((name, args)) = formal.struct_application()
+                    && let Some(instance) = structs.instances.get(canonical)
+                    && instance.template.name == name
+                    && match args {
+                        StructLiteralArgs::Types(types) => types.len() == instance.args.len(),
+                        StructLiteralArgs::Mixed(_) => true,
+                        _ => false,
+                    } =>
+            {
+                for (arg, bound) in args.iter().zip(&instance.args) {
+                    match (arg, bound) {
+                        (StructArgumentRef::Type(formal), BoundStructArgument::Type(actual)) => {
+                            self.match_pattern(formal, actual, structs, pattern)?;
+                        }
+                        _ if matches!(args, StructLiteralArgs::Types(_)) => {
+                            return Err(format!("expected a type argument for {name}"));
+                        }
+                        _ => { /* Mixed value arguments are checked after type inference. */ }
                     }
-                    Ok(())
-                } else if pattern != TypePattern::Resolved {
-                    Ok(())
-                } else {
-                    Err(format!("expected {formal}, got {actual}"))
                 }
+                Ok(())
             }
             (Type::Tuple(formals), Type::Tuple(actuals)) if formals.len() == actuals.len() => {
                 for (formal, actual) in formals.iter().zip(actuals) {
@@ -527,6 +568,16 @@ impl Bindings {
                 Type::Tuple(fields.iter().map(|field| self.substitute(field)).collect())
             }
             Type::Array { element, size } => Type::array(self.substitute(element), *size),
+            Type::MixedApplied { name, args } => Type::MixedApplied {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| match arg {
+                        StructArgument::Type(ty) => StructArgument::Type(self.substitute(ty)),
+                        StructArgument::Value(_) => arg.clone(),
+                    })
+                    .collect(),
+            },
             Type::TypeApplied { name, args } => Type::TypeApplied {
                 name: name.clone(),
                 args: args.iter().map(|arg| self.substitute(arg)).collect(),
@@ -554,6 +605,25 @@ impl Bindings {
         names.sort_unstable();
         names.dedup();
         names.into_iter().map(str::to_owned).collect()
+    }
+
+    /// Types needed to evaluate constexpr arguments are inputs to
+    /// specialization, even when that value expression cannot infer the type
+    /// from a port.
+    pub(super) fn value_type_dependencies(&self, ty: &Type) -> Vec<String> {
+        let mut names = BTreeSet::new();
+        super::type_dependencies(
+            ty,
+            |_, _| {},
+            |expr| {
+                names.extend(
+                    value_type_names(expr)
+                        .filter(|name| self.declares(name))
+                        .map(str::to_owned),
+                );
+            },
+        );
+        names.into_iter().collect()
     }
 
     /// Before callbacks are resolved, a template's data arguments can leave
@@ -590,6 +660,7 @@ fn canonical_argument(ty: &Type) -> Type {
         | Type::ParametricArray { .. }
         | Type::Applied { .. }
         | Type::ParametricStruct { .. }
+        | Type::MixedApplied { .. }
         | Type::TypeApplied { .. } => ty.clone(),
     }
 }

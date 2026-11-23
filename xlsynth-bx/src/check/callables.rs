@@ -64,8 +64,21 @@ pub(super) struct BlockCallbackFormal {
 
 impl BlockCallbackFormal {
     pub(super) fn new(signature: CallbackParam, bindings: &Bindings) -> Self {
-        let input_type_params = bindings.referenced_parameters(&signature.params);
+        let mut input_type_params = bindings.referenced_parameters(&signature.params);
         let result_type_params = bindings.referenced_parameters([&signature.result]);
+        for param in &signature.params {
+            input_type_params.extend(bindings.value_type_dependencies(param));
+        }
+        // A callback supplies its result type arguments. Other types used to
+        // compute its result's value arguments must already come from data.
+        input_type_params.extend(
+            bindings
+                .value_type_dependencies(&signature.result)
+                .into_iter()
+                .filter(|name| !result_type_params.contains(name)),
+        );
+        input_type_params.sort_unstable();
+        input_type_params.dedup();
         Self {
             signature,
             input_type_params,
@@ -383,7 +396,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let mut params = Vec::with_capacity(formal.signature.params.len());
         let mut input_nodes = 0usize;
         for param in &formal.signature.params {
-            let ty = self.bound_block_type(param, bindings)?;
+            let ty = self.bound_block_type(key.binding.template, param, bindings)?;
             let shape = self.structs.type_shape(&ty, MAX_ELABORATION_DEPTH)?;
             input_nodes = input_nodes.saturating_add(shape.ir_nodes);
             self.specializations
@@ -394,13 +407,27 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let (target, result) =
             self.callback_result(&params, &key.binding.source, Some(input_nodes))?;
+        let mut result_bindings = Bindings::new(&formal.result_type_params);
+        result_bindings.match_input(&formal.signature.result, &result, self.structs)?;
+        if super::has_mixed_application(&formal.signature.result) {
+            let mut completed = bindings.clone();
+            completed.merge_callback_results(&result_bindings, |work| {
+                self.charge_expansion("callback result matching", work)
+            })?;
+            let expected =
+                self.bound_block_type(key.binding.template, &formal.signature.result, &completed)?;
+            if !super::compatible(&expected, &result) {
+                return Err(format!(
+                    "callback '{}' returns {result}, expected {expected}",
+                    formal.signature.name
+                ));
+            }
+        }
         let registry = self
             .specializations
             .as_mut()
             .expect("block specialization registry");
         registry.charge_callback_storage(source_type_nodes(&result))?;
-        let mut result_bindings = Bindings::new(&formal.result_type_params);
-        result_bindings.match_input(&formal.signature.result, &result, self.structs)?;
         for name in &formal.result_type_params {
             registry.charge_callback_storage(
                 result_bindings

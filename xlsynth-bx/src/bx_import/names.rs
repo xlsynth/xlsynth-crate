@@ -9,8 +9,8 @@ use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
     ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, InvariantDecl, LetBinding,
     MapExpr, MatchArm, MatchPattern, Module, Param, ParametricBinding, QuickCheckSignature,
-    StageAnnotation, Stmt, StructDef, StructSplat, TestDecl, TestKind, TestStmt, TestStmtKind,
-    Type, TypeAlias, UnrollFor, WidthSliceType,
+    StageAnnotation, Stmt, StructArgument, StructDef, StructParametricRef, StructSplat, TestDecl,
+    TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor, WidthSliceType,
 };
 use crate::ast::{ConstAssert, ScopeStatement};
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
@@ -66,14 +66,15 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
     for def in &module.structs {
         let at = position(&def.name);
         let mut scope = Scope::new(names, at, &def.name);
-        for name in &def.type_params {
-            scope.bind_as(name, Local::Formal);
+        let mut value_parametrics = Vec::with_capacity(def.value_parametrics.len());
+        for formal in def.parametric_bindings() {
+            match formal {
+                StructParametricRef::Type(name) => scope.bind_as(name, Local::Formal),
+                StructParametricRef::Value(value) => {
+                    value_parametrics.push(scope.dslx_value_parametric(value)?);
+                }
+            }
         }
-        let value_parametrics = def
-            .value_parametrics
-            .iter()
-            .map(|value| scope.dslx_value_parametric(value))
-            .collect::<Result<_, _>>()?;
         // A struct field can name a later declaration.
         scope.at = None;
         out.structs.push(StructDef {
@@ -552,6 +553,20 @@ impl<'a> Scope<'a> {
                 args: args
                     .iter()
                     .map(|arg| self.type_expression(arg, depth))
+                    .collect::<Result<_, _>>()?,
+            },
+            Type::MixedApplied { name, args } => Type::MixedApplied {
+                name: self.reference(name, self.at)?,
+                args: args
+                    .iter()
+                    .map(|arg| match arg {
+                        StructArgument::Type(ty) => {
+                            self.type_at_depth(ty, depth + 1).map(StructArgument::Type)
+                        }
+                        StructArgument::Value(value) => self
+                            .type_expression(value, depth)
+                            .map(StructArgument::Value),
+                    })
                     .collect::<Result<_, _>>()?,
             },
             Type::TypeApplied { name, args } => Type::TypeApplied {
@@ -1082,6 +1097,9 @@ impl<'a> Scope<'a> {
             }
             | Expr::TypeAppliedStruct {
                 name, fields, base, ..
+            }
+            | Expr::MixedAppliedStruct {
+                name, fields, base, ..
             } => {
                 let name = self.reference(name, self.at)?;
                 let fields = fields
@@ -1109,6 +1127,20 @@ impl<'a> Scope<'a> {
                     Expr::ParametricStruct { args, .. } => Expr::ParametricStruct {
                         name,
                         args: self.expressions(args)?,
+                        fields,
+                        base,
+                    },
+                    Expr::MixedAppliedStruct { args, .. } => Expr::MixedAppliedStruct {
+                        name,
+                        args: args
+                            .iter()
+                            .map(|arg| match arg {
+                                StructArgument::Type(ty) => self.ty(ty).map(StructArgument::Type),
+                                StructArgument::Value(value) => {
+                                    self.expr(value).map(StructArgument::Value)
+                                }
+                            })
+                            .collect::<Result<_, _>>()?,
                         fields,
                         base,
                     },

@@ -651,7 +651,8 @@ fn normalize_import_type(
         }
         Type::Applied { name, .. }
         | Type::ParametricStruct { name, .. }
-        | Type::TypeApplied { name, .. } => {
+        | Type::TypeApplied { name, .. }
+        | Type::MixedApplied { name, .. } => {
             return Err(format!("unresolved struct application '{name}'"));
         }
         Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
@@ -753,7 +754,8 @@ impl ProbeImports {
             Type::Bits { .. } | Type::Bool => Ok(ty.to_string()),
             Type::Applied { name, .. }
             | Type::ParametricStruct { name, .. }
-            | Type::TypeApplied { name, .. } => {
+            | Type::TypeApplied { name, .. }
+            | Type::MixedApplied { name, .. } => {
                 Err(format!("unresolved struct application '{name}'"))
             }
             Type::ParametricBits { .. } | Type::ParametricArray { .. } => Err(format!(

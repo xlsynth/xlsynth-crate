@@ -883,7 +883,8 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 | Type::ParametricArray { .. }
                 | Type::Applied { .. }
                 | Type::ParametricStruct { .. }
-                | Type::TypeApplied { .. } => {
+                | Type::TypeApplied { .. }
+                | Type::MixedApplied { .. } => {
                     return Err(BuilderError::InvalidOperation(format!(
                         "cannot lower block result with unresolved type '{}'",
                         block.result

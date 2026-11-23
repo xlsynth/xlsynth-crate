@@ -8,8 +8,11 @@ use std::fs;
 use support::search_paths;
 
 use tempfile::tempdir;
-use xlsynth_bx::{ResetBehavior, compile, compile_with_options, empty_package};
+use xlsynth_bx::{
+    ResetBehavior, check_module, compile, compile_with_options, empty_package, parse_module,
+};
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
 
@@ -339,5 +342,309 @@ pub block pipeline(clk, x: uN[600000]) -> u8 {
 "#;
     let package = compile(source, empty_package("flows"), ResetBehavior::default())?;
     xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
+    Ok(())
+}
+
+#[test]
+fn mixed_struct_arguments_are_inferred_and_keep_phantom_values() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+struct Packet<T, N: u32, Tag: u32 = {N + u32:1}> { lanes: T[N], valid: bool }
+
+fn describe<T, N: u32, Tag: u32>(p: Packet<T, N, Tag>) -> (T, u32, u32) {
+    (p.lanes[u32:0], N, Tag)
+}
+
+fn sample() -> ((u8, u32, u32), (s4, u32, u32), (u8, u32, u32)) {
+    let a = Packet { lanes: [u8:7, u8:8], valid: true };
+    let b = Packet::<s4> { lanes: [s4:-2], valid: false };
+    let custom: Packet<u8, 2, 9> = Packet<u8, 2> { lanes: a.lanes, valid: false };
+    let updated = Packet { valid: true, ..custom };
+    (describe(a), describe(b), describe(updated))
+}
+const RESULT = sample();
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    assert_eq!(
+        checked.constants()[0].value,
+        IrValue::parse_typed(
+            "((bits[8]:7, bits[32]:2, bits[32]:3), (bits[4]:14, bits[32]:1, bits[32]:2), (bits[8]:7, bits[32]:2, bits[32]:9))"
+        )?
+    );
+    Ok(())
+}
+
+#[test]
+fn mixed_struct_value_formal_can_use_an_earlier_type() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+struct Payload { valid: bool, tag: u8 }
+struct Stamp<N:u32, T:type, Init:T> { lanes:T[N] }
+fn read_init<T, N:u32, Init:T>(p:Stamp<N, T, Init>) -> T { Init }
+fn sample() -> (bool, u8) {
+    const INITIAL:Payload = Payload { valid: true, tag: u8:42 };
+    type Row = Stamp<2, Payload, INITIAL>;
+    let p: Row = Stamp { lanes: zero!<Payload[2]>() };
+    let expected = read_init(p);
+    (expected.valid, expected.tag)
+}
+const RESULT = sample();
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    assert_eq!(
+        checked.constants()[0].value,
+        IrValue::parse_typed("(bits[1]:1, bits[8]:42)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn scoped_fields_contribute_mixed_struct_witnesses() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+struct S<N:u32, T:type> { xs:T[N] }
+struct O<T:type, N:u32> { a:S<N,T>, tag:T }
+fn sample(x:u8) -> (u8, u8, u8, u8) {
+    let inferred = O { a:{ let _dummy = u8:8; S { xs:[1,2] } }, tag:x };
+    let prefixed = O {
+        a:{ type Len = u32; const V:Len = u32:2; S<{V as Len}> { xs:[3,4] } },
+        tag:x
+    };
+    let indexed = [u8:12,u8:13][O { a:{ x; S { xs:[1,2] } }, tag:x }.a.xs[u32:0]];
+    let update = O { a:S { ..{ const V = u32:2; S<V> { xs:[5,6] } } }, tag:x };
+    (inferred.a.xs[u32:0], prefixed.a.xs[u32:1], indexed, update.a.xs[u32:1])
+}
+const RESULT = sample(u8:42);
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    assert_eq!(
+        checked.constants()[0].value,
+        IrValue::parse_typed("(bits[8]:1,bits[8]:4,bits[8]:13,bits[8]:6)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn scalar_value_formals_keep_each_calls_signedness() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+struct Tag<T, N:u32, V:T={zero!<T>()}> { lanes:T[N] }
+fn tag<T, N:u32, V:T>(p:Tag<T,N,V>) -> T { V }
+fn read(a:s8[2], b:u8[1]) -> (s8,u8) {
+    let s = Tag<s8> { lanes:a };
+    let u:Tag<u8,1,u8:255> = Tag<u8,1,u8:255> { lanes:b };
+    (tag(s), tag(u))
+}
+const RESULT = read([s8:-1,s8:0], [u8:3]);
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    assert_eq!(
+        checked.constants()[0].value,
+        IrValue::parse_typed("(bits[8]:0, bits[8]:255)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn mixed_structs_preserve_imported_bindings_and_named_ports() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    fs::write(
+        directory.path().join("frames.bx"),
+        r#"
+const EXTRA = u32:1;
+pub struct Frame<N:u32, T, M:u32={N + EXTRA}> { payload:T[N], tags:u8[M] }
+pub fn wrap<T, N:u32>(payload:T[N], tags:u8[N+EXTRA]) -> Frame<N,T> {
+    Frame { payload, tags }
+}
+"#,
+    )?;
+    fs::write(
+        directory.path().join("stages.bx"),
+        r#"
+use frames::Frame;
+pub struct Stage<T, N:u32> { frame:Frame<N,T> }
+pub fn stage<T,N:u32>(frame:Frame<N,T>) -> Stage<T,N> { Stage::<T,N> { frame } }
+"#,
+    )?;
+    let source = r#"
+use frames;
+use stages;
+const EXTRA = u32:9;
+struct Value { x: u4 }
+#[allow(combinational_block)]
+pub block pipeline(data_in:Value[2], tags_in:u8[3]) -> frames::Frame<2,Value> {
+    let input = frames::wrap(data_in, tags_in);
+    let s: stages::Stage<Value, 2> = stages::stage(input);
+    frames::Frame::<2,Value> { payload: s.frame.payload, tags: s.frame.tags }
+}
+"#;
+    let package = compile_with_options(
+        source,
+        empty_package("pipeline"),
+        ResetBehavior::default(),
+        &search_paths(&[directory.path()]),
+    )?;
+    let top = package.get_top_block().expect("pipeline is the top");
+    let outputs: Vec<_> = top
+        .output_ports()
+        .map(|p| (top.port_name(p), top.port_type(p).to_string()))
+        .collect();
+    assert_eq!(
+        outputs,
+        [
+            ("payload", "(bits[4])[2]".into()),
+            ("tags", "bits[8][3]".into())
+        ]
+    );
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
+    Ok(())
+}
+
+#[test]
+fn mixed_struct_specializations_check_both_argument_kinds() {
+    let template = "struct Tag<N:u32, T> { x:u8 }";
+    for wrong in ["Tag<3,u8>", "Tag<2,s8>"] {
+        let source = format!("{template} fn bad(v:Tag<2,u8>)->{wrong} {{ v }}");
+        assert!(
+            parse_module(&source)
+                .and_then(|m| check_module(&m))
+                .is_err(),
+            "{source}"
+        );
+    }
+    for source in [
+        "struct Bad<N:T, T> { data:T }",
+        "struct Tag<T,N:u32> { x:u8 } block bad<T>(clk, p:Tag<T>) -> T { zero!() }",
+        "struct Tag<T,N:u32> { x:u8 } block bad<T>(clk, p:Tag<T,MISSING>) -> T { zero!() }",
+        "type A = u16; struct Tag<T,N:u32> { x:u8 } block bad<T>(clk, A:T, p:Tag<T,{bit_count<A>()}>) -> T { A }",
+        "const n = u32:2; struct Tag<T,N:u32> { x:u8 } block bad<T>(clk, n:u32, p:Tag<T,n>) -> T { zero!() }",
+        "struct Bad<T, T:u32> { data:T }",
+        "struct Tag<T,N:u32> { x:u8 } type Bad = Tag<u8>;",
+        "struct Tag<T,N:u32> { x:u8 } fn bad(x:u8)->u8 { let v = Tag { x }; v.x }",
+        "struct Tag<T,N:u32> { x:u8 } fn bad(x:u32)->u8 { let v = Tag<u8,x> { x:u8:1 }; v.x }",
+    ] {
+        assert!(
+            parse_module(source).and_then(|m| check_module(&m)).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn mixed_struct_type_arguments_follow_enclosing_declaration_visibility() -> Result<(), String> {
+    let source = r#"
+struct Tag<T, N:u32> { data:T }
+struct Concrete { wrapped:Tag<Rec,2> }
+struct Generic<A> { wrapped:Tag<(Rec,A),2> }
+#[allow(combinational_block)]
+block sample(x:Tag<Alias,2>, y:Concrete, z:Generic<bool>) -> (u8, u8, bool) {
+    (x.data, y.wrapped.data.value, z.wrapped.data.1)
+}
+struct Rec { value:u8 }
+type Alias = u8;
+"#;
+    let module = parse_module(source)?;
+    check_module(&module)?;
+    let strict = parse_module(&format!("#![require_define_before_use]\n{source}"))?;
+    assert_eq!(
+        check_module(&strict).unwrap_err(),
+        "in 'Concrete': 'Rec' is declared later in the module"
+    );
+
+    for function in [
+        "fn read(x:Tag<Rec,2>) -> u8 { x.data }",
+        "fn read(x:u8) -> u8 { let t = Tag<Rec,2> { data:x }; t.data }",
+        "fn read<T>(x:Tag<(Rec,T),2>) -> u8 { x.data }",
+    ] {
+        let module = parse_module(&format!(
+            "struct Tag<T,N:u32> {{ data:u8 }} {function} struct Rec {{value:u8}}"
+        ))?;
+        let error = check_module(&module).unwrap_err();
+        assert!(
+            error.contains("Rec") && error.contains("declared later"),
+            "{error}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn mixed_struct_results_specialize_clocked_children() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+struct Packet<T, N:u32> { valid:bool, data:T[N] }
+block stage<T>(clk, d:T[2]) -> Packet<T,2> {
+    reg store:T[2] = zero!();
+    store := d;
+    Packet { valid:true, data:store }
+}
+pub block pipeline(clk, xs:u8[2], flags:bool[2]) -> (u8[2], bool[2]) {
+    let bytes = stage(xs);
+    let bits_stage = stage(flags);
+    (bytes.data, bits_stage.data)
+}
+"#;
+    let package = compile(
+        source,
+        empty_package("packet_stage"),
+        ResetBehavior::default(),
+    )?;
+    let parent = package.get_top_block().expect("top block");
+    let [bytes, flags] = parent.instantiations.as_slice() else {
+        panic!("expected one instance per array shape");
+    };
+    assert_ne!(bytes.block, flags.block);
+    for (instance, expected) in [(bytes, "bits[8][2]"), (flags, "bits[1][2]")] {
+        let block = package
+            .get_block(&instance.block)
+            .expect("specialized child");
+        let outputs: Vec<_> = block
+            .output_ports()
+            .map(|p| (block.port_name(p), block.port_type(p).to_string()))
+            .collect();
+        assert_eq!(
+            outputs,
+            [("valid", "bits[1]".into()), ("data", expected.into())]
+        );
+    }
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
+    Ok(())
+}
+
+#[test]
+fn mixed_struct_siblings_infer_each_other_fields() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+struct S<T, N:u32, U> { xs:T[N], tag:U }
+fn compare(a:u8, b:u16, pick:bool) -> (u8,u16,u8,u16,u8,u16) {
+    let pair = [S { xs:[a], tag:1 }, S { tag:b, xs:[2] }];
+    let chosen = if pick { S { xs:[a], tag:3 } } else { S { tag:b, xs:[4] } };
+    let arm = match pick {
+        true => S { xs:[a], tag:5 },
+        _ => S { tag:b, xs:[6] },
+    };
+    (pair[u32:1].xs[u32:0], pair[u32:0].tag, chosen.xs[u32:0], chosen.tag, arm.xs[u32:0], arm.tag)
+}
+const RESULT = compare(u8:9, u16:77, false);
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    assert_eq!(
+        checked.constants()[0].value,
+        IrValue::parse_typed(
+            "(bits[8]:2, bits[16]:1, bits[8]:4, bits[16]:77, bits[8]:6, bits[16]:77)"
+        )?
+    );
+    Ok(())
+}
+
+#[test]
+fn mixed_struct_siblings_keep_the_final_dimension_witness() -> Result<(), String> {
+    let source = r#"
+struct R<T,N:u32> { data:T, width_witness:uN[N] }
+fn sample(y:u8) -> u8 {
+    let rows = [R { data:y, width_witness:0 }, R { data:y, width_witness:y }];
+    rows[u32:0].width_witness
+}
+"#;
+    check_module(&parse_module(source)?)?;
+    let reversed = source.replace(
+        "R { data:y, width_witness:0 }, R { data:y, width_witness:y }",
+        "R { data:y, width_witness:y }, R { data:y, width_witness:0 }",
+    );
+    assert!(check_module(&parse_module(&reversed)?).is_err());
     Ok(())
 }

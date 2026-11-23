@@ -129,7 +129,7 @@ impl StructTable<'_> {
                                         }
                                 )
                             }),
-                            Type::TypeApplied { .. } => true,
+                            Type::TypeApplied { .. } | Type::MixedApplied { .. } => true,
                             _ => false,
                         };
                     },
@@ -144,12 +144,11 @@ impl StructTable<'_> {
             // A fully explicit application has no dependency on its defaults.
             let mut default_prefixes = BTreeMap::new();
             let mut defaults = Vec::new();
-            let mut in_declaration = true;
+            let mut type_params = def.type_params.as_slice();
             let mut optional = false;
             while let Some(node) = pending.pop().or_else(|| {
-                // Defaults use their own value template's declaration scope.
-                in_declaration = false;
-                defaults.pop().map(|(node, preference)| {
+                defaults.pop().map(|(node, visible_types, preference)| {
+                    type_params = visible_types;
                     optional = preference;
                     node
                 })
@@ -158,6 +157,10 @@ impl StructTable<'_> {
                 let application = match node {
                     SourceNode::Annotation(Type::ParametricStruct { name, args })
                     | SourceNode::Expression(Expr::ParametricStruct { name, args, .. }) => {
+                        Some((name, args.len()))
+                    }
+                    SourceNode::Annotation(Type::MixedApplied { name, args })
+                    | SourceNode::Expression(Expr::MixedAppliedStruct { name, args, .. }) => {
                         Some((name, args.len()))
                     }
                     SourceNode::Annotation(Type::TypeApplied { name, args })
@@ -174,7 +177,7 @@ impl StructTable<'_> {
                 };
                 node.push_children(&mut pending);
                 if let Some((name, supplied)) = application
-                    && (!in_declaration || !def.type_params.contains(name))
+                    && !type_params.contains(name)
                 {
                     if optional {
                         preferred.push(name.as_str());
@@ -189,13 +192,24 @@ impl StructTable<'_> {
                         let first = default_prefixes
                             .entry((name.as_str(), preference))
                             .or_insert(formals.len());
+                        let supplied = formals.partition_point(|f| f.index < supplied);
                         if supplied < *first {
-                            defaults.extend(
-                                formals[supplied..*first]
-                                    .iter()
-                                    .filter_map(|formal| formal.default.as_ref())
-                                    .map(|expr| (SourceNode::Expression(expr), preference)),
-                            );
+                            for (value_index, formal) in
+                                formals.iter().enumerate().take(*first).skip(supplied)
+                            {
+                                if let Some(expr) = &formal.default {
+                                    // Earlier type formals occupy the
+                                    // declaration slots before this default
+                                    // that are not taken by values.
+                                    let visible_types =
+                                        &template.type_params[..formal.index - value_index];
+                                    defaults.push((
+                                        SourceNode::Expression(expr),
+                                        visible_types,
+                                        preference,
+                                    ));
+                                }
+                            }
                             *first = supplied;
                         }
                     }

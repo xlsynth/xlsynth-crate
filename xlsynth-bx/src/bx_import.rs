@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::ImportOptions;
-use crate::ast::{FunctionParametricRef, Module, TestKind, UsePath};
+use crate::ast::{FunctionParametricRef, Module, StructParametricKind, TestKind, UsePath};
 use crate::check::MAX_ELABORATION_DEPTH;
 use crate::import_structs::DslxSourceLoader;
 use crate::parser;
@@ -47,7 +47,7 @@ struct Export {
     can_qualify_member: bool,
     is_struct: bool,
     overrides_zero_builtin: bool,
-    has_type_params: bool,
+    struct_params: Vec<StructParametricKind>,
 }
 
 /// Callable arguments have the visibility of calls. Value arguments have
@@ -111,7 +111,7 @@ struct Names {
     /// A type alias can qualify a member if the checker resolves it to an enum.
     enums_or_aliases: BTreeSet<String>,
     structs: BTreeSet<String>,
-    type_structs: BTreeSet<String>,
+    type_structs: BTreeMap<String, Vec<StructParametricKind>>,
     templates: BTreeMap<String, Vec<ParametricKind>>,
     uses: BTreeMap<String, Binding>,
     positions: BTreeMap<String, usize>,
@@ -203,7 +203,12 @@ impl Names {
                 .structs
                 .iter()
                 .filter(|d| !d.type_params.is_empty())
-                .map(|d| d.name.clone())
+                .map(|d| {
+                    (
+                        d.name.clone(),
+                        d.parametric_bindings().map(|p| p.kind()).collect(),
+                    )
+                })
                 .collect(),
             templates,
             uses,
@@ -611,7 +616,7 @@ impl<'a> Graph<'a> {
                         is_struct: names.structs.contains(name),
                         overrides_zero_builtin: name == "zero!"
                             && names.zero_binding == ZeroBinding::BxFunction,
-                        has_type_params: names.type_structs.contains(name),
+                        struct_params: names.type_structs.get(name).cloned().unwrap_or_default(),
                     },
                 )
             })
@@ -744,7 +749,7 @@ impl<'a> Graph<'a> {
         bindings: &BTreeMap<String, Binding>,
     ) -> Result<Module, String> {
         let mut names = BTreeSet::new();
-        let mut type_structs = BTreeSet::new();
+        let mut type_structs = BTreeMap::new();
         if source.contains('<') {
             for path in uses {
                 let head = path.binding().expect("validated use");
@@ -753,8 +758,8 @@ impl<'a> Graph<'a> {
                         if !e.parametrics.is_empty() {
                             names.insert(head.to_owned());
                         }
-                        if e.has_type_params {
-                            type_structs.insert(head.to_owned());
+                        if !e.struct_params.is_empty() {
+                            type_structs.insert(head.to_owned(), e.struct_params.clone());
                         }
                     }
                     Binding::Module(lib) => {
@@ -762,8 +767,11 @@ impl<'a> Graph<'a> {
                             if !export.parametrics.is_empty() {
                                 names.insert(format!("{head}::{member}"));
                             }
-                            if export.has_type_params {
-                                type_structs.insert(format!("{head}::{member}"));
+                            if !export.struct_params.is_empty() {
+                                type_structs.insert(
+                                    format!("{head}::{member}"),
+                                    export.struct_params.clone(),
+                                );
                             }
                         }
                     }

@@ -401,6 +401,12 @@ Generates DSLX structs with two value parameters and two specializations that sh
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_imported_struct_parametrics --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_mixed_struct_parametrics.rs
+
+Compares mixed type and value parameters on native BX structs with the same generic structs in pinned DSLX using `#![feature(generics)]`. It varies declaration order, positional constructor prefixes, type and length inference from array fields, and a phantom value with a dependent default. The phantom can have the bound payload type `T`, with signed and unsigned widths from 1 through 129, an explicit bit pattern or the default `zero!<T>()`. Repeated calls and struct updates return both payload data and inferred parameters, exposing lost bindings when specialized layouts coincide. Rejection cases cover swapped argument kinds, excess arguments, conflicting field types and assignments between incompatible specializations. Accepted programs run on the same inputs through BX Block IR, native DSLX IR and DSLX constant evaluation.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_mixed_struct_parametrics -- -max_len=14 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_struct_parametrics.rs
 
 Generates native BX and DSLX struct templates with scalar and array fields. Cases vary explicit and inferred arguments, derived defaults, nested symbolic applications, widths inferred from unsized fields, and `xN[S][N]` signedness with signed or unsigned width parameters. Signed arguments vary decimal, hexadecimal, and binary spellings at the sign bit and beyond the declared width. Phantom parameters distinguish instances with identical fields using enum members or bit patterns that can differ only above bit 63. Nested records forward values between signed, unsigned, and boolean formals and check whether each value fits the destination. Some BX cases use turbofish for the same applications spelled with plain angle brackets in DSLX. Rejected programs exercise incompatible specializations, wrong nominal values, conflicting field types, and extra arguments. The target compares source acceptance and checks projected data and inferred bindings against both compiled DSLX IR and concrete DSLX calls.
