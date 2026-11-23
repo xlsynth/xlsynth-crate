@@ -183,8 +183,8 @@ pub struct EnumMember {
     pub value: Expr,
 }
 
-/// A module-level name for a concrete value type.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A name for a value type in its declaring scope.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TypeAlias {
     pub name: String,
     pub public: bool,
@@ -200,8 +200,8 @@ pub struct EnumDef {
     pub members: Vec<EnumMember>,
 }
 
-/// A module-level value evaluated at compile time.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A named value evaluated at compile time in its declaring scope.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ConstDef {
     pub name: String,
     pub public: bool,
@@ -254,6 +254,8 @@ impl Hash for ConstAssert {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ScopeStatement {
     Let(LetBinding),
+    Const(ConstDef),
+    TypeAlias(TypeAlias),
     ConstAssert(ConstAssert),
     /// A value expression followed by a semicolon. DSLX requires its value
     /// when evaluating the enclosing scope as a constant expression.

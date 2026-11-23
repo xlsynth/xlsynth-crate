@@ -243,7 +243,7 @@ impl<'m> BodyChecker<'_, 'm> {
     /// Find the value substituted for a bare formal in a struct declaration.
     pub(super) fn direct_struct_binding(&self, expr: &Expr) -> Option<(&Type, &IrValue)> {
         let Expr::Name(name) = expr else { return None };
-        if !self.in_struct_definition || !self.value_parametric_names.contains(name) {
+        if !self.in_struct_definition || !self.constant_pattern_names.contains(name) {
             return None;
         }
         let TypedExpr {
@@ -387,6 +387,9 @@ impl<'m> BodyChecker<'_, 'm> {
     ) -> Option<ContextualStruct<'m>> {
         let literal = expr.struct_literal()?;
         let name = literal.name;
+        if self.local_type_aliases.contains_key(name) {
+            return None;
+        }
         let supplied = match literal.args {
             StructLiteralArgs::Omitted => 0,
             StructLiteralArgs::Integers(args) => args.len(),
@@ -605,9 +608,10 @@ impl<'m> BodyChecker<'_, 'm> {
                 self.splat_base_with_prefix(base, name, args)
             }
             StructApplication::Named(name)
-                if !self
-                    .type_bindings()
-                    .is_some_and(|bindings| bindings.declares(name))
+                if !self.local_type_aliases.contains_key(name)
+                    && !self
+                        .type_bindings()
+                        .is_some_and(|bindings| bindings.declares(name))
                     && (self.structs.template(name).is_some()
                         || self.resolver.lookup(name)?.is_some_and(|(module, member)| {
                             self.resolver
@@ -763,9 +767,10 @@ impl<'m> BodyChecker<'_, 'm> {
         prefix: &[BoundParametricValue],
         canonical: &str,
     ) -> Result<Option<bool>, String> {
-        if self
-            .type_bindings()
-            .is_some_and(|bindings| bindings.declares(name))
+        if self.local_type_aliases.contains_key(name)
+            || self
+                .type_bindings()
+                .is_some_and(|bindings| bindings.declares(name))
         {
             return Ok(None);
         }
@@ -813,9 +818,10 @@ impl<'m> BodyChecker<'_, 'm> {
             }
         };
         let Some(template) = self.structs.template(name).filter(|_| {
-            !self
-                .type_bindings()
-                .is_some_and(|bindings| bindings.declares(name))
+            !self.local_type_aliases.contains_key(name)
+                && !self
+                    .type_bindings()
+                    .is_some_and(|bindings| bindings.declares(name))
         }) else {
             if let Some(ty @ Type::Named(canonical)) = expected
                 && self.struct_instance_matches(name, explicit, canonical)? == Some(true)

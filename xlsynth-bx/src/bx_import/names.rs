@@ -293,6 +293,7 @@ impl<'m> UnlinkedBlockScope<'m> {
 #[derive(Clone, Copy, PartialEq)]
 enum Local {
     Lexical,
+    TypeAlias,
     Hardware,
     Formal,
 }
@@ -354,7 +355,9 @@ impl<'a> Scope<'a> {
         if binding == Local::Formal {
             self.formals.insert(name.to_owned());
         }
-        if (name != "_" || binding == Local::Hardware) && self.locals.get(name) != Some(&binding) {
+        if (name != "_" || matches!(binding, Local::Hardware | Local::TypeAlias))
+            && self.locals.get(name) != Some(&binding)
+        {
             let previous = self.locals.insert(name.to_owned(), binding);
             self.introduced.push((name.to_owned(), previous));
         }
@@ -400,8 +403,12 @@ impl<'a> Scope<'a> {
                 .unresolved(name, format!("invalid source reference '{name}'"));
         }
         if let Some((head, _)) = name.split_once("::")
-            && self.locals.contains_key(head)
+            && let Some(binding) = self.locals.get(head)
         {
+            if *binding == Local::TypeAlias {
+                // The checker resolves enum members against this lexical alias.
+                return Ok(name.to_owned());
+            }
             return self
                 .names
                 .unresolved(name, format!("'{head}' names a local value here"));
@@ -445,7 +452,7 @@ impl<'a> Scope<'a> {
                 self.names
                     .resolve(name, self.at, self.source_owner, ReferenceKind::Name)
             }
-            Some(Local::Lexical | Local::Hardware)
+            Some(Local::Lexical | Local::Hardware | Local::TypeAlias)
                 if site == CallSite::Direct
                     || site == CallSite::Parametric
                         && matches!(self.names.uses.get(name), Some(Binding::Dslx(_))) =>
@@ -455,7 +462,7 @@ impl<'a> Scope<'a> {
                 // it only when an iteration is typechecked.
                 Ok(mark_local_callee(name))
             }
-            Some(Local::Lexical | Local::Hardware) => self
+            Some(Local::Lexical | Local::Hardware | Local::TypeAlias) => self
                 .names
                 .unresolved(name, format!("'{name}' names a local value here")),
             None if site == CallSite::Direct && (name == "map" || is_call_builtin(name)) => {
@@ -973,6 +980,26 @@ impl<'a> Scope<'a> {
                         .map(|statement| match statement {
                             ScopeStatement::Let(binding) => {
                                 scope.binding(binding).map(ScopeStatement::Let)
+                            }
+                            ScopeStatement::Const(def) => {
+                                let ty = scope.optional_type(&def.ty)?;
+                                let value = scope.expr(&def.value)?;
+                                scope.bind(&def.name);
+                                Ok(ScopeStatement::Const(ConstDef {
+                                    name: def.name.clone(),
+                                    public: def.public,
+                                    ty,
+                                    value,
+                                }))
+                            }
+                            ScopeStatement::TypeAlias(alias) => {
+                                let ty = scope.ty(&alias.ty)?;
+                                scope.bind_as(&alias.name, Local::TypeAlias);
+                                Ok(ScopeStatement::TypeAlias(TypeAlias {
+                                    name: alias.name.clone(),
+                                    public: alias.public,
+                                    ty,
+                                }))
                             }
                             ScopeStatement::ConstAssert(assertion) => scope
                                 .const_assert(assertion)

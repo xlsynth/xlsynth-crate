@@ -358,6 +358,12 @@ For let-bound `ceillog2` predicates the target compares BX IR with concrete DSLX
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_const_assert -- -max_len=14 -len_control=0`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_local_declarations.rs
+
+Generates function-local constants and type aliases in nested blocks and conditional branches. Cases vary lexical shadowing, constexpr lets, alias chains, signed and unsigned widths, aggregate types, and successive value and type parameter bindings. For each accepted case the BX block returns results from both the local function and a concrete function with its declarations hoisted to module scope under fresh names. Compiled DSLX IR and concrete DSLX calls evaluate the local function on the same inputs and supply the expected value for both BX results. Rejection cases check runtime-dependent initializers and dimensions, mismatched annotations, forward references, and references outside a declaration's scope.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_local_declarations -- -max_len=13 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_constants.rs
 
 Generates module constants with dependent scalar expressions, nested aggregates, and calls to earlier pure functions. BX blocks and local functions read them in expressions, named match patterns, map callbacks, loop bounds, and slice widths. Constants also set element signedness, bit widths, and array lengths in annotations. Counted traversals use the same length constant as the array they index. The target compares BX and pinned DSLX acceptance, including shadowing, forward references, duplicate definitions, builtin name collisions, and invalid dimension types. It checks every constant's name, declaration order, concrete type, and computed value against DSLX metadata, including signedness and width inside tuples and arrays. It compares block results on shared inputs against both compiled DSLX IR and concrete DSLX calls.

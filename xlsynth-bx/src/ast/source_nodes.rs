@@ -162,6 +162,11 @@ impl<'a> SourceNode<'a> {
                                 pending.push(Expression(&binding.value));
                                 pending.extend(binding.ty.iter().map(Annotation));
                             }
+                            ScopeStatement::Const(def) => {
+                                pending.push(Expression(&def.value));
+                                pending.extend(def.ty.iter().map(Annotation));
+                            }
+                            ScopeStatement::TypeAlias(alias) => pending.push(Annotation(&alias.ty)),
                             ScopeStatement::ConstAssert(assertion) => {
                                 pending.push(Expression(&assertion.predicate));
                             }

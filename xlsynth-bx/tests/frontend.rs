@@ -18,6 +18,8 @@ mod counted_for;
 mod directed_expr_eval;
 #[path = "support/expr_eval.rs"]
 mod expr_eval;
+#[path = "frontend/function_local_declarations.rs"]
+mod function_local_declarations;
 #[path = "frontend/function_parametrics.rs"]
 mod function_parametrics;
 #[path = "frontend/function_type_parametrics.rs"]

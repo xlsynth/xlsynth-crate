@@ -6,7 +6,6 @@ use crate::ast::{
     BindingPattern, ForIterable, FunctionParametricRef, MapExpr, ScopeStatement, UnrollFor,
 };
 use crate::infer_literal::BindingWidths;
-use std::borrow::Cow;
 use std::cell::Cell;
 use xlsynth_pir::IrBits;
 
@@ -22,15 +21,15 @@ pub(super) struct StaticRange {
 
 /// State hidden by a loop-local name. Restore it when leaving the iteration.
 pub(super) struct Shadowed {
-    name: String,
+    pub(super) name: String,
     value: Option<TypedExpr>,
+    type_alias: Option<super::scope::LocalTypeAlias>,
     /// A function-local binding in a map can shadow an enclosing loop value.
     outer_loop_value: Option<TypedExpr>,
     widths: Option<BindingWidths>,
     declared: bool,
-    /// A nearer data binding hides the name's use as a parametric match
-    /// pattern.
-    outer_parametric: Option<String>,
+    /// A nearer binding can hide an eligible constant match pattern.
+    outer_constant_pattern: Option<String>,
 }
 
 impl BodyChecker<'_, '_> {
@@ -258,6 +257,21 @@ impl BodyChecker<'_, '_> {
         if name == "_" {
             return;
         }
+        self.shadow_scoped_name(name, saved);
+        let scope = if self.in_loop_scope() {
+            &mut self.loop_values
+        } else {
+            &mut self.function_values
+        };
+        scope.insert(name.to_owned(), value);
+        if let Some(mut widths) = widths {
+            widths.bind_in_scope(self.width_scope());
+            self.inferred_bindings.insert(name.to_owned(), widths);
+        }
+    }
+
+    /// Save the current meaning of a name before a declaration of either kind.
+    pub(super) fn shadow_scoped_name(&mut self, name: &str, saved: &mut Vec<Shadowed>) {
         let (values, outer_loop_value) = if self.in_loop_scope() {
             (&mut self.loop_values, None)
         } else {
@@ -265,23 +279,26 @@ impl BodyChecker<'_, '_> {
         };
         saved.push(Shadowed {
             name: name.to_owned(),
-            value: values.insert(name.to_owned(), value),
+            value: values.remove(name),
+            type_alias: self.local_type_aliases.remove(name),
             outer_loop_value,
             widths: self.inferred_bindings.remove(name),
             declared: self.names.insert(name.to_owned()),
-            outer_parametric: self.value_parametric_names.take(name),
+            outer_constant_pattern: self.constant_pattern_names.take(name),
         });
-        if let Some(mut widths) = widths {
-            widths.bind_in_scope(self.width_scope());
-            self.inferred_bindings.insert(name.to_owned(), widths);
-        }
     }
 
     pub(super) fn leave_scope(&mut self, saved: Vec<Shadowed>) {
         let in_loop = self.in_loop_scope();
         for old in saved.into_iter().rev() {
-            if let Some(name) = old.outer_parametric {
-                self.value_parametric_names.insert(name);
+            self.constant_pattern_names.remove(&old.name);
+            if let Some(ty) = old.type_alias {
+                self.local_type_aliases.insert(old.name.clone(), ty);
+            } else {
+                self.local_type_aliases.remove(&old.name);
+            }
+            if let Some(name) = old.outer_constant_pattern {
+                self.constant_pattern_names.insert(name);
             }
             let values = if in_loop {
                 &mut self.loop_values
@@ -484,9 +501,21 @@ impl BodyChecker<'_, '_> {
     }
 }
 
-/// Value names visible during lexical checking, including zero-trip bodies.
+/// Declaration kinds needed for type and match-pattern lookup during a
+/// lexical walk without evaluation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LexicalKind {
+    Value,
+    Constant,
+    TypeAlias { can_construct: bool },
+}
+
+/// Names visible during lexical checking, including zero-trip bodies.
 struct LexicalScope<'a> {
-    values: Cow<'a, BTreeSet<String>>,
+    /// The root borrows names from elaboration so skipped loops need no copy
+    /// of the enclosing scope.
+    enclosing_names: Option<&'a BTreeSet<String>>,
+    declarations: BTreeMap<String, LexicalKind>,
     parent: Option<&'a LexicalScope<'a>>,
     in_lambda: bool,
     /// Shared across nested scopes in this one lexical walk, including
@@ -495,9 +524,10 @@ struct LexicalScope<'a> {
 }
 
 impl<'a> LexicalScope<'a> {
-    fn root(values: &'a BTreeSet<String>, visited: &'a Cell<usize>) -> Self {
+    fn root(names: &'a BTreeSet<String>, visited: &'a Cell<usize>) -> Self {
         Self {
-            values: Cow::Borrowed(values),
+            enclosing_names: Some(names),
+            declarations: BTreeMap::new(),
             parent: None,
             in_lambda: false,
             visited,
@@ -506,7 +536,8 @@ impl<'a> LexicalScope<'a> {
 
     fn nested(&self) -> LexicalScope<'_> {
         LexicalScope {
-            values: Cow::Owned(BTreeSet::new()),
+            enclosing_names: None,
+            declarations: BTreeMap::new(),
             parent: Some(self),
             in_lambda: self.in_lambda,
             visited: self.visited,
@@ -514,24 +545,30 @@ impl<'a> LexicalScope<'a> {
     }
 
     fn bind_pattern(&mut self, pattern: &BindingPattern) {
-        let nodes = pattern.visit_names(&mut |name| {
-            self.values.to_mut().insert(name.to_owned());
-        });
+        let nodes = pattern.visit_names(&mut |name| self.bind_pattern_name(name));
         self.visited.set(self.visited.get().saturating_add(nodes));
     }
 
     /// An unrolled binding or lambda parameter can discard its value with `_`.
     fn bind_pattern_name(&mut self, name: &str) {
         if name != "_" {
-            self.values.to_mut().insert(name.to_owned());
+            self.bind(name, LexicalKind::Value);
         }
+    }
+
+    fn bind(&mut self, name: &str, kind: LexicalKind) {
+        self.declarations.insert(name.to_owned(), kind);
     }
 
     /// Find the lexical scope that introduced a visible name.
     fn lookup(&self, name: &str) -> Option<&Self> {
         let mut scope = Some(self);
         while let Some(current) = scope {
-            if current.values.contains(name) {
+            if current.declarations.contains_key(name)
+                || current
+                    .enclosing_names
+                    .is_some_and(|names| names.contains(name))
+            {
                 return Some(current);
             }
             scope = current.parent;
@@ -554,6 +591,23 @@ enum NominalUse {
 }
 
 impl BodyChecker<'_, '_> {
+    /// Combine declaration kinds seen in this walk with the concrete
+    /// enclosing scope, preserving lexical shadowing of either kind.
+    fn lexical_kind(&self, locals: &LexicalScope<'_>, name: &str) -> Option<LexicalKind> {
+        let scope = locals.lookup(name)?;
+        Some(scope.declarations.get(name).copied().unwrap_or_else(|| {
+            if let Some(alias) = self.local_type_aliases.get(name) {
+                LexicalKind::TypeAlias {
+                    can_construct: alias.can_construct,
+                }
+            } else if self.constant_pattern_names.contains(name) {
+                LexicalKind::Constant
+            } else {
+                LexicalKind::Value
+            }
+        }))
+    }
+
     /// Resolve template names in source order without evaluating any bindings.
     pub(super) fn check_struct_template_names(&mut self, def: &StructDef) -> Result<(), String> {
         self.function_position = self.decls.positions.get(def.name.as_str()).copied();
@@ -566,9 +620,9 @@ impl BodyChecker<'_, '_> {
         let mut locals = LexicalScope::root(&self.names, &visited);
         for binding in &def.value_parametrics {
             // The formal hides an outer type even in its own annotation.
-            locals.bind_pattern_name(&binding.name);
+            locals.bind(&binding.name, LexicalKind::Constant);
             self.check_type_names(&binding.ty, &locals)?;
-            self.value_parametric_names.insert(binding.name.clone());
+            self.constant_pattern_names.insert(binding.name.clone());
             if let Some(default) = &binding.default {
                 self.check_expr_names(default, &locals)?;
             }
@@ -597,9 +651,9 @@ impl BodyChecker<'_, '_> {
                 FunctionParametricRef::Value(binding) => {
                     // DSLX introduces the formal before its annotation and
                     // default.
-                    locals.bind_pattern_name(&binding.name);
+                    locals.bind(&binding.name, LexicalKind::Constant);
                     self.check_type_names(&binding.ty, &locals)?;
-                    self.value_parametric_names.insert(binding.name.clone());
+                    self.constant_pattern_names.insert(binding.name.clone());
                     if let Some(default) = &binding.default {
                         self.check_expr_names(default, &locals)?;
                     }
@@ -615,9 +669,18 @@ impl BodyChecker<'_, '_> {
         // From here each callback has its declared callable role, including as
         // a named map operand. A nearer local may still shadow that binding.
         for callback in &f.callback_params {
-            locals.values.to_mut().remove(&callback.name);
+            locals.declarations.remove(&callback.name);
         }
-        self.template_callbacks = Some(&self.decls.value_template_callbacks[f.name.as_str()]);
+        self.template_callbacks = self
+            .decls
+            .value_template_callbacks
+            .get(f.name.as_str())
+            .or_else(|| {
+                self.decls
+                    .functions
+                    .get(f.name.as_str())
+                    .map(|f| &f.callback_indices)
+            });
         for param in &f.params {
             self.check_type_names(&param.ty, &locals)?;
             locals.bind_pattern_name(&param.name);
@@ -799,8 +862,19 @@ impl BodyChecker<'_, '_> {
         usage: NominalUse,
         locals: &LexicalScope<'_>,
     ) -> Result<(), String> {
-        if locals.contains(name) {
-            return Err(format!("'{name}' names a local value here"));
+        if let Some(kind) = self.lexical_kind(locals, name) {
+            return match kind {
+                LexicalKind::TypeAlias { .. } if usage == NominalUse::AppliedStruct => {
+                    Err(format!("type alias '{name}' takes no arguments"))
+                }
+                LexicalKind::TypeAlias {
+                    can_construct: false,
+                } if usage == NominalUse::Constructor => {
+                    Err(format!("type alias '{name}' does not name a struct"))
+                }
+                LexicalKind::TypeAlias { .. } => Ok(()),
+                _ => Err(format!("'{name}' names a local value here")),
+            };
         }
         let head = name.split_once("::").map_or(name, |(head, _)| head);
         if self.callback_index(head).is_some() {
@@ -810,11 +884,8 @@ impl BodyChecker<'_, '_> {
         }
         if let Some(bindings) = self.type_bindings() {
             if usage != NominalUse::AppliedStruct && bindings.declares(name) {
-                if usage == NominalUse::Constructor
-                    && matches!(bindings.get(name), Some(Type::Enum { .. }))
-                {
-                    return Err(format!("cannot construct enum '{name}' as a struct"));
-                }
+                // A type parameter can lexically name a record even if this
+                // specialization skips the body and binds it to a scalar.
                 return Ok(());
             }
             bindings.reject_value(name)?;
@@ -841,9 +912,13 @@ impl BodyChecker<'_, '_> {
             if usage == NominalUse::AppliedStruct {
                 self.resolver.check_struct_template_name(&module, &member)
             } else if usage == NominalUse::Constructor
-                && self.resolver.is_enum_type(&module, &member)
+                && !self.resolver.is_struct_type(&module, &member)
+                && self
+                    .resolver
+                    .struct_template_arity(&module, &member)
+                    .is_none()
             {
-                Err(format!("cannot construct enum '{name}' as a struct"))
+                Err(format!("'{name}' does not name a struct"))
             } else {
                 self.resolver.check_member_name(&module, &member)
             }
@@ -935,10 +1010,27 @@ impl BodyChecker<'_, '_> {
         if name == "_" {
             return Err("cannot read the wildcard binding '_'".into());
         }
+        let head = name.split_once("::").map_or(name, |(head, _)| head);
+        if matches!(
+            self.lexical_kind(locals, head),
+            Some(LexicalKind::TypeAlias { .. })
+        ) {
+            if head == name && !callee {
+                return Err(format!("type alias '{name}' cannot be used as a value"));
+            }
+            if name
+                .rsplit_once("::")
+                .is_some_and(|(prefix, _)| prefix != head)
+            {
+                return Err(format!(
+                    "a member of type alias '{head}' cannot be a qualifier"
+                ));
+            }
+            return Ok(());
+        }
         if locals.contains(name) {
             return Ok(());
         }
-        let head = name.split_once("::").map_or(name, |(head, _)| head);
         if self.callback_index(head).is_some() {
             return Err(format!(
                 "callable parameter '{head}' may only be used as a callee"
@@ -1010,6 +1102,29 @@ impl BodyChecker<'_, '_> {
                             }
                             self.check_expr_names(&binding.value, &names)?;
                             names.bind_pattern(&binding.pattern);
+                        }
+                        ScopeStatement::Const(def) => {
+                            if let Some(ty) = &def.ty {
+                                self.check_type_names(ty, &names)?;
+                            }
+                            self.check_expr_names(&def.value, &names)?;
+                            names.bind(&def.name, LexicalKind::Constant);
+                        }
+                        ScopeStatement::TypeAlias(alias) => {
+                            self.check_type_names(&alias.ty, &names)?;
+                            // Record the target's constructor eligibility now,
+                            // before another declaration can shadow any name in
+                            // the annotation.
+                            let can_construct = match &alias.ty {
+                                Type::Named(name) => self
+                                    .check_nominal_name(name, NominalUse::Constructor, &names)
+                                    .is_ok(),
+                                Type::Applied { .. }
+                                | Type::TypeApplied { .. }
+                                | Type::ParametricStruct { .. } => true,
+                                _ => false,
+                            };
+                            names.bind(&alias.name, LexicalKind::TypeAlias { can_construct });
                         }
                         ScopeStatement::ConstAssert(assertion) => {
                             self.check_expr_names(&assertion.predicate, &names)?;
@@ -1217,10 +1332,12 @@ impl BodyChecker<'_, '_> {
             Expr::Match { subject, arms } => {
                 for operand in super::match_operands(subject, arms, |name| {
                     let head = name.split_once("::").map_or(name, |(head, _)| head);
-                    if let Some(scope) = locals.lookup(head) {
-                        return Ok(
-                            scope.parent.is_none() && self.value_parametric_names.contains(name)
-                        );
+                    if let Some(kind) = self.lexical_kind(locals, head) {
+                        return Ok(if head == name {
+                            kind == LexicalKind::Constant
+                        } else {
+                            matches!(kind, LexicalKind::TypeAlias { .. })
+                        });
                     }
                     Ok(self.callback_index(head).is_none() && self.is_constant_pattern(name)?)
                 })? {
@@ -1326,6 +1443,43 @@ mod tests {
     use crate::{ImportOptions, check_module, check_module_with_options, parse_module};
     use std::fs;
     use xlsynth::dslx::{ImportData, parse_and_typecheck};
+
+    #[test]
+    fn unelaborated_function_scopes_resolve_local_declarations_in_order() {
+        for (body, valid) in [
+            (
+                "type W = u8; const K = W:3; match c { K => c, _ => W:0 }",
+                true,
+            ),
+            ("type M = Mode; match M::A { M::A => c, _ => c }", true),
+            ("type W = Bits; type A = W; let y = A { x: c }; c", false),
+            ("type A = Mode; let y = A { x: c }; c", false),
+            ("type A = uN[c]; let y = A { x: c }; c", false),
+            ("type A = S; type B = A; type A = u8; B { x: c }.x", true),
+            ("type A = Mode; let y = A::Missing; c", true),
+            ("type A = Mode; let y = A::A::Missing; c", false),
+            ("const V = c; type W = uN[c]; c", true),
+            ("type W = u8; W", false),
+            ("type W = u8; const K = missing; c", false),
+            ("let y = { type W = u8; W:0 }; let z: W = c; c", false),
+        ] {
+            for function in [
+                format!("fn f<N:u32>(c:u8) -> u8 {{ {body} }}"),
+                format!(
+                    "fn f(x:u8) -> u8 {{ unroll_for! (_, c) in u32:0..u32:0 {{ {body} }}(x) }}"
+                ),
+            ] {
+                let source = format!(
+                    "enum Mode:u1 {{ A=0, B=1 }}\ntype Bits = u8;\nstruct S {{ x:u8 }}\n{function}"
+                );
+                let native =
+                    parse_and_typecheck(&source, "scope.x", "scope", &mut ImportData::default());
+                assert_eq!(native.is_ok(), valid, "{source}: {:?}", native.err());
+                let bx = parse_module(&source).and_then(|m| check_module(&m));
+                assert_eq!(bx.is_ok(), valid, "{source}: {:?}", bx.err());
+            }
+        }
+    }
 
     #[test]
     fn unused_value_templates_resolve_lexical_names_in_declaration_order() {

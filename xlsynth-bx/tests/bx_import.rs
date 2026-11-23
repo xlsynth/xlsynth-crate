@@ -142,6 +142,60 @@ block circuit(clk, x: u8) -> u8 { flags::decode(x) }
     Ok(())
 }
 
+#[test]
+fn imported_function_local_declarations_resolve_private_dependencies() -> Result<(), Box<dyn Error>>
+{
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "sizes.bx",
+        "pub type Count = u32; pub const WIDTH = u32:4;",
+    )?;
+    write_module(
+        dir.path(),
+        "codec.bx",
+        r#"
+use sizes;
+type Count = sizes::Count;
+const EXTRA = u32:1;
+fn bias(x: u8) -> u8 { x + u8:1 }
+pub fn encode(x: u8) -> u8 {
+    const WIDTH: Count = sizes::WIDTH + EXTRA;
+    type Packed = uN[WIDTH];
+    const STEP = bias(Packed:31 as u8);
+    const MARKER: Packed = 1;
+    let low: Packed = x as Packed;
+    match low {
+        MARKER => STEP,
+        _ => (low as u8) + (WIDTH as u8),
+    }
+}
+"#,
+    )?;
+    let caller = r#"
+use codec::encode;
+type Count = u16;
+type Packed = u2;
+const WIDTH = u32:2;
+const EXTRA = u32:9;
+fn bias(x: u8) -> u8 { x }
+#[allow(combinational_block)]
+block circuit(x: u8) -> u8 { encode(x) }
+"#;
+    let options = search_paths(&[dir.path()]);
+    let package = compile_design(caller, &options)?;
+    assert_eq!(run(package.clone(), 33)?, IrValue::make_ubits(8, 32)?);
+    assert_eq!(run(package, 63)?, IrValue::make_ubits(8, 36)?);
+    for private in ["codec::WIDTH", "codec::Packed:0 as u8"] {
+        let source = format!("use codec; fn sample() -> u8 {{ {private} as u8 }}");
+        assert!(
+            check_source_with_options(&source, &options).is_err(),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
 /// Evaluate the selected block, including its imported child instances.
 fn run(mut package: Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
     xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
