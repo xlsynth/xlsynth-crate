@@ -13,10 +13,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use xlsynth_pir::IrValue;
 
-use super::{MAX_TYPE_SIZE, StructTable};
+use super::StructTable;
 use crate::ast::{BinaryOp, OutputCycles, Param, Type};
 use crate::typed::{
-    AvailableFunctions, CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K,
+    AvailableFunctions, CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K, TypedMatchArm,
     is_constexpr_only_name,
 };
 
@@ -114,7 +114,7 @@ fn check_outputs(
     ports: &[Param],
     structs: &StructTable<'_>,
     children: &BTreeMap<&str, &CheckedBlock>,
-    case: Option<cases::Case>,
+    case: Option<cases::Case<'_>>,
 ) -> Result<(), String> {
     if let OutputCycles::ByPort(expected) = expected {
         // If Ports has `saved` and `live`, `@(saved: 1)` is incomplete
@@ -401,10 +401,7 @@ struct StageChecker<'a> {
     scopes: Vec<Scope<'a>>,
     structs: &'a StructTable<'a>,
     instances: BTreeMap<&'a str, Instance<'a>>,
-    /// Reset can override a register write, so its RHS is not an exact value.
-    reset_registers: BTreeSet<&'a str>,
-    case: Option<cases::Case>,
-    remaining: Cell<usize>,
+    case: Option<cases::Case<'a>>,
 }
 
 impl<'a> StageChecker<'a> {
@@ -412,7 +409,7 @@ impl<'a> StageChecker<'a> {
         block: &'a CheckedBlock,
         structs: &'a StructTable<'a>,
         children: &BTreeMap<&str, &'a CheckedBlock>,
-        case: Option<cases::Case>,
+        case: Option<cases::Case<'a>>,
     ) -> Self {
         let mut root = Scope::default();
         for param in &block.params {
@@ -423,20 +420,7 @@ impl<'a> StageChecker<'a> {
             scopes: vec![root],
             structs,
             instances: Instance::collect(block, children),
-            reset_registers: block
-                .statements
-                .iter()
-                .filter_map(|stmt| match stmt {
-                    CheckedStmt::Reg {
-                        name,
-                        reset: Some(_),
-                        ..
-                    } => Some(name.as_str()),
-                    _ => None,
-                })
-                .collect(),
             case,
-            remaining: Cell::new(MAX_TYPE_SIZE),
         };
         checker.collect_assignments(&block.statements, BLOCK_SCOPE);
         checker
@@ -509,38 +493,6 @@ impl<'a> StageChecker<'a> {
         })
     }
 
-    /// Keep the structural stage rules in one place. A case may also tell us
-    /// the bits at that stage; a disabled register has no such bit guarantee.
-    fn join(
-        &self,
-        rule: Join<'_>,
-        left: TimedValue,
-        right: TimedValue,
-    ) -> Result<TimedValue, String> {
-        if matches!(rule, Join::Select(_)) && self.case.is_some() && right.known.is_some() {
-            // Both arms were proved to produce the same constant. The mux
-            // select cannot change the result, even if it is from another
-            // stage.
-            return Ok(right);
-        }
-        let stage = rule.apply(left.stage, right.stage)?;
-        let known = match rule {
-            Join::Register(name)
-                if right.boolean() == Some(true) && !self.reset_registers.contains(name) =>
-            {
-                left.known
-            }
-            Join::Guards => match (left.boolean(), right.boolean()) {
-                (Some(a), Some(b)) => Some(IrValue::bool(a && b)),
-                _ => None,
-            },
-            Join::Branches(_) if left.known.is_some() && left.known == right.known => left.known,
-            Join::Selected(_) | Join::Select(_) => right.known,
-            _ => None,
-        };
-        Ok(TimedValue { stage, known })
-    }
-
     /// Choose only a statically known arm. The selector still meets the
     /// selected data at the mux, so a stage-0 opcode cannot select stage-1
     /// data.
@@ -552,74 +504,63 @@ impl<'a> StageChecker<'a> {
         fields: Vec<usize>,
     ) -> Result<(), String> {
         let subject = walk.values.last().expect("selector evaluated");
-        let (kind, selected, arms): (&'static str, Option<&TypedExpr>, Vec<&TypedExpr>) =
-            match &expr.kind {
-                K::If {
-                    then_value,
-                    else_value,
-                    ..
-                } => {
-                    let selected = subject.boolean().map(|bit| {
-                        if bit {
-                            then_value.as_ref()
-                        } else {
-                            else_value.as_ref()
-                        }
-                    });
-                    (
-                        "if",
-                        selected,
-                        vec![then_value.as_ref(), else_value.as_ref()],
-                    )
+        match &expr.kind {
+            K::If {
+                then_value,
+                else_value,
+                ..
+            } => {
+                if same_value(then_value, else_value) {
+                    // `if en { q } else { q }` is just q.
+                    walk.values.pop();
+                    walk.pending.push(Step::Expr(then_value, scope, fields));
+                } else if let Some(bit) = subject.boolean() {
+                    let value = if bit { then_value } else { else_value };
+                    walk.schedule([
+                        Step::Expr(value, scope, fields),
+                        Step::Join(Join::Selected("if")),
+                    ]);
+                } else {
+                    walk.schedule([
+                        Step::Expr(then_value, scope, fields.clone()),
+                        Step::Expr(else_value, scope, fields),
+                        Step::Join(Join::Branches("if")),
+                        Step::Join(Join::Select("if")),
+                    ]);
                 }
-                K::Match {
-                    subject: source,
-                    arms,
-                } => {
-                    let mut selected = None;
-                    if let Some(value) = &subject.known {
-                        'find: for arm in arms {
-                            for pattern in &arm.patterns {
-                                if pattern.matches_value(value, &source.ty)? {
-                                    selected = Some(&arm.value);
-                                    break 'find;
-                                }
-                            }
-                        }
-                        if selected.is_none() {
-                            return Err("stage case has no matching arm".into());
-                        }
-                    }
-                    (
-                        "match",
-                        selected,
-                        arms.iter().map(|arm| &arm.value).collect(),
-                    )
-                }
-                _ => unreachable!("choose follows an if or match selector"),
-            };
-        if let Some(&first) = arms.first()
-            && arms.iter().all(|other| same_value(first, other))
-        {
-            // `match en { true => q, false => q }` is just q. There is no
-            // selection dependency to align with en.
-            walk.values.pop();
-            walk.pending.push(Step::Expr(first, scope, fields));
-            return Ok(());
-        }
-        if let Some(value) = selected {
-            walk.schedule([
-                Step::Expr(value, scope, fields),
-                Step::Join(Join::Selected(kind)),
-            ]);
-        } else {
-            walk.pending.push(Step::Join(Join::Select(kind)));
-            for (index, value) in arms.into_iter().enumerate().rev() {
-                if index != 0 {
-                    walk.pending.push(Step::Join(Join::Branches(kind)));
-                }
-                walk.pending.push(Step::Expr(value, scope, fields.clone()));
             }
+            K::Match {
+                subject: source,
+                arms,
+            } => {
+                let selected = subject
+                    .known
+                    .as_ref()
+                    .map(|value| selected_match_arm(arms, value, &source.ty))
+                    .transpose()?;
+                if let Some(first) = arms.first()
+                    && arms.iter().all(|arm| same_value(&first.value, &arm.value))
+                {
+                    // `match en { true => q, false => q }` is just q.
+                    walk.values.pop();
+                    walk.pending.push(Step::Expr(&first.value, scope, fields));
+                } else if let Some(value) = selected {
+                    walk.schedule([
+                        Step::Expr(value, scope, fields),
+                        Step::Join(Join::Selected("match")),
+                    ]);
+                } else {
+                    walk.pending.push(Step::Join(Join::Select("match")));
+                    for (index, arm) in arms.iter().enumerate().rev() {
+                        if index != 0 {
+                            walk.pending.push(Step::Join(Join::Branches("match")));
+                        }
+                        walk.pending
+                            .push(Step::Expr(&arm.value, scope, fields.clone()));
+                    }
+                }
+            }
+            _ => unreachable!("choose follows an if or match selector"),
         }
         Ok(())
     }
@@ -645,7 +586,11 @@ impl<'a> StageChecker<'a> {
                 Step::Choose(expr, scope, fields) => self.choose(&mut walk, expr, scope, fields)?,
                 Step::Unary(expr) => {
                     let value = walk.values.pop().expect("unary operand evaluated");
-                    let known = self.fold_operation(expr, &[&value])?;
+                    let known = self
+                        .case
+                        .as_ref()
+                        .expect("case unary step")
+                        .fold_operation(expr, &[&value])?;
                     walk.values.push(TimedValue {
                         stage: value.stage,
                         known,
@@ -654,7 +599,8 @@ impl<'a> StageChecker<'a> {
                 Step::Binary(expr) => {
                     let right = walk.values.pop().expect("right operand evaluated");
                     let left = walk.values.pop().expect("left operand evaluated");
-                    walk.values.push(self.binary(expr, left, right)?);
+                    let case = self.case.as_ref().expect("case binary step");
+                    walk.values.push(case.binary(expr, left, right)?);
                 }
                 Step::Aggregate(count) => walk.finish_aggregate(count, self.case.is_some())?,
                 Step::Guard(scope) => {
@@ -679,7 +625,11 @@ impl<'a> StageChecker<'a> {
                 Step::Join(rule) => {
                     let right = walk.values.pop().expect("right operand evaluated");
                     let left = walk.values.pop().expect("left operand evaluated");
-                    walk.values.push(self.join(rule, left, right)?);
+                    let value = match &self.case {
+                        Some(case) => case.join(rule, left, right)?,
+                        None => TimedValue::new(rule.apply(left.stage, right.stage)?),
+                    };
+                    walk.values.push(value);
                 }
                 Step::SaveRead(assignment, fields) => {
                     let stage = walk.values.last().expect("assignment evaluated").clone();
@@ -820,8 +770,13 @@ impl<'a> StageChecker<'a> {
                     walk.aggregate(members.iter().map(operand));
                 }
             }
-            K::Binary { left, right, .. } => {
-                walk.schedule([operand(left), operand(right), Step::Binary(expr)]);
+            K::Binary { op, left, right } => {
+                let combine = if self.case.is_some() {
+                    Step::Binary(expr)
+                } else {
+                    Step::Join(Join::Operator(*op))
+                };
+                walk.schedule([operand(left), operand(right), combine]);
             }
             K::If {
                 condition,
@@ -849,6 +804,22 @@ impl<'a> StageChecker<'a> {
         }
         Ok(())
     }
+}
+
+/// Find the first source-ordered match arm for this concrete case.
+fn selected_match_arm<'a>(
+    arms: &'a [TypedMatchArm],
+    value: &IrValue,
+    ty: &Type,
+) -> Result<&'a TypedExpr, String> {
+    for arm in arms {
+        for pattern in &arm.patterns {
+            if pattern.matches_value(value, ty)? {
+                return Ok(&arm.value);
+            }
+        }
+    }
+    Err("stage case has no matching arm".into())
 }
 
 /// Recognize identical leaves without proving arbitrary expressions equivalent.
