@@ -45,8 +45,16 @@ impl<'m> Declarations<'m> {
             }
             declare(&mut names, name)?;
         }
-        if !f.type_params.is_empty() {
-            validate_inference_sources(&f.type_params, &f.params, &f.callback_params)?;
+        let needs_result_type = !f.type_params.is_empty()
+            && validate_inference_sources(&f.type_params, &f.params, &f.callback_params, None)
+                .is_err();
+        if needs_result_type {
+            validate_inference_sources(
+                &f.type_params,
+                &f.params,
+                &f.callback_params,
+                Some(&f.result),
+            )?;
         }
         let mut last = None;
         for p in &f.value_parametrics {
@@ -84,6 +92,36 @@ impl<'m> Declarations<'m> {
         }
         for p in &f.params {
             declare(&mut names, &p.name)?;
+        }
+        if needs_result_type {
+            self.result_context
+                .insert(&f.name, super::ResultContext::TypeParameter);
+        } else if !f.value_parametrics.is_empty() {
+            // The specialization binds missing dimensions from data arguments
+            // before it checks callback signatures.
+            let mut dimensions = BTreeSet::new();
+            for param in &f.params {
+                super::type_dependencies(
+                    &param.ty,
+                    |_, _| {},
+                    |expr| {
+                        if let Expr::Name(name) = expr {
+                            dimensions.insert(name.as_str());
+                        }
+                    },
+                );
+            }
+            if let Some(formal) = f
+                .value_parametrics
+                .iter()
+                .rev()
+                .find(|p| p.default.is_none() && !dimensions.contains(p.name.as_str()))
+            {
+                self.result_context.insert(
+                    &f.name,
+                    super::ResultContext::ExplicitValues(formal.index + 1),
+                );
+            }
         }
         self.value_template_callbacks
             .insert(&f.name, callback_indices);
@@ -408,9 +446,9 @@ impl<'f> InferredBindings<'f> {
 }
 
 /// A data operand may already have a type from inference or from map's element.
-struct DataArgument<'e> {
-    source: Option<&'e Expr>,
-    checked: Option<TypedExpr>,
+enum DataArgument<'e> {
+    Source(&'e Expr),
+    Checked(TypedExpr),
 }
 
 /// Earlier explicit formals stay in declaration scope while the caller
@@ -652,37 +690,25 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         f: &'m Function,
         actuals: &[Expr],
         args: &[Expr],
+        expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         for arg in args {
             crate::infer_literal::check_argument_array_sizes(arg)?;
         }
-        let instantiate = |checker: &mut Self, args: &[&Expr]| {
-            let args = args
-                .iter()
-                .map(|&expr| DataArgument {
-                    source: Some(expr),
-                    checked: None,
-                })
-                .collect();
-            checker.instantiate_value_function(f, actuals, args)
-        };
         self.with_parametric_context(|checker| {
-            if f.type_params.is_empty() {
-                let sources: Vec<_> = args.iter().collect();
-                return checker.with_scoped_results(&sources, instantiate);
-            }
             checker.with_scope_aliases(|checker| {
-                // Preserve scoped aggregate members and branch results until
-                // both their type evidence and the final context are known.
+                // Keep branch-local and aggregate-member bindings visible
+                // through both witness collection and application of the final
+                // signature.
                 let prepared = args
                     .iter()
                     .map(|expr| checker.prepare_value(expr))
                     .collect::<Result<Vec<_>, _>>()?;
-                let sources = prepared
+                let args = prepared
                     .iter()
-                    .map(|expr| expr.as_ref())
-                    .collect::<Vec<_>>();
-                instantiate(checker, &sources)
+                    .map(|expr| DataArgument::Source(expr.as_ref()))
+                    .collect();
+                checker.instantiate_value_function(f, actuals, args, expected)
             })
         })
     }
@@ -702,10 +728,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let (ty, kind) = self.instantiate_value_function(
             f,
             actuals,
-            vec![DataArgument {
-                source: None,
-                checked: Some(element),
-            }],
+            vec![DataArgument::Checked(element)],
+            None,
         )?;
         Ok(TypedExpr { ty, kind })
     }
@@ -910,19 +934,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .cache_value_signature(f, supplied, signature)
     }
 
-    /// Preserve DSLX's source-order dimension inference. An unsized scalar
-    /// can wait for later evidence. A constructor supplies the type inferred
-    /// for its members when this argument needs to bind a width.
-    fn infer_dimension_input(
-        &mut self,
-        formal: &Type,
-        expr: &Expr,
-        inferred: &mut InferredBindings<'_>,
-    ) -> Result<Option<TypedExpr>, String> {
-        inferred.literal_lengths(formal, expr)?;
-        self.dimension_witness(formal, expr, inferred, /* tuple_member= */ false)
-    }
-
     /// An unsized scalar in a tuple or struct supplies its minimum width.
     /// An unsized scalar passed directly to a function can wait for context.
     fn dimension_witness(
@@ -982,30 +993,209 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         self.infer_input(formal, expr, types, InputPattern::Function(witness))
     }
 
-    /// Infer type variables from data and callback results before applying
-    /// the resulting signature to contextual literals and the specialized body.
-    fn instantiate_type_function(
+    /// Gather dimension witnesses from the same field across array rows or
+    /// conditional arms. Other fields receive the completed signature later.
+    fn dimension_input_group<'e>(
         &mut self,
-        f: &'m Function,
-        actuals: &[Expr],
-        mut args: Vec<DataArgument<'_>>,
-    ) -> Result<(Type, K), String> {
-        let mut types = Bindings::new(&f.type_params);
-        let mut inferred = InferredBindings::new(&f.value_parametrics, actuals.len());
-        let mut inputs = Vec::with_capacity(args.len());
-        for (arg, param) in args.iter_mut().zip(&f.params) {
-            let input = match (arg.source, arg.checked.take()) {
-                (Some(expr), _) => {
-                    inferred.literal_lengths(&param.ty, expr)?;
-                    self.infer_type_input(
-                        &param.ty,
+        formal: &Type,
+        exprs: &[&'e Expr],
+        inferred: &mut InferredBindings<'_>,
+        aggregate_member: bool,
+    ) -> Result<Vec<Input<'e>>, String> {
+        if exprs.is_empty() || !inferred.needs_witness(formal) {
+            return Ok(exprs
+                .iter()
+                .map(|&expr| Input::Contextual {
+                    expr,
+                    prepared: None,
+                })
+                .collect());
+        }
+        if exprs
+            .iter()
+            .any(|expr| matches!(expr, Expr::If { .. } | Expr::Match { .. }))
+            && exprs.iter().any(|expr| super::has_aggregate_literal(expr))
+        {
+            let (selectors, branches) = self.result_branches(exprs)?;
+            let mut inputs = self
+                .dimension_input_group(formal, &branches, inferred, aggregate_member)?
+                .into_iter();
+            return Ok(exprs
+                .iter()
+                .zip(selectors)
+                .map(|(&expr, selector)| {
+                    let count = match expr {
+                        Expr::If { .. } => 2,
+                        Expr::Match { arms, .. } => arms.len(),
+                        _ => return inputs.next().expect("one input for an unbranched operand"),
+                    };
+                    Input::Branches {
                         expr,
-                        &mut types,
-                        &mut inferred,
-                        /* tuple_member= */ false,
-                    )?
+                        selector: Some(selector),
+                        results: inputs.by_ref().take(count).collect(),
+                    }
+                })
+                .collect());
+        }
+        if let Type::Tuple(fields) = formal
+            && let Some(rows) = exprs
+                .iter()
+                .map(|expr| match expr {
+                    Expr::Tuple(items) if items.len() == fields.len() => Some(items),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        {
+            let mut members: Vec<Vec<Input>> = rows
+                .iter()
+                .map(|_| Vec::with_capacity(fields.len()))
+                .collect();
+            for (index, field) in fields.iter().enumerate() {
+                let column = rows.iter().map(|row| &row[index]).collect::<Vec<_>>();
+                let inputs = self.dimension_input_group(
+                    field, &column, inferred, /* aggregate_member= */ true,
+                )?;
+                for (row, input) in members.iter_mut().zip(inputs) {
+                    row.push(input);
                 }
-                (None, Some(value)) => {
+            }
+            return Ok(exprs
+                .iter()
+                .zip(members)
+                .map(|(&expr, members)| Input::Aggregate {
+                    expr,
+                    members,
+                    charged_fill: 0,
+                })
+                .collect());
+        }
+        if let Type::Array { element, .. } | Type::ParametricArray { element, .. } = formal
+            && let Some(rows) = exprs
+                .iter()
+                .map(|expr| expr.unannotated_array())
+                .collect::<Option<Vec<_>>>()
+        {
+            if let Type::ParametricArray { size, .. } = formal {
+                for (row, fill) in &rows {
+                    if !fill && !row.is_empty() {
+                        inferred.bind_size(size, row.len(), WitnessType::Exact)?;
+                    }
+                }
+            }
+            let column = rows
+                .iter()
+                .flat_map(|(items, _)| items.iter())
+                .collect::<Vec<_>>();
+            let mut inputs = self
+                .dimension_input_group(
+                    element, &column, inferred, /* aggregate_member= */ true,
+                )?
+                .into_iter();
+            return Ok(exprs
+                .iter()
+                .zip(rows)
+                .map(|(&expr, (row, _))| {
+                    if row.is_empty() {
+                        // The complete element type is needed to materialize an
+                        // empty array.
+                        Input::Contextual {
+                            expr,
+                            prepared: None,
+                        }
+                    } else {
+                        Input::Aggregate {
+                            expr,
+                            members: inputs.by_ref().take(row.len()).collect(),
+                            charged_fill: 0,
+                        }
+                    }
+                })
+                .collect());
+        }
+        let mut needs_sibling = true;
+        for expr in exprs {
+            if !crate::infer_literal::requires_sibling_type(
+                expr,
+                self.common_widths(),
+                &|name, count| self.call_needs_result(name, count),
+            )? {
+                needs_sibling = false;
+                break;
+            }
+        }
+        if needs_sibling {
+            return Ok(exprs
+                .iter()
+                .map(|&expr| Input::Contextual {
+                    expr,
+                    prepared: None,
+                })
+                .collect());
+        }
+        if let [expr] = exprs {
+            let witness = self.dimension_witness(formal, expr, inferred, aggregate_member)?;
+            return Ok(vec![Input::Contextual {
+                expr,
+                prepared: witness,
+            }]);
+        }
+        let witnesses = self.infer_constructors(exprs, /* infer_literal_widths= */ true)?;
+        let mut witnesses = witnesses.into_iter().flatten().peekable();
+        if let Some(value) = witnesses.peek() {
+            // Sibling checking has given the entire column one type.
+            inferred.infer(formal, &value.ty, self.structs, self.resolver)?;
+        }
+        Ok(exprs
+            .iter()
+            .map(|&expr| Input::Contextual {
+                expr,
+                prepared: witnesses.next(),
+            })
+            .collect())
+    }
+
+    /// Check each data argument for witnesses in source order, retaining its
+    /// checked leaves for application of the complete function signature.
+    fn infer_function_inputs<'e>(
+        &mut self,
+        f: &Function,
+        args: Vec<DataArgument<'e>>,
+        types: &mut Bindings,
+        inferred: &mut InferredBindings<'_>,
+    ) -> Result<Vec<Input<'e>>, String> {
+        let mut inputs = Vec::with_capacity(args.len());
+        for (arg, param) in args.into_iter().zip(&f.params) {
+            let input = match arg {
+                DataArgument::Source(expr) => {
+                    inferred.literal_lengths(&param.ty, expr)?;
+                    let mut input = self
+                        .dimension_input_group(
+                            &param.ty,
+                            &[expr],
+                            inferred,
+                            /* aggregate_member= */ false,
+                        )?
+                        .pop()
+                        .expect("one input per argument");
+                    if !f.type_params.is_empty() {
+                        // Dimension witnesses share a column; type parameters
+                        // bind in the original order of the caller's rows and
+                        // fields.
+                        input.visit_leaves(&param.ty, &mut |formal, leaf| {
+                            if let Input::Contextual { expr, prepared } = leaf {
+                                *leaf = self.infer_input(
+                                    formal,
+                                    expr,
+                                    types,
+                                    InputPattern::Function(prepared.take()),
+                                )?;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    input
+                }
+                DataArgument::Checked(value) => {
                     types.infer_source_type(
                         &param.ty,
                         &value.ty,
@@ -1015,17 +1205,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     inferred.infer(&param.ty, &value.ty, self.structs, self.resolver)?;
                     Input::Checked { expr: None, value }
                 }
-                (None, None) => unreachable!("map supplies a typed argument"),
             };
             inferred.finish_argument();
             inputs.push(input);
         }
-        self.infer_input_groups(&mut inputs, &f.params, &mut types, &format!("'{}'", f.name))?;
-        let (types, targets) = self.infer_explicit_formals(f, types, actuals, &mut inferred)?;
-        let bound = self.specialized_signature(f, types, inferred.values)?;
+        Ok(inputs)
+    }
+
+    /// Apply the bound signature to remaining operands and reuse the witnesses.
+    fn finish_function_inputs(
+        &mut self,
+        f: &Function,
+        inputs: Vec<Input>,
+        params: &[Param],
+    ) -> Result<Vec<TypedExpr>, String> {
         let mut checked = Vec::with_capacity(inputs.len());
-        for ((input, arg), param) in inputs.into_iter().zip(args).zip(&bound.interface.params) {
-            if let Some(expr) = arg.source {
+        for (input, param) in inputs.into_iter().zip(params) {
+            if let Some(expr) = input.source() {
                 super::check_argument_widths(
                     expr,
                     &param.ty,
@@ -1038,6 +1234,33 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     format!("argument '{}', call to '{}': {e}", param.name, f.name)
                 })?);
         }
+        Ok(checked)
+    }
+
+    /// Infer type variables from the result context, data and callbacks before
+    /// checking contextual arguments and the specialized body.
+    fn instantiate_type_function(
+        &mut self,
+        f: &'m Function,
+        actuals: &[Expr],
+        args: Vec<DataArgument<'_>>,
+        expected: Option<&Type>,
+        mut inferred: InferredBindings<'_>,
+    ) -> Result<(Type, K), String> {
+        let mut types = Bindings::new(&f.type_params);
+        if let Some(result) = expected {
+            types.infer_source_type(
+                &f.result,
+                result,
+                self.structs,
+                /* contextual_projection= */ false,
+            )?;
+        }
+        let mut inputs = self.infer_function_inputs(f, args, &mut types, &mut inferred)?;
+        self.infer_input_groups(&mut inputs, &f.params, &mut types, &format!("'{}'", f.name))?;
+        let (types, targets) = self.infer_explicit_formals(f, types, actuals, &mut inferred)?;
+        let bound = self.specialized_signature(f, types, inferred.values)?;
+        let checked = self.finish_function_inputs(f, inputs, &bound.interface.params)?;
         let result = bound.interface.result.clone();
         let name = self.intern_function(f, targets, Some(bound))?;
         Ok((
@@ -1222,7 +1445,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         &mut self,
         f: &'m Function,
         actuals: &[Expr],
-        mut args: Vec<DataArgument<'_>>,
+        args: Vec<DataArgument<'_>>,
+        expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         if self.function_registry.is_none() {
             return Err(format!(
@@ -1238,10 +1462,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 args.len()
             ));
         }
-        if !f.type_params.is_empty() {
-            return self.instantiate_type_function(f, actuals, args);
-        }
         let mut inferred = InferredBindings::new(&f.value_parametrics, actuals.len());
+        if let Some(result) = expected {
+            inferred.infer(&f.result, result, self.structs, self.resolver)?;
+            inferred.finish_argument();
+        }
+        if !f.type_params.is_empty() {
+            return self.instantiate_type_function(f, actuals, args, expected, inferred);
+        }
         if !actuals.is_empty() {
             // Check explicit annotations before instantiating the callee.
             // Preceding formals hide module declarations even though none of
@@ -1267,15 +1495,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 inferred.values[i] = Some(BoundParametricValue { ty, value });
             }
         }
-        for (arg, param) in args.iter_mut().zip(&f.params) {
-            if let Some(expr) = arg.source {
-                arg.checked = self.infer_dimension_input(&param.ty, expr, &mut inferred)?;
-            } else if let Some(value) = &arg.checked {
-                inferred.infer(&param.ty, &value.ty, self.structs, self.resolver)?;
-            }
-            inferred.finish_argument();
-        }
-        let bound = self.specialized_signature(f, Bindings::new(&[]), inferred.values)?;
+        let mut types = Bindings::new(&[]);
+        let inputs = self.infer_function_inputs(f, args, &mut types, &mut inferred)?;
+        let bound = self.specialized_signature(f, types, inferred.values)?;
         let interface = &bound.interface;
         let mut targets = Vec::new();
         for (i, formal) in f.parametric_bindings().enumerate() {
@@ -1300,30 +1522,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 targets.push(target);
             }
         }
-        let mut checked = Vec::new();
-        for (arg, param) in args.into_iter().zip(&interface.params) {
-            let value = match (arg.source, arg.checked) {
-                (Some(expr), Some(value)) if compatible(&param.ty, &value.ty) => {
-                    super::check_argument_widths(
-                        expr,
-                        &param.ty,
-                        Some(&self.inferred_bindings),
-                        Some(&|| self.zero_calls_function()),
-                    )?;
-                    value
-                }
-                (Some(expr), _) => self.dslx_argument(expr, &param.ty)?,
-                (None, Some(value)) if compatible(&param.ty, &value.ty) => value,
-                (None, Some(value)) => {
-                    return Err(format!(
-                        "argument '{}' expects {}, got {}",
-                        param.name, param.ty, value.ty
-                    ));
-                }
-                (None, None) => unreachable!("map supplies a typed argument"),
-            };
-            checked.push(value);
-        }
+        let checked = self.finish_function_inputs(f, inputs, &interface.params)?;
         let result = interface.result.clone();
         let name = self.intern_function(f, targets, Some(bound))?;
         Ok((

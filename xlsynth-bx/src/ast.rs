@@ -372,7 +372,8 @@ impl MatchPattern {
 pub struct Function {
     pub name: String,
     pub public: bool,
-    /// Type parameters inferred from data inputs and callback results.
+    /// Type parameters inferred from data inputs, callback results, or the
+    /// expected return type.
     pub type_params: Vec<String>,
     /// Named, compile-time function parameters in declaration order.
     pub callback_params: Vec<CallbackParam>,

@@ -179,7 +179,7 @@ impl Dependencies {
                     pending.extend(args);
                 }
                 K::Tuple(items) | K::Array(items) => pending.extend(items),
-                K::Index { value, index }
+                K::Index { value, index, .. }
                 | K::WidthSlice {
                     value,
                     start: index,

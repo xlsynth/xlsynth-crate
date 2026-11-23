@@ -399,14 +399,40 @@ struct ConstantContext<'a> {
     /// values outside loops as well as in their bodies.
     charge_values: bool,
     functions: Option<&'a mut ConstantFunctions>,
-    assertion_cache: Option<&'a mut AssertionCache>,
+    temporary_bindings: Option<&'a mut TemporaryConstantBindings>,
 }
 
-/// Save changes to outer bindings while an assertion temporarily enables
-/// helper execution. Ordinary BX expressions keep their original cache state.
-struct AssertionCache {
+/// Outer bindings to restore after a constexpr expression temporarily enables
+/// helper execution.
+struct TemporaryConstantBindings {
     first_local: usize,
     saved: Vec<(String, ConstantBinding)>,
+    start: SaveBindingReplays,
+}
+
+/// Ordinary replay results remain reusable until an evaluation needs a
+/// capability specific to its constexpr consumer.
+enum SaveBindingReplays {
+    All,
+    AfterHelperCall(usize),
+    AfterResetOnlyBinding,
+}
+
+impl TemporaryConstantBindings {
+    fn new(first_local: usize) -> Self {
+        Self {
+            first_local,
+            saved: Vec::new(),
+            start: SaveBindingReplays::All,
+        }
+    }
+
+    /// Restore the bindings visible to ordinary BX expressions.
+    fn restore(self, names: &mut BTreeMap<String, ConstantBinding>) {
+        for (name, binding) in self.saved.into_iter().rev() {
+            names.insert(name, binding);
+        }
+    }
 }
 
 impl ConstantContext<'_> {
@@ -415,11 +441,29 @@ impl ConstantContext<'_> {
             Some(binding) => self.names.insert(name.to_owned(), binding),
             None => self.names.remove(name),
         };
-        if let Some(cache) = &mut self.assertion_cache
+        if let Some(cache) = &mut self.temporary_bindings
             && definition < cache.first_local
             && let Some(previous) = previous
         {
-            cache.saved.push((name.to_owned(), previous));
+            let save = match cache.start {
+                SaveBindingReplays::All => true,
+                SaveBindingReplays::AfterHelperCall(before) => self
+                    .functions
+                    .as_ref()
+                    .is_some_and(|functions| functions.calls > before),
+                SaveBindingReplays::AfterResetOnlyBinding => matches!(
+                    previous,
+                    ConstantBinding::DeferredCall {
+                        parametric_inputs: false,
+                        ..
+                    }
+                ),
+            };
+            if save {
+                // Subsequent replays may read the temporarily available value.
+                cache.start = SaveBindingReplays::All;
+                cache.saved.push((name.to_owned(), previous));
+            }
         }
     }
 }
@@ -664,9 +708,9 @@ struct Declarations<'a> {
     /// A module with assertions may execute any visible pure helper at compile
     /// time.
     has_const_assert: bool,
-    /// At least one callee was instantiated while evaluating an erased
-    /// assertion.
-    assertion_instantiated_callee: Cell<bool>,
+    /// A compile-time assertion or register reset instantiated a callee
+    /// whose body may have no hardware users.
+    constexpr_instantiated_callee: Cell<bool>,
     /// Clock requirements of all defined and external blocks, including
     /// templates.
     block_clocks: BTreeMap<&'a str, bool>,
@@ -679,12 +723,21 @@ struct Declarations<'a> {
     constants: BTreeMap<&'a str, CheckedConstant>,
     functions: BTreeMap<&'a str, FunctionInterface>,
     function_templates: BTreeMap<&'a str, &'a Function>,
+    /// Factories whose arguments alone cannot determine a specialization.
+    result_context: BTreeMap<&'a str, ResultContext>,
     /// Value-template source types are borrowed from function_templates until
     /// instantiation. Only their callable lookup table is needed beforehand.
     value_template_callbacks: BTreeMap<&'a str, BTreeMap<String, usize>>,
     has_block_value_parametrics: bool,
     blocks: BTreeMap<&'a str, BlockInterface>,
     templates: BTreeMap<&'a str, BlockTemplate<'a>>,
+}
+
+/// Which calls to a function need a sibling or enclosing result type.
+enum ResultContext {
+    TypeParameter,
+    /// Supplying this many explicit arguments binds every result-only value.
+    ExplicitValues(usize),
 }
 
 /// A transparent alias and the cost of copying its expanded type at a use site.
@@ -1178,7 +1231,6 @@ pub(crate) fn is_dslx_builtin_value(name: &str) -> bool {
         || matches!(
             name,
             "all_ones!"
-                | "zero!"
                 | "map"
                 | "decode"
                 | "bit_count"
@@ -2316,7 +2368,7 @@ pub(crate) fn check_sources_with_tests(
             .collect();
         checked.resolve_pure_test_dependencies(harnesses);
     }
-    checked.imports = if linked.is_some() || declarations.assertion_instantiated_callee.get() {
+    checked.imports = if linked.is_some() || declarations.constexpr_instantiated_callee.get() {
         let calls = checked.retain_reachable_dependencies();
         if linked.is_some() {
             checked.restore_extern_names();
@@ -2556,7 +2608,7 @@ struct BodyChecker<'a, 'm> {
     /// Evaluate constexpr builtins and parametric actuals under the current
     /// predicate's rules when they occur inside an assertion.
     dslx_constant_use: ConstantUse,
-    assertion_cache: Option<AssertionCache>,
+    assertion_cache: Option<TemporaryConstantBindings>,
     /// Type and specialization operands erased from the current expression.
     assert_operands: Option<Vec<TypedExpr>>,
     /// Materialize only constexpr bindings while checking an erased
@@ -2594,6 +2646,9 @@ struct BodyChecker<'a, 'm> {
     constants: BTreeMap<String, ConstantBinding>,
     /// Earlier local functions available to a module constant initializer.
     constant_functions: Option<ConstantFunctions>,
+    /// Share pure call results across register initializers without enabling
+    /// helper evaluation for ordinary expressions in the block.
+    reset_functions: Option<ConstantFunctions>,
     /// Bindings whose entire initializer depends only on compile-time inputs.
     constexpr_names: BTreeSet<String>,
     /// Minimum widths of unannotated bindings and their aggregate members.
@@ -2645,7 +2700,22 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Generated bodies share their registry's evaluation budget. Ordinary
     /// source bodies own independent budgets as they do for unrolling.
-    fn constant_context(&mut self) -> ConstantContext<'_> {
+    fn constant_context(&mut self, register_reset: bool) -> ConstantContext<'_> {
+        let charge_values = self.constant_functions.is_some() || self.function_spec.is_some();
+        let functions =
+            if register_reset && let Some(registry) = &self.function_registry {
+                if let Some(active) = self.constant_functions.as_mut() {
+                    // A constexpr builtin may have enabled ordinary calls since
+                    // an earlier reset populated the block's reset cache.
+                    Some(self.reset_functions.as_mut().unwrap_or(active))
+                } else {
+                    Some(self.reset_functions.get_or_insert_with(|| {
+                        ConstantFunctions::new(Rc::clone(&registry.available))
+                    }))
+                }
+            } else {
+                self.constant_functions.as_mut()
+            };
         let budgets = match (
             &mut self.function_registry,
             self.function_spec,
@@ -2667,9 +2737,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 || self.decls.has_block_value_parametrics,
             statements: &self.statements,
             budgets,
-            charge_values: self.constant_functions.is_some() || self.function_spec.is_some(),
-            functions: self.constant_functions.as_mut(),
-            assertion_cache: self.assertion_cache.as_mut(),
+            charge_values,
+            functions,
+            temporary_bindings: self.assertion_cache.as_mut(),
         }
     }
 
@@ -2681,8 +2751,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Option<ConstantBinding> {
         let assertion_inputs = constexpr_inputs
             && (!self.preserve_assert_inputs || !value.needs_dslx_inputs(&self.constants));
+        // A block may later use this let in a register's constant initializer.
+        let may_initialize_register = self.kind == BodyKind::Block;
         let preserve_assert_inputs = self.preserve_assert_inputs;
-        let mut ctx = self.constant_context();
+        let mut ctx = self.constant_context(/* register_reset= */ false);
         let parametric_ready = constexpr_inputs || !ctx.check_parametric_inputs;
         let deferred = ConstantBinding::Deferred(ctx.statements.len());
         // A projected wide scalar owns its limbs in the speculative cache.
@@ -2729,9 +2801,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     assertion_inputs && !v.needs_dslx_replay,
                 )
             }),
-            Err(ConstantFailure::NeedsFunctions) if !ctx.check_parametric_inputs => {
-                preserve_assert_inputs
-                    .then_some(ConstantBinding::AssertionDeferred(ctx.statements.len()))
+            Err(ConstantFailure::NeedsFunctions) => {
+                (ctx.check_parametric_inputs || may_initialize_register || preserve_assert_inputs)
+                    .then_some(ConstantBinding::DeferredCall {
+                        definition: ctx.statements.len(),
+                        parametric_inputs: ctx.check_parametric_inputs,
+                    })
             }
             Err(_) => Some(deferred),
         }
@@ -2742,14 +2817,42 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         self.checked_constant_for(value, ConstantUse::Bx)
     }
 
-    /// Replay required lets on an explicit stack and cache which uses the
-    /// evaluated definition satisfies.
     fn checked_constant_for(
         &mut self,
         value: &TypedExpr,
         usage: ConstantUse,
     ) -> Result<Option<IrValue>, String> {
-        let mut ctx = self.constant_context();
+        Self::fold_required_constant(
+            self.constant_context(/* register_reset= */ false),
+            value,
+            usage,
+        )
+    }
+
+    /// Evaluate a reset with its block's pure-call cache while preserving the
+    /// ordinary constant bindings used to check subsequent runtime expressions.
+    fn checked_reset_constant(&mut self, value: &TypedExpr) -> Result<Option<IrValue>, String> {
+        let mut saved = TemporaryConstantBindings::new(self.statements.len());
+        let temporary_helpers = self.constant_functions.is_none();
+        let mut ctx = self.constant_context(/* register_reset= */ true);
+        saved.start = if temporary_helpers {
+            SaveBindingReplays::AfterHelperCall(ctx.functions.as_ref().map_or(0, |f| f.calls))
+        } else {
+            SaveBindingReplays::AfterResetOnlyBinding
+        };
+        ctx.temporary_bindings = Some(&mut saved);
+        let result = Self::fold_required_constant(ctx, value, ConstantUse::RegisterReset);
+        saved.restore(&mut self.constants);
+        result
+    }
+
+    /// Replay required lets on an explicit stack and cache which uses the
+    /// evaluated definition satisfies.
+    fn fold_required_constant(
+        mut ctx: ConstantContext<'_>,
+        value: &TypedExpr,
+        usage: ConstantUse,
+    ) -> Result<Option<IrValue>, String> {
         let mut charge_values = ctx.charge_values;
         let mut pending: Vec<usize> = Vec::new();
         loop {
@@ -2761,7 +2864,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 if ctx
                     .names
                     .get(name)
-                    .and_then(|b| b.deferred_definition(usage))
+                    .and_then(|b| b.deferred_definition(usage, ctx.functions.is_some()))
                     != Some(index)
                 {
                     pending.pop();
@@ -2793,17 +2896,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                                 true,
                                 !result.needs_dslx_replay && !expr.needs_dslx_inputs(ctx.names),
                             ),
-                            ConstantUse::Bx => ConstantBinding::folded(
-                                result.value,
-                                definition,
-                                !ctx.check_parametric_inputs || ctx.constexpr_names.contains(name),
-                                !result.needs_dslx_replay
-                                    && ctx.constexpr_names.contains(name)
-                                    && !expr.needs_dslx_inputs(ctx.names),
-                            ),
+                            ConstantUse::Bx | ConstantUse::RegisterReset => {
+                                ConstantBinding::folded(
+                                    result.value,
+                                    definition,
+                                    !ctx.check_parametric_inputs
+                                        || ctx.constexpr_names.contains(name),
+                                    !result.needs_dslx_replay
+                                        && ctx.constexpr_names.contains(name)
+                                        && !expr.needs_dslx_inputs(ctx.names),
+                                )
+                            }
                         };
                         ctx.cache_replay(name, definition, Some(binding));
-                    } else if usage != ConstantUse::Bx {
+                    } else if !usage.is_bx() {
                         // The ordinary BX constant may still have a value.
                         return Ok(None);
                     } else {
@@ -2813,7 +2919,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
                 Err(ConstantFailure::Deferred(mut earlier)) => {
                     charge_values = true;
-                    expr.deferred_inputs(ctx.names, &mut earlier, usage);
+                    expr.deferred_inputs(ctx.names, &mut earlier, usage, ctx.functions.is_some());
                     debug_assert!(
                         earlier
                             .last()
@@ -2823,7 +2929,27 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
                 // A later constexpr actual may replay the same definition
                 // with its callees available.
-                Err(ConstantFailure::NeedsFunctions) => return Ok(None),
+                Err(ConstantFailure::NeedsFunctions) => {
+                    // A speculative pass may have exhausted its budget before
+                    // reaching this helper. Remember the requirement for later
+                    // runtime uses of the same definition.
+                    if ctx.functions.is_none()
+                        && let (Some(index), Some(name)) = (definition, name)
+                    {
+                        ctx.cache_replay(
+                            name,
+                            index,
+                            Some(ConstantBinding::DeferredCall {
+                                definition: index,
+                                // This code path replayed a previously
+                                // unrestricted deferred let. Its other
+                                // consumers can still replay it.
+                                parametric_inputs: true,
+                            }),
+                        );
+                    }
+                    return Ok(None);
+                }
                 Err(ConstantFailure::InvalidEnumCast(name)) => {
                     return Err(format!(
                         "constant cast to enum '{name}' requires bits of its declared width encoding a member"
@@ -2885,6 +3011,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             values: BTreeMap::new(),
             constants: BTreeMap::new(),
             constant_functions: None,
+            reset_functions: None,
             constexpr_names: BTreeSet::new(),
             inferred_bindings: BTreeMap::new(),
             regs: BTreeMap::new(),
@@ -3422,10 +3549,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     let reset = match reset {
                         None => None,
                         Some(expr) => {
+                            let prior_callees = self.callee_specialization_count();
                             let value = self
                                 .expr(expr, Some(&ty))
                                 .map_err(|e| format!("reset of register '{name}': {e}"))?;
-                            Some(self.checked_constant(&value)?.ok_or_else(|| {
+                            if self.callee_specialization_count() > prior_callees {
+                                self.decls.constexpr_instantiated_callee.set(true);
+                            }
+                            // A reset may call a pure BX factory specialized
+                            // while checking this initializer.
+                            Some(self.checked_reset_constant(&value)?.ok_or_else(|| {
                                 format!(
                                     "reset of register '{name}' must be a compile-time constant"
                                 )
@@ -3752,7 +3885,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 self.struct_literal(application, literal.fields, literal.base, expected)
             }
             Expr::Field { value, name } => self.project_field(value, name),
-            Expr::Call { name, args } => self.function_call(name, args),
+            Expr::Call { name, args } => self.function_call(name, args, expected),
             Expr::MapBeforeUse {
                 name,
                 args,
@@ -3764,7 +3897,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         .ok_or("invalid operand syntax for the built-in map")?;
                     self.with_dslx_value_context(|checker| checker.named_array_map(args))
                 } else {
-                    self.function_call(name, args)
+                    self.function_call(name, args, expected)
                 }
             }
             Expr::ParametricCall {
@@ -3780,7 +3913,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     )?;
                     return Err(self.block_in_value_error(name));
                 }
-                self.parametric_call(name, parametrics, args)
+                self.parametric_call(name, parametrics, args, expected)
             }
             Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
                 let selector = checker.match_selector(subject, arms)?;
@@ -3921,7 +4054,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn zero_value(&mut self, ty: &Type) -> Result<(Type, K), String> {
         let ty = self.source_type(ty)?;
         if self.zero_calls_function()? {
-            self.function_call(&self.zero_binding.clone(), &[])
+            self.function_call(&self.zero_binding.clone(), &[], Some(&ty))
         } else {
             let zero = self.intrinsic_zero(&ty)?;
             Ok((ty, zero))
@@ -4095,7 +4228,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return Err("cannot index an empty array".into());
         }
         let index = self.unsigned_index(index, Some(32))?;
-        if index.has_constant_inputs(&self.constexpr_names)
+        let constant_index = index.has_constant_inputs(&self.constexpr_names);
+        if constant_index
             && let Some(value) = self.checked_constant(&index)?
             && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
                 .is_none_or(|i| i >= *size)
@@ -4110,6 +4244,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             K::Index {
                 value: Box::new(array),
                 index: Box::new(index),
+                constant_index,
             },
         ))
     }
@@ -4618,6 +4753,33 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
     }
 
+    /// Defer an invocation only when its result needs contextual evidence.
+    fn call_needs_result(&self, name: &str, explicit: usize) -> Result<bool, String> {
+        if name.strip_prefix(BUILTIN_PREFIX) == Some("zero!") {
+            return Ok(true);
+        }
+        if self.callback_index(name).is_some() {
+            return Ok(false);
+        }
+        if name == "zero!"
+            && (!self.decls.visible(name, self.function_position)
+                || !self.decls.declares_function(name) && self.resolver.lookup(name)?.is_none())
+        {
+            return Ok(true);
+        }
+        Ok(match self.decls.result_context.get(name) {
+            Some(ResultContext::TypeParameter) => true,
+            Some(ResultContext::ExplicitValues(minimum)) => explicit < *minimum,
+            None => false,
+        })
+    }
+
+    fn has_concrete_element_type(&self, expr: &Expr) -> Result<bool, String> {
+        has_concrete_element_type(expr, self.common_widths(), &|name, explicit| {
+            self.call_needs_result(name, explicit)
+        })
+    }
+
     fn common_hint(&self, items: &[&Expr]) -> Result<CommonTypeHint, String> {
         if items
             .iter()
@@ -4625,13 +4787,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         {
             for (i, item) in items.iter().enumerate() {
                 if !self.contains_inferred_aggregate(item)
-                    && has_concrete_element_type(item, self.common_widths())?
+                    && self.has_concrete_element_type(item)?
                 {
                     return Ok(CommonTypeHint::FromExpr(i));
                 }
             }
         }
-        common_type_hint(items, self.common_widths())
+        common_type_hint(items, self.common_widths(), &|name, explicit| {
+            self.call_needs_result(name, explicit)
+        })
     }
 
     /// Infer corresponding signed leaves across already evaluated aggregate
@@ -4813,7 +4977,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .collect();
         }
         let first_has_type = !self.contains_inferred_aggregate(items[0])
-            && has_concrete_element_type(items[0], self.common_widths())?;
+            && self.has_concrete_element_type(items[0])?;
         if !first_has_type
             && items
                 .iter()
@@ -5194,7 +5358,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Resolve a local or extern signature or infer an imported DSLX
     /// specialization.
-    fn function_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
+    fn function_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), String> {
         let name = self.qualified_extern(name).unwrap_or(name);
         let local = crate::bx_import::local_callee_name(name);
         let binding = local.unwrap_or(name);
@@ -5225,12 +5394,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if let Some(builtin) = name.strip_prefix(BUILTIN_PREFIX)
             && is_call_builtin(builtin)
         {
-            return self.builtin_call(builtin, args);
+            return self.builtin_call(builtin, args, expected);
         }
         let visible = self.decls.visible(name, self.function_position);
         if !visible {
             if is_call_builtin(name) && !self.has_local_name(name) {
-                return self.builtin_call(name, args);
+                return self.builtin_call(name, args, expected);
             }
             return Err(format!("function '{name}' is declared later in the module"));
         }
@@ -5244,7 +5413,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         {
             if is_call_builtin(spelling) && self.resolver.has_public_type(&subject, &function) {
                 if !visible_value {
-                    return self.builtin_call(spelling, args);
+                    return self.builtin_call(spelling, args, expected);
                 }
                 let kind = if self.resolver.is_enum_type(&subject, &function) {
                     "enum"
@@ -5294,10 +5463,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             if self.has_local_name(name) {
                 return Err(format!("'{name}' names a local value here"));
             }
-            return self.builtin_call(name, args);
+            return self.builtin_call(name, args, expected);
         }
         if self.decls.value_template_callbacks.contains_key(name) {
-            return self.parametric_call(name, &[], args);
+            return self.parametric_call(name, &[], args, expected);
         }
         let (&callee, f) = self
             .decls

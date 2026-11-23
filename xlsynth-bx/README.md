@@ -48,7 +48,7 @@ Functions and blocks can call these builtins directly.
 | Encoding and selection | `encode`, `decode<T>`, `one_hot`, `one_hot_sel`, `priority_sel`, `gate!` |
 | Extension and multiplication | `signex`, `widening_cast<T>`, `checked_cast<T>`, `smulp`, `umulp` |
 | Arrays | `array_rev`, `array_size`, `array_slice`, `zip`, `update`, `map` |
-| Typed values and shape queries | `zero!<T>()`, `all_ones!<T>()`, `bit_count<T>()`, `element_count<T>()` |
+| Typed values and shape queries | `zero!()`, `zero!<T>()`, `all_ones!<T>()`, `bit_count<T>()`, `element_count<T>()` |
 | Compile-time values | `ceillog2`, `configured_value_or` |
 
 ```text
@@ -433,7 +433,31 @@ BX emits XLS IR for runtime array operations. For an out-of-range index, IR read
 
 Pure functions use the same inferred type parameters as blocks. Both `fn id<T>(x: T) -> T { x }` and `fn id<T: type>(x: T) -> T { x }` specialize at `id(x)`. The call's data arguments bind types, including element types inside arrays and fields inside tuples. Repeated occurrences must agree on signedness and nominal record identity. `bool` and `u1` are equivalent. Give an integer a width when it is the only source for its type, as in `id(u8:1)`.
 
-Each type parameter needs an inference source in a data argument or a callback result. BX resolves named callbacks in declaration order, using the input types known at that point. In the example below, `xs` and `ys` determine `A`, `B`, and the common array length `N`. BX checks that `join` accepts those element types and infers `R` from its return type.
+A pure function can also infer a type parameter from the expected result of a call.
+For example, `let x: u8 = id(0);` binds `T` to `u8` before checking the literal.
+A generic factory needs no data argument when its caller supplies the result type.
+
+```text
+struct Packet { data: u8, valid: bool }
+fn cleared<T>() -> T { zero!() }
+
+block capture(clk, x: Packet) -> Packet {
+    reg q: Packet = cleared();
+    q := x;
+    q
+}
+```
+
+Here `Packet` determines the specialization of `cleared`, and its return type
+determines the type of `zero!()`. Writing `reg q: Packet = zero!();` directly
+works as well. Without a type from context, use `zero!<Packet>()`.
+
+A typed operand can supply the result type in `zero!() == x` or
+`cleared() == x`. BX uses the function's declared signature to choose which
+operand determines the type. When inference depends on nested calls, an
+annotation supplies the context directly, as in `let y: u8 = id(cleared());`.
+
+BX resolves named callbacks in declaration order, using the input types known at that point. In the example below, `xs` and `ys` determine `A`, `B`, and the common array length `N`. BX checks that `join` accepts those element types and infers `R` from its return type.
 
 ```text
 struct Left { x: u8 }
@@ -471,7 +495,8 @@ fn widths(x: u8) -> (u9, u16) { (resize(x), resize<8, 16>(x)) }
 
 In `resize(x)`, the input width binds `N` to 8 and the default binds `M` to 9.
 BX can infer a directly named width or array length (`u32`) and signedness
-(`bool`) from the data arguments, including tuple members and array elements.
+(`bool`) from data arguments or the expected function result, including tuple
+members and array elements. Explicit bindings and declared defaults take precedence.
 For example, `xs: xN[S][N][L]` supplies the signedness, element width, and
 array length. In a computed dimension such as `uN[N + u32:1]`, supply `N`
 explicitly, give it a default, or infer it from another parameter.

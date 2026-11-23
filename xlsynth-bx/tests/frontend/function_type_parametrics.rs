@@ -8,7 +8,8 @@ use std::{error::Error, fs};
 use tempfile::tempdir;
 use xlsynth_bx::ast::Type;
 use xlsynth_bx::{
-    ResetBehavior, check_module, check_source_with_options, lower_module, parse_module,
+    ResetBehavior, check_module, check_source_with_options, empty_package, lower_module,
+    parse_module,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
@@ -23,6 +24,205 @@ pub fn zip_with<A, B, R, F: fn(A, B) -> R, N: u32>(xs: A[N], ys: B[N]) -> R[N] {
     }(zero!<R[N]>())
 }
 "#;
+
+#[test]
+fn expected_register_type_specializes_a_library_factory() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    fs::write(
+        dir.path().join("factory.bx"),
+        "pub fn cleared<T>() -> T { zero!<T>() }",
+    )?;
+    let bx = r#"
+use factory::cleared;
+struct MyType { valid: bool, data: u8 }
+pub block capture(clk, input: MyType) -> MyType {
+    reg thing: MyType = cleared();
+    thing := input;
+    thing
+}
+"#;
+    let checked = check_source_with_options(bx, &search_paths(&[dir.path()]))?;
+    let package = lower_module(&checked, empty_package("design"), ResetBehavior::default())?;
+    let block = package.get_top_block().ok_or("missing capture block")?;
+    assert_eq!(
+        block.registers[0].reset_value,
+        Some(IrValue::parse_typed("(bits[1]:0, bits[8]:0)")?)
+    );
+    Ok(())
+}
+
+#[test]
+fn expected_result_reaches_nested_type_and_value_parametrics() -> Result<(), Box<dyn Error>> {
+    let helpers = r#"
+fn id<T>(x: T) -> T { x }
+fn pair<T>() -> (T, T) { (zero!<T>(), zero!<T>()) }
+fn width<N: u32>() -> uN[N] { N as uN[N] }
+"#;
+    let body = r#"
+let byte: u8 = id(0);
+let words: (u4[2], u4[2]) = id(pair());
+(byte, words, width())
+"#;
+    let source = format!(
+        "{helpers}{}",
+        bx_source("", "(u8, (u4[2], u4[2]), u5)", body)
+    );
+    let checked = check_module(&parse_module(&source)?)?;
+    let evaluator = BlockEvaluator::lower(&checked, &source)?;
+    assert_eq!(
+        evaluator.evaluate(&[])?,
+        IrValue::parse_typed(
+            "(bits[8]:0, ([bits[4]:0, bits[4]:0], [bits[4]:0, bits[4]:0]), bits[5]:5)"
+        )?
+    );
+    Ok(())
+}
+
+#[test]
+fn array_rows_use_bound_field_types_while_inferring_sibling_widths() -> Result<(), Box<dyn Error>> {
+    let helpers = r#"
+fn cleared<T>() -> T { zero!() }
+fn pick<T, N: u32>(rows: (T, uN[N])[2]) -> (T, u32) { (rows[u32:1].0, N) }
+fn deep<T, N: u32>(rows: ((T, T), T[0], uN[N])[1]) -> (T, u32) { (rows[u32:0].0.1, N) }
+fn widths<N: u32, M: u32>(rows: (uN[N], uN[N + u32:1], uN[M])[1]) -> (uN[N], u32) {
+    (rows[u32:0].0, M)
+}
+"#;
+    let body = r#"
+let typed: (u8, u32) = pick([(zero!(), 1), (cleared(), u16:5)]);
+let minimum: (u8, u32) = pick(if true {
+    [(cleared(), 1), (37, 255)]
+} else {
+    [(zero!(), 5), (zero!(), 0)]
+});
+let nested: (u8, u32) = deep([(cleared(), [], u12:4)]);
+let sized: (u8, u32) = widths([(zero!(), cleared(), u11:5)]);
+(typed, minimum, nested, sized)
+"#;
+    let source = format!(
+        "{helpers}{}",
+        bx_source("", "((u8, u32), (u8, u32), (u8, u32), (u8, u32))", body)
+    );
+    let checked = check_module(&parse_module(&source)?)?;
+    assert_eq!(
+        BlockEvaluator::lower(&checked, &source)?.evaluate(&[])?,
+        IrValue::parse_typed(
+            "((bits[8]:0, bits[32]:16), (bits[8]:37, bits[32]:8), (bits[8]:0, bits[32]:12), (bits[8]:0, bits[32]:11))"
+        )?
+    );
+    Ok(())
+}
+
+#[test]
+fn dimension_witnesses_defer_fields_with_default_or_explicit_bindings() -> Result<(), Box<dyn Error>>
+{
+    let helpers = r#"
+fn default_width<N: u32 = {u32:8}, M: u32>(row: (uN[N], uN[M])) -> u32 { M }
+fn shared_width<N: u32>(row: (uN[N], uN[N])) -> u32 { N }
+fn explicit_width<T, N: u32, M: u32>(rows: (T, uN[N], uN[M])[1]) -> (T, u32) {
+    (rows[u32:0].0, M)
+}
+"#;
+    let body = r#"
+let width = default_width((zero!(), u11:5));
+let row: (u8, u32) = explicit_width<8>([(zero!(), zero!(), u11:5)]);
+(width, row, shared_width((zero!(), u11:5)))
+"#;
+    let source = format!("{helpers}{}", bx_source("", "(u32, (u8, u32), u32)", body));
+    let checked = check_module(&parse_module(&source)?)?;
+    assert_eq!(
+        BlockEvaluator::lower(&checked, &source)?.evaluate(&[])?,
+        IrValue::parse_typed("(bits[32]:11, (bits[8]:0, bits[32]:11), bits[32]:11)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn dimension_witnesses_retain_each_conditional_arms_local_bindings() -> Result<(), Box<dyn Error>> {
+    let helpers = r#"
+fn pick<M: u32>(row: (u8, uN[M])) -> u32 { M + (row.1 as u32) }
+fn choose(flag: bool) -> u32 {
+    let a = u8:33;
+    let value = pick(if flag {
+        let a = u11:5;
+        (zero!(), a)
+    } else {
+        let a = u11:6;
+        (zero!(), a)
+    });
+    value + (a as u32)
+}
+"#;
+    let source = format!(
+        "{helpers}{}",
+        bx_source("flag: bool", "u32", "choose(flag)")
+    );
+    let checked = check_module(&parse_module(&source)?)?;
+    let evaluator = BlockEvaluator::lower(&checked, &source)?;
+    for (flag, expected) in [(true, 49), (false, 50)] {
+        assert_eq!(
+            evaluator.evaluate(&[IrValue::bool(flag)])?,
+            IrValue::u32(expected)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn mixed_dimension_witnesses_use_concrete_fields_in_the_callee_scope() -> Result<(), Box<dyn Error>>
+{
+    let dir = tempdir()?;
+    fs::write(
+        dir.path().join("library.bx"),
+        r#"
+struct Payload { data: u8 }
+pub fn pick<T, N: u32>(xs: (Payload, T, uN[N])[1]) -> (T, u8, u32) {
+    let row = xs[u32:0];
+    (row.1, row.0.data, N)
+}
+"#,
+    )?;
+    let helpers = r#"
+use library::pick;
+struct Payload { flag: bool }
+fn fixed<N: u32>(arg: (u8, uN[N])) -> u8 { arg.0 }
+"#;
+    let source = format!(
+        "{helpers}{}",
+        bx_source(
+            "",
+            "(u8, (u8, u8, u32))",
+            "(fixed((zero!(), u16:3)), pick([(zero!(), zero!(), u16:4)]))",
+        )
+    );
+    let checked = check_source_with_options(&source, &search_paths(&[dir.path()]))?;
+    assert_eq!(
+        BlockEvaluator::lower(&checked, &source)?.evaluate(&[])?,
+        IrValue::parse_typed("(bits[8]:0, (bits[8]:0, bits[8]:0, bits[32]:16))")?
+    );
+    Ok(())
+}
+
+#[test]
+fn pure_calls_reject_missing_and_conflicting_type_evidence() -> Result<(), Box<dyn Error>> {
+    let factories = r#"
+fn id<T>(x: T) -> T { x }
+fn cleared<T>() -> T { zero!<T>() }
+fn pair<T>() -> (T, T) { (zero!<T>(), zero!<T>()) }
+fn sized<N: u32 = {u32:4}>() -> uN[N] { N as uN[N] }
+"#;
+    for body in [
+        "let x = cleared(); u8:0",
+        "let x: u8 = id(u16:1); x",
+        "let p: (u8,u16) = pair(); p.0",
+        "sized()",
+        "sized<16>()",
+    ] {
+        let source = format!("{factories} fn sample() -> u8 {{ {body} }}");
+        assert!(check_module(&parse_module(&source)?).is_err(), "{body}");
+    }
+    Ok(())
+}
 
 #[test]
 fn library_zip_with_infers_record_inputs_result_and_length() -> Result<(), Box<dyn Error>> {
@@ -177,15 +377,14 @@ let other = ([0x80],u8:1);
         ))?
     );
 
-    for rejected in [
-        bx.replace("let ys =", "let ys: u8[1] ="),
-        bx.replace("pick(xs,ys)", "pick(ys,xs)"),
-    ] {
-        assert!(
-            check_module(&parse_module(&rejected)?).is_err(),
-            "{rejected}"
-        );
-    }
+    // The block result also supplies s8[1] when the deferred literal is first.
+    let swapped = bx.replace("pick(xs,ys)", "pick(ys,xs)");
+    let checked = check_module(&parse_module(&swapped)?)?;
+    let swapped = BlockEvaluator::lower(&checked, &swapped)?.evaluate(&inputs)?;
+    assert_eq!(swapped.get_element(0)?, inputs[0]);
+
+    let annotated = bx.replace("let ys =", "let ys: u8[1] =");
+    assert!(check_module(&parse_module(&annotated)?).is_err());
     Ok(())
 }
 

@@ -269,7 +269,7 @@ Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_parame
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_function_type_parametrics.rs
 
-Generates calls to a pure BX zip function over arrays with independently chosen element and result types. Inferred lengths, explicit lengths, named generic identity maps, and callbacks returning records, tuples, arrays, or bits exercise type binding and specialization reuse. The target checks acceptance against concrete DSLX signatures and compares BX IR with unrolled DSLX calls in compiled IR and concrete evaluation. It catches misbound nominal types, mismatched lengths, and incorrect callback results or element order.
+Generates calls to a pure BX zip function over arrays with independently chosen element and result types. Inferred lengths, explicit lengths, named generic identity maps, and callbacks returning records, tuples, arrays, or bits exercise type binding and specialization reuse. The generated callback compares an inferred zero with a typed operand in either order and can return an all-zero value through a result-inferred BX factory. The DSLX reference supplies the concrete types to `zero!`. The target checks acceptance against concrete DSLX signatures and compares BX IR with unrolled DSLX calls in compiled IR and concrete evaluation. It catches misbound nominal types, mismatched lengths, and incorrect callback results or element order.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_type_parametrics --sanitizer none`.
 

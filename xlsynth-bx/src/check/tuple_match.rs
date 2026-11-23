@@ -11,7 +11,7 @@ use xlsynth_pir::IrBits;
 use super::match_patterns::{nonempty_range, pattern_bits};
 use super::{BodyChecker, MAX_TYPE_SIZE, MatchSelector, StructTable};
 use crate::ast::{Expr, MatchArm, MatchPattern, Type};
-use crate::infer_literal::{check_inferred_signed_width, has_concrete_element_type};
+use crate::infer_literal::check_inferred_signed_width;
 use crate::typed::{TypedExpr, TypedMatchPattern, bits};
 
 type Region = Vec<Range<BigUint>>;
@@ -254,7 +254,7 @@ impl BodyChecker<'_, '_> {
             // determines its type, including the boundaries of nested matches.
             for item in items {
                 if !self.contains_inferred_aggregate(item)
-                    && has_concrete_element_type(item, self.common_widths())?
+                    && self.has_concrete_element_type(item)?
                 {
                     return self.check_results(items, None);
                 }
@@ -291,7 +291,7 @@ impl BodyChecker<'_, '_> {
         }
 
         for item in items {
-            if has_concrete_element_type(item, self.common_widths())? {
+            if self.has_concrete_element_type(item)? {
                 return if let [subject] = items {
                     Ok(vec![self.expr(subject, None)?])
                 } else {

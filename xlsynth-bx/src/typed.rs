@@ -498,6 +498,9 @@ pub enum TypedExprKind {
     Index {
         value: Box<TypedExpr>,
         index: Box<TypedExpr>,
+        /// All index inputs are constexpr. A helper may supply the value
+        /// after the checker first attempted to verify its bounds.
+        constant_index: bool,
     },
     ArrayUpdate {
         array: Box<TypedExpr>,
@@ -587,16 +590,21 @@ pub(crate) fn repr_bits(ty: &Type) -> Option<(bool, usize)> {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ConstantUse {
     Bx,
+    RegisterReset,
     Dslx,
     Assertion,
 }
 
 impl ConstantUse {
+    pub(super) fn is_bx(self) -> bool {
+        matches!(self, Self::Bx | Self::RegisterReset)
+    }
+
     fn requires_capture(self, capture: CaptureUse) -> bool {
         match self {
             Self::Assertion => capture.constexpr(),
             Self::Dslx => capture.runtime(false),
-            Self::Bx => false,
+            Self::Bx | Self::RegisterReset => false,
         }
     }
 }
@@ -614,9 +622,13 @@ pub(super) enum ConstantBinding {
         parametric_ready: bool,
     },
     Deferred(usize),
-    /// Without a value-parametric callee in scope, an ordinary body does not
-    /// retain speculative helper calls. Assertions can still replay them.
-    AssertionDeferred(usize),
+    /// A pure call can be replayed for a reset or assertion. Ordinary
+    /// constexpr consumers can replay it in modules that retain parametric
+    /// inputs.
+    DeferredCall {
+        definition: usize,
+        parametric_inputs: bool,
+    },
 }
 
 /// A checked expression could not finish evaluating in the current context.
@@ -635,6 +647,8 @@ pub(super) enum ConstantFailure {
 pub(super) struct ConstantFunctions {
     available: AvailableFunctions,
     values: HashMap<ConstantCall, FoldedConstant>,
+    /// Counts evaluations that reached a helper, including cache hits.
+    pub(super) calls: usize,
 }
 
 /// An evaluated value and whether a BX fold omitted DSLX constexpr work.
@@ -661,6 +675,7 @@ impl ConstantFunctions {
         Self {
             available,
             values: HashMap::new(),
+            calls: 0,
         }
     }
 }
@@ -686,10 +701,22 @@ impl ConstantBinding {
         }
     }
 
-    pub(super) fn deferred_definition(&self, usage: ConstantUse) -> Option<usize> {
+    pub(super) fn deferred_definition(
+        &self,
+        usage: ConstantUse,
+        has_functions: bool,
+    ) -> Option<usize> {
         match self {
             Self::Deferred(index) => Some(*index),
-            Self::AssertionDeferred(index) if usage == ConstantUse::Assertion => Some(*index),
+            Self::DeferredCall {
+                definition,
+                parametric_inputs,
+            } if has_functions
+                && (*parametric_inputs
+                    || matches!(usage, ConstantUse::RegisterReset | ConstantUse::Assertion)) =>
+            {
+                Some(*definition)
+            }
             Self::Selected {
                 definition,
                 parametric_ready,
@@ -704,7 +731,7 @@ impl ConstantBinding {
     }
 
     fn read(&self, work: &mut CountedWork<'_>) -> Option<&IrValue> {
-        if let Some(index) = self.deferred_definition(work.usage) {
+        if let Some(index) = self.deferred_definition(work.usage, work.functions.is_some()) {
             work.failure = Some(ConstantFailure::Deferred(BTreeSet::from([index])));
             return None;
         }
@@ -714,10 +741,9 @@ impl ConstantBinding {
                 work.needs_dslx_replay = true;
                 Some(value)
             }
-            Self::AssertionDeferred(_) => {
-                // A speculative BX fold that depends on this helper must also
-                // retain its own definition for a later assertion replay.
-                if work.usage == ConstantUse::Bx {
+            Self::DeferredCall { .. } => {
+                // Propagate the requirement through enclosing let definitions.
+                if work.usage.is_bx() {
                     work.failure = Some(ConstantFailure::NeedsFunctions);
                 }
                 None
@@ -835,10 +861,9 @@ impl CountedWork<'_> {
             (ConstantScope::Outer(bindings), _, Some(ConstantFailure::Deferred(pending))) => {
                 for operand in operands {
                     operand.unconditional_sequence_inputs(bytecode, &mut |name, _| {
-                        if let Some(index) = bindings
-                            .get(name)
-                            .and_then(|b| b.deferred_definition(self.usage))
-                        {
+                        if let Some(index) = bindings.get(name).and_then(|b| {
+                            b.deferred_definition(self.usage, self.functions.is_some())
+                        }) {
                             pending.insert(index);
                         }
                         true
@@ -916,10 +941,11 @@ impl CountedWork<'_> {
         args: &[TypedExpr],
         names: &ConstantScope<'_>,
     ) -> Option<IrValue> {
-        let Some(functions) = self.functions.as_ref() else {
+        let Some(functions) = self.functions.as_mut() else {
             self.failure = Some(ConstantFailure::NeedsFunctions);
             return None;
         };
+        functions.calls += 1;
         let function = functions.available.borrow().get(name)?.clone();
         let args = args
             .iter()
@@ -932,7 +958,13 @@ impl CountedWork<'_> {
         let call = ConstantCall {
             name: name.to_owned(),
             arguments: args,
-            usage: self.usage,
+            // Ordinary BX and reset calls share evaluation rules once the
+            // concrete arguments have crossed into the helper's lexical scope.
+            usage: if self.usage.is_bx() {
+                ConstantUse::Bx
+            } else {
+                self.usage
+            },
         };
         if let Some(cached) = self.functions.as_ref()?.values.get(&call) {
             self.needs_dslx_replay |= cached.needs_dslx_replay;
@@ -1360,6 +1392,7 @@ impl TypedExpr {
             K::Index {
                 value: left,
                 index: right,
+                ..
             }
             | K::WidthSlice {
                 value: left,
@@ -1404,9 +1437,13 @@ impl TypedExpr {
         names: &BTreeMap<String, ConstantBinding>,
         pending: &mut BTreeSet<usize>,
         usage: ConstantUse,
+        has_functions: bool,
     ) {
         self.all_inputs(false, &mut |name, _| {
-            if let Some(index) = names.get(name).and_then(|b| b.deferred_definition(usage)) {
+            if let Some(index) = names
+                .get(name)
+                .and_then(|b| b.deferred_definition(usage, has_functions))
+            {
                 pending.insert(index);
             }
             true
@@ -1430,7 +1467,12 @@ impl TypedExpr {
                 || usage.runtime(false)
                     && names
                         .get(name)
-                        .and_then(|value| value.deferred_definition(ConstantUse::Assertion))
+                        .and_then(|value| {
+                            value.deferred_definition(
+                                ConstantUse::Assertion,
+                                /* has_functions= */ true,
+                            )
+                        })
                         .is_none()
         })
     }
@@ -1505,7 +1547,7 @@ impl TypedExpr {
         // DSLX emits bytecode for a constexpr match or loop with bindings for
         // all its free names, including unselected arms. A helper's parameters
         // and iteration locals already have concrete values when executed.
-        if remaining.usage != ConstantUse::Bx
+        if !remaining.usage.is_bx()
             && names.depth() == 0
             && matches!(self.kind, K::Match { .. } | K::For(_) | K::Map(_))
             && !self.all_inputs(true, &mut |name, usage| {
@@ -1572,14 +1614,18 @@ impl TypedExpr {
                 }
                 IrValue::make_array(&elements).ok()
             }
-            K::Index { value, index } => {
+            K::Index {
+                value,
+                index,
+                constant_index,
+            } => {
                 let array = value.constant_with_budget(names, remaining)?;
                 let size = array.get_element_count().ok()?;
                 let index = index.constant_with_budget(names, remaining)?;
                 let bits = index.as_bits().ok()?;
-                let i = if names.depth() > 0 || remaining.usage != ConstantUse::Bx {
-                    // An iteration or constexpr actual can make an index
-                    // constant for the first time. Check its array bounds.
+                let i = if *constant_index || names.depth() > 0 || !remaining.usage.is_bx() {
+                    // A helper, iteration or constexpr actual can supply an
+                    // index whose bounds the checker could not yet verify.
                     ir_bits_to_usize_in_range(bits, size)?
                 } else {
                     let last = size.checked_sub(1)?;
@@ -1744,7 +1790,10 @@ impl TypedExpr {
                 Some(IrValue::Bits(result))
             }
         }?;
-        if remaining.inside_loop {
+        // A register reset can call a helper without materializing and
+        // charging every straight-line expression around it. Its returned
+        // value still consumes work, including on a cache hit.
+        if remaining.inside_loop || matches!(self.kind, K::Call { .. }) {
             remaining.charge(constant_work(&value))?;
         }
         Some(value)

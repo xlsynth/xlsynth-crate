@@ -1526,7 +1526,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
                 }
                 self.builder.array(self.layouts.lower(element)?, &values)
             }
-            TypedExprKind::Index { value, index } => {
+            TypedExprKind::Index { value, index, .. } => {
                 let value = self.expr(value)?;
                 let index = self.expr(index)?;
                 self.builder.array_index(value, index)
