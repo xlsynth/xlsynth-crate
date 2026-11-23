@@ -707,7 +707,7 @@ fn test_integer_type_port() {
     file.add_input(module, "i", &int_t);
     let verilog = file.emit();
     let want = r#"module m(
-  input wire i
+  input wire integer i
 );
 
 endmodule
@@ -1291,14 +1291,14 @@ fn test_array_parameters_with_def_and_assignment_pattern() {
     let scalar = file.make_scalar_type();
 
     // P0: parameter P0[2] = '{'0, '0};
-    let p0_type = file.make_unpacked_array_type(scalar.clone(), &[2]);
+    let p0_type = file.make_unpacked_array_type(scalar, &[2]);
     let p0_def = file.make_def("P0", DataKind::User, &p0_type);
     let tick0 = file.make_unsized_zero_literal();
     let p0_rhs = file.make_array_assignment_pattern(&[&tick0, &tick0]);
     file.add_parameter_with_def(module, &p0_def, &p0_rhs);
 
     // P1: parameter int P1[3] = '{1, 2, 3};
-    let p1_type = file.make_unpacked_array_type(scalar.clone(), &[3]);
+    let p1_type = file.make_unpacked_array_type(scalar, &[3]);
     let p1_def = file.make_def("P1", DataKind::Int, &p1_type);
     let one = file.make_unsized_decimal_literal(1);
     let two = file.make_unsized_decimal_literal(2);
@@ -1323,7 +1323,7 @@ fn test_array_parameters_with_def_and_assignment_pattern() {
     file.add_parameter_with_def(module, &p2_def, &p2_rhs);
 
     // P3: parameter integer P3[1][4] = '{'{1, 2, 3, 4}};
-    let p3_type = file.make_unpacked_array_type(scalar.clone(), &[1, 4]);
+    let p3_type = file.make_unpacked_array_type(scalar, &[1, 4]);
     let p3_def = file.make_def("P3", DataKind::Integer, &p3_type);
     let inner_1234 = file.make_array_assignment_pattern(&[&one, &two, &three, &four]);
     let p3_rhs = file.make_array_assignment_pattern(&[&inner_1234]);
@@ -1465,7 +1465,7 @@ fn test_index_unpacked_array_parameter() {
 
     // parameter P0[2] = '{'0, '1};
     let scalar = file.make_scalar_type();
-    let p0_type = file.make_unpacked_array_type(scalar.clone(), &[2]);
+    let p0_type = file.make_unpacked_array_type(scalar, &[2]);
     let p0_def = file.make_def("P0", DataKind::User, &p0_type);
     let tick0 = file.make_unsized_zero_literal();
     let tick1 = file.make_unsized_one_literal();

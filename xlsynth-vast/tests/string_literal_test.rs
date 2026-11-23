@@ -28,13 +28,13 @@ fn quotes_and_literal_backslashes_are_escaped_without_reinterpreting_input() {
 }
 
 #[test]
-fn newline_carriage_return_and_tab_use_named_verilog_escapes() {
+fn newline_and_tab_use_named_escapes_and_carriage_return_uses_octal() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let expression = file.make_string_literal("first\nsecond\rthird\tfourth");
 
     assert_eq!(
         file.emit_expression(&expression),
-        r#""first\nsecond\rthird\tfourth""#
+        r#""first\nsecond\015third\tfourth""#
     );
 }
 

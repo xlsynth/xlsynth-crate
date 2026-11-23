@@ -32,6 +32,103 @@ pub enum DataKind {
     Genvar,
 }
 
+/// Selects the SystemVerilog `parameter` or `localparam` declaration keyword.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ParameterKind {
+    Parameter,
+    Localparam,
+}
+
+/// A value expression or data type supplied at a SystemVerilog argument
+/// boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SvArgument {
+    /// An ordinary value expression.
+    Value(Expr),
+    /// A data type, such as an instance type parameter or `$bits` argument.
+    Type(VastDataType),
+}
+
+/// Unit suffix used by SystemVerilog time literals and declarations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TimeUnit {
+    Seconds,
+    Milliseconds,
+    Microseconds,
+    Nanoseconds,
+    Picoseconds,
+    Femtoseconds,
+}
+
+impl TimeUnit {
+    /// Returns the SystemVerilog spelling of this time unit.
+    pub(crate) fn suffix(self) -> &'static str {
+        match self {
+            Self::Seconds => "s",
+            Self::Milliseconds => "ms",
+            Self::Microseconds => "us",
+            Self::Nanoseconds => "ns",
+            Self::Picoseconds => "ps",
+            Self::Femtoseconds => "fs",
+        }
+    }
+
+    /// Returns this unit's base-ten exponent relative to one femtosecond.
+    fn femtosecond_exponent(self) -> u8 {
+        match self {
+            Self::Seconds => 15,
+            Self::Milliseconds => 12,
+            Self::Microseconds => 9,
+            Self::Nanoseconds => 6,
+            Self::Picoseconds => 3,
+            Self::Femtoseconds => 0,
+        }
+    }
+}
+
+/// Legal magnitudes for a SystemVerilog timeunit or timeprecision declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TimeScaleMagnitude {
+    One,
+    Ten,
+    Hundred,
+}
+
+impl TimeScaleMagnitude {
+    /// Returns the numeric spelling of this legal time-scale magnitude.
+    pub(crate) fn value(self) -> u16 {
+        match self {
+            Self::One => 1,
+            Self::Ten => 10,
+            Self::Hundred => 100,
+        }
+    }
+
+    /// Returns the base-ten exponent represented by this magnitude.
+    fn exponent(self) -> u8 {
+        match self {
+            Self::One => 0,
+            Self::Ten => 1,
+            Self::Hundred => 2,
+        }
+    }
+}
+
+/// A legal SystemVerilog time-scale value such as `1ps` or `100fs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TimeScaleValue {
+    pub magnitude: TimeScaleMagnitude,
+    pub unit: TimeUnit,
+}
+
+impl TimeScaleValue {
+    /// Returns the magnitude's base-ten exponent in femtoseconds for precision
+    /// comparisons.
+    pub(crate) fn femtosecond_exponent(self) -> u8 {
+        self.unit.femtosecond_exponent() + self.magnitude.exponent()
+    }
+}
+
 /// Distinguishes the supported procedural block forms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AlwaysKind {
@@ -207,6 +304,7 @@ pub(crate) struct Ast {
 pub(crate) enum FileItem {
     Module(VastModule),
     Include(String),
+    Import(PackageImport),
     Comment(String),
     BlankLine,
 }
@@ -214,17 +312,38 @@ pub(crate) enum FileItem {
 #[derive(Clone, Debug)]
 pub(crate) struct ModuleData {
     pub(crate) name: String,
+    pub(crate) imports: Vec<PackageImport>,
     pub(crate) parameter_ports: Vec<ParameterPortData>,
     pub(crate) ports: Vec<ModulePort>,
     pub(crate) members: Vec<MemberData>,
     pub(crate) defined_names: BTreeSet<String>,
 }
 
+/// A package import in a compilation unit or module scope.
+#[derive(Clone, Debug)]
+pub(crate) struct PackageImport {
+    pub(crate) package: String,
+    pub(crate) item: String,
+}
+
+/// An ordered value or type parameter in a module's parameter-port list.
 #[derive(Clone, Debug)]
 pub(crate) struct ParameterPortData {
     pub(crate) name: String,
-    pub(crate) data_type: Option<VastDataType>,
-    pub(crate) value: Expr,
+    pub(crate) kind: ParameterKind,
+    pub(crate) declaration: ParameterPortDeclaration,
+}
+
+/// The declared value type or default type of a parameter-port entry.
+#[derive(Clone, Debug)]
+pub(crate) enum ParameterPortDeclaration {
+    Value {
+        data_type: Option<VastDataType>,
+        default: Option<Expr>,
+    },
+    Type {
+        default: Option<VastDataType>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -267,12 +386,20 @@ pub(crate) enum ExprData {
         name: String,
         data_type: Option<VastDataType>,
     },
+    ExternalValue {
+        package: Option<String>,
+        name: String,
+    },
     Literal {
         text: String,
         value: Option<i64>,
     },
     StringLiteral {
         value: String,
+    },
+    TimeLiteral {
+        magnitude: String,
+        unit: TimeUnit,
     },
     InlineVerilog {
         text: String,
@@ -310,6 +437,7 @@ pub(crate) enum ExprData {
         elements: Vec<Expr>,
     },
     ArrayAssignmentPattern(Vec<Expr>),
+    StructAssignmentPattern(Vec<(String, Expr)>),
     WidthCast {
         width: Expr,
         value: Expr,
@@ -322,11 +450,11 @@ pub(crate) enum ExprData {
     NegEdge(Expr),
     Macro {
         name: String,
-        args: Option<Vec<Expr>>,
+        args: Option<Vec<SvArgument>>,
     },
     FunctionCall {
         name: String,
-        args: Vec<Expr>,
+        args: Vec<SvArgument>,
     },
 }
 
@@ -373,17 +501,55 @@ pub(crate) enum BinaryOp {
 pub(crate) enum IntegerTypeKind {
     Integer,
     Int,
+    Byte,
+    Shortint,
+    Longint,
+    Time,
+}
+
+impl IntegerTypeKind {
+    /// Returns this built-in integer atom's keyword.
+    pub(crate) fn keyword(self) -> &'static str {
+        match self {
+            Self::Integer => "integer",
+            Self::Int => "int",
+            Self::Byte => "byte",
+            Self::Shortint => "shortint",
+            Self::Longint => "longint",
+            Self::Time => "time",
+        }
+    }
+
+    /// Returns this built-in integer atom's bit width.
+    pub(crate) fn bit_width(self) -> i64 {
+        match self {
+            Self::Byte => 8,
+            Self::Shortint => 16,
+            Self::Integer | Self::Int => 32,
+            Self::Longint | Self::Time => 64,
+        }
+    }
+}
+
+/// Distinguishes SystemVerilog two-state bit from four-state logic storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LogicState {
+    TwoState,
+    FourState,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum TypeData {
+    String,
     Scalar {
         signed: bool,
+        state: LogicState,
     },
     BitVector {
         width: Expr,
         width_value: Option<i64>,
         signed: bool,
+        state: LogicState,
     },
     Extern {
         package: Option<String>,
@@ -405,6 +571,8 @@ pub(crate) enum TypeData {
 
 #[derive(Clone, Debug)]
 pub(crate) enum MemberData {
+    TimeUnit(TimeScaleValue),
+    TimePrecision(TimeScaleValue),
     Declaration {
         kind: DataKind,
         name: String,
@@ -421,6 +589,7 @@ pub(crate) enum MemberData {
         right: LogicRef,
     },
     Instantiation(Instantiation),
+    Import(PackageImport),
     Function(VastFunction),
     Always(VastAlwaysBase),
     Generate(GenerateLoop),
@@ -430,6 +599,11 @@ pub(crate) enum MemberData {
         name: String,
         rhs: Expr,
         int_kind: bool,
+    },
+    TypeParameter {
+        kind: ParameterKind,
+        name: String,
+        default: VastDataType,
     },
     Conditional(Conditional),
     Comment(String),
@@ -494,7 +668,7 @@ pub(crate) struct AlwaysData {
 pub(crate) struct InstantiationData {
     pub(crate) module_name: String,
     pub(crate) instance_name: String,
-    pub(crate) parameters: Vec<(String, Expr)>,
+    pub(crate) parameters: Vec<(String, SvArgument)>,
     pub(crate) ports: Vec<(String, Option<Expr>)>,
 }
 

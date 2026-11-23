@@ -158,8 +158,8 @@ fn builtin_and_external_type_casts_preserve_type_and_signedness() {
     let cases = [
         (scalar, "logic'(value)"),
         (signed_scalar, "signed'(logic'(value))"),
-        (unsigned_vector, "unsigned'(8'(value))"),
-        (signed_vector, "signed'(8'(value))"),
+        (unsigned_vector, "unsigned'(type(logic [7:0])'(value))"),
+        (signed_vector, "signed'(type(logic signed [7:0])'(value))"),
         (signed_integer, "integer'(value)"),
         (unsigned_integer, "unsigned'(integer'(value))"),
         (signed_int, "int'(value)"),
@@ -189,10 +189,13 @@ fn vector_type_casts_preserve_symbolic_width_expressions() {
     let signed_cast = file.make_type_cast(&signed_width, &value.to_expr());
     let unsigned_cast = file.make_type_cast(&unsigned_width_plus_one, &value.to_expr());
 
-    assert_eq!(file.emit_expression(&signed_cast), "signed'(WIDTH'(value))");
+    assert_eq!(
+        file.emit_expression(&signed_cast),
+        "signed'(type(logic signed [WIDTH - 1:0])'(value))"
+    );
     assert_eq!(
         file.emit_expression(&unsigned_cast),
-        "unsigned'((WIDTH + 1)'(value))"
+        "unsigned'(type(logic [WIDTH + 1 - 1:0])'(value))"
     );
 }
 

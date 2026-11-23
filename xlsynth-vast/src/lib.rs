@@ -12,6 +12,7 @@ pub mod helpers;
 mod literal;
 mod model;
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -19,16 +20,17 @@ use literal::Literal;
 use model::{
     AlwaysData, Artifact, AssignmentData, Ast, BinaryOp, BlockData, CaseData, ConditionalData,
     DefData, ExprData, FileItem, FunctionData, FunctionInputData, FunctionLocalData, GenerateData,
-    Id, InstantiationData, IntegerTypeKind, MemberData, ModuleData, ParameterPortData, PortData,
-    StatementData, TypeData, UnaryOp,
+    Id, InstantiationData, IntegerTypeKind, LogicState, MemberData, ModuleData, PackageImport,
+    ParameterPortData, ParameterPortDeclaration, PortData, StatementData, TypeData, UnaryOp,
 };
 
 pub use model::{
     AlwaysKind, BlankLine, CaseStatement, Comment, Conditional, ContinuousAssignment, DataKind,
     Def, Expr, GenerateLoop, Index, IndexableExpr, InlineVerilogStatement, Instantiation,
     LocalparamRef, LogicRef, MacroRef, MacroStatement, ModulePort, ModulePortDirection,
-    ParameterRef, Slice, VastAlwaysBase, VastDataType, VastFileType, VastFunction, VastModule,
-    VastStatement, VastStatementBlock,
+    ParameterKind, ParameterRef, Slice, SvArgument, TimeScaleMagnitude, TimeScaleValue, TimeUnit,
+    VastAlwaysBase, VastDataType, VastFileType, VastFunction, VastModule, VastStatement,
+    VastStatementBlock,
 };
 
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
@@ -300,6 +302,22 @@ pub fn is_system_verilog_keyword(identifier: &str) -> bool {
     )
 }
 
+/// Builds a package import from identifier tokens or a wildcard item.
+fn package_import(package: &str, item: &str) -> PackageImport {
+    assert!(
+        is_system_verilog_simple_identifier(package),
+        "invalid package identifier: {package}"
+    );
+    assert!(
+        item == "*" || is_system_verilog_simple_identifier(item),
+        "invalid import item: {item}"
+    );
+    PackageImport {
+        package: package.to_owned(),
+        item: item.to_owned(),
+    }
+}
+
 /// Controls how an arbitrary-width integer appears in generated Verilog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LiteralFormat {
@@ -425,6 +443,10 @@ impl VastFile {
         self.check_unique_module_name(module, name, direction_name)
             .expect("module ports must have unique names");
         self.check(data_type.0);
+        assert!(
+            direction != ModulePortDirection::InOut || !self.is_non_net_builtin(*data_type),
+            "this built-in type cannot be used as an inout net"
+        );
         let logic_ref = self.make_named_ref(name, Some(*data_type));
         let port = ModulePort(self.id(self.ast.ports.len()));
         self.ast.ports.push(PortData {
@@ -445,6 +467,32 @@ impl VastFile {
     fn push_member(&mut self, module: VastModule, member: MemberData) {
         let module_index = self.check(module.0);
         self.ast.modules[module_index].members.push(member);
+    }
+
+    /// Reports whether a built-in type cannot be declared as a net.
+    fn is_non_net_builtin(&self, data_type: VastDataType) -> bool {
+        match &self.ast.data_types[self.check(data_type.0)] {
+            TypeData::Scalar {
+                state: LogicState::TwoState,
+                ..
+            }
+            | TypeData::BitVector {
+                state: LogicState::TwoState,
+                ..
+            }
+            | TypeData::String => true,
+            TypeData::Integer { kind, .. } => matches!(
+                kind,
+                IntegerTypeKind::Byte
+                    | IntegerTypeKind::Shortint
+                    | IntegerTypeKind::Int
+                    | IntegerTypeKind::Longint
+            ),
+            TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
+                self.is_non_net_builtin(*element)
+            }
+            _ => false,
+        }
     }
 
     /// Enforces the common namespace shared by module ports and declarations.
@@ -500,11 +548,20 @@ impl VastFile {
         self.ast.file_items.push(FileItem::Comment(text.to_owned()));
     }
 
+    /// Adds an ordered compilation-unit package import. Use `"*"` for all
+    /// items.
+    pub fn add_file_import(&mut self, package: &str, item: &str) {
+        self.ast
+            .file_items
+            .push(FileItem::Import(package_import(package, item)));
+    }
+
     /// Adds a module at the current position in the output file.
     pub fn add_module(&mut self, name: &str) -> VastModule {
         let handle = VastModule(self.id(self.ast.modules.len()));
         self.ast.modules.push(ModuleData {
             name: name.to_owned(),
+            imports: Vec::new(),
             parameter_ports: Vec::new(),
             ports: Vec::new(),
             members: Vec::new(),
@@ -512,6 +569,24 @@ impl VastFile {
         });
         self.ast.file_items.push(FileItem::Module(handle));
         handle
+    }
+
+    /// Adds a package import to a module's header scope. Use `"*"` to import
+    /// all items. Package and item names must be simple SystemVerilog
+    /// identifiers.
+    pub fn add_module_import(&mut self, module: VastModule, package: &str, item: &str) {
+        let index = self.check(module.0);
+        self.ast.modules[index]
+            .imports
+            .push(package_import(package, item));
+    }
+
+    /// Adds a package import in the module body at the current member position.
+    /// Use `"*"` to import all items. Names must be simple SystemVerilog
+    /// identifiers.
+    pub fn add_member_import(&mut self, module: VastModule, package: &str, item: &str) {
+        self.check(module.0);
+        self.push_member(module, MemberData::Import(package_import(package, item)));
     }
 
     /// Returns the name of a module belonging to this file.
@@ -526,11 +601,23 @@ impl VastFile {
 
     /// Moves signal declarations ahead of statements in the suffix starting at
     /// `start`, preserving order within both groups and leaving nested scopes
-    /// and earlier members untouched.
+    /// and earlier members untouched. Declarations stay on their original side
+    /// of imports, parameter declarations, and timescales, preserving their
+    /// scope and order.
     pub fn hoist_module_declarations(&mut self, module: VastModule, start: usize) {
         let module_index = self.check(module.0);
-        self.ast.modules[module_index].members[start..]
-            .sort_by_key(|member| !matches!(member, MemberData::Declaration { .. }));
+        for section in self.ast.modules[module_index].members[start..].split_mut(|member| {
+            matches!(
+                member,
+                MemberData::Import(_)
+                    | MemberData::Parameter { .. }
+                    | MemberData::TypeParameter { .. }
+                    | MemberData::TimeUnit(_)
+                    | MemberData::TimePrecision(_)
+            )
+        }) {
+            section.sort_by_key(|member| !matches!(member, MemberData::Declaration { .. }));
+        }
     }
 
     /// Adds an automatic, typed function at the current module-member position.
@@ -764,7 +851,10 @@ impl VastFile {
             TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
                 self.type_width_expr(*element)
             }
-            TypeData::Scalar { .. } | TypeData::Extern { .. } | TypeData::Integer { .. } => None,
+            TypeData::Scalar { .. }
+            | TypeData::Extern { .. }
+            | TypeData::Integer { .. }
+            | TypeData::String => None,
         }
     }
 
@@ -775,8 +865,8 @@ impl VastFile {
             TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
                 self.type_is_signed(*element)
             }
-            TypeData::Scalar { signed } => *signed,
-            TypeData::Extern { .. } => false,
+            TypeData::Scalar { signed, .. } => *signed,
+            TypeData::Extern { .. } | TypeData::String => false,
         }
     }
 
@@ -795,9 +885,9 @@ impl VastFile {
             TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
                 self.type_width_as_int64(*element)
             }
-            TypeData::Extern { .. } | TypeData::Integer { .. } => Err(VastError(
-                "data type does not have a declared bit-vector width".into(),
-            )),
+            TypeData::Extern { .. } | TypeData::Integer { .. } | TypeData::String => Err(
+                VastError("data type does not have a declared bit-vector width".into()),
+            ),
         }
     }
 
@@ -806,7 +896,8 @@ impl VastFile {
         match &self.ast.data_types[self.check(data_type.0)] {
             TypeData::Scalar { .. } => Ok(1),
             TypeData::BitVector { .. } => self.type_width_as_int64(data_type),
-            TypeData::Integer { .. } => Ok(32),
+            TypeData::Integer { kind, .. } => Ok(kind.bit_width()),
+            TypeData::String => Err(VastError("string type has a dynamic bit width".into())),
             TypeData::PackedArray {
                 element,
                 dimensions,
@@ -832,22 +923,13 @@ impl VastFile {
         }
     }
 
-    /// Adds an untyped parameter to a module's parameter-port list.
+    /// Adds an untyped parameter with a default to a module's parameter-port
+    /// list.
     pub fn add_parameter_port(&mut self, module: VastModule, name: &str, value: &Expr) -> LogicRef {
-        let module_index = self.check(module.0);
-        self.check(value.0);
-        let logic_ref = self.make_named_ref(name, None);
-        self.ast.modules[module_index]
-            .parameter_ports
-            .push(ParameterPortData {
-                name: name.to_owned(),
-                data_type: None,
-                value: *value,
-            });
-        logic_ref
+        self.add_value_parameter_port(module, name, ParameterKind::Parameter, None, Some(value))
     }
 
-    /// Adds a typed parameter to a module's parameter-port list.
+    /// Adds a typed parameter with a default to a module's parameter-port list.
     pub fn add_typed_parameter_port(
         &mut self,
         module: VastModule,
@@ -855,17 +937,84 @@ impl VastFile {
         data_type: &VastDataType,
         value: &Expr,
     ) -> LogicRef {
+        self.add_value_parameter_port(
+            module,
+            name,
+            ParameterKind::Parameter,
+            Some(data_type),
+            Some(value),
+        )
+    }
+
+    /// Appends a value parameter or local parameter to the parameter-port list.
+    ///
+    /// Omitting the default makes an overridable parameter required. Local
+    /// parameters must have defaults. All supplied handles must belong to this
+    /// file.
+    pub fn add_value_parameter_port(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        kind: ParameterKind,
+        data_type: Option<&VastDataType>,
+        default: Option<&Expr>,
+    ) -> LogicRef {
         let module_index = self.check(module.0);
-        self.check(value.0);
-        let logic_ref = self.make_named_ref(name, Some(*data_type));
+        assert!(
+            kind != ParameterKind::Localparam || default.is_some(),
+            "local parameters require a default"
+        );
+        if let Some(data_type) = data_type {
+            self.check(data_type.0);
+        }
+        if let Some(default) = default {
+            self.check(default.0);
+        }
+        let reference = self.make_named_ref(name, data_type.copied());
         self.ast.modules[module_index]
             .parameter_ports
             .push(ParameterPortData {
                 name: name.to_owned(),
-                data_type: Some(*data_type),
-                value: *value,
+                kind,
+                declaration: ParameterPortDeclaration::Value {
+                    data_type: data_type.copied(),
+                    default: default.copied(),
+                },
             });
-        logic_ref
+        reference
+    }
+
+    /// Appends a type parameter and returns a reference to its declared type.
+    ///
+    /// An overridable type parameter can omit its default. A local type
+    /// parameter cannot. Anonymous unpacked array defaults require a named
+    /// typedef.
+    pub fn add_type_parameter_port(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        kind: ParameterKind,
+        default: Option<&VastDataType>,
+    ) -> VastDataType {
+        let module_index = self.check(module.0);
+        assert!(
+            kind != ParameterKind::Localparam || default.is_some(),
+            "local parameters require a default"
+        );
+        if let Some(default) = default {
+            self.check_standalone_type(*default);
+        }
+        let reference = self.make_extern_type(name);
+        self.ast.modules[module_index]
+            .parameter_ports
+            .push(ParameterPortData {
+                name: name.to_owned(),
+                kind,
+                declaration: ParameterPortDeclaration::Type {
+                    default: default.copied(),
+                },
+            });
+        reference
     }
 
     /// Adds an input port to the indicated module.
@@ -979,6 +1128,10 @@ impl VastFile {
         name: &str,
         data_type: &VastDataType,
     ) -> LogicRef {
+        assert!(
+            !self.is_non_net_builtin(*data_type),
+            "this built-in type cannot be used as a wire net"
+        );
         self.check_unique_module_name(module, name, "wire")
             .expect("module wires must have unique names");
         self.add_declaration(module, name, data_type, DataKind::Wire)
@@ -1056,19 +1209,45 @@ impl VastFile {
 
     /// Creates a sized binary pattern from MSB-first `0`, `1`, and `?` digits.
     pub fn make_binary_pattern(&mut self, bits_msb: &str) -> Result<Expr, VastError> {
+        self.make_checked_binary_literal(
+            bits_msb,
+            b"01?",
+            "binary patterns require 1 to 1048576 MSB-first 0, 1, or ? digits",
+        )
+    }
+
+    /// Creates a sized four-state binary literal from MSB-first `0`, `1`, `x`,
+    /// and `z` digits. Letter case and all unknown or high-impedance bits
+    /// are preserved.
+    pub fn make_four_state_binary_literal(&mut self, bits_msb: &str) -> Result<Expr, VastError> {
+        self.make_checked_binary_literal(
+            bits_msb,
+            b"01xXzZ",
+            "four-state binary literals require 1 to 1048576 MSB-first 0, 1, x, or z digits",
+        )
+    }
+
+    /// Checks a bounded binary digit sequence and creates its sized literal
+    /// expression.
+    fn make_checked_binary_literal(
+        &mut self,
+        bits_msb: &str,
+        allowed: &[u8],
+        error: &str,
+    ) -> Result<Expr, VastError> {
         if bits_msb.is_empty()
             || bits_msb.len() > (1 << 20)
-            || !bits_msb
-                .bytes()
-                .all(|bit| matches!(bit, b'0' | b'1' | b'?'))
+            || !bits_msb.bytes().all(|bit| allowed.contains(&bit))
         {
-            return Err(VastError(
-                "binary patterns require 1 to 1048576 MSB-first 0, 1, or ? digits".to_owned(),
-            ));
+            return Err(VastError(error.to_owned()));
         }
+        let value = bits_msb.bytes().try_fold(0_i64, |value, bit| match bit {
+            b'0' | b'1' => value.checked_mul(2)?.checked_add(i64::from(bit - b'0')),
+            _ => None,
+        });
         Ok(self.add_expression(ExprData::Literal {
             text: format!("{}'b{bits_msb}", bits_msb.len()),
-            value: None,
+            value,
         }))
     }
 
@@ -1093,6 +1272,35 @@ impl VastFile {
         })
     }
 
+    /// Creates a time literal from a decimal magnitude such as `1`, `1.5`, or
+    /// `1_000`.
+    pub fn make_time_literal(
+        &mut self,
+        magnitude: &str,
+        unit: TimeUnit,
+    ) -> Result<Expr, VastError> {
+        let mut parts = magnitude.split('.');
+        let integer = parts.next().unwrap_or_default();
+        let fraction = parts.next();
+        let valid = |part: &str| {
+            let bytes = part.as_bytes();
+            !bytes.is_empty()
+                && bytes.first().is_some_and(u8::is_ascii_digit)
+                && bytes
+                    .iter()
+                    .all(|digit| digit.is_ascii_digit() || *digit == b'_')
+        };
+        if !valid(integer) || fraction.is_some_and(|part| !valid(part)) || parts.next().is_some() {
+            return Err(VastError(
+                "time literal magnitude must be an unsigned decimal or fixed-point number".into(),
+            ));
+        }
+        Ok(self.add_expression(ExprData::TimeLiteral {
+            magnitude: magnitude.to_owned(),
+            unit,
+        }))
+    }
+
     /// Creates an expression from complete Verilog source text.
     ///
     /// Supply any required Verilog quotes and escapes as part of the text.
@@ -1104,16 +1312,100 @@ impl VastFile {
         })
     }
 
-    /// Creates an unsigned one-bit scalar type.
-    pub fn make_scalar_type(&mut self) -> VastDataType {
-        self.add_data_type(TypeData::Scalar { signed: false })
+    /// Refers to an external value by its simple SystemVerilog identifier.
+    pub fn make_extern_value_ref(&mut self, name: &str) -> Expr {
+        assert!(
+            is_system_verilog_simple_identifier(name),
+            "invalid external value identifier: {name}"
+        );
+        self.add_expression(ExprData::ExternalValue {
+            package: None,
+            name: name.to_owned(),
+        })
     }
 
-    /// Creates a bit-vector type, collapsing one-bit vectors to scalars.
+    /// Refers to an external value using separate simple package and value
+    /// identifiers.
+    pub fn make_extern_package_value_ref(&mut self, package: &str, name: &str) -> Expr {
+        assert!(
+            is_system_verilog_simple_identifier(package),
+            "invalid package identifier: {package}"
+        );
+        assert!(
+            is_system_verilog_simple_identifier(name),
+            "invalid external value identifier: {name}"
+        );
+        self.add_expression(ExprData::ExternalValue {
+            package: Some(package.to_owned()),
+            name: name.to_owned(),
+        })
+    }
+
+    /// Checks that a type can be emitted without a declarator separating its
+    /// array dimensions.
+    fn check_standalone_type(&self, data_type: VastDataType) {
+        let index = self.check(data_type.0);
+        assert!(
+            !matches!(self.ast.data_types[index], TypeData::UnpackedArray { .. }),
+            "anonymous unpacked array types require a named typedef"
+        );
+    }
+
+    /// Creates an unsigned, four-state one-bit logic scalar type.
+    pub fn make_scalar_type(&mut self) -> VastDataType {
+        self.add_data_type(TypeData::Scalar {
+            signed: false,
+            state: LogicState::FourState,
+        })
+    }
+
+    /// Creates an unsigned, two-state SystemVerilog `bit` scalar type.
+    pub fn make_bit_type(&mut self) -> VastDataType {
+        self.add_data_type(TypeData::Scalar {
+            signed: false,
+            state: LogicState::TwoState,
+        })
+    }
+
+    /// Creates a two-state SystemVerilog `bit` vector, collapsing width one to
+    /// a scalar.
+    pub fn make_two_state_bit_vector_type(&mut self, bit_count: i64, signed: bool) -> VastDataType {
+        self.make_integral_vector_type(bit_count, signed, LogicState::TwoState)
+    }
+
+    /// Creates a two-state SystemVerilog `bit` vector with an expression-valued
+    /// width.
+    pub fn make_two_state_bit_vector_type_expr(
+        &mut self,
+        width: &Expr,
+        signed: bool,
+    ) -> VastDataType {
+        self.make_integral_vector_type_expr(width, signed, LogicState::TwoState)
+    }
+
+    /// Creates a four-state logic vector, collapsing width one to a scalar.
+    /// Despite its legacy name, this does not create a SystemVerilog two-state
+    /// `bit` vector.
     pub fn make_bit_vector_type(&mut self, bit_count: i64, signed: bool) -> VastDataType {
+        self.make_integral_vector_type(bit_count, signed, LogicState::FourState)
+    }
+
+    /// Creates a four-state logic vector whose width is determined by an
+    /// expression.
+    pub fn make_bit_vector_type_expr(&mut self, width: &Expr, signed: bool) -> VastDataType {
+        self.make_integral_vector_type_expr(width, signed, LogicState::FourState)
+    }
+
+    /// Creates an integral vector of the requested state and constant width.
+    fn make_integral_vector_type(
+        &mut self,
+        bit_count: i64,
+        signed: bool,
+        state: LogicState,
+    ) -> VastDataType {
         assert!(bit_count > 0, "bit-vector width must be greater than zero");
         if bit_count == 1 {
-            return self.add_data_type(TypeData::Scalar { signed });
+            return self.add_data_type(TypeData::Scalar { signed, state });
         }
         let width = self.add_expression(ExprData::Literal {
             text: bit_count.to_string(),
@@ -1123,11 +1415,18 @@ impl VastFile {
             width,
             width_value: Some(bit_count),
             signed,
+            state,
         })
     }
 
-    /// Creates a bit-vector type whose width is determined by an expression.
-    pub fn make_bit_vector_type_expr(&mut self, width: &Expr, signed: bool) -> VastDataType {
+    /// Creates an integral vector of the requested state and expression-valued
+    /// width.
+    fn make_integral_vector_type_expr(
+        &mut self,
+        width: &Expr,
+        signed: bool,
+        state: LogicState,
+    ) -> VastDataType {
         let expression_index = self.check(width.0);
         let width_value = match &self.ast.expressions[expression_index] {
             ExprData::Literal { value, .. } => *value,
@@ -1140,6 +1439,7 @@ impl VastFile {
             width: *width,
             width_value,
             signed,
+            state,
         })
     }
 
@@ -1175,6 +1475,44 @@ impl VastFile {
         })
     }
 
+    /// Creates a dynamically sized SystemVerilog `string` type.
+    pub fn make_string_type(&mut self) -> VastDataType {
+        self.add_data_type(TypeData::String)
+    }
+
+    /// Creates a signed or unsigned, 64-bit, four-state SystemVerilog `time`
+    /// type.
+    pub fn make_time_type(&mut self, signed: bool) -> VastDataType {
+        self.add_data_type(TypeData::Integer {
+            signed,
+            kind: IntegerTypeKind::Time,
+        })
+    }
+
+    /// Creates a signed or unsigned 8-bit SystemVerilog `byte` type.
+    pub fn make_byte_type(&mut self, signed: bool) -> VastDataType {
+        self.add_data_type(TypeData::Integer {
+            signed,
+            kind: IntegerTypeKind::Byte,
+        })
+    }
+
+    /// Creates a signed or unsigned 16-bit SystemVerilog `shortint` type.
+    pub fn make_shortint_type(&mut self, signed: bool) -> VastDataType {
+        self.add_data_type(TypeData::Integer {
+            signed,
+            kind: IntegerTypeKind::Shortint,
+        })
+    }
+
+    /// Creates a signed or unsigned 64-bit SystemVerilog `longint` type.
+    pub fn make_longint_type(&mut self, signed: bool) -> VastDataType {
+        self.add_data_type(TypeData::Integer {
+            signed,
+            kind: IntegerTypeKind::Longint,
+        })
+    }
+
     /// Creates a packed multidimensional array around its element type.
     ///
     /// Dimensions are ordered from outermost to innermost. Nesting packed
@@ -1206,6 +1544,10 @@ impl VastFile {
                 TypeData::Integer { .. }
             ),
             "packed arrays cannot contain integer or int elements"
+        );
+        assert!(
+            !matches!(&self.ast.data_types[element_index], TypeData::String),
+            "packed arrays cannot contain string elements"
         );
 
         assert!(
@@ -1350,14 +1692,69 @@ impl VastFile {
             .collect()
     }
 
-    /// Calls an ordinary or system function with ordered, owned arguments.
+    /// Calls an ordinary or system function with value expressions.
     pub fn make_function_call(&mut self, name: &str, arguments: &[&Expr]) -> Expr {
+        self.make_function_call_from_arguments(
+            name,
+            arguments
+                .iter()
+                .map(|argument| SvArgument::Value(**argument)),
+        )
+    }
+
+    /// Calls a function with value or type arguments, such as `$bits(T)`.
+    ///
+    /// Type arguments are accepted only for system functions. The caller is
+    /// responsible for choosing a system function and argument position that
+    /// accept a type.
+    pub fn make_function_call_with_arguments(
+        &mut self,
+        name: &str,
+        arguments: &[SvArgument],
+    ) -> Expr {
+        self.make_function_call_from_arguments(name, arguments.iter().copied())
+    }
+
+    /// Creates a call while collecting its checked arguments exactly once.
+    fn make_function_call_from_arguments(
+        &mut self,
+        name: &str,
+        arguments: impl IntoIterator<Item = SvArgument>,
+    ) -> Expr {
         assert!(!name.is_empty(), "function call name must not be empty");
-        let arguments = self.checked_expressions(arguments);
+        let args = self.checked_arguments(arguments);
+        assert!(
+            name.starts_with('$')
+                || args
+                    .iter()
+                    .all(|argument| matches!(argument, SvArgument::Value(_))),
+            "ordinary function calls do not accept type arguments"
+        );
         self.add_expression(ExprData::FunctionCall {
             name: name.to_owned(),
-            args: arguments,
+            args,
         })
+    }
+
+    /// Checks and collects ordered arguments into their AST-owned storage.
+    fn checked_arguments(
+        &self,
+        arguments: impl IntoIterator<Item = SvArgument>,
+    ) -> Vec<SvArgument> {
+        arguments
+            .into_iter()
+            .inspect(|&argument| self.check_argument(argument))
+            .collect()
+    }
+
+    /// Checks an argument's owning file and standalone type spelling.
+    fn check_argument(&self, argument: SvArgument) {
+        match argument {
+            SvArgument::Value(value) => {
+                self.check(value.0);
+            }
+            SvArgument::Type(data_type) => self.check_standalone_type(data_type),
+        }
     }
 
     /// Creates an ordinary concatenation expression.
@@ -1392,6 +1789,33 @@ impl VastFile {
     pub fn make_array_assignment_pattern(&mut self, elements: &[&Expr]) -> Expr {
         let elements = self.checked_expressions(elements);
         self.add_expression(ExprData::ArrayAssignmentPattern(elements))
+    }
+
+    /// Creates an ordered SystemVerilog struct assignment pattern with named
+    /// members.
+    ///
+    /// Keys must be simple identifiers or the `default` key. Panics for an
+    /// empty pattern, invalid or duplicate keys, or expressions owned by
+    /// another file.
+    pub fn make_struct_assignment_pattern(&mut self, members: &[(&str, &Expr)]) -> Expr {
+        assert!(
+            !members.is_empty(),
+            "struct assignment pattern must not be empty"
+        );
+        let mut names = HashSet::with_capacity(members.len());
+        let members = members
+            .iter()
+            .map(|(name, value)| {
+                assert!(
+                    *name == "default" || is_system_verilog_simple_identifier(name),
+                    "invalid struct assignment member identifier: {name}"
+                );
+                assert!(names.insert(*name), "duplicate struct member {name}");
+                self.check(value.0);
+                ((*name).to_owned(), **value)
+            })
+            .collect();
+        self.add_expression(ExprData::StructAssignmentPattern(members))
     }
 
     /// Adds a unary expression to the file-owned arena.
@@ -1708,13 +2132,36 @@ impl VastFile {
         )
     }
 
-    /// Creates a preprocessor macro reference with explicit arguments.
+    /// Creates a preprocessor macro reference with explicit value arguments.
     pub fn make_macro_ref_with_args(&mut self, name: &str, arguments: &[&Expr]) -> MacroRef {
-        let arguments = self.checked_expressions(arguments);
+        self.make_macro_ref_from_arguments(
+            name,
+            arguments
+                .iter()
+                .map(|argument| SvArgument::Value(**argument)),
+        )
+    }
+
+    /// Creates a preprocessor macro reference with value or type arguments.
+    pub fn make_macro_ref_with_arguments(
+        &mut self,
+        name: &str,
+        arguments: &[SvArgument],
+    ) -> MacroRef {
+        self.make_macro_ref_from_arguments(name, arguments.iter().copied())
+    }
+
+    /// Creates a macro reference while collecting checked arguments once.
+    fn make_macro_ref_from_arguments(
+        &mut self,
+        name: &str,
+        arguments: impl IntoIterator<Item = SvArgument>,
+    ) -> MacroRef {
+        let args = self.checked_arguments(arguments);
         MacroRef(
             self.add_expression(ExprData::Macro {
                 name: name.to_owned(),
-                args: Some(arguments),
+                args: Some(args),
             })
             .0,
         )
@@ -1771,8 +2218,7 @@ impl VastFile {
         handle
     }
 
-    /// Constructs a named module instantiation with ordered parameters and
-    /// ports.
+    /// Constructs a named module instantiation with value parameters and ports.
     pub fn make_instantiation(
         &mut self,
         module_name: &str,
@@ -1782,9 +2228,51 @@ impl VastFile {
         connection_names: &[&str],
         connection_expressions: &[Option<&Expr>],
     ) -> Instantiation {
+        self.make_instantiation_from_arguments(
+            module_name,
+            instance_name,
+            parameter_names,
+            parameter_expressions
+                .iter()
+                .map(|value| SvArgument::Value(**value)),
+            connection_names,
+            connection_expressions,
+        )
+    }
+
+    /// Constructs a named module instantiation with value or type parameters.
+    pub fn make_instantiation_with_arguments(
+        &mut self,
+        module_name: &str,
+        instance_name: &str,
+        parameter_names: &[&str],
+        parameter_arguments: &[SvArgument],
+        connection_names: &[&str],
+        connection_expressions: &[Option<&Expr>],
+    ) -> Instantiation {
+        self.make_instantiation_from_arguments(
+            module_name,
+            instance_name,
+            parameter_names,
+            parameter_arguments.iter().copied(),
+            connection_names,
+            connection_expressions,
+        )
+    }
+
+    /// Creates an instantiation while checking and storing each parameter once.
+    fn make_instantiation_from_arguments(
+        &mut self,
+        module_name: &str,
+        instance_name: &str,
+        parameter_names: &[&str],
+        parameter_arguments: impl ExactSizeIterator<Item = SvArgument>,
+        connection_names: &[&str],
+        connection_expressions: &[Option<&Expr>],
+    ) -> Instantiation {
         assert_eq!(
             parameter_names.len(),
-            parameter_expressions.len(),
+            parameter_arguments.len(),
             "module-instantiation parameter names and values must have equal lengths"
         );
         assert_eq!(
@@ -1794,10 +2282,10 @@ impl VastFile {
         );
         let parameters = parameter_names
             .iter()
-            .zip(parameter_expressions)
-            .map(|(name, expression)| {
-                self.check(expression.0);
-                ((*name).to_owned(), **expression)
+            .zip(parameter_arguments)
+            .map(|(name, argument)| {
+                self.check_argument(argument);
+                ((*name).to_owned(), argument)
             })
             .collect();
         let ports = connection_names
@@ -1916,6 +2404,77 @@ impl VastFile {
                 int_kind,
             },
         )
+    }
+
+    /// Appends a module-body type parameter and returns a reference to its
+    /// type.
+    ///
+    /// SystemVerilog treats body parameters as local when the module has a
+    /// parameter-port list, regardless of the declaration keyword.
+    /// The returned type is available to later body declarations, not to the
+    /// module's preceding port list; use [`Self::add_type_parameter_port`] for
+    /// a port type. Anonymous unpacked array defaults require a named
+    /// typedef.
+    pub fn add_type_parameter(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        kind: ParameterKind,
+        default: &VastDataType,
+    ) -> VastDataType {
+        self.check(module.0);
+        self.check_standalone_type(*default);
+        let reference = self.make_extern_type(name);
+        self.push_member(
+            module,
+            MemberData::TypeParameter {
+                kind,
+                name: name.to_owned(),
+                default: *default,
+            },
+        );
+        reference
+    }
+
+    /// Appends a legal `timeunit` declaration to the module body.
+    /// Panics if it follows other scope items or conflicts with a local time
+    /// scale.
+    pub fn add_timeunit(&mut self, module: VastModule, value: TimeScaleValue) {
+        self.add_timescale_declaration(module, MemberData::TimeUnit(value));
+    }
+
+    /// Appends a legal `timeprecision` declaration to the module body.
+    /// Panics if it follows other scope items or is coarser than the local time
+    /// unit.
+    pub fn add_timeprecision(&mut self, module: VastModule, value: TimeScaleValue) {
+        self.add_timescale_declaration(module, MemberData::TimePrecision(value));
+    }
+
+    /// Validates local time-scale declarations before appending them in source
+    /// order.
+    fn add_timescale_declaration(&mut self, module: VastModule, declaration: MemberData) {
+        let module_index = self.check(module.0);
+        let members = &self.ast.modules[module_index].members;
+        for member in members {
+            match (member, &declaration) {
+                (MemberData::TimeUnit(existing), MemberData::TimeUnit(value))
+                | (MemberData::TimePrecision(existing), MemberData::TimePrecision(value)) => {
+                    assert_eq!(existing, value, "conflicting time-scale declarations");
+                }
+                (MemberData::TimeUnit(unit), MemberData::TimePrecision(precision))
+                | (MemberData::TimePrecision(precision), MemberData::TimeUnit(unit)) => {
+                    assert!(
+                        precision.femtosecond_exponent() <= unit.femtosecond_exponent(),
+                        "time precision cannot be coarser than time unit"
+                    );
+                }
+                (MemberData::Comment(_) | MemberData::BlankLine, _) => {
+                    // Comments and whitespace do not declare scope items.
+                }
+                _ => panic!("time-scale declarations must precede other module members"),
+            }
+        }
+        self.push_member(module, declaration);
     }
 
     /// Adds an untyped module parameter declaration.

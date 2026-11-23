@@ -312,7 +312,7 @@ fn builtin_and_named_external_type_casts_remain_unchanged() {
 
     for (data_type, expected) in [
         (scalar, "logic'(7)"),
-        (signed_vector, "signed'(8'(7))"),
+        (signed_vector, "signed'(type(logic signed [7:0])'(7))"),
         (signed_integer, "integer'(7)"),
         (unsigned_int, "unsigned'(int'(7))"),
         (local, "payload_t'(7)"),

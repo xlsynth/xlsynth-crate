@@ -7,9 +7,10 @@ use std::fmt::Write;
 use crate::VastFile;
 use crate::model::{
     AlwaysKind, BinaryOp, CaseStatement, Conditional, DataKind, Expr, ExprData, FileItem,
-    FunctionData, GenerateLoop, Instantiation, IntegerTypeKind, MemberData, ModuleData,
-    ModulePortDirection, StatementData, TypeData, UnaryOp, VastAlwaysBase, VastDataType,
-    VastFileType, VastFunction, VastStatementBlock,
+    FunctionData, GenerateLoop, Instantiation, IntegerTypeKind, LogicState, MemberData, ModuleData,
+    ModulePortDirection, PackageImport, ParameterKind, ParameterPortDeclaration, StatementData,
+    SvArgument, TypeData, UnaryOp, VastAlwaysBase, VastDataType, VastFileType, VastFunction,
+    VastStatementBlock,
 };
 
 /// Emits all file members in insertion order, with one terminating newline
@@ -24,6 +25,7 @@ pub(crate) fn emit_file(file: &VastFile) -> String {
             FileItem::Include(path) => {
                 write!(result, "`include \"{path}\"").expect("writing to String cannot fail");
             }
+            FileItem::Import(import) => result.push_str(&emit_package_import(import)),
             FileItem::Comment(text) => result.push_str(&emit_comment(text)),
             FileItem::BlankLine => {
                 // The common terminating newline below is the entire blank
@@ -39,8 +41,13 @@ pub(crate) fn emit_file(file: &VastFile) -> String {
 pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
     match &file.ast.expressions[expr.0.index] {
         ExprData::Name { name, .. } => name.clone(),
+        ExprData::ExternalValue { package, name } => match package {
+            Some(package) => format!("{package}::{name}"),
+            None => name.clone(),
+        },
         ExprData::Literal { text, .. } | ExprData::InlineVerilog { text } => text.clone(),
         ExprData::StringLiteral { value } => emit_string_literal(value),
+        ExprData::TimeLiteral { magnitude, unit } => format!("{magnitude}{}", unit.suffix()),
         ExprData::Unary { op, arg } => {
             let operand = emit_expr(file, *arg);
             // Keep unary operators out of a size cast's constant expression.
@@ -139,16 +146,24 @@ pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
         ExprData::ArrayAssignmentPattern(elements) => {
             format!("'{{{}}}", join_expressions(file, elements))
         }
+        ExprData::StructAssignmentPattern(members) => {
+            let members = members
+                .iter()
+                .map(|(name, value)| format!("{name}: {}", emit_expr(file, *value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("'{{{members}}}")
+        }
         ExprData::WidthCast { width, value } => emit_width_cast(file, *width, *value),
         ExprData::TypeCast { data_type, value } => emit_data_type_cast(file, *data_type, *value),
         ExprData::PosEdge(value) => format!("posedge {}", emit_expr(file, *value)),
         ExprData::NegEdge(value) => format!("negedge {}", emit_expr(file, *value)),
         ExprData::Macro { name, args } => match args {
-            Some(expressions) => format!("`{name}({})", join_expressions(file, expressions)),
+            Some(arguments) => format!("`{name}({})", join_arguments(file, arguments)),
             None => format!("`{name}"),
         },
         ExprData::FunctionCall { name, args } => {
-            format!("{name}({})", join_expressions(file, args))
+            format!("{name}({})", join_arguments(file, args))
         }
     }
 }
@@ -162,7 +177,6 @@ fn emit_string_literal(value: &str) -> String {
             '"' => escaped.push_str("\\\""),
             '\\' => escaped.push_str("\\\\"),
             '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
             control if control.is_ascii_control() => {
                 write!(escaped, "\\{:03o}", control as u32).expect("writing to String cannot fail");
@@ -186,7 +200,10 @@ fn emit_width_cast(file: &VastFile, width: Expr, value: Expr) -> String {
 /// fragment.
 fn emit_data_type_cast(file: &VastFile, data_type: VastDataType, value: Expr) -> String {
     match &file.ast.data_types[data_type.0.index] {
-        TypeData::Scalar { signed } => {
+        TypeData::Scalar {
+            signed,
+            state: LogicState::FourState,
+        } => {
             let cast = format!("logic'({})", emit_expr(file, value));
             if *signed {
                 format!("signed'({cast})")
@@ -194,22 +211,40 @@ fn emit_data_type_cast(file: &VastFile, data_type: VastDataType, value: Expr) ->
                 cast
             }
         }
-        TypeData::BitVector { width, signed, .. } => {
+        TypeData::Scalar {
+            state: LogicState::TwoState,
+            ..
+        } => {
+            format!(
+                "{}'({})",
+                emit_type(file, data_type),
+                emit_expr(file, value)
+            )
+        }
+        TypeData::BitVector { signed, .. } => {
+            // The sign cast prevents parsers from treating a nested
+            // type-reference cast as a type operand in comparisons. The target
+            // preserves width, sign, and state.
             let sign = if *signed { "signed" } else { "unsigned" };
-            format!("{sign}'({})", emit_width_cast(file, *width, value))
+            format!(
+                "{sign}'(type({})'({}))",
+                emit_complete_type(file, data_type),
+                emit_expr(file, value)
+            )
         }
         TypeData::Integer { signed, kind } => {
-            let keyword = match kind {
-                IntegerTypeKind::Integer => "integer",
-                IntegerTypeKind::Int => "int",
-            };
+            let keyword = kind.keyword();
             let cast = format!("{keyword}'({})", emit_expr(file, value));
-            if *signed {
+            let default_signed = *kind != IntegerTypeKind::Time;
+            if *signed == default_signed {
                 cast
+            } else if *signed {
+                format!("signed'({cast})")
             } else {
                 format!("unsigned'({cast})")
             }
         }
+        TypeData::String => format!("string'({})", emit_expr(file, value)),
         TypeData::Extern { .. } => {
             format!(
                 "{}'({})",
@@ -226,37 +261,53 @@ fn emit_data_type_cast(file: &VastFile, data_type: VastDataType, value: Expr) ->
 /// Returns the textual representation of a data type without its identifier.
 pub(crate) fn emit_type(file: &VastFile, data_type: VastDataType) -> String {
     match &file.ast.data_types[data_type.0.index] {
-        TypeData::Scalar { signed } => {
-            if *signed {
-                "signed".to_owned()
-            } else {
-                String::new()
-            }
-        }
+        TypeData::String => "string".to_owned(),
+        TypeData::Scalar { signed, state } => match state {
+            LogicState::FourState if *signed => "signed".to_owned(),
+            LogicState::FourState => String::new(),
+            LogicState::TwoState if *signed => "bit signed".to_owned(),
+            LogicState::TwoState => "bit".to_owned(),
+        },
         TypeData::BitVector {
             width,
             width_value,
             signed,
-        } => {
-            let signed_prefix = if *signed { "signed " } else { "" };
-            format!(
-                "{signed_prefix}[{}:0]",
-                width_limit(file, *width, *width_value)
-            )
-        }
+            state,
+        } => emit_integral_vector_type(
+            *state,
+            *signed,
+            &format!("[{}:0]", width_limit(file, *width, *width_value)),
+        ),
         TypeData::Extern { package, name } => match package {
             Some(package) => format!("{package}::{name}"),
             None => name.clone(),
         },
-        TypeData::Integer { signed, .. } => {
-            if *signed {
-                String::new()
-            } else {
-                "unsigned".to_owned()
+        TypeData::Integer { signed, kind } => match kind {
+            IntegerTypeKind::Integer | IntegerTypeKind::Int => {
+                if *signed {
+                    String::new()
+                } else {
+                    "unsigned".to_owned()
+                }
             }
-        }
+            IntegerTypeKind::Time if *signed => "time signed".to_owned(),
+            IntegerTypeKind::Time => "time".to_owned(),
+            _ if *signed => kind.keyword().to_owned(),
+            _ => format!("{} unsigned", kind.keyword()),
+        },
         TypeData::PackedArray { .. } => emit_packed_array_type(file, data_type),
         TypeData::UnpackedArray { element, .. } => emit_type(file, *element),
+    }
+}
+
+/// Emits a two-state bit or four-state logic vector's type fragment and
+/// dimensions.
+fn emit_integral_vector_type(state: LogicState, signed: bool, dimensions: &str) -> String {
+    match (state, signed) {
+        (LogicState::TwoState, true) => format!("bit signed {dimensions}"),
+        (LogicState::TwoState, false) => format!("bit {dimensions}"),
+        (LogicState::FourState, true) => format!("signed {dimensions}"),
+        (LogicState::FourState, false) => dimensions.to_owned(),
     }
 }
 
@@ -278,13 +329,15 @@ fn emit_packed_array_type(file: &VastFile, data_type: VastDataType) -> String {
             width,
             width_value,
             signed,
-        } => {
-            let signed_prefix = if *signed { "signed " } else { "" };
-            format!(
-                "{signed_prefix}{dimension_text}[{}:0]",
+            state,
+        } => emit_integral_vector_type(
+            *state,
+            *signed,
+            &format!(
+                "{dimension_text}[{}:0]",
                 width_limit(file, *width, *width_value)
-            )
-        }
+            ),
+        ),
         _ => {
             let element_type = emit_type(file, element);
             if element_type.is_empty() {
@@ -332,28 +385,52 @@ fn emit_type_with_identifier(file: &VastFile, data_type: VastDataType, name: &st
     result
 }
 
+/// Emits an import declaration at file, module header, or module body scope.
+fn emit_package_import(import: &PackageImport) -> String {
+    format!("import {}::{};", import.package, import.item)
+}
+
 /// Emits a module header and its ordered module members.
 fn emit_module(file: &VastFile, module: &ModuleData) -> String {
     let mut result = format!("module {}", module.name);
+    for import in &module.imports {
+        result.push(' ');
+        result.push_str(&emit_package_import(import));
+    }
     if !module.parameter_ports.is_empty() {
         result.push_str(" #(\n");
         for (index, parameter) in module.parameter_ports.iter().enumerate() {
             if index != 0 {
                 result.push_str(",\n");
             }
-            result.push_str("  parameter ");
-            if let Some(data_type) = parameter.data_type {
-                result.push_str(&emit_declaration_without_semicolon(
-                    file,
-                    parameter_data_kind(file, data_type),
-                    data_type,
-                    &parameter.name,
-                ));
-            } else {
-                result.push_str(&parameter.name);
-            }
-            write!(result, " = {}", emit_expr(file, parameter.value))
+            write!(result, "  {} ", parameter_keyword(parameter.kind))
                 .expect("writing to String cannot fail");
+            match &parameter.declaration {
+                ParameterPortDeclaration::Value { data_type, default } => {
+                    if let Some(data_type) = data_type {
+                        result.push_str(&emit_declaration_without_semicolon(
+                            file,
+                            parameter_data_kind(file, *data_type),
+                            *data_type,
+                            &parameter.name,
+                        ));
+                    } else {
+                        result.push_str(&parameter.name);
+                    }
+                    if let Some(default) = default {
+                        write!(result, " = {}", emit_expr(file, *default))
+                            .expect("writing to String cannot fail");
+                    }
+                }
+                ParameterPortDeclaration::Type { default } => {
+                    write!(result, "type {}", parameter.name)
+                        .expect("writing to String cannot fail");
+                    if let Some(default) = default {
+                        write!(result, " = {}", emit_complete_type(file, *default))
+                            .expect("writing to String cannot fail");
+                    }
+                }
+            }
         }
         result.push_str("\n)");
         if !module.ports.is_empty() {
@@ -361,7 +438,15 @@ fn emit_module(file: &VastFile, module: &ModuleData) -> String {
         }
     }
 
+    let needs_explicit_port_list = !module.imports.is_empty() && module.parameter_ports.is_empty();
+    if needs_explicit_port_list {
+        result.push(' ');
+    }
+
     if module.ports.is_empty() {
+        if needs_explicit_port_list {
+            result.push_str("()");
+        }
         result.push_str(";\n");
     } else {
         result.push_str("(\n");
@@ -375,8 +460,11 @@ fn emit_module(file: &VastFile, module: &ModuleData) -> String {
                 ModulePortDirection::Output => "output",
                 ModulePortDirection::InOut => "inout",
             };
-            let kind = if port.direction != ModulePortDirection::InOut
-                && is_user_defined(file, port.data_type)
+            let kind = if base_integer_kind(file, port.data_type) == Some(IntegerTypeKind::Int) {
+                DataKind::Int
+            } else if port.direction != ModulePortDirection::InOut
+                && uses_complete_type(file, port.data_type)
+                && !(port.kind == DataKind::Wire && is_time_type(file, port.data_type))
             {
                 DataKind::User
             } else {
@@ -404,14 +492,46 @@ fn emit_module(file: &VastFile, module: &ModuleData) -> String {
     result
 }
 
+/// Emits the complete spelling of a type, including its built-in base kind.
+fn emit_complete_type(file: &VastFile, data_type: VastDataType) -> String {
+    emit_declaration_without_semicolon(file, parameter_data_kind(file, data_type), data_type, "")
+        .trim_end()
+        .to_owned()
+}
+
+/// Returns the selected parameter declaration keyword.
+fn parameter_keyword(kind: ParameterKind) -> &'static str {
+    match kind {
+        ParameterKind::Parameter => "parameter",
+        ParameterKind::Localparam => "localparam",
+    }
+}
+
 /// Chooses the complete declaration kind corresponding to a parameter type.
 fn parameter_data_kind(file: &VastFile, data_type: VastDataType) -> DataKind {
     match &file.ast.data_types[data_type.0.index] {
-        TypeData::Scalar { .. } | TypeData::BitVector { .. } => DataKind::Logic,
-        TypeData::Extern { .. } => DataKind::User,
+        TypeData::Scalar {
+            state: LogicState::FourState,
+            ..
+        }
+        | TypeData::BitVector {
+            state: LogicState::FourState,
+            ..
+        } => DataKind::Logic,
+        TypeData::Scalar {
+            state: LogicState::TwoState,
+            ..
+        }
+        | TypeData::BitVector {
+            state: LogicState::TwoState,
+            ..
+        }
+        | TypeData::Extern { .. }
+        | TypeData::String => DataKind::User,
         TypeData::Integer { kind, .. } => match kind {
             IntegerTypeKind::Integer => DataKind::Integer,
             IntegerTypeKind::Int => DataKind::Int,
+            _ => DataKind::User,
         },
         TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
             parameter_data_kind(file, *element)
@@ -422,6 +542,16 @@ fn parameter_data_kind(file: &VastFile, data_type: VastDataType) -> DataKind {
 /// Emits one module member without the containing module's indentation.
 fn emit_member(file: &VastFile, member: &MemberData) -> String {
     match member {
+        MemberData::TimeUnit(value) => format!(
+            "timeunit {}{};",
+            value.magnitude.value(),
+            value.unit.suffix()
+        ),
+        MemberData::TimePrecision(value) => format!(
+            "timeprecision {}{};",
+            value.magnitude.value(),
+            value.unit.suffix()
+        ),
         MemberData::Declaration {
             kind,
             name,
@@ -455,6 +585,7 @@ fn emit_member(file: &VastFile, member: &MemberData) -> String {
             )
         }
         MemberData::Instantiation(handle) => emit_instantiation(file, *handle),
+        MemberData::Import(import) => emit_package_import(import),
         MemberData::Function(handle) => emit_function(file, *handle),
         MemberData::Always(handle) => emit_always(file, *handle),
         MemberData::Generate(handle) => emit_generate(file, *handle),
@@ -481,6 +612,15 @@ fn emit_member(file: &VastFile, member: &MemberData) -> String {
             };
             format!("{keyword} {declaration} = {};", emit_expr(file, *rhs))
         }
+        MemberData::TypeParameter {
+            kind,
+            name,
+            default,
+        } => format!(
+            "{} type {name} = {};",
+            parameter_keyword(*kind),
+            emit_complete_type(file, *default)
+        ),
         MemberData::Conditional(handle) => emit_conditional(file, *handle),
         MemberData::Comment(text) => emit_comment(text),
         MemberData::BlankLine => String::new(),
@@ -500,7 +640,7 @@ fn emit_function(file: &VastFile, handle: VastFunction) -> String {
         .inputs
         .iter()
         .map(|input| {
-            let kind = if is_user_defined(file, input.data_type) {
+            let kind = if uses_complete_type(file, input.data_type) {
                 DataKind::User
             } else {
                 input.kind
@@ -536,11 +676,8 @@ fn emit_function(file: &VastFile, handle: VastFunction) -> String {
 /// Formats a function result with an explicit SystemVerilog storage type.
 fn function_result_declaration(file: &VastFile, function: &FunctionData) -> String {
     match &file.ast.data_types[function.result_type.0.index] {
-        TypeData::Integer { kind, .. } => {
-            let declaration_kind = match kind {
-                IntegerTypeKind::Integer => DataKind::Integer,
-                IntegerTypeKind::Int => DataKind::Int,
-            };
+        TypeData::Integer { .. } => {
+            let declaration_kind = parameter_data_kind(file, function.result_type);
             emit_declaration_without_semicolon(
                 file,
                 declaration_kind,
@@ -549,7 +686,7 @@ fn function_result_declaration(file: &VastFile, function: &FunctionData) -> Stri
             )
         }
         _ if file.file_type == VastFileType::SystemVerilog
-            && !is_user_defined(file, function.result_type) =>
+            && !uses_complete_type(file, function.result_type) =>
         {
             emit_declaration_without_semicolon(
                 file,
@@ -569,6 +706,30 @@ fn emit_declaration_without_semicolon(
     data_type: VastDataType,
     name: &str,
 ) -> String {
+    if let Some(atom) = base_integer_kind(file, data_type) {
+        let atom_kind = match atom {
+            IntegerTypeKind::Integer => Some(DataKind::Integer),
+            IntegerTypeKind::Int => Some(DataKind::Int),
+            _ => None,
+        };
+        if let Some(atom_kind) = atom_kind {
+            if kind == DataKind::Wire && atom == IntegerTypeKind::Integer {
+                return format!(
+                    "wire {}",
+                    emit_declaration_without_semicolon(file, atom_kind, data_type, name)
+                );
+            }
+            if matches!(kind, DataKind::Reg | DataKind::Logic) {
+                return emit_declaration_without_semicolon(file, atom_kind, data_type, name);
+            }
+        }
+    }
+    let kind =
+        if matches!(kind, DataKind::Reg | DataKind::Logic) && uses_complete_type(file, data_type) {
+            DataKind::User
+        } else {
+            kind
+        };
     let kind_spelling = match kind {
         DataKind::Reg => "reg",
         DataKind::Wire => "wire",
@@ -728,12 +889,12 @@ fn emit_instantiation(file: &VastFile, handle: Instantiation) -> String {
             if index != 0 {
                 result.push_str(",\n");
             }
-            write!(result, "  .{name}({})", emit_expr(file, *expr))
+            write!(result, "  .{name}({})", emit_argument(file, *expr))
                 .expect("writing to String cannot fail");
         }
         result.push_str("\n) ");
     }
-    write!(result, "{} (\n", instantiation.instance_name).expect("writing to String cannot fail");
+    writeln!(result, "{} (", instantiation.instance_name).expect("writing to String cannot fail");
     for (index, (name, expr)) in instantiation.ports.iter().enumerate() {
         if index != 0 {
             result.push_str(",\n");
@@ -771,6 +932,23 @@ fn emit_comment(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Emits an argument according to whether it denotes a value or type.
+fn emit_argument(file: &VastFile, argument: SvArgument) -> String {
+    match argument {
+        SvArgument::Value(value) => emit_expr(file, value),
+        SvArgument::Type(data_type) => emit_complete_type(file, data_type),
+    }
+}
+
+/// Joins mixed arguments with the same comma spacing as ordinary expressions.
+fn join_arguments(file: &VastFile, arguments: &[SvArgument]) -> String {
+    arguments
+        .iter()
+        .map(|argument| emit_argument(file, *argument))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Joins expressions with the comma spacing used by the C++ VAST emitter.
@@ -825,13 +1003,47 @@ fn packed_dimensions(dimensions: &[i64]) -> String {
     result
 }
 
-/// Reports whether the data type ultimately names a user-defined type.
-fn is_user_defined(file: &VastFile, data_type: VastDataType) -> bool {
+/// Returns the built-in integer atom behind any unpacked array dimensions.
+fn base_integer_kind(file: &VastFile, data_type: VastDataType) -> Option<IntegerTypeKind> {
     match &file.ast.data_types[data_type.0.index] {
-        TypeData::Extern { .. } => true,
-        TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
-            is_user_defined(file, *element)
+        TypeData::Integer { kind, .. } => Some(*kind),
+        TypeData::UnpackedArray { element, .. } => base_integer_kind(file, *element),
+        _ => None,
+    }
+}
+
+/// Reports whether this type already includes its complete type keyword or
+/// name.
+fn uses_complete_type(file: &VastFile, data_type: VastDataType) -> bool {
+    match &file.ast.data_types[data_type.0.index] {
+        TypeData::Scalar {
+            state: LogicState::TwoState,
+            ..
         }
+        | TypeData::BitVector {
+            state: LogicState::TwoState,
+            ..
+        }
+        | TypeData::Extern { .. }
+        | TypeData::String => true,
+        TypeData::Integer { kind, .. } => {
+            !matches!(kind, IntegerTypeKind::Integer | IntegerTypeKind::Int)
+        }
+        TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
+            uses_complete_type(file, *element)
+        }
+        _ => false,
+    }
+}
+
+/// Reports whether a declared type is an integral four-state `time` atom.
+fn is_time_type(file: &VastFile, data_type: VastDataType) -> bool {
+    match &file.ast.data_types[data_type.0.index] {
+        TypeData::Integer {
+            kind: IntegerTypeKind::Time,
+            ..
+        } => true,
+        TypeData::UnpackedArray { element, .. } => is_time_type(file, *element),
         _ => false,
     }
 }
@@ -944,7 +1156,9 @@ fn is_digits_or_identifier(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Expr, LiteralFormat, ModulePortDirection, VastFile, VastFileType, VastModule};
+    use crate::{
+        Expr, LiteralFormat, ModulePortDirection, ParameterKind, VastFile, VastFileType, VastModule,
+    };
 
     /// Confirms that all lightweight AST references are independently copyable.
     #[test]
@@ -1258,6 +1472,52 @@ endmodule
         );
     }
 
+    /// Preserves required, local, value, and type declarations in header order.
+    #[test]
+    fn parameter_ports_support_required_local_and_type_declarations() {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let module = file.add_module("Params");
+        let integer = file.make_int_type(true);
+        let byte = file.make_bit_vector_type(8, false);
+        let four = file.make_unsized_decimal_literal(4);
+        let width = file.add_value_parameter_port(
+            module,
+            "W",
+            ParameterKind::Parameter,
+            Some(&integer),
+            None,
+        );
+        let offset = file.make_add(&width.to_expr(), &four);
+        file.add_value_parameter_port(
+            module,
+            "OFFSET",
+            ParameterKind::Localparam,
+            None,
+            Some(&offset),
+        );
+        file.add_type_parameter_port(module, "Required", ParameterKind::Parameter, None);
+        let word =
+            file.add_type_parameter_port(module, "Word", ParameterKind::Parameter, Some(&byte));
+        file.add_type_parameter_port(module, "Alias", ParameterKind::Localparam, Some(&word));
+        file.add_type_parameter(module, "Body", ParameterKind::Parameter, &integer);
+        file.add_type_parameter(module, "LocalBody", ParameterKind::Localparam, &word);
+
+        assert_eq!(
+            file.emit(),
+            r#"module Params #(
+  parameter int W,
+  localparam OFFSET = W + 4,
+  parameter type Required,
+  parameter type Word = logic [7:0],
+  localparam type Alias = Word
+);
+  parameter type Body = int;
+  localparam type LocalBody = Word;
+endmodule
+"#
+        );
+    }
+
     /// Uses legal signing and width casts for every built-in scalar type.
     #[test]
     fn built_in_type_casts_preserve_width_and_signedness() {
@@ -1277,8 +1537,8 @@ endmodule
         for (data_type, expected) in [
             (scalar, "logic'(value)"),
             (signed_scalar, "signed'(logic'(value))"),
-            (byte, "unsigned'(8'(value))"),
-            (signed_byte, "signed'(8'(value))"),
+            (byte, "unsigned'(type(logic [7:0])'(value))"),
+            (signed_byte, "signed'(type(logic signed [7:0])'(value))"),
             (integer, "integer'(value)"),
             (unsigned_integer, "unsigned'(integer'(value))"),
             (int, "int'(value)"),
@@ -1295,7 +1555,10 @@ endmodule
             .to_expr();
         let symbolic = file.make_bit_vector_type_expr(&width, true);
         let cast = file.make_type_cast(&symbolic, &value);
-        assert_eq!(file.emit_expression(&cast), "signed'(WIDTH'(value))");
+        assert_eq!(
+            file.emit_expression(&cast),
+            "signed'(type(logic signed [WIDTH - 1:0])'(value))"
+        );
 
         let one = file.make_unsized_decimal_literal(1);
         let incremented_width = file.make_add(&width, &one);
@@ -1303,7 +1566,7 @@ endmodule
         let compound_cast = file.make_type_cast(&compound, &value);
         assert_eq!(
             file.emit_expression(&compound_cast),
-            "unsigned'((WIDTH + 1)'(value))"
+            "unsigned'(type(logic [WIDTH + 1 - 1:0])'(value))"
         );
     }
 
