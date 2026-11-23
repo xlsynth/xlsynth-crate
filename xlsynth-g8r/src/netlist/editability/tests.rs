@@ -3,8 +3,8 @@
 use super::*;
 use crate::netlist::io::read_gv_from_str;
 
-/// A shared source and its clock-facing tap carry control-fan-in facts;
-/// the separate ordinary data tap remains distinguishable.
+/// A register output feeding clock logic is marked as part of the control cone,
+/// while its separate data input connection remains identifiable.
 #[test]
 fn control_fanin_protects_shared_data_connections() -> Result<()> {
     let lib = crate::netlist::resize::tests::library()?;
@@ -30,7 +30,8 @@ fn control_fanin_protects_shared_data_connections() -> Result<()> {
 }
 
 /// Worked example for an optimizer: assemble a register boundary, discover
-/// editable taps, measure the same physical Q with STA, and assess its rules.
+/// editable input pins, measure the same physical Q with STA, and assess its
+/// rules.
 ///
 ///     input -> launch FF --Q--> capture FF -> output
 ///                         ^
@@ -95,7 +96,7 @@ fn assembled_stage_combines_editability_sta_and_electrical_rules() -> Result<()>
     Ok(())
 }
 
-/// Rewiring a tap changes the subject graph. Rebuild snapshot analyses and
+/// Rewiring an input pin changes the graph. Rebuild snapshot analyses and
 /// remeasure STA; an old owned report continues to describe the old graph.
 #[test]
 fn rebuilding_after_a_rewire_updates_exact_pins_load_and_timing() -> Result<()> {
@@ -157,14 +158,15 @@ fn rebuilding_after_a_rewire_updates_exact_pins_load_and_timing() -> Result<()> 
 }
 
 /// An output alias contributes physical load to Q while preserving directed
-/// value flow. Retargeting the assign moves both the load and the timing path.
+/// value flow. Changing the assignment's source changes which driver carries
+/// the load and supplies the timing path.
 #[test]
 fn retargeting_an_output_alias_updates_load_and_launch_class() -> Result<()> {
     use crate::netlist::parse::{AssignExpr, NetIndex};
     use crate::netlist::sta::{PreparedStaLibrary, StaOptions};
     let lib = crate::netlist::resize::tests::library()?;
     let mut n = mapped(read_gv_from_str(
-        "module top(input clk,input d,output tap,output y); wire q; assign tap=q; DFF1 launch(.CLK(clk),.D(d),.Q(q)); DFF1 capture(.CLK(clk),.D(tap),.Q(y)); endmodule",
+        "module top(input clk,input d,output alias_out,output y); wire q; assign alias_out=q; DFF1 launch(.CLK(clk),.D(d),.Q(q)); DFF1 capture(.CLK(clk),.D(alias_out),.Q(y)); endmodule",
     )?);
     let analyze = |n: &MappedNetlist| analyze_editable_outputs(n, &lib, 0.5, None);
     let before = analyze(&n)?;
@@ -288,9 +290,10 @@ fn assembly_metadata_detects_invalid_graph_edits_and_allows_appends() -> Result<
 }
 
 /// The same master can capture D at one site and select scan or hold state
-/// at the next. Only the site whose ties prove next_state = D can move D.
+/// at the next. Only when the tied controls prove next_state = D can the
+/// optimizer reconnect that register's D pin.
 #[test]
-fn tied_controls_select_the_movable_capture_pin_per_instance() -> Result<()> {
+fn tied_controls_determine_which_capture_pin_can_be_reconnected() -> Result<()> {
     use crate::liberty::model::LibraryBuilder;
     for (next, dynamic, inactive) in [
         (
@@ -391,7 +394,7 @@ fn tied_setup_conditions_and_incomplete_edges_keep_unpriced_taps_fixed() -> Resu
         .retain(|t| t.kind_str() != "fall_constraint");
     assert!(first_driver(&report(&lib, "1'b1")?).sinks.is_empty());
     // A missing falling clock-to-Q slew table makes the launch itself
-    // unpriced, rather than merely making its capture tap fixed.
+    // unpriced, rather than merely making its capture data pin fixed.
     let cell = lib.cells.iter_mut().find(|c| c.name == "DFF1").unwrap();
     let q = cell
         .pins
@@ -434,7 +437,7 @@ fn malformed_alias_groups_never_become_editable_roots() -> Result<()> {
 }
 
 /// A tran joins the two names electrically. With Q as the only driver we
-/// can move the capture pin; adding a gate on the alias rules out the root.
+/// can reconnect the capture data pin; adding a gate on the alias rules out Q.
 #[test]
 fn tran_requires_a_unique_driver_even_when_only_register_outputs_are_selected() -> Result<()> {
     let lib = crate::netlist::resize::tests::library()?;

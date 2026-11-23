@@ -154,7 +154,7 @@ impl OutputCharacterization {
     }
 }
 
-/// Load carried by a set of physical pins and module output taps. Wire
+/// Load carried by cell input pins and module output ports. Wire
 /// capacitance is supplied separately because an edit can change the fanout.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Load {
@@ -242,8 +242,8 @@ mod tests {
         assert_eq!(limit.violations_known(0.0, 0.0, 2.0).fanout, 2.0);
     }
 
-    /// Output taps add capacitance but not pin fanout. Rise and fall loads
-    /// remain separate, and a table boundary is not an electrical rule.
+    /// Module output ports add capacitance but not pin fanout. Rise and fall
+    /// loads remain separate, and a table boundary is not an electrical rule.
     #[test]
     fn asymmetric_loads_ports_and_characterization_are_independent() {
         use crate::netlist::connectivity::{PinConnection, exact::SignalPins};

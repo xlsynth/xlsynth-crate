@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Determine which registered data connections a netlist transformation may
-//! edit without disturbing control cones, fixed taps or unpriced boundaries.
-//! This analysis is valid only for its unchanged netlist snapshot.
+//! edit without disturbing control cones, fixed connections or unpriced
+//! boundaries. This analysis is valid only for its unchanged netlist snapshot.
 
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, Pin, PinDirection};
@@ -18,7 +18,7 @@ use crate::netlist::sequential_liberty::classify_tied_ff_data;
 use anyhow::{Result, anyhow, ensure};
 use std::collections::{HashMap, HashSet};
 
-/// A movable scalar data pin and its existing binding.
+/// A scalar cell input pin whose connection an optimizer may change.
 #[derive(Clone, Debug)]
 pub struct EditablePin {
     pub binding: PinConnection,
@@ -54,14 +54,26 @@ pub struct EditableOutputs {
     pub launches: Vec<usize>,
 }
 
-/// Collects freely movable scalar data taps and the loads that must remain on
-/// their original source. A scalar pin may use a vector bit or a one-bit alias.
+/// Finds register outputs and identifies which connected cell input pins an
+/// optimizer may disconnect from their current net and connect to another net.
+/// For example, an optimizer might insert a buffer and change an input pin's
+/// connection from the register output to the buffer output.
 ///
-/// The analysis first resolves aliases and exact drivers, then follows control
-/// fan-in to exclude edits that could alter clock or control behavior. A tap is
-/// movable only when its cell, pin binding, and timing coverage are known; all
-/// other taps stay attached to the original source. Assembly metadata, when
-/// supplied, must describe the same netlist snapshot.
+/// For each register output, determines:
+/// - Which cell input pins may have their connections changed.
+/// - Which connections must remain unchanged and their combined load.
+/// - Whether the output also feeds clock or control logic.
+///
+/// Handles scalar nets, individual bits of vector nets,
+/// continuous assignments, and bidirectional `tran` connections.
+///
+/// Changing a pin's connection requires known cell, connection, and required
+/// timing information. Callers must also respect the reported control-cone
+/// information when choosing edits.
+///
+/// The result is valid for the analyzed netlist snapshot. Recompute it
+/// after changing connectivity. Any supplied register assembly metadata
+/// must describe the same netlist.
 pub fn analyze_editable_outputs(
     netlist: &MappedNetlist,
     lib: &Library,
@@ -324,15 +336,17 @@ pub fn analyze_editable_outputs(
                 {
                     blocked[group(*bit).index()] = true
                 }
-                Some(Role::Input { movable, .. })
-                    if coverage.is_none_or(|(data, priced)| {
-                        *data != Some(conn.port) || !priced.contains(&conn.port)
-                    }) =>
+                Some(Role::Input {
+                    can_change_connection,
+                    ..
+                }) if coverage.is_none_or(|(data, priced)| {
+                    *data != Some(conn.port) || !priced.contains(&conn.port)
+                }) =>
                 {
                     // Without both active setup edges this physical D can be
                     // absent from otherwise successful whole-module STA.
                     control.push(group(*bit));
-                    if *movable {
+                    if *can_change_connection {
                         fixed_capture_pins.insert(PinConnection {
                             instance: inst.raw_index,
                             connection,
@@ -398,7 +412,7 @@ pub fn analyze_editable_outputs(
                 let inst = &n.instances[id.instance.0];
                 let conn = &inst.connections[id.connection];
                 let Some(Role::Input {
-                    movable,
+                    can_change_connection,
                     cap,
                     fanout_load,
                     ..
@@ -413,7 +427,7 @@ pub fn analyze_editable_outputs(
                     capacitance: *cap,
                     fanout: *fanout_load,
                 };
-                if *movable && !fixed_capture_pins.contains(&id) {
+                if *can_change_connection && !fixed_capture_pins.contains(&id) {
                     driver.sinks.push(EditablePin {
                         binding: id,
                         original: netlist.module.instances[id.instance.0].connections
@@ -443,7 +457,7 @@ pub fn analyze_editable_outputs(
 /// Whether a characterized pin carries editable data, a control, or an output.
 enum Role {
     Input {
-        movable: bool,
+        can_change_connection: bool,
         control: bool,
         cap: [f64; 2],
         fanout_load: f64,
@@ -586,12 +600,12 @@ fn pin_roles(
                     let fanout_load = load.fanout;
                     // FF inputs are candidates here. The instance-specific
                     // check fixes every pin without proven data and setup arcs.
-                    let movable = valid
+                    let can_change_connection = valid
                         && cell.clock_gate.is_none()
                         && !control
                         && (data_inputs.contains(name) || next.is_some());
                     Role::Input {
-                        movable,
+                        can_change_connection,
                         control,
                         cap,
                         fanout_load,
