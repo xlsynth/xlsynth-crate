@@ -1,9 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exact electrical wiring for a normalized netlist snapshot. Unlike a logical
-//! cone, a wire alias shares physical load with its source. Expression assigns,
-//! repeated destinations and cycles are recorded as issues rather than silently
-//! treated as physical wires. Rebuild this view after changing connectivity.
+//! Identifies which bits of a gate-level netlist are connected
+//! and which cell pins drive or load those connections.
+//!
+//! For example, given `assign b = a`, collect the pins connected
+//! to either `a` or `b` together when accounting for driver load.
+//! The assignment still transfers values from `a` to `b`.
+//!
+//! Operates on NormalizedNetlistModule, using NormalizedBitIndex
+//! to identify individual bits.
+//!
+//! Records unsupported assignments and conflicting connections
+//! so callers can decide whether the affected circuit is safe
+//! to modify.
+//!
+//! This is a temporary analysis. Rebuild it after changing
+//! the netlist's connections.
 
 use super::super::normalized::{
     BitExpr, BitSource, NormalizedBitIndex, NormalizedNetlistModule, find_alias_root,
