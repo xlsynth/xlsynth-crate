@@ -155,9 +155,11 @@ BX evaluates pure value expressions and calls to earlier local functions,
 including value-parametric specializations, within its compile-time work limit.
 Evaluation follows the dependencies of the result. For example, an
 out-of-bounds access in an unused helper binding can
-go unevaluated in BX even when DSLX reports a constexpr error. Calls to imported
-DSLX functions and extern functions require runtime evaluation, including when
-reached through a local helper.
+go unevaluated in BX even when DSLX reports a constexpr error. Module constants
+and register initializers can also call public, pure DSLX functions with
+compile-time arguments. For example, after `use config;`, a block can write
+`reg q: u8 = config::initial_value();`. DSLX evaluates the imported helper
+using its own constexpr rules. Extern calls require runtime evaluation.
 
 ### Compile-time assertions
 
@@ -243,10 +245,9 @@ fn sum(xs: uN[WIDTH][LANES]) -> uN[WIDTH] {
 
 Widths can also appear in `bits[WIDTH]`, `sN[WIDTH]`, and
 `xN[SIGNED][WIDTH]`. Use a `bool` or `u1` constant for `SIGNED`. For a
-computed width or length, declare the expression as a module constant, then
-use its name in the type. A public BX or DSLX library constant can be qualified, as
-in `u8[packet::LANES]`. Width slices and value-parametric functions also
-accept dimension expressions.
+computed width or length, use a constexpr expression directly, as in
+`uN[config::width()]`, or name it once with `const WIDTH = config::width();`.
+A public BX or DSLX library constant can be qualified, as in `u8[packet::LANES]`.
 
 ## Module-level type aliases
 
@@ -1404,8 +1405,11 @@ Use a call binding to supply the arguments for inference. When a payload literal
 
 ### Value parametrics on blocks
 
-A block can take required `u32` value parametrics for compile-time expressions
-in its body. Supply each value explicitly in angle brackets at the call site.
+A block can take `bool` and `u32` value parametrics for compile-time expressions
+in its body. For a block declared as `route<SPLIT: bool = {false}>`,
+`route(data)` binds `SPLIT` to `false` and `route<true>(data)` binds it to
+`true`. Omitted trailing value arguments use their braced defaults, evaluated
+in the block's declaration scope with preceding value parameters in scope.
 BX infers type parameters from the data inputs.
 
 ```text

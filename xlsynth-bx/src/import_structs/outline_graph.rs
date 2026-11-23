@@ -594,6 +594,12 @@ impl OutlineGraph {
         let mut exports = Vec::new();
         for (target, spelling) in &self.exports {
             let decl = &self.modules[&target.subject].outline.declarations[&target.name];
+            if matches!(decl.kind, OutlineKind::Struct { .. }) {
+                // A public struct can expose private nominal types through its
+                // fields.
+                pending.insert(target.clone());
+                continue;
+            }
             let OutlineKind::Alias(annotation) = &decl.kind else {
                 continue;
             };

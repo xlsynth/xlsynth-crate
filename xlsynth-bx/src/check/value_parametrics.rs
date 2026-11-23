@@ -621,7 +621,7 @@ impl ExplicitScope {
         preceding_value: Option<(&str, &BoundParametricValue)>,
         evaluate: impl FnOnce(&mut BodyChecker<'_, 'm>) -> Result<T, String>,
     ) -> Result<T, String> {
-        caller.with_value_definition(f, |definition| {
+        caller.with_value_definition(&f.name, |definition| {
             self.exchange(definition);
             if let Some((name, value)) = preceding_value {
                 definition.bind_parametric_value(name, value);
@@ -938,33 +938,76 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Evaluate a declaration's annotations and defaults with its own imports
     /// and earlier module declarations, even when called from a different
     /// scope.
-    fn with_value_definition<T>(
+    pub(super) fn with_value_definition<T>(
         &mut self,
-        f: &'m Function,
+        owner: &'m str,
         evaluate: impl FnOnce(&mut BodyChecker<'_, 'm>) -> Result<T, String>,
     ) -> Result<T, String> {
-        let registry = self.function_registry.as_deref_mut().ok_or_else(|| {
-            format!(
-                "cannot specialize function '{}' in this type annotation",
-                f.name
-            )
-        })?;
-        registry.enter(&f.name)?;
+        let registry = self
+            .function_registry
+            .as_deref_mut()
+            .ok_or_else(|| format!("cannot specialize '{owner}' in this type annotation"))?;
+        registry.enter(owner)?;
         let result = stacker::maybe_grow(1024 * 1024, 2 * 1024 * 1024, || {
             let mut definition =
                 BodyChecker::new(self.decls, self.resolver, self.structs, BodyKind::Function);
             definition.function_position = self
                 .decls
                 .positions
-                .get(f.name.as_str())
+                .get(owner)
                 .map(|at| at.saturating_sub(1));
-            definition.warning_owner = Some(&f.name);
-            definition.zero_binding = self.decls.zero_binding(&f.name);
+            definition.warning_owner = Some(owner);
+            definition.zero_binding = self.decls.zero_binding(owner);
             definition.function_registry = Some(registry);
             evaluate(&mut definition)
         });
         registry.leave();
         result
+    }
+
+    /// Check an explicitly supplied value or evaluate its default in the
+    /// declaration scope containing earlier bindings.
+    pub(super) fn value_or_default(
+        &mut self,
+        owner: &str,
+        formal: &ParametricBinding,
+        ty: Type,
+        supplied: Option<&BoundParametricValue>,
+    ) -> Result<BoundParametricValue, String> {
+        self.names.insert(formal.name.clone());
+        Ok(match (supplied, &formal.default) {
+            (Some(bound), default) => {
+                if !compatible(&ty, &bound.ty) {
+                    return Err(format!(
+                        "parametric '{}' expects {ty}, got {}",
+                        formal.name, bound.ty
+                    ));
+                }
+                if let Some(expr) = default {
+                    // An overridden default still has to typecheck. The
+                    // formal has its supplied value inside its own default.
+                    self.bind_parametric_value(&formal.name, bound);
+                    self.with_parametric_context(|c| c.dslx_argument(expr, &ty))
+                        .map_err(|e| format!("default for '{}': {e}", formal.name))?;
+                }
+                BoundParametricValue {
+                    ty,
+                    value: bound.value.clone(),
+                }
+            }
+            (None, Some(expr)) => {
+                let value = self
+                    .parametric_value(expr, &ty)
+                    .map_err(|e| format!("default for '{}': {e}", formal.name))?;
+                BoundParametricValue { ty, value }
+            }
+            (None, None) => {
+                return Err(format!(
+                    "cannot infer value parametric '{}' of '{}'",
+                    formal.name, owner
+                ));
+            }
+        })
     }
 
     /// Bind defaults in declaration order, then resolve each runtime parameter
@@ -1020,40 +1063,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             };
             let supplied = &provided[values.len()];
             let ty = self.value_binding_type(formal)?;
-            self.names.insert(formal.name.clone());
-            let bound = match (supplied, &formal.default) {
-                (Some(bound), default) => {
-                    if !compatible(&ty, &bound.ty) {
-                        return Err(format!(
-                            "parametric '{}' expects {ty}, got {}",
-                            formal.name, bound.ty
-                        ));
-                    }
-                    if let Some(expr) = default {
-                        // An overridden default still has to typecheck. The
-                        // formal has its supplied value inside its own default.
-                        self.bind_parametric_value(&formal.name, bound);
-                        self.with_parametric_context(|c| c.dslx_argument(expr, &ty))
-                            .map_err(|e| format!("default for '{}': {e}", formal.name))?;
-                    }
-                    BoundParametricValue {
-                        ty,
-                        value: bound.value.clone(),
-                    }
-                }
-                (None, Some(expr)) => {
-                    let value = self
-                        .parametric_value(expr, &ty)
-                        .map_err(|e| format!("default for '{}': {e}", formal.name))?;
-                    BoundParametricValue { ty, value }
-                }
-                (None, None) => {
-                    return Err(format!(
-                        "cannot infer value parametric '{}' of '{}'",
-                        formal.name, f.name
-                    ));
-                }
-            };
+            let bound = self.value_or_default(&f.name, formal, ty, supplied.as_ref())?;
             charge(self, 1 + literal_copy_work(&bound.value))?;
             self.bind_parametric_value(&formal.name, &bound);
             values.push(bound);
@@ -1125,7 +1135,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if let Some(bound) = registry.cached_value_signature(f, &supplied)? {
             return Ok(bound);
         }
-        let signature = self.with_value_definition(f, |definition| {
+        let signature = self.with_value_definition(&f.name, |definition| {
             definition.function_type_bindings = (!f.type_params.is_empty()).then_some(types);
             definition.bound_value_signature(f, &supplied.values)
         })?;
@@ -1854,7 +1864,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             // Check explicit annotations before instantiating the callee.
             // Preceding formals hide module declarations even though none of
             // their values are available yet in this definition scope.
-            let types = self.with_value_definition(f, |definition| {
+            let types = self.with_value_definition(&f.name, |definition| {
                 let mut types = Vec::new();
                 for formal in f.parametric_bindings().take(actuals.len()) {
                     let name = match formal {

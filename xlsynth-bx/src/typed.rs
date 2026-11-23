@@ -15,7 +15,7 @@ use crate::ast::{
 };
 use crate::builtin::BuiltinOp;
 use crate::bx_import::library_item;
-use crate::dslx_import::{ImportedCall, ResolvedImports};
+use crate::dslx_import::{ImportResolver, ImportedCall, ResolvedImports};
 use crate::warnings::BxWarning;
 use TypedExprKind as K;
 
@@ -651,6 +651,9 @@ pub(super) enum ConstantBinding {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ConstantFailure {
     InvalidEnumCast(String),
+    ImportedCall(String),
+    /// A concrete native call is executed only during required evaluation.
+    NeedsImport,
     WorkLimit,
     Deferred(BTreeSet<usize>),
     /// A checked call needs the callback implementation to produce a value.
@@ -661,6 +664,14 @@ pub(super) enum ConstantFailure {
     /// can replay the let with the module's concrete functions available.
     NeedsFunctions,
     PendingFunction(usize),
+}
+
+/// Helper implementations available for the current fold. Speculative folds
+/// defer native execution until the enclosing expression demands its value.
+#[derive(Default)]
+pub(super) struct ConstantCallees<'a> {
+    pub(super) local: Option<&'a mut ConstantFunctions>,
+    pub(super) imports: Option<&'a mut ImportResolver>,
 }
 
 /// Memoize concrete local function calls while evaluating an initializer or
@@ -845,6 +856,7 @@ struct CountedWork<'a> {
     failure: Option<ConstantFailure>,
     missing_local: Option<(usize, BTreeSet<usize>)>,
     functions: Option<&'a mut ConstantFunctions>,
+    imports: Option<&'a mut ImportResolver>,
 }
 
 /// Reserve room for one syntax-depth-limited expression tree at initializer
@@ -1074,6 +1086,37 @@ impl CountedWork<'_> {
             },
         );
         Some(value)
+    }
+
+    /// Execute the selected pure DSLX specialization with concrete BX inputs.
+    fn imported_call(
+        &mut self,
+        id: usize,
+        args: &[TypedExpr],
+        names: &ConstantScope<'_>,
+    ) -> Option<IrValue> {
+        let args = self.eager_values(args, names)?;
+        if self.imports.is_none() {
+            self.failure = Some(ConstantFailure::NeedsImport);
+            return None;
+        }
+        if let Some(functions) = self.functions.as_mut() {
+            functions.calls += 1;
+        }
+        self.charge(
+            args.iter()
+                .fold(1usize, |sum, arg| sum.saturating_add(constant_work(arg))),
+        )?;
+        match self.imports.as_mut()?.evaluate_constant_call(id, args) {
+            Ok(value) => {
+                self.charge(constant_work(&value))?;
+                Some(value)
+            }
+            Err(error) => {
+                self.failure = Some(ConstantFailure::ImportedCall(error));
+                None
+            }
+        }
     }
 
     /// Evaluate the checked bindings and output with only the callee's
@@ -1596,10 +1639,10 @@ impl TypedExpr {
         remaining: &mut usize,
         replaying: bool,
         usage: ConstantUse,
-        functions: Option<&mut ConstantFunctions>,
+        callees: ConstantCallees<'_>,
         enums: &BTreeMap<String, CheckedEnum>,
     ) -> Result<Option<FoldedConstant>, ConstantFailure> {
-        let may_call = functions.is_some();
+        let may_call = callees.local.is_some() || callees.imports.is_some();
         let mut work = CountedWork {
             enums,
             remaining,
@@ -1609,7 +1652,8 @@ impl TypedExpr {
             usage,
             failure: None,
             missing_local: None,
-            functions,
+            functions: callees.local,
+            imports: callees.imports,
         };
         if replaying && work.charge(1).is_none() {
             return Err(ConstantFailure::WorkLimit);
@@ -1796,7 +1840,8 @@ impl TypedExpr {
                 names.read(name, remaining)?.get_element(*index).ok()
             }
             K::Call { name, args } => remaining.call(name, args, names),
-            K::ImportedCall { .. } | K::InstanceOutput { .. } => None,
+            K::ImportedCall { id, args } => remaining.imported_call(*id, args, names),
+            K::InstanceOutput { .. } => None,
             K::Match { subject, arms } => {
                 let outer = std::mem::replace(&mut remaining.inside_match, true);
                 let result = (|| {
@@ -1916,9 +1961,9 @@ mod tests {
     use xlsynth_pir::{IrBits, IrValue};
 
     use super::{
-        CONSTEXPR_PREFIX, CheckedBinding, CheckedStmt, ConstantBinding, ConstantFailure,
-        ConstantFunctions, ConstantUse, TEST_DISCARD_PREFIX, Type, TypedExpr, TypedExprKind,
-        body_inputs,
+        CONSTEXPR_PREFIX, CheckedBinding, CheckedStmt, ConstantBinding, ConstantCallees,
+        ConstantFailure, ConstantFunctions, ConstantUse, TEST_DISCARD_PREFIX, Type, TypedExpr,
+        TypedExprKind, body_inputs,
     };
     use crate::{check_module, parse_module};
 
@@ -1977,7 +2022,10 @@ mod tests {
                             &mut remaining,
                             true,
                             ConstantUse::Bx,
-                            Some(&mut calls),
+                            ConstantCallees {
+                                local: Some(&mut calls),
+                                imports: None
+                            },
                             &BTreeMap::new(),
                         )
                         .map(|v| v.map(|fold| fold.value)),
@@ -2066,7 +2114,7 @@ block folded(clk) -> u16 {{
                         &mut remaining,
                         false,
                         ConstantUse::Bx,
-                        None,
+                        ConstantCallees::default(),
                         &BTreeMap::new()
                     )
                     .map(|v| v.map(|fold| fold.value)),
@@ -2090,7 +2138,7 @@ block folded(clk) -> u16 {{
                 &mut remaining,
                 false,
                 ConstantUse::Bx,
-                None,
+                ConstantCallees::default(),
                 &BTreeMap::new(),
             ),
             Err(ConstantFailure::WorkLimit),
@@ -2123,7 +2171,7 @@ fn pack(x: uN[256][2]) -> uN[512] { x as uN[512] }
                     &mut remaining,
                     false,
                     ConstantUse::Bx,
-                    None,
+                    ConstantCallees::default(),
                     &BTreeMap::new(),
                 ),
                 Err(ConstantFailure::WorkLimit),
@@ -2160,7 +2208,7 @@ block folded(clk, rows: u8[2][2]) -> u8[2][2] {
                     &mut ample,
                     false,
                     ConstantUse::Bx,
-                    None,
+                    ConstantCallees::default(),
                     &BTreeMap::new()
                 )
                 .map(|v| v.map(|fold| fold.value)),
@@ -2173,7 +2221,7 @@ block folded(clk, rows: u8[2][2]) -> u8[2][2] {
                 &mut limited,
                 false,
                 ConstantUse::Bx,
-                None,
+                ConstantCallees::default(),
                 &BTreeMap::new()
             ),
             Err(ConstantFailure::WorkLimit)
@@ -2351,7 +2399,7 @@ block wide_capture(clk, data: Payload) -> bool {
                     &mut remaining,
                     false,
                     ConstantUse::Bx,
-                    None,
+                    ConstantCallees::default(),
                     &BTreeMap::new()
                 ),
                 Err(ConstantFailure::WorkLimit),

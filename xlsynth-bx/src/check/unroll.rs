@@ -641,6 +641,30 @@ impl BodyChecker<'_, '_> {
         Ok(())
     }
 
+    /// Check names in block defaults before any call selects their concrete
+    /// values.
+    pub(super) fn check_block_default_names(&mut self, block: &Block) -> Result<(), String> {
+        self.function_position = self.function_position.map(|at| at.saturating_sub(1));
+        self.template_name_depth = Some(Cell::new(0));
+        let visited = Cell::new(0);
+        let mut locals = LexicalScope::root(&self.names, &visited);
+        for formal in block.parametric_bindings() {
+            match formal {
+                FunctionParametricRef::Value(binding) => {
+                    locals.bind(&binding.name, LexicalKind::Constant);
+                    if let Some(default) = &binding.default {
+                        self.check_expr_names(default, &locals)
+                            .map_err(|e| format!("default for '{}': {e}", binding.name))?;
+                    }
+                }
+                FunctionParametricRef::Callback(callback) => {
+                    locals.bind_pattern_name(&callback.name)
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve names at a template's declaration while leaving concrete types
     /// and evaluation to the call that supplies its parametric values.
     pub(super) fn check_value_template_names(&mut self, f: &Function) -> Result<(), String> {

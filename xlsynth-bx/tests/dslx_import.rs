@@ -271,6 +271,138 @@ fn native_constant_imports_obey_visibility_and_source_order() -> Result<(), Box<
 }
 
 #[test]
+fn native_helpers_supply_typed_resets_and_keep_runtime_calls() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "config.x",
+        r#"
+pub struct State { word: uN[81], tags: u8[0] }
+pub fn state<N: u32>(word: uN[N]) -> State {
+    State { word: word as uN[81], tags: zero!<u8[0]>() }
+}
+pub fn bump(x: s8) -> s8 { x + s8:1 }
+pub fn width() -> u32 { u32:4 }
+"#,
+    )?;
+    let source = r#"
+use config;
+use config::bump;
+const BOOT = config::state<81>(uN[81]:0x1_0000_0000_0000_0001);
+fn next(x: s8) -> s8 { bump(x) }
+fn nibble(x:u8) -> u4 {
+    let w = config::width();
+    let width = w;
+    x[0+:uN[width]]
+}
+pub block delay(clk, x:s8) -> s8 {
+    let seed = next(s8:-4);
+    reg q:s8 = seed;
+    q := bump(x);
+    q
+}
+"#;
+    let options = search_paths(&[root.path()]);
+    let checked = check_source_with_options(source, &options)?;
+    let boot = &checked.constants()[0];
+    assert_eq!(boot.ty, Type::Named("config::State".into()));
+    let empty = IrValue::make_array_typed(xlsynth_pir::ir::Type::Bits(8), &[])?;
+    assert_eq!(
+        boot.value,
+        IrValue::make_tuple(&[
+            IrValue::parse_typed("bits[81]:0x1_0000_0000_0000_0001")?,
+            empty,
+        ])
+    );
+    let package = lower_module(&checked, empty_package("design"), ResetBehavior::default())?;
+    let block = package.get_top_block().ok_or("expected delay block")?;
+    assert_eq!(
+        block.registers[0].reset_value,
+        Some(IrValue::make_sbits(8, -3)?)
+    );
+    assert!(package.get_fn("__config__bump").is_some());
+    Ok(())
+}
+
+#[test]
+fn native_constexpr_calls_reconstruct_private_fields_of_a_public_struct()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "config.x",
+        r#"
+enum Mode: u2 { Off = 0, On = 1 }
+struct Inner { x: u8, mode: Mode }
+pub struct Wrapper { inner: Inner }
+pub fn make() -> Wrapper { Wrapper { inner: Inner { x: u8:13, mode: Mode::On } } }
+pub fn read(w: Wrapper) -> u8 { w.inner.x + (w.inner.mode as u8) }
+"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    let checked = check_source_with_options(
+        "use config; const V = config::read(config::make());",
+        &options,
+    )?;
+    assert_eq!(checked.constants()[0].value, IrValue::make_ubits(8, 14)?);
+    Ok(())
+}
+
+#[test]
+fn native_reset_calls_require_constant_data_and_pure_helpers() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "settings.x",
+        r#"
+pub fn id(x:u8) -> u8 { x }
+pub fn pick(i:u32) -> u8 { [u8:7, u8:42][i] }
+pub fn require(x:u8) -> u8 { if x == u8:0 { fail!("zero", x) } else { x } }
+"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    for (call, diagnostic) in [
+        ("settings::id(x)", "must be a compile-time constant"),
+        ("settings::require(u8:1)", "implicit token"),
+        (
+            "settings::pick(u32:4)",
+            "constexpr call to 'settings::pick'",
+        ),
+    ] {
+        let source =
+            format!("use settings; block delay(clk, x:u8)->u8 {{ reg q:u8 = {call}; q := x; q }}");
+        let error = check_source_with_options(&source, &options).unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+    // Runtime IR can index out of bounds. Native constexpr checking occurs
+    // only when the result of the imported call is demanded at compile time.
+    let source = r#"
+use settings;
+block delay(clk, x:u8) -> u8 {
+    let last = settings::pick(u32:4);
+    reg q:u8 = if true { u8:1 } else { last };
+    q := x + last;
+    q
+}
+"#;
+    let package = compile_with_options(
+        source,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(
+        package
+            .get_top_block()
+            .ok_or("expected delay block")?
+            .registers[0]
+            .reset_value,
+        Some(IrValue::make_ubits(8, 1)?)
+    );
+    Ok(())
+}
+
+#[test]
 fn native_constant_register_reset_keeps_the_checked_source_value() -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;
     write_module(

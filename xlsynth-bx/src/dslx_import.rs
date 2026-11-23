@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember, TypecheckedModule};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{NodePayload, Package};
 use xlsynth_pir::ir_parser;
 
@@ -73,6 +74,14 @@ struct CallInputs {
     parametrics: Vec<BoundParametricValue>,
 }
 
+/// One pure specialization invoked with concrete data arguments during BX
+/// checking.
+#[derive(Eq, Hash, PartialEq)]
+struct ConstantCall {
+    id: usize,
+    args: Vec<IrValue>,
+}
+
 /// Per-check import graph and memoized concrete function signatures.
 pub(crate) struct ImportResolver {
     bindings: BTreeMap<String, UseBinding>,
@@ -86,6 +95,8 @@ pub(crate) struct ImportResolver {
     binding_types: BTreeMap<(String, String), Vec<Type>>,
     context_types: HashMap<value_parametrics::ContextInputs, Vec<Type>>,
     calls: Vec<ImportedCall>,
+    constant_calls: HashMap<ConstantCall, IrValue>,
+    constant_work: usize,
     explicit_count: usize,
     explicit_work: usize,
 }
@@ -164,6 +175,8 @@ impl ImportResolver {
             binding_types: BTreeMap::new(),
             context_types: HashMap::new(),
             calls: Vec::new(),
+            constant_calls: HashMap::new(),
+            constant_work: 0,
             explicit_count: 0,
             explicit_work: 0,
         })
@@ -171,6 +184,80 @@ impl ImportResolver {
 
     pub(crate) fn call_count(&self) -> usize {
         self.calls.len()
+    }
+
+    /// Evaluate a pure call under DSLX constexpr semantics in the checked
+    /// source snapshot.
+    pub(crate) fn evaluate_constant_call(
+        &mut self,
+        id: usize,
+        args: Vec<IrValue>,
+    ) -> Result<IrValue, String> {
+        let key = ConstantCall { id, args };
+        if let Some(value) = self.constant_calls.get(&key) {
+            return Ok(value.clone());
+        }
+        if self.constant_calls.len() >= MAX_SPECIALIZATIONS {
+            return Err(format!(
+                "native DSLX constexpr call limit of {MAX_SPECIALIZATIONS} exceeded"
+            ));
+        }
+        let call = &self.calls[id];
+        let mut imports = ProbeImports::default();
+        let name = imports.specialized_name(
+            &call.module,
+            &call.function,
+            &call.parametrics,
+            &self.structs,
+        )?;
+        let args = call
+            .args
+            .iter()
+            .zip(&key.args)
+            .map(|(ty, value)| imports.render_value(ty, value, &self.structs, false))
+            .collect::<Result<Vec<_>, _>>()?;
+        let witness = TypeWitness {
+            imports: imports.declarations(),
+            params: String::new(),
+            expr: format!("{name}({})", args.join(", ")),
+        };
+        // Each distinct call retains its probe in the native context, its
+        // concrete arguments in the cache key, and its decoded result.
+        let input_work = key
+            .args
+            .iter()
+            .fold(witness.expr.len() + witness.imports.len(), |total, arg| {
+                total.saturating_add(crate::typed::constant_work(arg))
+            });
+        self.reserve_constant_work(input_work)?;
+        let call = &self.calls[id];
+        let result_ty = call.result.clone();
+        let callee = format!("{}::{}", call.module, call.function);
+        let value = self.with_imports(|structs, data| {
+            structs
+                .evaluate_constant_call(&result_ty, &witness, data)
+                .map_err(|error| {
+                    format!(
+                        "constexpr call to '{callee}': {}",
+                        structs.remap_diagnostic(error)
+                    )
+                })
+        })?;
+        self.reserve_constant_work(crate::typed::constant_work(&value))?;
+        self.constant_calls.insert(key, value.clone());
+        Ok(value)
+    }
+
+    /// Bound retained native constexpr probes and concrete arguments across the
+    /// import graph.
+    fn reserve_constant_work(&mut self, work: usize) -> Result<(), String> {
+        self.constant_work = self.constant_work.saturating_add(work);
+        if self.constant_work > MAX_TYPE_SIZE {
+            return Err(format!(
+                "native DSLX constexpr calls exceed the work limit of {MAX_TYPE_SIZE}"
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn has_imports(&self) -> bool {

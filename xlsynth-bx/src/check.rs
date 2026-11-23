@@ -53,8 +53,8 @@ mod value_parametrics;
 pub use crate::builtin::BuiltinOp;
 pub use crate::typed::TypedMatchPattern as ScalarPattern;
 use crate::typed::{
-    BoundParametricValue, ConstantBinding, ConstantFailure, ConstantFunctions, ConstantUse,
-    TypedExprKind as K, bits, repr_bits,
+    BoundParametricValue, ConstantBinding, ConstantCallees, ConstantFailure, ConstantFunctions,
+    ConstantUse, TypedExprKind as K, bits, repr_bits,
 };
 pub use crate::typed::{
     CheckedBinding, CheckedBlock, CheckedConstant, CheckedEnum, CheckedFunction, CheckedModule,
@@ -347,6 +347,12 @@ struct BlockTemplate<'m> {
     stages: BlockStages<u64>,
     params: Vec<Param>,
     result: Type,
+    /// Concrete annotation for each value formal, resolved in declaration
+    /// scope.
+    value_types: Vec<Type>,
+    /// Position after the last required value or callback in the explicit
+    /// prefix.
+    required_arguments: usize,
     callback_params: Vec<BlockCallbackFormal>,
     callback_indices: BTreeMap<String, usize>,
 }
@@ -402,6 +408,7 @@ struct ConstantContext<'a> {
     /// values outside loops as well as in their bodies.
     charge_values: bool,
     functions: Option<&'a mut ConstantFunctions>,
+    imports: &'a mut ImportResolver,
     temporary_bindings: Option<&'a mut TemporaryConstantBindings>,
     deferred_callback_declaration: Option<&'a mut bool>,
 }
@@ -1071,8 +1078,8 @@ fn resolve_type<'m>(
             }
         }
         Type::ParametricBits { signed, width } => Ok(Type::Bits {
-            signed: dimensions.signed(signed, is_local, bindings, types.resolver)?,
-            width: dimensions.size(width, is_local, bindings, types.resolver)?,
+            signed: dimensions.signed(signed, is_local, bindings, types)?,
+            width: dimensions.size(width, is_local, bindings, types)?,
         }),
         Type::ParametricArray { element, size } => Ok(Type::array(
             resolve_type(
@@ -1083,7 +1090,7 @@ fn resolve_type<'m>(
                 types,
                 child_type_budget(remaining)?,
             )?,
-            dimensions.size(size, is_local, bindings, types.resolver)?,
+            dimensions.size(size, is_local, bindings, types)?,
         )),
         Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
     }
@@ -2509,7 +2516,10 @@ pub(crate) fn check_sources_with_tests(
             .collect();
         checked.resolve_pure_test_dependencies(harnesses);
     }
-    checked.imports = if linked.is_some() || declarations.constexpr_instantiated_callee.get() {
+    checked.imports = if linked.is_some()
+        || declarations.constexpr_instantiated_callee.get()
+        || resolver.call_count() != 0
+    {
         let calls = checked.retain_reachable_dependencies();
         if linked.is_some() {
             checked.restore_extern_names();
@@ -2885,6 +2895,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             budgets,
             charge_values,
             functions,
+            imports: self.resolver,
             temporary_bindings: self.assertion_cache.as_mut(),
             deferred_callback_declaration: Some(&mut self.deferred_callback_declaration),
         }
@@ -2918,7 +2929,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             &mut ctx.budgets.speculative,
             ctx.charge_values,
             ConstantUse::Bx,
-            ctx.functions.as_deref_mut(),
+            ConstantCallees {
+                local: ctx.functions.as_deref_mut(),
+                imports: None,
+            },
             ctx.enums,
         ) {
             Ok(Some(result)) if !ctx.charge_values => {
@@ -3036,7 +3050,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 &mut ctx.budgets.required,
                 charge_values,
                 usage,
-                ctx.functions.as_deref_mut(),
+                ConstantCallees {
+                    local: ctx.functions.as_deref_mut(),
+                    imports: Some(ctx.imports),
+                },
                 ctx.enums,
             ) {
                 Ok(result) => {
@@ -3111,6 +3128,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     *requested = Some(index);
                     return Ok(None);
                 }
+                Err(ConstantFailure::ImportedCall(error)) => return Err(error),
+                Err(ConstantFailure::NeedsImport) => unreachable!("required folds provide imports"),
                 Err(ConstantFailure::InvalidEnumCast(name)) => {
                     return Err(format!(
                         "constant cast to enum '{name}' requires bits of its declared width encoding a member"
@@ -3508,15 +3527,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Result<TypedExpr, String> {
         let mut prepared = None;
         let spec;
-        let (symbol, child) = if let Some(template) = self.decls.templates.get(target) {
+        let template = self.decls.templates.get(target);
+        let (symbol, child) = if let Some(template) = template {
             let mut values = Vec::with_capacity(template.block.value_parametrics.len());
             let mut callbacks = Vec::with_capacity(template.callback_params.len());
             for (formal, actual) in template.block.parametric_bindings().zip(parametrics) {
                 match formal {
                     FunctionParametricRef::Value(formal) => {
-                        // Block template validation resolves each value formal
-                        // to u32.
-                        let ty = value_parametrics::dimension_type();
+                        let ty = template.value_types[values.len()].clone();
                         let value = self.parametric_value(actual, &ty).map_err(|e| {
                             format!(
                                 "value parametric '{}' of block '{target}': {e}",
@@ -3531,6 +3549,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
             }
             let call = self.generic_inputs(template, args, &callbacks)?;
+            let values = template.apply_value_defaults(self, values, &call.bindings)?;
             let path = self.specialization.map_or(&[][..], |s| s.path.as_slice());
             spec = self
                 .specializations
@@ -3557,8 +3576,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         } else {
             (target, &self.decls.blocks[target])
         };
-        // Charge for each instance's ports, even when the definition is shared.
-        if self.replaying_body() || !parametrics.is_empty() {
+        // Charge for each instance's ports, including calls that use defaults.
+        if self.replaying_body()
+            || template.is_some_and(|t| !t.value_types.is_empty() || !t.callback_params.is_empty())
+        {
             self.charge_expansion("child block wiring", child.port_type_nodes)?;
         }
         self.has_block_only_behavior.set(true);
@@ -3639,14 +3660,24 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 format!("clockless block cannot call clocked block '{target}'; add `clk` to the parent signature"),
             ));
         }
-        let (values, callbacks) = self.decls.templates.get(target).map_or((0, 0), |template| {
-            (
-                template.block.value_parametrics.len(),
-                template.callback_params.len(),
-            )
-        });
-        let expected = values + callbacks;
-        if expected != count {
+        let (values, callbacks, required) =
+            self.decls
+                .templates
+                .get(target)
+                .map_or((0, 0, 0), |template| {
+                    (
+                        template.value_types.len(),
+                        template.callback_params.len(),
+                        template.required_arguments,
+                    )
+                });
+        let maximum = values + callbacks;
+        if !(required..=maximum).contains(&count) {
+            let expected = if required == maximum {
+                maximum.to_string()
+            } else {
+                format!("{required} to {maximum}")
+            };
             let kind = if values == 0 {
                 "callable"
             } else {

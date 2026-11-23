@@ -14,8 +14,9 @@ use crate::parser::{is_identifier, is_use_identifier};
 
 use super::struct_parametrics::BoundStructArgument;
 use super::{
-    BlockCallbackFormal, BlockInterface, BlockTemplate, MAX_ELABORATION_DEPTH, ModuleDimensions,
-    StructTable, TypeResolver, TypeShape, compatible, resolve_type, type_parameter_references,
+    BlockCallbackFormal, BlockInterface, BlockTemplate, BodyChecker, BoundParametricValue,
+    MAX_ELABORATION_DEPTH, ModuleDimensions, StructTable, TypeResolver, TypeShape, compatible,
+    resolve_type, type_parameter_references,
 };
 
 /// A callable argument identifies a function in the caller's lexical scope.
@@ -59,11 +60,6 @@ pub(super) fn validate_declaration(block: &Block) -> Result<(), String> {
         if type_params.contains(name) || callback_names.contains(name) || !value_names.insert(name)
         {
             return Err(format!("duplicate block parameter '{name}'"));
-        }
-        if parametric.default.is_some() {
-            return Err(format!(
-                "block value parametric '{name}' requires an explicit argument"
-            ));
         }
         if parametric.index >= explicit_count
             || previous_index.is_some_and(|i| i >= parametric.index)
@@ -166,29 +162,38 @@ impl<'m> BlockTemplate<'m> {
         dimensions: ModuleDimensions<'_, 'm>,
         types: &mut TypeResolver<'_, 'm>,
     ) -> Result<Self, String> {
-        let dimension_type = super::value_parametrics::dimension_type();
+        let mut value_types = Vec::with_capacity(block.value_parametrics.len());
+        let mut required_arguments = 0;
+        if block.value_parametrics.iter().any(|p| p.default.is_some()) {
+            let mut checker = types.struct_scope(dimensions);
+            checker.function_type_bindings = Some(bindings.clone());
+            checker.check_block_default_names(block)?;
+        }
         let mut preceding = BTreeSet::new();
-        for formal in block.parametric_bindings() {
+        for (index, formal) in block.parametric_bindings().enumerate() {
             let name = match formal {
-                FunctionParametricRef::Callback(callback) => &callback.name,
+                FunctionParametricRef::Callback(callback) => {
+                    required_arguments = index + 1;
+                    &callback.name
+                }
                 FunctionParametricRef::Value(value) => {
-                    let is_dimension = if matches!(value.ty, Type::Named(_)) {
-                        resolve_type(
-                            &value.ty,
-                            &|name| preceding.contains(name),
-                            Some(bindings),
-                            dimensions,
-                            types,
-                            MAX_ELABORATION_DEPTH,
-                        )? == dimension_type
-                    } else {
-                        value.ty == dimension_type
-                    };
-                    if !is_dimension {
+                    let ty = resolve_type(
+                        &value.ty,
+                        &|name| preceding.contains(name),
+                        Some(bindings),
+                        dimensions,
+                        types,
+                        MAX_ELABORATION_DEPTH,
+                    )?;
+                    if !matches!(crate::typed::bits(&ty), Some((false, 1 | 32))) {
                         return Err(format!(
-                            "block value parametric '{}' must have type u32",
+                            "block value parametric '{}' must have type u32 or bool",
                             value.name
                         ));
+                    }
+                    value_types.push(ty);
+                    if value.default.is_none() {
+                        required_arguments = index + 1;
                     }
                     &value.name
                 }
@@ -252,7 +257,50 @@ impl<'m> BlockTemplate<'m> {
             params,
             result,
             callback_params,
+            value_types,
+            required_arguments,
             callback_indices,
+        })
+    }
+
+    /// Complete the caller's explicit value prefix in the block's own scope.
+    pub(super) fn apply_value_defaults(
+        &self,
+        caller: &mut BodyChecker<'_, 'm>,
+        supplied: Vec<BoundParametricValue>,
+        types: &Bindings,
+    ) -> Result<Vec<BoundParametricValue>, String> {
+        if self
+            .block
+            .value_parametrics
+            .iter()
+            .all(|p| p.default.is_none())
+        {
+            return Ok(supplied);
+        }
+        caller.with_value_definition(&self.block.name, |definition| {
+            definition.function_type_bindings = Some(types.clone());
+            let mut supplied = supplied.iter();
+            let mut bound = Vec::with_capacity(self.value_types.len());
+            for formal in self.block.parametric_bindings() {
+                match formal {
+                    FunctionParametricRef::Callback(callback) => {
+                        definition.names.insert(callback.name.clone());
+                    }
+                    FunctionParametricRef::Value(formal) => {
+                        let ty = self.value_types[bound.len()].clone();
+                        let value = definition.value_or_default(
+                            &self.block.name,
+                            formal,
+                            ty,
+                            supplied.next(),
+                        )?;
+                        definition.bind_parametric_value(&formal.name, &value);
+                        bound.push(value);
+                    }
+                }
+            }
+            Ok(bound)
         })
     }
 }
