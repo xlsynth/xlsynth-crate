@@ -581,7 +581,7 @@ unsafe extern "C" {
     pub fn xls_value_from_bits_owned(bits: *mut CIrBits) -> *mut CIrValue;
     pub fn xls_value_flatten_to_bits(value: *const CIrValue) -> *mut CIrBits;
 
-    pub fn xls_value_eq(value: *const CIrValue, value: *const CIrValue) -> bool;
+    pub fn xls_value_eq(lhs: *const CIrValue, rhs: *const CIrValue) -> bool;
     pub fn xls_parse_ir_package(
         ir: *const std::os::raw::c_char,
         filename: *const std::os::raw::c_char,

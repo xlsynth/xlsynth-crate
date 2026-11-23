@@ -370,6 +370,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         ))
     }
 
+    /// A local alias fixes its enum identity at the declaration site.
+    fn local_enum_alias(&self, prefix: &str) -> Result<Option<&CheckedEnum>, String> {
+        match self.local_type_aliases.get(prefix).map(|alias| &alias.ty) {
+            Some(Type::Enum { name, .. }) => Ok(self.structs.enums.get(name)),
+            Some(_) => Err(format!("'{prefix}' is not a numeric enum")),
+            None => Ok(None),
+        }
+    }
+
     /// Resolve an enum member name even in a skipped loop without converting
     /// any imported functions or forcing evaluation of the enclosing
     /// expression.
@@ -377,12 +386,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let Some((prefix, member)) = name.rsplit_once("::") else {
             return Ok(false);
         };
-        if let Some(def) = self.structs.enum_subject(prefix, self.decls) {
+        let local = self.local_enum_alias(prefix)?;
+        if let Some(def) = local.or_else(|| self.structs.enum_subject(prefix, self.decls)) {
             crate::parser::validate_dslx_value_path(name)?;
-            self.decls.check_type_name_visibility(
-                prefix,
-                self.function_position.or(self.block_position),
-            )?;
+            if local.is_none() {
+                self.decls.check_type_name_visibility(
+                    prefix,
+                    self.function_position.or(self.block_position),
+                )?;
+            }
             if def.members.contains_key(member) {
                 return Ok(true);
             }
@@ -408,14 +420,22 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return Ok(None);
         };
         let head = prefix.split("::").next().unwrap_or(prefix);
-        if self.names.contains(head) || self.callback_index(head).is_some() {
+        if !self.local_type_aliases.contains_key(prefix)
+            && (self.names.contains(head) || self.callback_index(head).is_some())
+        {
             return Err(format!("'{head}' names a local value here"));
         }
-        self.reject_type_parameter_value(head)?;
-        self.decls
-            .check_type_name_visibility(prefix, self.function_position.or(self.block_position))?;
+        let local = self.local_enum_alias(prefix)?;
+        if local.is_none() {
+            self.reject_type_parameter_value(head)?;
+            self.decls.check_type_name_visibility(
+                prefix,
+                self.function_position.or(self.block_position),
+            )?;
+        }
         let canonical;
-        let def = if let Some(def) = self.structs.enum_subject(prefix, self.decls) {
+        let def = if let Some(def) = local.or_else(|| self.structs.enum_subject(prefix, self.decls))
+        {
             def
         } else if let Some((subject, ty)) = self.resolver.lookup_enum_prefix(prefix)? {
             let Type::Enum { name, .. } = self.resolver.resolve_named(&subject, &ty)? else {

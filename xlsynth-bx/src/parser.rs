@@ -6,7 +6,7 @@ pub mod outline;
 pub(crate) mod source_bytes;
 mod test_declarations;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use xlsynth_pir::{IrBits, IrValue};
@@ -509,6 +509,8 @@ struct Parser<'s> {
     depth: usize,
     dslx_type_display: bool,
     value_context: ValueContext,
+    /// A function body and its nested scopes accept compile-time declarations.
+    in_function_body: bool,
     /// Pure operands such as counted-loop iterables and map inputs permit
     /// lexical value scopes while keeping the enclosing identifier dialect.
     expression_grammar: ExpressionGrammar,
@@ -536,12 +538,20 @@ struct Parser<'s> {
     hidden_templates: Vec<(String, TemplateBinding)>,
     /// Names in source scope, including imports. An overwritten literal type
     /// needs lexical resolution while its syntax is still available.
-    visible_names: HashSet<String>,
-    /// Struct and enum names can qualify a member, but cannot be bare values.
-    visible_type_names: HashSet<String>,
-    /// Names newly introduced in an active lexical scope.
-    local_names: Vec<String>,
+    visible_names: HashMap<String, NameKind>,
+    /// Previous bindings hidden by currently active lexical declarations.
+    local_names: Vec<(String, Option<NameKind>)>,
     literal_type_context: LiteralTypeContext,
+}
+
+/// The visible declaration kind determines whether a name can annotate a
+/// literal and whether a discarded annotation needs module lookup.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameKind {
+    Value,
+    ModuleType,
+    LocalType,
+    FunctionTypeParameter,
 }
 
 /// Which parts of a nested literal annotation still require name resolution.
@@ -551,8 +561,8 @@ enum LiteralTypeContext {
     Live,
     /// The literal's outer annotation supersedes this type.
     Overwritten,
-    /// A computed dimension of an overwritten template type is discarded
-    /// together with all of its subexpressions and lexical scopes.
+    /// A computed dimension of an overwritten type resolves names in the
+    /// scope of each operand, without evaluating the expression.
     DiscardedExpression,
 }
 
@@ -751,9 +761,12 @@ impl<'s> Parser<'s> {
         let mut header = None;
         let mut type_structs = BTreeSet::new();
         let mut literal_type_heads = BTreeSet::new();
+        let mut braces = 0usize;
         for (index, ts) in tokens.windows(3).enumerate() {
             match (ts[0].text, ts[1].text, ts[2].text) {
-                ("type", name, "=") if is_function_identifier(name) => {
+                ("{", _, _) => braces += 1,
+                ("}", _, _) => braces = braces.saturating_sub(1),
+                ("type", name, "=") if braces == 0 && is_function_identifier(name) => {
                     literal_type_heads.insert(name.to_owned());
                 }
                 ("fn" | "block", _, "<") => header = Some(ts[1]),
@@ -786,6 +799,7 @@ impl<'s> Parser<'s> {
             depth: 0,
             dslx_type_display,
             value_context: ValueContext::Block,
+            in_function_body: false,
             expression_grammar: ExpressionGrammar::Block,
             block_map_shadowed: false,
             forward_map_import: false,
@@ -796,8 +810,7 @@ impl<'s> Parser<'s> {
             literal_type_heads,
             overwritten_literal_types: BTreeSet::new(),
             hidden_templates: Vec::new(),
-            visible_names: HashSet::new(),
-            visible_type_names: HashSet::new(),
+            visible_names: HashMap::new(),
             local_names: Vec::new(),
             literal_type_context: LiteralTypeContext::Live,
         })
@@ -917,21 +930,55 @@ impl<'s> Parser<'s> {
         self.block_map_shadowed = map_shadowed;
         self.callable_templates
             .extend(self.hidden_templates.drain(first..));
-        for name in self.local_names.drain(first_name..) {
-            self.visible_names.remove(&name);
+        for (name, previous) in self.local_names.drain(first_name..).rev() {
+            if let Some(kind) = previous {
+                self.visible_names.insert(name, kind);
+            } else {
+                self.visible_names.remove(&name);
+            }
         }
         result
     }
 
     fn bind_local_name(&mut self, name: &str) {
-        if !self.visible_names.contains(name) {
-            self.visible_names.insert(name.to_owned());
-            self.local_names.push(name.to_owned());
+        self.bind_local(name, NameKind::Value);
+    }
+
+    fn is_visible_value(&self, name: &str) -> bool {
+        self.visible_names.get(name) == Some(&NameKind::Value)
+    }
+
+    fn in_discarded_function_dimension(&self) -> bool {
+        self.in_function_body
+            && self.literal_type_context == LiteralTypeContext::DiscardedExpression
+    }
+
+    fn has_type_parameter(&self, name: &str) -> bool {
+        if self.in_function_body {
+            self.visible_names.get(name) == Some(&NameKind::FunctionTypeParameter)
+        } else {
+            self.type_params.contains(name)
+        }
+    }
+
+    fn literal_type_head(&self, name: &str) -> bool {
+        self.literal_type_heads.contains(name)
+            || self.visible_names.get(name) == Some(&NameKind::LocalType)
+    }
+
+    fn bind_local(&mut self, name: &str, kind: NameKind) {
+        if self.visible_names.get(name) != Some(&kind) {
+            let previous = self.visible_names.insert(name.to_owned(), kind);
+            self.local_names.push((name.to_owned(), previous));
         }
     }
 
     fn shadow_callable(&mut self, name: &str) {
         self.bind_local_name(name);
+        self.hide_callable(name);
+    }
+
+    fn hide_callable(&mut self, name: &str) {
         self.block_map_shadowed |= name == "map";
         if let Some(entry) = self.callable_templates.remove_entry(name) {
             self.hidden_templates.push(entry);
@@ -1130,13 +1177,13 @@ impl<'s> Parser<'s> {
                 module.functions.push(function);
             } else if self.eat("const") {
                 self.value_context = ValueContext::DslxItem;
-                let constant = self.with_name_scope(|p| p.const_def(public))?;
+                let (constant, _) = self.with_name_scope(|p| p.const_def(public))?;
                 self.value_context = ValueContext::Block;
                 module.declaration_order.push(constant.name.clone());
                 module.constants.push(constant);
             } else if self.eat("type") {
                 self.value_context = ValueContext::DslxItem;
-                let def = self.with_name_scope(|p| p.type_alias(public))?;
+                let (def, _) = self.with_name_scope(|p| p.type_alias(public))?;
                 self.value_context = ValueContext::Block;
                 self.block_map_shadowed |= def.name == "map";
                 module.declaration_order.push(def.name.clone());
@@ -1223,15 +1270,15 @@ impl<'s> Parser<'s> {
             if is_const_assert {
                 continue;
             }
-            let names = if declares_type {
-                &mut self.visible_type_names
+            let kind = if declares_type {
+                NameKind::ModuleType
             } else {
-                &mut self.visible_names
+                NameKind::Value
             };
-            names.extend(
+            self.visible_names.extend(
                 module.declaration_order[first_declaration..]
                     .iter()
-                    .cloned(),
+                    .map(|name| (name.clone(), kind)),
             );
         }
         if !module.tests.is_empty() || !module.invariants.is_empty() {
@@ -1397,20 +1444,35 @@ impl<'s> Parser<'s> {
 
     /// Parse a local name or a member of an imported DSLX module.
     fn name_or_qualified_member(&mut self) -> Result<String, String> {
+        let start = self.tokens[self.pos].start;
         let head = self.take_identifier(is_value_identifier)?;
-        if self.peek(1) != "<" && self.eat("::") {
+        let name = if self.peek(1) != "<" && self.eat("::") {
             let member = self.take_identifier(is_dslx_member_name)?;
-            return Ok(format!("{head}::{member}"));
+            format!("{head}::{member}")
+        } else {
+            head
+        };
+        if self.in_discarded_function_dimension() {
+            // The checker never receives this expression. Resolve the source
+            // name here, while any loop, lambda, or match binders are visible.
+            self.check_discarded_name(&name, start, true)?;
         }
-        Ok(head)
+        Ok(name)
     }
 
     /// An imported enum value can have a module, type, and member component.
     fn named_value(&mut self, mut name: String) -> Result<Expr, String> {
-        if self.eat("::") {
+        while self.eat("::") {
             let member = self.take_identifier(is_function_identifier)?;
             name.push_str("::");
             name.push_str(&member);
+            if self.literal_type_context != LiteralTypeContext::DiscardedExpression {
+                break;
+            }
+        }
+        if self.in_discarded_function_dimension() {
+            self.check_discarded_name(&name, self.tokens[self.pos - 1].start, false)?;
+            validate_dslx_value_path(&name).map_err(|e| self.error(&e))?;
         }
         Ok(Expr::Name(name))
     }
@@ -1534,23 +1596,27 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// Parse a module constant with an optional DSLX type annotation.
-    fn const_def(&mut self, public: bool) -> Result<ConstDef, String> {
+    /// Parse a named constant before bringing its name into scope.
+    fn const_def(&mut self, public: bool) -> Result<(ConstDef, usize), String> {
         let name = self.ident()?;
         let ty = if self.eat(":") {
-            Some(self.ty()?)
+            Some(self.parsed_ty(true)?)
         } else {
             None
         };
         self.expect("=")?;
-        let value = self.expr()?.value;
+        let value = self.expr()?;
         self.expect(";")?;
-        Ok(ConstDef {
-            name,
-            public,
-            ty,
-            value,
-        })
+        let height = value.height.max(ty.as_ref().map_or(0, |ty| ty.depth));
+        Ok((
+            ConstDef {
+                name,
+                public,
+                ty: ty.map(|ty| ty.value),
+                value: value.value,
+            },
+            height,
+        ))
     }
 
     /// Parse DSLX's numeric enum declaration and its compile-time values.
@@ -1581,15 +1647,24 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// Parse a concrete type alias whose dimensions may use module constants.
-    fn type_alias(&mut self, public: bool) -> Result<TypeAlias, String> {
+    /// Parse an alias whose dimensions can use visible compile-time values.
+    fn type_alias(&mut self, public: bool) -> Result<(TypeAlias, usize), String> {
         let name = self.ident()?;
         self.expect("=")?;
-        self.dependent_types = true;
-        let ty = self.ty()?;
-        self.dependent_types = false;
+        let outer = self.dependent_types;
+        self.dependent_types |= !self.in_function_body;
+        let ty = self.parsed_ty(true);
+        self.dependent_types = outer;
+        let ty = ty?;
         self.expect(";")?;
-        Ok(TypeAlias { name, public, ty })
+        Ok((
+            TypeAlias {
+                name,
+                public,
+                ty: ty.value,
+            },
+            ty.depth,
+        ))
     }
 
     /// Parse pure local lets and a trailing value. A body ending in a
@@ -1608,7 +1683,8 @@ impl<'s> Parser<'s> {
             }
             for formal in declared_type_params(&self.tokens[self.pos..]) {
                 self.type_params.insert(formal);
-                self.shadow_callable(formal);
+                self.bind_local(formal, NameKind::FunctionTypeParameter);
+                self.hide_callable(formal);
             }
             self.list(">", |p| {
                 if p.peek(1) != ":" || p.peek(2) == "type" {
@@ -1642,7 +1718,10 @@ impl<'s> Parser<'s> {
         for param in &params {
             self.shadow_callable(&param.name);
         }
-        let body = self.value_scope()?.value;
+        self.in_function_body = true;
+        let body = self.value_scope();
+        self.in_function_body = false;
+        let body = body?.value;
         self.type_params.clear();
         self.dependent_types = false;
         Ok(Function {
@@ -1721,6 +1800,20 @@ impl<'s> Parser<'s> {
                 height = height.max(initializer_height);
                 statements.push(ScopeStatement::Let(binding));
                 self.expect(";")?;
+            } else if self.in_function_body && self.eat("const") {
+                if self.peek(0) == "_" {
+                    return Err(self.error("a local constant requires a name"));
+                }
+                let (def, depth) = self.const_def(false)?;
+                self.shadow_callable(&def.name);
+                height = height.max(depth);
+                statements.push(ScopeStatement::Const(def));
+            } else if self.in_function_body && self.eat("type") {
+                let (alias, depth) = self.type_alias(false)?;
+                self.bind_local(&alias.name, NameKind::LocalType);
+                self.hide_callable(&alias.name);
+                height = height.max(depth);
+                statements.push(ScopeStatement::TypeAlias(alias));
             } else if self.eat("const_assert!") {
                 let (assertion, predicate_height) = self.const_assert_predicate()?;
                 height = height.max(predicate_height);
@@ -2130,13 +2223,11 @@ impl<'s> Parser<'s> {
         Ok((signed, bit_count))
     }
 
-    /// Nonliteral dimensions name constants. Templates can also
-    /// compute dimensions from their value parametrics.
+    /// Read a named dimension or a constexpr expression in an alias,
+    /// function body, or parametric declaration.
     fn type_dimension(&mut self) -> Result<ParsedExpr, String> {
         let start = self.tokens[self.pos].start;
-        let mut dimension = if self.dependent_types {
-            // Template expressions introduce their own scopes. Only a bare
-            // dimension name here needs the lookup for an overwritten type.
+        let mut dimension = if self.dependent_types || self.in_function_body {
             let previous = self.literal_type_context;
             if previous == LiteralTypeContext::Overwritten {
                 self.literal_type_context = LiteralTypeContext::DiscardedExpression;
@@ -2148,34 +2239,49 @@ impl<'s> Parser<'s> {
             ParsedExpr::leaf(Expr::Name(self.name_or_qualified_member()?))
         };
         if let Expr::Name(name) = &mut dimension.value {
-            if self.literal_type_context == LiteralTypeContext::Overwritten {
+            if self.literal_type_context == LiteralTypeContext::Overwritten
+                && !self.in_function_body
+            {
                 // DSLX resolves only the head of a path in a type that an
                 // outer literal annotation overwrites.
                 while self.eat("::") {
                     name.push_str("::");
                     name.push_str(&self.take_identifier(is_function_identifier)?);
                 }
-                let head = name
-                    .split_once("::")
-                    .map_or(name.as_str(), |(head, _)| head);
-                let type_member = head != name.as_str()
-                    && (self.visible_type_names.contains(head)
-                        || crate::check::is_dslx_builtin_type(head));
-                if !type_member
-                    && !self.visible_names.contains(head)
-                    && !self.visible_names.contains(name.as_str())
-                    && !crate::check::is_dslx_builtin_value(head)
-                {
-                    return Err(diagnostic(
-                        self.source,
-                        start,
-                        &format!("unknown name '{head}' in literal annotation"),
-                    ));
-                }
+                self.check_discarded_name(name, start, false)?;
             }
             validate_dslx_value_path(name).map_err(|e| self.error(&e))?;
         }
         Ok(dimension)
+    }
+
+    /// Resolve the head of a reference in a discarded dimension. The member
+    /// of a qualified name does not undergo typechecking.
+    fn check_discarded_name(
+        &self,
+        name: &str,
+        start: usize,
+        allow_bare_type: bool,
+    ) -> Result<(), String> {
+        let head = name.split_once("::").map_or(name, |(head, _)| head);
+        let type_visible = (allow_bare_type || head != name)
+            && (matches!(
+                self.visible_names.get(head),
+                Some(NameKind::ModuleType | NameKind::LocalType)
+            ) || crate::check::is_dslx_builtin_type(head));
+        if type_visible
+            || self.is_visible_value(head)
+            || self.has_type_parameter(head)
+            || self.is_visible_value(name)
+            || crate::check::is_dslx_builtin_value(head)
+        {
+            return Ok(());
+        }
+        Err(diagnostic(
+            self.source,
+            start,
+            &format!("unknown name '{head}' in literal annotation"),
+        ))
     }
 
     fn parsed_ty(&mut self, singleton_tuples: bool) -> Result<ParsedType, String> {
@@ -2361,14 +2467,14 @@ impl<'s> Parser<'s> {
             return Err(self.error("unsupported DSLX result type (expected bits, tuple, or array)"));
         } else {
             if spelling == "self"
-                && self.literal_type_heads.contains(spelling)
-                && !self.type_params.contains(spelling)
+                && self.literal_type_head(spelling)
+                && !self.has_type_parameter(spelling)
             {
                 return Err(self.error("the keyword 'self' cannot refer to a type alias"));
             }
             if spelling == "_"
-                && self.literal_type_heads.contains(spelling)
-                && !self.type_params.contains(spelling)
+                && (self.literal_type_head(spelling) || self.is_visible_value(spelling))
+                && !self.has_type_parameter(spelling)
                 && !self.visible_literal_type(spelling, false)
             {
                 return Err(self.error("'_' does not name a type in this scope"));
@@ -2378,7 +2484,9 @@ impl<'s> Parser<'s> {
             // in a tuple of comparisons such as (x as T < 1, 2 > (y)).
             let after_as = self.pos > 0 && self.tokens[self.pos - 1].text == "as";
             let name = self.name_or_qualified_member()?;
-            if self.literal_type_context == LiteralTypeContext::Overwritten {
+            if self.literal_type_context == LiteralTypeContext::Overwritten
+                || self.in_discarded_function_dimension()
+            {
                 self.record_overwritten_type(&name)?;
             }
             if self.eat_turbofish()
@@ -2677,7 +2785,7 @@ impl<'s> Parser<'s> {
         let value = self.expr()?;
         // DSLX's single-name let hides a type named '_'. A wildcard inside a
         // destructuring pattern discards the value without hiding the type.
-        if self.literal_type_heads.contains("_")
+        if self.literal_type_head("_")
             && matches!(&head.pattern, BindingPattern::Name(name) if name == "_")
         {
             self.shadow_callable("_");
@@ -2773,16 +2881,26 @@ impl<'s> Parser<'s> {
         let mut height = subject.height;
         let mut spellings = MatchPatternSpellings::default();
         let arms = self.list("}", |parser| {
-            let mut patterns = vec![parser.match_arm_pattern(&mut spellings)?];
-            while parser.eat("|") {
-                patterns.push(parser.match_arm_pattern(&mut spellings)?);
-            }
-            parser.expect("=>")?;
-            let value = parser.match_value(Braces::Struct)?;
-            height = height.max(value.height);
-            Ok(MatchArm {
-                patterns,
-                value: value.value,
+            parser.with_name_scope(|parser| {
+                let first_binding = parser.local_names.len();
+                let mut patterns = vec![parser.match_arm_pattern(&mut spellings)?];
+                while parser.eat("|") {
+                    patterns.push(parser.match_arm_pattern(&mut spellings)?);
+                }
+                if patterns.len() > 1
+                    && let Some((name, _)) = parser.local_names.get(first_binding)
+                {
+                    return Err(parser.error(&format!(
+                        "cannot bind '{name}' in a match arm with multiple patterns"
+                    )));
+                }
+                parser.expect("=>")?;
+                let value = parser.match_value(Braces::Struct)?;
+                height = height.max(value.height);
+                Ok(MatchArm {
+                    patterns,
+                    value: value.value,
+                })
             })
         })?;
         self.compose(
@@ -2846,6 +2964,14 @@ impl<'s> Parser<'s> {
         {
             // The checker resolves a scalar constant, value parametric, or enum
             // member. DSLX requires numeric literals on both sides of a range.
+            if self.in_discarded_function_dimension()
+                && end == 1
+                && !self.visible_names.contains_key(self.peek(0))
+                && !crate::check::is_dslx_builtin_value(self.peek(0))
+            {
+                // An unbound bare pattern introduces a name for this arm.
+                self.bind_local_name(self.peek(0));
+            }
             let name = self.name_or_qualified_member()?;
             let value = self.named_value(name)?;
             spellings
@@ -2853,7 +2979,7 @@ impl<'s> Parser<'s> {
                 .extend(self.tokens[first..self.pos].iter().map(|token| token.text));
             return Ok(MatchPattern::Literal(value));
         }
-        if self.named_literal_type_at(0) && !self.type_params.contains(self.peek(0)) {
+        if self.named_literal_type_at(0) && !self.has_type_parameter(self.peek(0)) {
             return Err(self.error("a match pattern cannot start with an alias-annotated literal"));
         }
         let start = self.pattern_literal()?;
@@ -3495,7 +3621,7 @@ impl<'s> Parser<'s> {
             None
         };
         if self.peek(0) == "{" && self.struct_braces(braces) {
-            if name == "self" && self.literal_type_heads.contains("self") {
+            if name == "self" && self.literal_type_head("self") {
                 return Err(self.error("the keyword 'self' cannot introduce a struct literal"));
             }
             self.pos += 1;
@@ -3557,6 +3683,9 @@ impl<'s> Parser<'s> {
             let value = if self.eat(":") {
                 self.expr()?
             } else {
+                if self.in_discarded_function_dimension() {
+                    self.check_discarded_name(&field, self.tokens[self.pos - 1].start, false)?;
+                }
                 ParsedExpr::leaf(Expr::Name(field.clone()))
             };
             *height = (*height).max(value.height);
@@ -3603,8 +3732,7 @@ impl<'s> Parser<'s> {
                 | "decode"
                 | "widening_cast"
                 | "checked_cast"
-        ) && !self.visible_names.contains(token.text)
-            && !self.visible_type_names.contains(token.text)
+        ) && !self.visible_names.contains_key(token.text)
             && !self
                 .callable_templates
                 .get(token.text)
@@ -3779,7 +3907,7 @@ impl<'s> Parser<'s> {
             // Imports have template placeholders even when they could name a
             // type. A known bare value cannot start a symbolic constructor.
             let known_value = bare_name.is_some_and(|name| {
-                self.visible_names.contains(name) && !self.callable_templates.contains_key(name)
+                self.is_visible_value(name) && !self.callable_templates.contains_key(name)
             });
             if !known_value
                 || self.tokens[angle + 1..end].iter().all(|token| {
@@ -3800,7 +3928,7 @@ impl<'s> Parser<'s> {
             }
             [.., cast]
                 if cast.text == "as"
-                    && !bare_name.is_some_and(|name| self.type_params.contains(name))
+                    && !bare_name.is_some_and(|name| self.has_type_parameter(name))
                     && (matches!(
                         next,
                         "." | "[" | "as" | "," | ")" | "]" | "}" | ";" | "{" | ".." | "..="
@@ -3815,9 +3943,8 @@ impl<'s> Parser<'s> {
     /// Whether this angle follows a known type-parametric struct name.
     fn type_struct_before(&self, angle: usize) -> bool {
         let end = angle - usize::from(self.turbofish_at(angle));
-        let visible_type = |name: &str| {
-            !self.visible_names.contains(name) || self.callable_templates.contains_key(name)
-        };
+        let visible_type =
+            |name: &str| !self.is_visible_value(name) || self.callable_templates.contains_key(name);
         match &self.tokens[..end] {
             [.., head, separator, member] if separator.text == "::" => {
                 visible_type(head.text)
@@ -4218,7 +4345,7 @@ impl<'s> Parser<'s> {
     fn named_literal_type_at(&self, offset: usize) -> bool {
         let head = self.peek(offset);
         let bare = self.peek(offset + 1) == ":";
-        if bare && self.type_params.contains(head) {
+        if bare && self.has_type_parameter(head) {
             return true;
         }
         let qualified = self.peek(offset + 1) == "::" && self.peek(offset + 3) == ":";
@@ -4227,6 +4354,9 @@ impl<'s> Parser<'s> {
 
     /// A lexical binding can hide a module alias or an imported type name.
     fn visible_literal_type(&self, head: &str, qualified: bool) -> bool {
+        if self.visible_names.get(head) == Some(&NameKind::LocalType) {
+            return !qualified;
+        }
         if !self.literal_type_heads.contains(head) {
             return false;
         }
@@ -4234,11 +4364,11 @@ impl<'s> Parser<'s> {
         if self.callable_templates.contains_key(head) {
             // All use bindings have a template entry until a local shadows
             // them.
-            allow_forward || self.visible_names.contains(head)
+            allow_forward || self.is_visible_value(head)
         } else {
             !qualified
-                && !self.visible_names.contains(head)
-                && (allow_forward || self.visible_type_names.contains(head))
+                && !self.is_visible_value(head)
+                && (allow_forward || self.visible_names.get(head) == Some(&NameKind::ModuleType))
         }
     }
 
@@ -4248,7 +4378,10 @@ impl<'s> Parser<'s> {
         let (head, qualified) = name
             .split_once("::")
             .map_or((name, false), |(h, _)| (h, true));
-        if self.type_params.contains(head) || crate::check::is_dslx_builtin_type(head) {
+        if self.has_type_parameter(head)
+            || self.visible_names.get(head) == Some(&NameKind::LocalType)
+            || crate::check::is_dslx_builtin_type(head)
+        {
             return Ok(());
         }
         if !self.visible_literal_type(head, qualified) {
@@ -4257,7 +4390,7 @@ impl<'s> Parser<'s> {
             if qualified && crate::check::is_dslx_builtin_value(head) {
                 return Ok(());
             }
-            if self.visible_names.contains(head) {
+            if self.is_visible_value(head) {
                 return if qualified {
                     Ok(())
                 } else {
@@ -4266,7 +4399,7 @@ impl<'s> Parser<'s> {
                     )))
                 };
             }
-            if !self.visible_type_names.contains(head)
+            if !self.visible_names.contains_key(head)
                 && self.value_context == ValueContext::DslxItem
             {
                 return Err(self.error(&format!("unknown name '{head}' in literal annotation")));
@@ -5111,9 +5244,37 @@ pub type Pair' = (Word!, lib::Lane)[2];
             "pub type Word<T> = T;",
             "type Word<N:u32> = uN[N];",
             "type u8 = bool;",
-            "fn local() { type Word = u8; }",
+            "fn local() { pub type Word = u8; }",
         ] {
             assert!(parse_module(malformed).is_err(), "{malformed}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn function_declaration_syntax_stays_in_its_lexical_scope() -> Result<(), String> {
+        parse_module(
+            r#"
+fn f(x: u8) -> u8 {
+    let Word = x;
+    let y = { type Word = u4; const K = Word:3; K as u8 };
+    Word + y
+}
+block b(clk, const: u8) -> u8 { const }
+"#,
+        )?;
+        for source in [
+            "fn f() { const _ = u8:3; }",
+            "fn f() { const (a, b) = (u8:1, u8:2); }",
+            "fn f() { let a = { type Word = u8; Word:3 }; Word:3 }",
+            "fn f(x: u8) -> u8 { type _ = u8; let _ = x; x as _ }",
+            "fn f() -> u8 { u8:uN[missing + u32:1]:3 }",
+            "fn f() { type Word = u8; } block b(clk) -> u8 { Word:2 }",
+            "const OUTER = { const INNER = u8:3; INNER };",
+            "block b(clk) -> u8 { if true { type Word = u8; Word:2 } else { u8:0 } }",
+            "block b(clk, xs: u8[2]) -> u8[2] { map(xs, |x| { const K = u8:3; x + K }) }",
+        ] {
+            assert!(parse_module(source).is_err(), "{source}");
         }
         Ok(())
     }

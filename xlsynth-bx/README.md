@@ -390,6 +390,36 @@ Write `fn name(parameters) -> ResultType { ... }` or `pub fn` at module scope. F
 
 Inside a function, `let` can bind a name or destructure a tuple, as in `let (data, valid) = packet;`. Braced expressions and `if` arms can introduce their own local bindings. The final expression supplies the result. A function that returns `()` may omit the result annotation and end with a semicolon or an empty body.
 
+Use `const NAME = expression;` or `const NAME: Type = expression;` inside a
+function to require a compile-time value. The initializer can read preceding
+constants, compile-time `let` values, and the function's parametric bindings.
+For example, `let n = width(); const W = n;` is valid if BX can evaluate
+`width()` at compile time. In an elaborated scope, an initializer that needs
+a runtime input is invalid even when the constant is unused.
+Use `type Name = Type;` to give a concrete type a local alias. Each function
+specialization resolves its own constants and aliases. For a parametric
+struct, supply the bindings needed to make its type concrete, as in
+`type Payload = Packet<N>;`.
+
+A callback's declared return type lets BX check uses of a local constant
+such as `const W = F();` before selecting an implementation of `F`.
+When elaboration needs the callback's actual value, for example to resolve
+`type Word = uN[W];`, BX checks the remaining names and finishes checking
+the body at each specialization.
+
+```text
+fn bump<N: u32>(x: uN[N]) -> uN[N] {
+    const WIDTH = N;
+    type Word = uN[WIDTH];
+    const STEP: Word = 1;
+    x + STEP
+}
+```
+
+Both declarations are visible from the following statement to the end of
+the enclosing braces. A nested declaration can shadow an outer name. Its
+initializer or aliased type uses the bindings visible before that declaration.
+
 Give a bound integer literal its intended width before passing it to a function.
 For a parameter of type `u8`, write `let n: u8 = 1; take(n)` or `take(u8:1)`.
 With `let n = 1`, BX infers `u1`. The pinned DSLX typechecker can accept the

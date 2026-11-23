@@ -63,7 +63,9 @@ pub use crate::typed::{
 };
 use callables::{BlockCallbackBinding, BlockCallbackFormal, BoundCallback};
 use counted_for::CarryContext;
-use function_specializations::{CallbackTarget, FunctionSpecialization, FunctionSpecializations};
+use function_specializations::{
+    CallbackTarget, FunctionSpecialization, FunctionSpecializations, PendingFunction,
+};
 use generic_blocks::{Bindings, TypeArgument};
 use module_constants::ModuleDimensions;
 
@@ -269,7 +271,7 @@ enum BranchSelector {
 fn match_operands<'e>(
     subject: &'e Expr,
     arms: &'e [MatchArm],
-    is_named_pattern: impl Fn(&str) -> Result<bool, String>,
+    mut is_named_pattern: impl FnMut(&str) -> Result<bool, String>,
 ) -> Result<Vec<&'e Expr>, String> {
     if arms.is_empty() || arms.iter().any(|arm| arm.patterns.is_empty()) {
         return Err("match requires at least one arm and a pattern for each arm".into());
@@ -400,6 +402,7 @@ struct ConstantContext<'a> {
     charge_values: bool,
     functions: Option<&'a mut ConstantFunctions>,
     temporary_bindings: Option<&'a mut TemporaryConstantBindings>,
+    deferred_callback_declaration: Option<&'a mut bool>,
 }
 
 /// Outer bindings to restore after a constexpr expression temporarily enables
@@ -705,10 +708,10 @@ struct Declarations<'a> {
     /// Pure tests observe IR contracts in evaluated but discarded tuple fields.
     evaluate_discarded_tuple_fields: bool,
     has_test_discards: Cell<bool>,
-    /// A module with assertions may execute any visible pure helper at compile
-    /// time.
-    has_const_assert: bool,
-    /// A compile-time assertion or register reset instantiated a callee
+    /// A local declaration or assertion may need the constexpr operands of
+    /// any visible pure helper.
+    has_constexpr_declaration: bool,
+    /// A compile-time declaration or register reset instantiated a callee
     /// whose body may have no hardware users.
     constexpr_instantiated_callee: Cell<bool>,
     /// Clock requirements of all defined and external blocks, including
@@ -788,7 +791,7 @@ impl Declarations<'_> {
         &self,
         ty: &Type,
         at: Option<usize>,
-        bindings: Option<&Bindings>,
+        is_bound: impl Fn(&str) -> bool,
     ) -> Result<(), String> {
         if at.is_none() {
             return Ok(());
@@ -796,8 +799,8 @@ impl Declarations<'_> {
         let mut pending = vec![ty];
         while let Some(ty) = pending.pop() {
             match ty {
-                Type::Named(name) if bindings.is_some_and(|b| b.declares(name)) => {
-                    // The template introduces this name in its own scope.
+                Type::Named(name) if is_bound(name) => {
+                    // The enclosing scope already resolved this name.
                 }
                 Type::Named(name)
                 | Type::Applied { name, .. }
@@ -1360,7 +1363,7 @@ impl<'a> Declarations<'a> {
             for callback in &function.callback_params {
                 declare(&mut names, &callback.name)?;
                 let mut resolve = |ty: &Type| {
-                    self.check_type_visibility(ty, dimensions.position, None)?;
+                    self.check_type_visibility(ty, dimensions.position, |_| false)?;
                     resolve_type(
                         ty,
                         &|name| names.contains(name),
@@ -1704,7 +1707,7 @@ impl TypeShape {
                 "type {ty} exceeds maximum concrete type size {MAX_TYPE_SIZE}"
             ));
         }
-        shape.check_source_budget()?;
+        Self::check_source_budget(shape.source_nodes, shape.name_bytes)?;
         Ok(shape)
     }
 
@@ -1730,18 +1733,18 @@ impl TypeShape {
                     "aggregate exceeds maximum concrete type size {MAX_TYPE_SIZE}"
                 ));
             }
-            shape.check_source_budget()?;
+            Self::check_source_budget(shape.source_nodes, shape.name_bytes)?;
         }
         Ok(shape)
     }
 
-    fn check_source_budget(&self) -> Result<(), String> {
-        if self.source_nodes > MAX_TYPE_SIZE {
+    fn check_source_budget(source_nodes: usize, name_bytes: usize) -> Result<(), String> {
+        if source_nodes > MAX_TYPE_SIZE {
             return Err(format!(
                 "type syntax exceeds the limit of {MAX_TYPE_SIZE} nodes"
             ));
         }
-        if self.name_bytes > MAX_TYPE_SIZE {
+        if name_bytes > MAX_TYPE_SIZE {
             return Err(format!(
                 "type names exceed the limit of {MAX_TYPE_SIZE} bytes"
             ));
@@ -1949,7 +1952,10 @@ pub(crate) fn check_sources_with_tests(
         });
     }
     let mut declarations = Declarations {
-        has_const_assert: source_patterns::has_const_assert(module, tests.is_some()),
+        has_constexpr_declaration: source_patterns::has_constexpr_declaration(
+            module,
+            tests.is_some(),
+        ),
         evaluate_discarded_tuple_fields: tests.is_some()
             && module
                 .tests
@@ -2591,11 +2597,14 @@ struct BodyChecker<'a, 'm> {
     specialization: Option<&'a BlockSpecialization<'m>>,
     function_registry: Option<&'a mut FunctionSpecializations<'m>>,
     function_spec: Option<&'a FunctionSpecialization<'m>>,
+    pending_functions: Vec<PendingFunction<'m>>,
     /// Type arguments in the function's declaration scope, including partial
     /// bindings while checking a callback signature.
     function_type_bindings: Option<Bindings>,
     /// The enclosing template's signature for abstract or concrete checking.
     source_template: Option<&'a FunctionInterface>,
+    /// A required value depends on an abstract callback's implementation.
+    deferred_callback_declaration: bool,
     /// Callable names available during lexical checking of a value template.
     template_callbacks: Option<&'a BTreeMap<String, usize>>,
     /// Bound recursive type and expression walks over programmatically supplied
@@ -2634,9 +2643,11 @@ struct BodyChecker<'a, 'm> {
     block_position: Option<usize>,
     local_callees: BTreeSet<String>,
     names: BTreeSet<String>,
-    /// Visible function value parametrics, which can appear as named match
+    /// Lexical constants and value parametrics eligible as named match
     /// patterns.
-    value_parametric_names: BTreeSet<String>,
+    constant_pattern_names: BTreeSet<String>,
+    /// Concrete alias targets, resolved in the scope of each declaration.
+    local_type_aliases: BTreeMap<String, scope::LocalTypeAlias>,
     /// Bare dimension bindings in a struct declaration can have any integer
     /// type.
     in_struct_definition: bool,
@@ -2740,6 +2751,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             charge_values,
             functions,
             temporary_bindings: self.assertion_cache.as_mut(),
+            deferred_callback_declaration: Some(&mut self.deferred_callback_declaration),
         }
     }
 
@@ -2822,11 +2834,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         value: &TypedExpr,
         usage: ConstantUse,
     ) -> Result<Option<IrValue>, String> {
-        Self::fold_required_constant(
-            self.constant_context(/* register_reset= */ false),
-            value,
-            usage,
-        )
+        loop {
+            let mut requested = None;
+            let value = Self::fold_required_constant(
+                self.constant_context(/* register_reset= */ false),
+                value,
+                usage,
+                &mut requested,
+            )?;
+            let Some(index) = requested else {
+                return Ok(value);
+            };
+            self.materialize_pending_function(index)?;
+        }
     }
 
     /// Evaluate a reset with its block's pure-call cache while preserving the
@@ -2841,7 +2861,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             SaveBindingReplays::AfterResetOnlyBinding
         };
         ctx.temporary_bindings = Some(&mut saved);
-        let result = Self::fold_required_constant(ctx, value, ConstantUse::RegisterReset);
+        let result =
+            Self::fold_required_constant(ctx, value, ConstantUse::RegisterReset, &mut None);
         saved.restore(&mut self.constants);
         result
     }
@@ -2852,6 +2873,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         mut ctx: ConstantContext<'_>,
         value: &TypedExpr,
         usage: ConstantUse,
+        requested: &mut Option<usize>,
     ) -> Result<Option<IrValue>, String> {
         let mut charge_values = ctx.charge_values;
         let mut pending: Vec<usize> = Vec::new();
@@ -2889,7 +2911,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     if let Some(result) = result {
                         let definition = definition.expect("replayed let");
                         let binding = match usage {
-                            ConstantUse::Assertion => ConstantBinding::Known(result.value),
+                            ConstantUse::Declaration => ConstantBinding::Known(result.value),
                             ConstantUse::Dslx => ConstantBinding::folded(
                                 result.value,
                                 definition,
@@ -2950,10 +2972,34 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     }
                     return Ok(None);
                 }
+                Err(ConstantFailure::PendingFunction(index)) => {
+                    *requested = Some(index);
+                    return Ok(None);
+                }
                 Err(ConstantFailure::InvalidEnumCast(name)) => {
                     return Err(format!(
                         "constant cast to enum '{name}' requires bits of its declared width encoding a member"
                     ));
+                }
+                Err(ConstantFailure::UnboundCallback) if usage != ConstantUse::Declaration => {
+                    return Ok(None);
+                }
+                Err(ConstantFailure::UnboundCallback | ConstantFailure::DeferredCallbackValue) => {
+                    if usage == ConstantUse::Declaration
+                        && let (Some(index), Some(name)) = (definition, name)
+                    {
+                        // Replay the enclosing expression with this let marked
+                        // as callback-dependent so its other eager operands
+                        // still receive their constexpr checks.
+                        ctx.cache_replay(name, index, Some(ConstantBinding::CallbackDependent));
+                        pending.pop();
+                        continue;
+                    }
+                    if let Some(deferred) = ctx.deferred_callback_declaration {
+                        *deferred = true;
+                        return Err("declaration requires a specialized callback".into());
+                    }
+                    return Ok(None);
                 }
                 Err(ConstantFailure::WorkLimit) => {
                     return Err(format!(
@@ -2985,12 +3031,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             specialization: None,
             function_registry: None,
             function_spec: None,
+            pending_functions: Vec::new(),
             function_type_bindings: None,
             source_template: None,
+            deferred_callback_declaration: false,
             template_callbacks: None,
             template_name_depth: None,
             dslx_value_context: false,
-            preserve_assert_inputs: decls.has_const_assert,
+            preserve_assert_inputs: decls.has_constexpr_declaration,
             dslx_constant_use: ConstantUse::Dslx,
             assertion_cache: None,
             assert_operands: None,
@@ -3004,7 +3052,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             block_position: None,
             local_callees: BTreeSet::new(),
             names: BTreeSet::new(),
-            value_parametric_names: BTreeSet::new(),
+            constant_pattern_names: BTreeSet::new(),
+            local_type_aliases: BTreeMap::new(),
             in_struct_definition: false,
             outputs: BTreeSet::new(),
             reserved_hardware_names: BTreeSet::new(),
@@ -3233,12 +3282,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve a source annotation and register its concrete fields.
     fn source_type(&mut self, source: &Type) -> Result<Type, String> {
         self.decls
-            .check_type_visibility(source, self.function_position, self.type_bindings())?;
-        let ty = self.resolve_dimensions(source, MAX_ELABORATION_DEPTH)?;
-        let ty = match self.type_bindings() {
-            Some(bindings) => bindings.concrete_type(&ty)?,
-            None => ty,
-        };
+            .check_type_visibility(source, self.function_position, |name| {
+                self.local_type_aliases.contains_key(name)
+                    || self.type_bindings().is_some_and(|b| b.declares(name))
+            })?;
+        let ty = self.concrete_annotation(source)?;
         self.structs.update_imports(self.resolver)?;
         self.structs.validate_type(&ty)?;
         Ok(ty)
@@ -3947,6 +3995,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if name == "_" && (self.kind == BodyKind::Function || self.in_loop_scope()) {
             return Err("cannot read the wildcard binding '_'".into());
         }
+        if self.local_type_aliases.contains_key(name) {
+            return Err(format!("'{name}' names a local type, expected a value"));
+        }
         if let Some(value) = self.lexical_value(name) {
             let literal = match &value.kind {
                 K::Literal(literal) => Some(literal),
@@ -4229,15 +4280,21 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let index = self.unsigned_index(index, Some(32))?;
         let constant_index = index.has_constant_inputs(&self.constexpr_names);
-        if constant_index
-            && let Some(value) = self.checked_constant(&index)?
-            && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
-                .is_none_or(|i| i >= *size)
-        {
-            return Err(format!(
-                "constant index {value} out of bounds for {}",
-                array.ty
-            ));
+        if constant_index {
+            let mut ctx = self.constant_context(false);
+            // Bounds can be checked after specialization while the array's
+            // element type is already available to the abstract callback body.
+            ctx.deferred_callback_declaration = None;
+            if let Some(value) =
+                Self::fold_required_constant(ctx, &index, ConstantUse::Bx, &mut None)?
+                && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
+                    .is_none_or(|i| i >= *size)
+            {
+                return Err(format!(
+                    "constant index {value} out of bounds for {}",
+                    array.ty
+                ));
+            }
         }
         Ok((
             element.as_ref().clone(),
@@ -5246,10 +5303,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             checker.with_prepared_value(subject, |checker, subject| {
                 let operands = match_operands(subject, arms, |name| {
                     let head = name.split_once("::").map_or(name, |(head, _)| head);
-                    Ok(checker.value_parametric_names.contains(name)
-                        || (!checker.names.contains(head)
-                            && checker.callback_index(head).is_none()
-                            && checker.is_constant_pattern(name)?))
+                    if checker.names.contains(head) {
+                        if let Some(TypedExpr {
+                            kind: K::Call { name: target, .. },
+                            ..
+                        }) = checker.lexical_value(name)
+                            && target == crate::typed::DEFERRED_CALLBACK_VALUE
+                        {
+                            checker.deferred_callback_declaration = true;
+                            return Err("match pattern requires a specialized callback".into());
+                        }
+                        return Ok(checker.constant_pattern_names.contains(name)
+                            || (head != name
+                                && checker.local_type_aliases.contains_key(head)
+                                && checker.is_enum_member_name(name)?));
+                    }
+                    Ok(checker.callback_index(head).is_none()
+                        && checker.is_constant_pattern(name)?)
                 })?;
                 if arms
                     .iter()

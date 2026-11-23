@@ -16,8 +16,8 @@ use super::generic_blocks::{Bindings, callback_argument_name, validate_inference
 use super::generic_inputs::{Input, InputPattern};
 use super::{
     BodyChecker, BodyKind, CallbackFormal, CallbackTarget, Declarations, FunctionInterface, K,
-    MAX_ELABORATION_DEPTH, StructTable, TypeResolver, bits, child_type_budget, compatible, declare,
-    literal_copy_work, minimum_type, resolve_type, source_type_nodes,
+    MAX_ELABORATION_DEPTH, StructTable, TypeResolver, TypeShape, bits, child_type_budget,
+    compatible, declare, literal_copy_work, minimum_type, resolve_type, source_type_nodes,
 };
 use crate::ast::{
     CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding,
@@ -28,6 +28,13 @@ use crate::typed::{BoundParametricValue, TypedExpr};
 
 pub(super) fn dimension_type() -> Type {
     Type::unsigned(32)
+}
+
+/// Total source storage copied from bound type parameters in one annotation.
+#[derive(Default)]
+struct TypeArgumentCopies {
+    nodes: usize,
+    name_bytes: usize,
 }
 
 impl<'m> Declarations<'m> {
@@ -460,7 +467,7 @@ pub(super) struct ExplicitScope {
     values: BTreeMap<String, Type>,
     literals: BTreeMap<String, TypedExpr>,
     constexpr_names: BTreeSet<String>,
-    value_parametric_names: BTreeSet<String>,
+    constant_pattern_names: BTreeSet<String>,
 }
 
 impl ExplicitScope {
@@ -473,8 +480,8 @@ impl ExplicitScope {
         std::mem::swap(&mut self.literals, &mut checker.function_values);
         std::mem::swap(&mut self.constexpr_names, &mut checker.constexpr_names);
         std::mem::swap(
-            &mut self.value_parametric_names,
-            &mut checker.value_parametric_names,
+            &mut self.constant_pattern_names,
+            &mut checker.constant_pattern_names,
         );
     }
 
@@ -512,7 +519,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     pub(super) fn bind_parametric_value(&mut self, name: &str, bound: &BoundParametricValue) {
         self.names.insert(name.to_owned());
-        self.value_parametric_names.insert(name.to_owned());
+        self.constant_pattern_names.insert(name.to_owned());
         self.values.insert(name.to_owned(), bound.ty.clone());
         self.constexpr_names.insert(name.to_owned());
         self.function_values.insert(
@@ -579,6 +586,26 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         ty: &Type,
         remaining: usize,
     ) -> Result<Type, String> {
+        self.resolve_annotation(ty, remaining, &mut None)
+    }
+
+    /// Substitute each written type parameter once, at its source reference.
+    /// Already concrete names inside an alias or another argument retain their
+    /// original identity even if a formal has the same spelling.
+    pub(super) fn concrete_annotation(&mut self, ty: &Type) -> Result<Type, String> {
+        let mut copies = Some(TypeArgumentCopies::default());
+        self.resolve_annotation(ty, MAX_ELABORATION_DEPTH, &mut copies)
+    }
+
+    /// Resolve dimensions and aliases, keeping formals symbolic when checking
+    /// an inference pattern. Concrete annotations budget all copied formals
+    /// together before cloning their bound types.
+    fn resolve_annotation(
+        &mut self,
+        ty: &Type,
+        remaining: usize,
+        copies: &mut Option<TypeArgumentCopies>,
+    ) -> Result<Type, String> {
         let size = |checker: &mut Self, expr: &Expr| {
             if let Some(n) = checker.struct_dimension(expr)? {
                 return Ok(n);
@@ -588,6 +615,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .ok_or_else(|| "dimension does not fit usize".to_owned())
         };
         match ty {
+            Type::Named(name) if self.local_type_aliases.contains_key(name) => {
+                let alias = &self.local_type_aliases[name].ty;
+                self.charge_reference_copy(super::source_type_nodes(alias))?;
+                Ok(alias.clone())
+            }
             Type::TypeApplied { name, args } => {
                 if self.has_local_name(name)
                     || self
@@ -609,9 +641,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 let budget = child_type_budget(remaining)?;
                 let args = args
                     .iter()
-                    .map(|arg| self.resolve_dimensions(arg, budget))
+                    .map(|arg| self.resolve_annotation(arg, budget, copies))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.with_type_resolver(|types, dimensions, bindings| {
+                    let bindings = if copies.is_some() { None } else { bindings };
                     types.resolve_struct_type_application(
                         name, args, bindings, dimensions, remaining,
                     )
@@ -640,24 +673,24 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 element,
                 size: expr,
             } => Ok(Type::array(
-                self.resolve_dimensions(element, child_type_budget(remaining)?)?,
+                self.resolve_annotation(element, child_type_budget(remaining)?, copies)?,
                 size(self, expr)?,
             )),
             Type::Array { element, size } => Ok(Type::array(
-                self.resolve_dimensions(element, child_type_budget(remaining)?)?,
+                self.resolve_annotation(element, child_type_budget(remaining)?, copies)?,
                 *size,
             )),
             Type::Tuple(fields) => {
                 let depth = child_type_budget(remaining)?;
                 fields
                     .iter()
-                    .map(|t| self.resolve_dimensions(t, depth))
+                    .map(|t| self.resolve_annotation(t, depth, copies))
                     .collect::<Result<_, _>>()
                     .map(Type::Tuple)
             }
             _ => {
                 let callbacks = self.callback_indices();
-                resolve_type(
+                let resolved = resolve_type(
                     ty,
                     &|name| {
                         self.names.contains(name)
@@ -680,7 +713,21 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         functions: self.function_registry.as_deref_mut(),
                     },
                     remaining,
-                )
+                )?;
+                if let Some(copies) = copies
+                    && let Type::Named(name) = ty
+                    && let Some(bindings) = self.type_bindings()
+                    && let Some(shape) = bindings.shape(name)
+                {
+                    let bound = bindings
+                        .get(name)
+                        .ok_or_else(|| format!("cannot infer type parameter '{name}'"))?;
+                    copies.nodes = copies.nodes.saturating_add(shape.source_nodes);
+                    copies.name_bytes = copies.name_bytes.saturating_add(shape.name_bytes);
+                    TypeShape::check_source_budget(copies.nodes, copies.name_bytes)?;
+                    return Ok(bound.clone());
+                }
+                Ok(resolved)
             }
         }
     }

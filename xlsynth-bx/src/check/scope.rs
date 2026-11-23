@@ -3,12 +3,12 @@
 use super::unroll::Shadowed;
 use super::{BodyChecker, CheckedStmt, K, TemporaryConstantBindings, Type, TypedExpr};
 use crate::ast::{
-    BinaryOp, BindingPattern, ConstAssert, Expr, ForIterable, LetBinding, ScopeStatement, Stmt,
-    WidthSliceType,
+    BinaryOp, BindingPattern, ConstAssert, ConstDef, Expr, ForIterable, LetBinding, ScopeStatement,
+    Stmt, WidthSliceType,
 };
 use crate::infer_literal::{BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type};
 use crate::typed::TEST_DISCARD_PREFIX;
-use crate::typed::{CONSTEXPR_PREFIX, ConstantBinding, ConstantUse};
+use crate::typed::{CONSTEXPR_PREFIX, ConstantBinding, ConstantUse, DEFERRED_CALLBACK_VALUE};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -19,6 +19,13 @@ use xlsynth_pir::IrValue;
 pub(super) struct BindingInitializer {
     pub value: TypedExpr,
     pub widths: Option<BindingWidths>,
+}
+
+/// A resolved alias also records whether the written type can name a struct
+/// during lexical checking of a skipped expression.
+pub(super) struct LocalTypeAlias {
+    pub(super) ty: Type,
+    pub(super) can_construct: bool,
 }
 
 /// Bindings restored on scope exit and expression statements required by
@@ -138,6 +145,55 @@ impl BodyChecker<'_, '_> {
                 .map_or(0, |registry| registry.generated_count())
     }
 
+    /// Evaluate a compile-time declaration in its lexical environment. Remove
+    /// generated lets and restore caches before resuming runtime elaboration.
+    fn with_erased_declaration<T>(
+        &mut self,
+        check: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let prior_callees = self.callee_specialization_count();
+        let start = self.statements.len();
+        let had_functions = self.constant_functions.is_some();
+        let preserve_inputs = std::mem::replace(&mut self.preserve_assert_inputs, true);
+        // A predicate elaborates only pure expressions, even in a block's
+        // zero-trip unroll where the body receives only lexical checking.
+        let outer_kind = std::mem::replace(&mut self.kind, super::BodyKind::Function);
+        let outer_use = std::mem::replace(&mut self.dslx_constant_use, ConstantUse::Declaration);
+        let outer_match = std::mem::replace(&mut self.in_match_bytecode, false);
+        let outer_operands = self.assert_operands.take();
+        let outer_cache = self
+            .assertion_cache
+            .replace(TemporaryConstantBindings::new(start));
+        let ids = (
+            self.next_map,
+            self.next_counted_loop,
+            self.unroll_binding_count,
+        );
+        self.enable_constant_functions();
+        let result = self.with_dslx_value_context(check);
+        self.discard_temporary_statements(start);
+        (
+            self.next_map,
+            self.next_counted_loop,
+            self.unroll_binding_count,
+        ) = ids;
+        self.preserve_assert_inputs = preserve_inputs;
+        self.kind = outer_kind;
+        self.dslx_constant_use = outer_use;
+        self.in_match_bytecode = outer_match;
+        self.assert_operands = outer_operands;
+        let cache = std::mem::replace(&mut self.assertion_cache, outer_cache)
+            .expect("active declaration cache");
+        cache.restore(&mut self.constants);
+        if self.callee_specialization_count() > prior_callees {
+            self.decls.constexpr_instantiated_callee.set(true);
+        }
+        if !had_functions {
+            self.constant_functions = None;
+        }
+        result
+    }
+
     /// Evaluate a declaration in its lexical scope and erase its predicate's
     /// temporary lets.
     pub(super) fn check_const_assert(&mut self, assertion: &ConstAssert) -> Result<(), String> {
@@ -147,55 +203,17 @@ impl BodyChecker<'_, '_> {
             // names can be required here.
             self.check_deferred_predicate_names(&assertion.predicate)
         } else {
-            let prior_callees = self.callee_specialization_count();
-            let start = self.statements.len();
-            let had_functions = self.constant_functions.is_some();
-            let preserve_inputs = std::mem::replace(&mut self.preserve_assert_inputs, true);
-            // A predicate elaborates only pure expressions, even in a block's
-            // zero-trip unroll where the body receives only lexical checking.
-            let outer_kind = std::mem::replace(&mut self.kind, super::BodyKind::Function);
-            let outer_use = std::mem::replace(&mut self.dslx_constant_use, ConstantUse::Assertion);
-            let outer_match = std::mem::replace(&mut self.in_match_bytecode, false);
-            let outer_cache = self
-                .assertion_cache
-                .replace(TemporaryConstantBindings::new(start));
-            let ids = (
-                self.next_map,
-                self.next_counted_loop,
-                self.unroll_binding_count,
-            );
-            self.enable_constant_functions();
-            let result = self.with_dslx_value_context(|checker| {
+            self.with_erased_declaration(|checker| {
                 let expr = checker.dslx_argument(&assertion.predicate, &Type::Bool)?;
                 let value = checker
-                    .checked_constant_for(&expr, ConstantUse::Assertion)?
+                    .checked_constant_for(&expr, ConstantUse::Declaration)?
                     .ok_or("predicate must evaluate to a compile-time constant")?;
                 if value.to_bool().map_err(|e| e.to_string())? {
                     Ok(())
                 } else {
                     Err("predicate is false".to_owned())
                 }
-            });
-            self.take_pure_bindings(start);
-            (
-                self.next_map,
-                self.next_counted_loop,
-                self.unroll_binding_count,
-            ) = ids;
-            self.preserve_assert_inputs = preserve_inputs;
-            self.kind = outer_kind;
-            self.dslx_constant_use = outer_use;
-            self.in_match_bytecode = outer_match;
-            let cache = std::mem::replace(&mut self.assertion_cache, outer_cache)
-                .expect("active assertion cache");
-            cache.restore(&mut self.constants);
-            if self.callee_specialization_count() > prior_callees {
-                self.decls.constexpr_instantiated_callee.set(true);
-            }
-            if !had_functions {
-                self.constant_functions = None;
-            }
-            result
+            })
         };
         result.map_err(|e| {
             format!(
@@ -264,6 +282,38 @@ impl BodyChecker<'_, '_> {
         value.map(|value| sequence(scope.operands, value))
     }
 
+    /// Evaluate even unused constants at their definition and preserve their
+    /// inferred literal widths for subsequent dimension and argument inference.
+    fn local_constant(&mut self, decl: &ConstDef) -> Result<BindingInitializer, String> {
+        self.with_erased_declaration(|checker| {
+            let mut init = checker.annotated_binding_initializer(
+                &decl.value,
+                decl.ty.as_ref(),
+                |checker, expr, ty| checker.elaborate_result(expr, ty, false),
+            )?;
+            init.value.kind = match checker
+                .checked_constant_for(&init.value, ConstantUse::Declaration)
+            {
+                Ok(Some(value)) => K::Literal(value),
+                Ok(None) => {
+                    return Err("initializer must evaluate to a compile-time constant".into());
+                }
+                Err(_) if std::mem::take(&mut checker.deferred_callback_declaration) => {
+                    // The initializer already has a checked type. Subsequent
+                    // declarations and runtime operations can use it until
+                    // an operation requires the concrete constant.
+                    K::Call {
+                        name: DEFERRED_CALLBACK_VALUE.into(),
+                        args: Vec::new(),
+                    }
+                }
+                Err(err) => return Err(err),
+            };
+            Ok(init)
+        })
+        .map_err(|e| format!("const '{}': {e}", decl.name))
+    }
+
     /// Enter each binding only after its initializer has been checked.
     fn enter_scope(&mut self, statements: &[ScopeStatement]) -> Result<EnteredScope, String> {
         if !self.iteration_path.is_empty() {
@@ -274,6 +324,28 @@ impl BodyChecker<'_, '_> {
         let result = statements.iter().try_for_each(|statement| {
             let binding = match statement {
                 ScopeStatement::Let(binding) => binding,
+                ScopeStatement::Const(decl) => {
+                    let init = self.local_constant(decl)?;
+                    self.bind_scoped_value(&decl.name, init.value, init.widths, &mut saved);
+                    self.constant_pattern_names.insert(decl.name.clone());
+                    return Ok(());
+                }
+                ScopeStatement::TypeAlias(alias) => {
+                    let ty = self
+                        .with_erased_declaration(|checker| checker.source_type(&alias.ty))
+                        .map_err(|e| format!("type '{}': {e}", alias.name))?;
+                    let mut can_construct = matches!(ty, Type::Named(_));
+                    if let Type::Named(name) = &alias.ty {
+                        can_construct |= match self.local_type_aliases.get(name) {
+                            Some(outer) => outer.can_construct,
+                            None => self.type_bindings().is_some_and(|b| b.declares(name)),
+                        };
+                    }
+                    self.shadow_scoped_name(&alias.name, &mut saved);
+                    self.local_type_aliases
+                        .insert(alias.name.clone(), LocalTypeAlias { ty, can_construct });
+                    return Ok(());
+                }
                 ScopeStatement::ConstAssert(assertion) => {
                     return self.check_const_assert(assertion);
                 }
@@ -410,6 +482,8 @@ impl BodyChecker<'_, '_> {
             self.names.remove(&name);
             self.inferred_bindings.remove(&name);
             self.prepared_counted_iterables.remove(&name);
+            self.local_type_aliases.remove(&name);
+            self.constant_pattern_names.remove(&name);
         }
         self.scope_alias_names.truncate(first_alias);
         result
@@ -643,17 +717,19 @@ impl BodyChecker<'_, '_> {
             };
             let scope = self.enter_scope(statements)?;
             let mut aliases = BTreeMap::new();
-            for statement in statements {
-                let ScopeStatement::Let(binding) = statement else {
-                    // An assertion introduces no names to capture.
+            for binding in &scope.saved {
+                let name = &binding.name;
+                if aliases.contains_key(name) {
                     continue;
-                };
-                binding.pattern.visit_names(&mut |name| {
-                    if aliases.contains_key(name) {
-                        return;
-                    }
-                    // The temporary alias now owns the local value. Leaving
-                    // the scope below restores any shadowed outer binding.
+                }
+                let alias = if let Some(ty) = self.local_type_aliases.remove(name) {
+                    let alias = self.new_scope_alias(Some(name));
+                    self.names.insert(alias.clone());
+                    self.local_type_aliases.insert(alias.clone(), ty);
+                    alias
+                } else {
+                    // Move the innermost binding before restoring its shadowed
+                    // names.
                     let value = if self.in_loop_scope() {
                         self.loop_values.remove(name)
                     } else {
@@ -662,8 +738,12 @@ impl BodyChecker<'_, '_> {
                     .expect("bound scoped result");
                     let widths = self.inferred_bindings.remove(name);
                     let alias = self.capture_value_alias(Some(name), value, widths);
-                    aliases.insert(name.to_owned(), alias);
-                });
+                    if self.constant_pattern_names.contains(name) {
+                        self.constant_pattern_names.insert(alias.clone());
+                    }
+                    alias
+                };
+                aliases.insert(name.clone(), alias);
             }
             let mut result = result.as_ref().clone();
             capture_names(&mut result, &mut aliases);
@@ -687,6 +767,12 @@ impl BodyChecker<'_, '_> {
         Ok(prepared)
     }
 
+    fn new_scope_alias(&mut self, source_name: Option<&str>) -> String {
+        let alias = format!("$scope_{}", self.scope_alias_names.len());
+        self.scope_alias_names.push(source_name.map(str::to_owned));
+        alias
+    }
+
     /// Preserve a checked operand until the surrounding group has used its
     /// type and value. The enclosing alias scope releases all three entries.
     fn capture_value_alias(
@@ -695,8 +781,7 @@ impl BodyChecker<'_, '_> {
         value: TypedExpr,
         widths: Option<BindingWidths>,
     ) -> String {
-        let alias = format!("$scope_{}", self.scope_alias_names.len());
-        self.scope_alias_names.push(source_name.map(str::to_owned));
+        let alias = self.new_scope_alias(source_name);
         let values = if self.in_loop_scope() {
             &mut self.loop_values
         } else {
@@ -1359,6 +1444,17 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             for statement in statements {
                 match statement {
                     ScopeStatement::Let(binding) => capture_binding(binding, aliases, &mut hidden),
+                    ScopeStatement::Const(decl) => {
+                        if let Some(ty) = &mut decl.ty {
+                            rename_type(ty, aliases);
+                        }
+                        capture_names(&mut decl.value, aliases);
+                        hidden.extend(aliases.remove_entry(&decl.name));
+                    }
+                    ScopeStatement::TypeAlias(alias) => {
+                        rename_type(&mut alias.ty, aliases);
+                        hidden.extend(aliases.remove_entry(&alias.name));
+                    }
                     ScopeStatement::ConstAssert(assertion) => {
                         capture_names(&mut assertion.predicate, aliases)
                     }

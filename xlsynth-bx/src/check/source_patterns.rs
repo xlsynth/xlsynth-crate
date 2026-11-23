@@ -19,8 +19,9 @@ pub(super) fn validate_source_match_patterns(module: &Module) -> Result<(), Stri
     Ok(())
 }
 
-/// A helper used transitively by an assertion also needs its constexpr inputs.
-pub(super) fn has_const_assert(module: &Module, include_tests: bool) -> bool {
+/// Local declarations and assertions can evaluate a helper transitively, so
+/// retain the lexical operands used to determine constexpr values.
+pub(super) fn has_constexpr_declaration(module: &Module, include_tests: bool) -> bool {
     if !module.const_asserts.is_empty() {
         return true;
     }
@@ -30,9 +31,14 @@ pub(super) fn has_const_assert(module: &Module, include_tests: bool) -> bool {
             return true;
         }
         if let Expression(Expr::Scope { statements, .. }) = node
-            && statements
-                .iter()
-                .any(|s| matches!(s, ScopeStatement::ConstAssert(_)))
+            && statements.iter().any(|s| {
+                matches!(
+                    s,
+                    ScopeStatement::ConstAssert(_)
+                        | ScopeStatement::Const(_)
+                        | ScopeStatement::TypeAlias(_)
+                )
+            })
         {
             return true;
         }

@@ -192,6 +192,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_local_declarations"
+path = "fuzz_targets/fuzz_bx_dslx_local_declarations.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_module_constants"
 path = "fuzz_targets/fuzz_bx_dslx_module_constants.rs"
 test = false

@@ -933,8 +933,7 @@ fn later(x: u8) -> u8 { x }
         crate::check_source_with_options(source, &options)?;
         let (module, imports) = read_for_tests(source, &options)?;
         let error = crate::check::check_sources(&module, imports, &options)
-            .err()
-            .expect("test uses a later declaration");
+            .expect_err("test uses a later declaration");
         assert_eq!(
             error,
             "in 'earlier': 'later' is declared later in the module"

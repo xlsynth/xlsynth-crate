@@ -14,6 +14,7 @@ use super::{
     source_type_nodes,
 };
 use crate::ast::{CallbackParam, Expr, Function, Type};
+use crate::typed::UNBOUND_CALLBACK;
 
 /// A visible declaration before its DSLX specialization (if any) is known.
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -509,7 +510,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             formal.params.iter().map(|ty| (None, ty)),
             dslx_arguments,
         )?;
-        let call = self.callback_call(target, &formal.name, args);
+        let call = self.callback_call(target, args);
         Ok((formal.result.clone(), call))
     }
 
@@ -659,16 +660,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         };
         Ok(TypedExpr {
             ty,
-            kind: self.callback_call(target, name, vec![element]),
+            kind: self.callback_call(target, vec![element]),
         })
     }
 
-    fn callback_call(
-        &mut self,
-        target: Option<CallbackTarget<'m>>,
-        name: &str,
-        args: Vec<TypedExpr>,
-    ) -> K {
+    fn callback_call(&mut self, target: Option<CallbackTarget<'m>>, args: Vec<TypedExpr>) -> K {
         match target {
             Some(CallbackTarget::Local(name)) => {
                 if self.source_kind == BodyKind::Function {
@@ -685,7 +681,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             },
             Some(CallbackTarget::Imported(id)) => K::ImportedCall { id, args },
             None => K::Call {
-                name: name.to_owned(),
+                name: UNBOUND_CALLBACK.to_owned(),
                 args,
             },
         }
