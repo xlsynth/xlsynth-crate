@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::registered_opt::{RegisteredOptimizationOptions, optimize_registered_netlist};
 use super::*;
 use crate::liberty::model::{LibraryBuilder, TimingType};
 use crate::liberty::parser::parse_liberty_files;
@@ -13,7 +14,7 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 /// A small load- and slew-sensitive library with explicitly sized equivalents.
-fn library() -> Result<Library> {
+pub(in crate::netlist) fn library() -> Result<Library> {
     let mut text = String::from(
         r#"library(test) {
         lu_table_template(delay) { variable_1: input_net_transition; variable_2: total_output_net_capacitance; index_1("0,10"); index_2("0,10"); }
@@ -369,6 +370,58 @@ fn default_work_limits_scale_with_instances_and_saturate() {
     );
 }
 
+// Make the early area candidates exhaust the first work window. A productive
+// search can renew its budget and resume at the next untried strength.
+#[test]
+fn productive_recovery_windows_resume_the_pending_strength_without_losing_timing() -> Result<()> {
+    let lib = library()?;
+    let net = read_gv_from_str(
+        "module m(input clk, input a, output y);
+         wire p,q,r,s;
+         BUF4 b0(.A(a),.Y(p)); BUF4 b1(.A(a),.Y(q));
+         BUF4 b2(.A(a),.Y(r)); BUF4 b3(.A(a),.Y(s));
+         DFF1 launch(.CLK(clk),.D(a),.Q(y)); endmodule",
+    )?;
+    let opts = ResizeOptions {
+        resize_registers: false,
+        ..Default::default()
+    };
+    let mut sta =
+        IncrementalSta::new(&net.modules[0], &net.nets, &net.interner, &lib, opts.timing)?;
+    let checkpoint = sta.score();
+    let initial_area = sta.cell_indices().iter().map(|&i| lib.cells[i].area).sum();
+    let families = CellFamilies::new(&lib);
+    let mut search = ResizeSearch {
+        library: &lib,
+        options: &opts,
+        families: &families,
+        area_weight: 0.5,
+        initial_delay: checkpoint,
+        timing_checkpoint: checkpoint,
+        objective: sta.objective(),
+        area: initial_area,
+        area_limit: initial_area,
+        work_limits: ResizeWorkLimits {
+            timing_evaluations: 0,
+            timing_candidate_sites: 1,
+            recovery_evaluations: 3,
+        },
+    };
+    let stats = search.run_phase_with_windows(SearchPhase::AreaRecovery, &mut sta, 1, Some(1));
+    assert_eq!(
+        (
+            stats.accepted,
+            stats.renewed_windows,
+            stats.propagated_instances
+        ),
+        (3, 2, 3)
+    );
+    assert_eq!(stats.stop_reason, ResizeStopReason::PropagationLimit);
+    assert_eq!(sta.score(), checkpoint);
+    assert_eq!(search.area, initial_area - 9.0);
+    Ok(())
+}
+
 #[test]
 fn phase_budgets_do_not_reset_per_round_or_borrow_from_each_other() -> Result<()> {
     let library = library()?;
@@ -469,12 +522,30 @@ fn negative_arrival_paths_remain_eligible_for_area_neutral_timing_improvement() 
     let mut file = NamedTempFile::new()?;
     file.write_all(text.as_bytes())?;
     let library = parse_liberty_files(&[file.path()]).map_err(anyhow::Error::msg)?;
-    let mut parsed =
-        read_gv_from_str("module m(input a, output y); BUF1 b(.A(a),.Y(y)); endmodule")?;
+    let gv = "module m(input a, output y, output z); BUF1 b(.A(a),.Y(y)); BUF1 c(.A(a),.Y(z)); endmodule";
+    let mut parsed = read_gv_from_str(gv)?;
     let report = resize(&mut parsed, &library, &options())?;
     assert_eq!(report.initial_delay.input_to_output, -1.0);
     assert_eq!(report.final_delay.input_to_output, -2.0);
     assert_eq!(report.final_area, report.initial_area);
+    let mut assembled = read_gv_from_str(gv)?;
+    let registered = optimize_registered_netlist(
+        &mut assembled,
+        &library,
+        &RegisteredOptimizationOptions {
+            timing: options().timing,
+            // Break the tie in one sweep and improve the worst delay in the
+            // next.
+            resize: Some(ResizeOptions {
+                max_candidate_sites: Some(1),
+                ..options()
+            }),
+            fanout: None,
+        },
+    )?;
+    assert_eq!(registered.objective_delay, -2.0);
+    assert_eq!(registered.final_delay, report.final_delay);
+    assert_eq!(registered.final_area, registered.initial_area);
     Ok(())
 }
 
@@ -1806,6 +1877,16 @@ fn replacement_that_changes_when_constants_is_skipped() -> Result<()> {
 fn unusable_register_alternative_restores_timing_before_the_next_trial() -> Result<()> {
     let mut library = library()?;
     let bad = library.cells.iter().position(|c| c.name == "DFF2").unwrap();
+    let mut partial = library.cells[bad].clone();
+    partial.name = "DFF_PARTIAL".to_string();
+    for pin in &mut partial.pins {
+        for arc in &mut pin.timing_arcs {
+            arc.tables
+                .retain(|table| table.kind_str() != "rise_constraint");
+        }
+    }
+    let missing_rise = library.cells.len();
+    library.cells.push(partial);
     let data = library.cells[bad]
         .pins
         .iter_mut()
@@ -1832,6 +1913,13 @@ fn unusable_register_alternative_restores_timing_before_the_next_trial() -> Resu
     )?;
     let before = sta.score();
     let cells = sta.cell_indices().to_vec();
+    // A remaining fall constraint keeps the endpoint visible to STA.
+    let error = sta
+        .trial(1, missing_rise, usize::MAX, None, |_| true)
+        .unwrap_err();
+    assert!(error.to_string().contains("setup timing coverage"));
+    assert_eq!(sta.score(), before);
+    assert_eq!(sta.cell_indices(), cells);
     // Duplicate capture tables fail after forward timing and input loads have
     // changed, exercising rollback beyond candidate preparation.
     assert!(sta.trial(1, bad, usize::MAX, None, |_| true).is_err());
@@ -1855,11 +1943,51 @@ fn unusable_register_alternative_restores_timing_before_the_next_trial() -> Resu
     let report = resize(&mut parsed, &library, &opts)?;
     assert!(report.upsize.register_changes > 0);
     library.cells[bad].dont_use = Some(true);
+    library.cells[missing_rise].dont_use = Some(true);
     let mut expected = read_gv_from_str(source)?;
     let expected_report = resize(&mut expected, &library, &opts)?;
     assert_eq!(parsed.modules, expected.modules);
     assert_eq!(report.final_area, expected_report.final_area);
     assert_eq!(report.final_delay, expected_report.final_delay);
+    Ok(())
+}
+
+#[test]
+fn register_replacement_preserves_setup_in_each_possible_mode() -> Result<()> {
+    let mut builder = LibraryBuilder::from_library(library()?);
+    let d = builder.intern_string("D")?;
+    let m = builder.intern_string("M")?;
+    let not_m = builder.intern_string("!M")?;
+    for name in ["DFF1", "DFF2"] {
+        let cell = builder.cells.iter_mut().find(|c| c.name == name).unwrap();
+        cell.sequential[0].next_state = "D ^ M".to_string();
+        let data = cell.pins.iter_mut().find(|p| p.name == d).unwrap();
+        let mut mode = data.clone();
+        mode.name = m;
+        data.timing_arcs[0].when = m;
+        if name == "DFF1" {
+            let mut arc = data.timing_arcs[0].clone();
+            arc.when = not_m;
+            data.timing_arcs.push(arc);
+        }
+        cell.pins.push(mode);
+    }
+    let library = builder.finish();
+    // The faster DFF2 has both constraints for M=1. A dynamic M also
+    // permits M=0, where DFF2 lacks both constraints.
+    for (mode, expected) in [("m", "DFF1"), ("1'b0", "DFF1"), ("1'b1", "DFF2")] {
+        let mut parsed = read_gv_from_str(&format!(
+            "module top(input clk, input d, input m, output q);
+             DFF1 capture(.CLK(clk), .M({mode}), .D(d), .Q(q)); endmodule"
+        ))?;
+        resize(&mut parsed, &library, &options())?;
+        let selected = parsed.modules[0].instances[0].type_name;
+        assert_eq!(
+            parsed.interner.resolve(selected),
+            Some(expected),
+            "M={mode}"
+        );
+    }
     Ok(())
 }
 

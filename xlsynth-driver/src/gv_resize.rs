@@ -25,7 +25,7 @@ pub fn command() -> Command {
         .arg(Arg::new("wire-capacitance-per-sink-ff").long("wire-capacitance-per-sink-ff").value_parser(clap::value_parser!(f64)).help("Wire capacitance per sink pin, in fF (default: 0)"))
         .arg(Arg::new("max-area-growth").long("max-area-growth").help(format!("Fractional area allowance [default: {}]", defaults.max_area_growth)).value_parser(clap::value_parser!(f64)))
         .arg(Arg::new("timing-evaluation-budget").long("timing-evaluation-budget").help("Instance timing/coverage propagation evaluations across timing rounds [default: max(50000, 4 * instance count)]").value_parser(clap::value_parser!(usize)))
-        .arg(Arg::new("recovery-evaluation-budget").long("recovery-evaluation-budget").help("Instance timing/coverage propagation evaluations across recovery rounds [default: max(100000, 8 * instance count)]").value_parser(clap::value_parser!(usize)))
+        .arg(Arg::new("recovery-evaluation-budget").long("recovery-evaluation-budget").help("Hard total timing/coverage propagation visits for recovery; default starts at max(100000, 8 * instances) and renews productive registered sweeps").value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("upsize-rounds").long("upsize-rounds").help(format!("Timing-search rounds, in either size direction [default: {}]", defaults.max_upsize_rounds)).value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("downsize-rounds").long("downsize-rounds").help(format!("Area-recovery rounds [default: {}]", defaults.max_downsize_rounds)).value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("no-register-resize").long("no-register-resize").action(ArgAction::SetTrue))
