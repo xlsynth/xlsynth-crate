@@ -19,6 +19,8 @@ use xlsynth_vast::is_system_verilog_keyword;
 pub type PortId = SymbolU32;
 pub type NetId = SymbolU32;
 
+/// Index into the netlist's `nets` table, which has one entry per scalar or
+/// vector net. For `bus[7]`, this identifies the whole vector net `bus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NetIndex(pub usize);
 
