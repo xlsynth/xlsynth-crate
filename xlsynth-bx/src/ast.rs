@@ -13,7 +13,7 @@ use std::{
 use crate::BxWarningKind;
 
 mod source_nodes;
-pub(crate) use source_nodes::SourceNode;
+pub(crate) use source_nodes::{ScopedSourceNodes, SourceNode};
 
 // Generate both directions of the spelling map from the same operator list.
 macro_rules! operator_enum {
@@ -344,7 +344,7 @@ pub enum BindingPattern {
 impl BindingPattern {
     /// Visit the names introduced in source order and return the number of
     /// pattern nodes traversed, including wildcards and rest markers.
-    pub(crate) fn visit_names(&self, visit: &mut impl FnMut(&str)) -> usize {
+    pub(crate) fn visit_names<'a>(&'a self, visit: &mut impl FnMut(&'a str)) -> usize {
         let mut nodes = 0;
         let mut pending = Vec::new();
         let mut next = Some(self);
@@ -1104,7 +1104,7 @@ pub struct Block {
     pub type_params: Vec<String>,
     /// Named callable parameters, in the order supplied at a block call site.
     pub callback_params: Vec<CallbackParam>,
-    /// Explicit compile-time values in declaration order.
+    /// Compile-time values and optional defaults in declaration order.
     pub value_parametrics: Vec<ParametricBinding>,
     /// A leading `clk` declares a clocked block. A clockless block is
     /// combinational.

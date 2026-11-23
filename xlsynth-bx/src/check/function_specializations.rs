@@ -352,7 +352,7 @@ impl<'m> FunctionSpecializations<'m> {
         // in dependency order once its enum representations and dimensions are
         // known.
         definitions.extend(
-            StructTable::struct_schedule(module, position)?
+            StructTable::struct_schedule(module, position, |owner| decls.zero_binding(owner))?
                 .into_iter()
                 .map(|(at, index)| (at, Definition::Struct(index))),
         );

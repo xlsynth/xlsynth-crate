@@ -2075,27 +2075,15 @@ impl<'s> Parser<'s> {
                     params.type_params.push(name);
                 }
                 Some(_) => {
-                    let name = p.ident()?;
-                    p.expect(":")?;
-                    let ty = p.ty()?;
-                    if !matches!(
-                        ty,
-                        Type::Bits {
-                            signed: false,
-                            width: 32
-                        } | Type::Named(_)
-                    ) {
-                        return Err(p.error("block value parameters require type 'u32'"));
+                    let formal = p.value_parametric(
+                        params.value_parametrics.len() + params.callback_params.len(),
+                    )?;
+                    if !matches!(formal.ty, Type::Named(_))
+                        && !matches!(crate::typed::bits(&formal.ty), Some((false, 1 | 32)))
+                    {
+                        return Err(p.error("block value parameters require type 'u32' or 'bool'"));
                     }
-                    if p.peek(0) == "=" {
-                        return Err(p.error("block value parameters require explicit arguments"));
-                    }
-                    params.value_parametrics.push(ParametricBinding {
-                        name,
-                        ty,
-                        default: None,
-                        index: params.value_parametrics.len() + params.callback_params.len(),
-                    });
+                    params.value_parametrics.push(formal);
                 }
             }
             Ok(())
@@ -2267,11 +2255,14 @@ impl<'s> Parser<'s> {
         Ok((signed, bit_count))
     }
 
-    /// Read a named dimension or a constexpr expression in an alias,
-    /// function body, or parametric declaration.
+    /// Read a constexpr dimension, preserving DSLX name resolution in
+    /// overwritten literal annotations.
     fn type_dimension(&mut self) -> Result<ParsedExpr, String> {
         let start = self.tokens[self.pos].start;
-        let mut dimension = if self.dependent_types || self.in_function_body {
+        let mut dimension = if self.dependent_types
+            || self.in_function_body
+            || self.literal_type_context != LiteralTypeContext::Overwritten
+        {
             let previous = self.literal_type_context;
             if previous == LiteralTypeContext::Overwritten {
                 self.literal_type_context = LiteralTypeContext::DiscardedExpression;
@@ -5669,10 +5660,10 @@ fn concrete(x:uN[8][4])->sN[8] { x[u32:0] as s8 }
         let self_binding = parse_module("fn f<self:u32>(x:uN[self])->uN[self]{x}")?;
         assert_eq!(self_binding.functions[0].value_parametrics[0].name, "self");
         assert!(parse_module("fn f<N:u32={8}>(x:u8)->u8 { /* still DSLX */ x }").is_err());
-        assert!(
-            parse_module("fn f<N:u32>(x:uN[N])->uN[N] {x} block bad(clk,x:uN[N + 1])->u8{x}")
-                .is_err()
-        );
+        let out_of_scope = parse_module(
+            "fn f<N:u32>(x:uN[N])->uN[N] {x} block bad(clk,x:uN[N + 1])->u8{x as u8}",
+        )?;
+        assert!(crate::check_module(&out_of_scope).is_err());
         Ok(())
     }
 
@@ -5728,10 +5719,10 @@ block wires(clk, xs: (sN[sizes::WIDTH], bool)[WORDS]) -> (sN[sizes::WIDTH], bool
             }
         }
         for ty in ["u8[WORDS + 1]", "uN[WORDS * 2]", "xN[!SIGNED][WORDS]"] {
-            assert!(
-                parse_module(&format!("fn bad(x:{ty}) {{ }}")).is_err(),
-                "{ty}"
-            );
+            let module = parse_module(&format!(
+                "const WORDS = u32:3; const SIGNED = false; fn pass(x:{ty})->{ty} {{ x }}"
+            ))?;
+            crate::check_module(&module)?;
         }
         Ok(())
     }
@@ -7227,10 +7218,7 @@ block stage<T, N: u32, F: fn(T) -> T, M: u32>(clk, x: T) -> T {
             ),
             ("<T, T: u32>", "duplicate block value parameter 'T'"),
             ("<N: u8>", "block value parameters require type 'u32'"),
-            (
-                "<N: u32 = {u32:1}>",
-                "block value parameters require explicit arguments",
-            ),
+            ("<SPLIT: bool = false>", "expected '{'"),
             ("<T = u32>", "expected ','"),
             ("<T,,U>", "expected identifier"),
             ("<bool>", "expected identifier"),

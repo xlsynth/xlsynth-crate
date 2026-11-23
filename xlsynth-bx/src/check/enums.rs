@@ -11,7 +11,7 @@ use xlsynth_pir::IrBits;
 use super::{
     BodyChecker, CheckedEnum, Declarations, StructTable, bits, dependency_order, type_dependencies,
 };
-use crate::ast::{EnumDef, Expr, Module, SourceNode, Type};
+use crate::ast::{EnumDef, Expr, Module, ScopedSourceNodes, SourceNode, Type};
 
 impl StructTable<'_> {
     /// Only BX declarations have unqualified keys. Imported enum references
@@ -74,6 +74,7 @@ impl StructTable<'_> {
     pub(super) fn struct_schedule(
         module: &Module,
         position: impl Fn(&str) -> usize,
+        zero_binding: impl Fn(&str) -> String,
     ) -> Result<Vec<(usize, usize)>, String> {
         let type_positions: BTreeMap<_, _> = module
             .enums
@@ -104,12 +105,15 @@ impl StructTable<'_> {
             let mut preferred = Vec::new();
             let mut dimensions = Vec::new();
             let mut has_symbolic_application = false;
+            let mut expression_ready_at = 0;
+            let declared_at = position(&def.name);
             let types = def
                 .value_parametrics
                 .iter()
                 .map(|formal| &formal.ty)
                 .chain(def.fields.iter().map(|field| &field.ty));
-            let mut pending = Vec::new();
+            let mut pending = ScopedSourceNodes::default();
+            let mut zero = None;
             for ty in types {
                 pending.push(SourceNode::Annotation(ty));
                 type_dependencies(
@@ -144,15 +148,56 @@ impl StructTable<'_> {
             // A fully explicit application has no dependency on its defaults.
             let mut default_prefixes = BTreeMap::new();
             let mut defaults = Vec::new();
+            let mut in_declaration = true;
             let mut type_params = def.type_params.as_slice();
             let mut optional = false;
-            while let Some(node) = pending.pop().or_else(|| {
-                defaults.pop().map(|(node, visible_types, preference)| {
-                    type_params = visible_types;
-                    optional = preference;
-                    node
-                })
+            while let Some(node) = pending.next().or_else(|| {
+                let (node, visible_types, preference) = defaults.pop()?;
+                in_declaration = false;
+                type_params = visible_types;
+                optional = preference;
+                pending.push(node);
+                pending.next()
             }) {
+                // A forward-used layout is ready after the values and helpers
+                // referenced by its dimensions, even if the struct itself is
+                // declared later. Name resolution still uses the struct scope.
+                if in_declaration && let SourceNode::Expression(expr) = node {
+                    let mut record = |name: &str| {
+                        if !pending.is_local(name) {
+                            // A linked declaration can contain "::" in its
+                            // module path. Only separators in the member
+                            // identify a source qualifier, such as an enum or
+                            // DSLX use.
+                            let member = crate::bx_import::library_item(name)
+                                .map_or(name, |(_, member)| member);
+                            let binding = member
+                                .split_once("::")
+                                .map_or(name, |(_, tail)| &name[..name.len() - tail.len() - 2]);
+                            let at = position(binding);
+                            if at <= declared_at {
+                                expression_ready_at = expression_ready_at.max(at);
+                            }
+                        }
+                    };
+                    match expr {
+                        Expr::Name(name)
+                        | Expr::Call { name, .. }
+                        | Expr::ParametricCall { name, .. }
+                        | Expr::MapBeforeUse { name, .. } => record(name),
+                        Expr::Map(map) => record(&map.target),
+                        Expr::NamedMap {
+                            target, callback, ..
+                        } => {
+                            record(target);
+                            record(callback);
+                        }
+                        Expr::Zero(_) if !pending.is_local("zero!") => {
+                            record(zero.get_or_insert_with(|| zero_binding(&def.name)));
+                        }
+                        _ => { /* Other expressions only reference names in their children. */ }
+                    }
+                }
                 let constructor = matches!(node, SourceNode::Expression(_));
                 let application = match node {
                     SourceNode::Annotation(Type::ParametricStruct { name, args })
@@ -175,9 +220,9 @@ impl StructTable<'_> {
                     }
                     _ => None,
                 };
-                node.push_children(&mut pending);
                 if let Some((name, supplied)) = application
                     && !type_params.contains(name)
+                    && !pending.is_local(name)
                 {
                     if optional {
                         preferred.push(name.as_str());
@@ -221,9 +266,9 @@ impl StructTable<'_> {
                 .map(|binding| binding.name.as_str())
                 .collect();
             let mut at = if parametric_names.is_empty() && !has_symbolic_application {
-                0
+                expression_ready_at
             } else {
-                position(&def.name)
+                declared_at
             };
             for dimension in dimensions {
                 if parametric_names.contains(dimension) {

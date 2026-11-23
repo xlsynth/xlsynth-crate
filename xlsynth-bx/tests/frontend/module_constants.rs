@@ -422,9 +422,10 @@ fn a_forward_struct_layout_waits_for_its_constant_and_enum_dependencies() -> Res
 struct Frame { lane: Lane }
 const N = u32:2;
 const W = u32:3;
+fn count(n: u32) -> u32 { n }
 enum Code: uN[W] { A = 0, B = 3 }
 fn sample(f: Frame) -> uN[W] { f.lane.codes[u32:1] as uN[W] }
-struct Lane { codes: Code[N] }
+struct Lane { codes: Code[count(N)] }
 "#;
     let checked = check_module(&parse_module(source)?)?;
     let lane = checked.structs().iter().find(|s| s.name == "Lane").unwrap();
@@ -433,5 +434,47 @@ struct Lane { codes: Code[N] }
     };
     assert_eq!(*size, 2);
     assert!(matches!(element.as_ref(), Type::Enum { name, width: 3, .. } if name == "Code"));
+    Ok(())
+}
+
+#[test]
+fn forward_struct_widths_respect_lexical_expression_bindings() -> Result<(), String> {
+    for width in [
+        "{ let (_, W) = (u32:0, u32:2); W }",
+        "for (W, acc): (u32, u32) in u32:0..u32:2 { acc + W + u32:1 }(u32:0) - u32:1",
+        "unroll_for! (W, acc): (u32, u32) in u32:0..u32:2 { acc + W + u32:1 }(u32:0) - u32:1",
+        "map([u32:2], |W| W)[u32:0]",
+    ] {
+        let source = format!(
+            r#"
+struct Frame {{ word: Word }}
+fn payload(x: Frame) -> u2 {{ x.word.data }}
+const W = u32:5;
+struct Word {{ data: uN[{width}] }}
+"#
+        );
+        let module = parse_module(&source).map_err(|e| format!("{width}: {e}"))?;
+        check_module(&module).map_err(|e| format!("{width}: {e}"))?;
+    }
+
+    let free = r#"
+const W = u32:2;
+struct Frame { word: Word }
+fn payload(x: Frame) -> u4 { x.word.data }
+struct Word { data: uN[{ let W = W + u32:2; W }] }
+"#;
+    check_module(&parse_module(free)?)?;
+    Ok(())
+}
+
+#[test]
+fn struct_width_waits_for_the_zero_override_visible_in_its_module() -> Result<(), String> {
+    let source = r#"
+const WIDTH = u32:7;
+fn zero!() -> u32 { WIDTH }
+struct Packet { code: uN[zero!<u32>()] }
+fn payload(x: Packet) -> u7 { x.code }
+"#;
+    check_module(&parse_module(source)?)?;
     Ok(())
 }

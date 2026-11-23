@@ -241,6 +241,155 @@ block circuit(clk, x:u32) -> u32 { let q = relay<3, u32:5>(x); q }
 }
 
 #[test]
+fn boolean_block_defaults_use_declaration_scope_and_share_specializations()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    fs::write(
+        directory.path().join("stages.bx"),
+        r#"
+type Flag = bool;
+const BASE = u32:2;
+fn offset(split: bool) -> u32 { if split { BASE + u32:3 } else { BASE } }
+#[allow(combinational_block)]
+pub block stage<SPLIT: Flag = {false}, N: u32 = {offset(SPLIT)}>(x: u32) -> u32 {
+    x + N
+}
+"#,
+    )?;
+    let source = r#"
+use stages::stage;
+pub block circuit(x: u32) -> (u32, u32, u32, u32) {
+    let BASE = u32:9;
+    let a = stage(x);
+    let b = stage<false, 2>(x);
+    let c = stage<true>(x);
+    let d = stage<true, BASE>(x);
+    (a, b, c, d)
+}
+"#;
+    let mut package = compile_with_options(
+        source,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &search_paths(&[directory.path()]),
+    )?;
+    let top = package.get_top_block().ok_or("missing circuit")?;
+    let [a, b, c, d] = top.instantiations.as_slice() else {
+        panic!("expected four stage instances");
+    };
+    assert_eq!(a.block, b.block);
+    assert_ne!(a.block, c.block);
+    assert_ne!(c.block, d.block);
+    inline_all_blocks_in_package(&mut package)?;
+    let function = combinational_block_to_fn(package.get_top_block().ok_or("missing circuit")?)?;
+    let expected = IrValue::parse_typed("(bits[32]:12, bits[32]:12, bits[32]:15, bits[32]:19)")?;
+    assert_eq!(
+        eval_fn_in_package_value(&package, &function, &[IrValue::make_ubits(32, 10)?]),
+        expected
+    );
+    Ok(())
+}
+
+#[test]
+fn overridden_block_default_omits_its_native_helper_from_ir() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    fs::write(
+        directory.path().join("config.x"),
+        "pub fn split() -> bool { false }",
+    )?;
+    let source = r#"
+use config;
+#[allow(combinational_block)]
+block stage<SPLIT: bool = {config::split()}>(x: bool) -> bool { SPLIT && x }
+pub block pipeline(x: bool) -> bool { let q = stage<true>(x); q }
+"#;
+    let package = compile_with_options(
+        source,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &search_paths(&[directory.path()]),
+    )?;
+    assert!(package.get_fn("__config__split").is_none());
+    Ok(())
+}
+
+#[test]
+fn omitted_block_defaults_follow_required_callbacks_in_calls_and_skipped_loops()
+-> Result<(), Box<dyn Error>> {
+    let source = r#"
+fn invert(x: bool) -> bool { !x }
+#[allow(combinational_block)]
+block select<S: bool = {false}, F: fn(bool) -> bool, ENABLE: bool = {S}>(x: bool) -> bool {
+    if ENABLE { F(x) } else { x }
+}
+block circuit(x: bool) -> bool {
+    let v = select<true, invert>(x);
+    unroll_for! (_, prev): (u32, bool) in u32:0..u32:0 {
+        let next = select<false, invert>(prev);
+        next
+    }(v)
+}
+"#;
+    let mut package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    inline_all_blocks_in_package(&mut package)?;
+    let function = combinational_block_to_fn(package.get_top_block().ok_or("missing circuit")?)?;
+    assert_eq!(
+        eval_fn_in_package_value(&package, &function, &[IrValue::make_ubits(1, 1)?]),
+        IrValue::make_ubits(1, 0)?
+    );
+    Ok(())
+}
+
+#[test]
+fn unused_block_defaults_resolve_names_at_the_declaration() -> Result<(), String> {
+    for default in ["MISSING", "LATER", "AFTER", "input"] {
+        let source = format!(
+            "block stage<S:bool={{{default}}}, LATER:bool={{true}}>(input:bool)->bool {{ input }} const AFTER = true;"
+        );
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert!(error.contains("default for 'S'"), "{error}");
+        assert!(error.contains(default), "{error}");
+    }
+    Ok(())
+}
+
+#[test]
+fn block_defaults_preserve_required_positions_and_types() -> Result<(), String> {
+    for (parametrics, call, expected) in [
+        (
+            "S: bool = {false}, F: fn(bool) -> bool",
+            "stage(x)",
+            "expects 2 explicit parametric arguments",
+        ),
+        (
+            "S: bool = {false}, N: u32",
+            "stage<true>(x)",
+            "expects 2 explicit parametric arguments",
+        ),
+        (
+            "S: bool = {false}",
+            "stage<x>(x)",
+            "requires a compile-time constant",
+        ),
+        (
+            "S: bool = {false}",
+            "stage<u32:1>(x)",
+            "expected bool, got u32",
+        ),
+        ("S: bool = {u32:1}", "stage(x)", "default for 'S'"),
+        ("S: bool = {u32:1}", "stage<true>(x)", "default for 'S'"),
+        ("S: bool = {x}", "stage(x)", "default for 'S'"),
+    ] {
+        let source = format!(
+            "block stage<{parametrics}>(x:bool)->bool {{ S }} block top(x:bool)->bool {{ let y={call}; y }}"
+        );
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert!(error.contains(expected), "{source}: {error}");
+    }
+    Ok(())
+}
+
+#[test]
 fn block_value_actuals_must_be_explicit_compile_time_u32_values() -> Result<(), String> {
     for (call, expected) in [
         (

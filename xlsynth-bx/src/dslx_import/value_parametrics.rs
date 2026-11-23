@@ -51,7 +51,7 @@ pub(super) struct ContextInputs {
 impl ProbeImports {
     /// Render a value using its source type, retaining signedness and nominal
     /// declarations.
-    fn render_value(
+    pub(super) fn render_value(
         &mut self,
         ty: &Type,
         value: &IrValue,
@@ -95,7 +95,9 @@ impl ProbeImports {
                         Ok(format!(
                             "{}: {}",
                             field.name,
-                            self.render_value(&field.ty, value, structs, aggregate_value)?
+                            self.render_value(
+                                &field.ty, value, structs, /* aggregate_value= */ true
+                            )?
                         ))
                     })
                     .collect::<Result<Vec<_>, String>>()?;

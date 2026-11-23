@@ -35,6 +35,91 @@ fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, 
 }
 
 #[test]
+fn imported_block_specializes_its_dslx_reset_helper_by_boolean_parameter()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "config.x",
+        r#"
+pub fn width() -> u32 { u32:13 }
+pub fn widen(n: u32) -> u32 { n + u32:1 }
+pub fn reset_value(split: bool) -> u13 {
+    if split { u13:0x123 } else { u13:0x456 }
+}
+"#,
+    )?;
+    write_module(
+        dir.path(),
+        "stages.bx",
+        r#"
+use config;
+const WIDTH = config::width();
+pub block stage<SPLIT: bool = {false}>(clk, x: uN[WIDTH]) -> uN[WIDTH] {
+    reg q: uN[WIDTH] = config::reset_value(SPLIT);
+    q := x;
+    q
+}
+"#,
+    )?;
+    let source = r#"
+use stages::stage;
+use config;
+const PAYLOAD_BITS = u32:12;
+struct Input { data: uN[config::widen(PAYLOAD_BITS)] }
+pub block pipeline(clk, x: Input) -> (uN[config::width()], u13, u13) {
+    let default_stage = stage(x.data);
+    let unsplit_stage = stage<false>(x.data);
+    let split_stage = stage<true>(x.data);
+    (default_stage, unsplit_stage, split_stage)
+}
+"#;
+    let package = compile_design(source, &search_paths(&[dir.path()]))?;
+    let top = package.get_top_block().ok_or("missing pipeline")?;
+    let [default, unsplit, split] = top.instantiations.as_slice() else {
+        return Err("expected three stage instances".into());
+    };
+    assert_eq!(default.block, unsplit.block);
+    for (instance, expected) in [(default, 0x456), (split, 0x123)] {
+        let stage = package.get_block(&instance.block).ok_or("missing stage")?;
+        let [register] = stage.registers.as_slice() else {
+            return Err("expected one stage register".into());
+        };
+        assert_eq!(
+            register.reset_value,
+            Some(IrValue::make_ubits(13, expected)?)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn struct_width_uses_the_zero_override_imported_by_its_module() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "ip/widths.bx",
+        "const WIDTH = u32:7; pub fn zero!() -> u32 { WIDTH }",
+    )?;
+    write_module(
+        dir.path(),
+        "format.bx",
+        r#"
+use ip::widths::zero!;
+pub struct Packet { code: uN[zero!<u32>()] }
+"#,
+    )?;
+    let source = r#"
+use format::Packet;
+fn zero!() -> u32 { u32:9 }
+#[allow(combinational_block)]
+pub block circuit(p: Packet) -> u7 { p.code }
+"#;
+    compile_design(source, &search_paths(&[dir.path()]))?;
+    Ok(())
+}
+
+#[test]
 fn imported_block_uses_stage_constants_from_its_defining_module() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     write_module(
