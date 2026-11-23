@@ -1333,6 +1333,8 @@ block pulse(clk, op: Op) -> bool @stage(op) {
 For Fast, `fast_q` is true at stage 1, so the OR is true at stage 1.
 For Slow, `slow_qq` is true at stage 2, so it is true at stage 2.
 This example allows pulses from different operations to overlap.
+The OR can also feed a fixed-stage child: a one-cycle tail would move those
+two stages to 2 and 3, respectively.
 
 A `match` or `if` selecting data still requires its selector and selected
 data to align. A stage-0 opcode cannot select stage-1 data. A guarded register
@@ -1342,8 +1344,10 @@ could override the write. As with fixed stages, the annotation does not promise
 freshness, validity, or exclusive use of an output.
 
 Controls must be block input ports of Boolean, enum, or small unsigned bit
-type. The checker limits their combined domain to 64 cases. Case-dependent
-child outputs do not yet expose a timing interface to their callers.
+type. The checker limits their combined domain to 64 hardware encodings,
+including unnamed enum encodings, since a port or runtime cast can supply
+those values. Case-dependent child outputs do not yet expose a timing
+interface to their callers.
 
 #### Related work
 

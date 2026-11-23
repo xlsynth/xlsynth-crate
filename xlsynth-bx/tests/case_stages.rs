@@ -34,6 +34,48 @@ block pulse(clk, op: Op) -> bool @stage(op) {
 }
 
 #[test]
+fn checks_unnamed_enum_encodings() {
+    let source = r#"
+enum Op : u2 { A = 0, B = 1 }
+fn stage(op: Op) -> u32 {
+    match op { Op::A => u32:0, Op::B => u32:0, _ => u32:1 }
+}
+block b(op: Op, x: u8) -> u8 @stage(op) { x }
+"#;
+    assert_eq!(
+        check(source).unwrap_err(),
+        "block 'b': case (op=Op(2)): expected cycle 1, got cycle 0"
+    );
+}
+
+#[test]
+fn checks_case_stages_before_a_shared_tail() -> Result<(), String> {
+    check(
+        r#"
+enum Op : u1 { Fast = 0, Slow = 1 }
+fn stage(op: Op) -> u32 {
+    match op { Op::Fast => u32:2, Op::Slow => u32:3 }
+}
+block tail(clk, x: bool) -> bool @1 {
+    reg q: bool;
+    q := x;
+    q
+}
+block pulse(clk, op: Op) -> bool @stage(op) {
+    reg fast_q: bool;
+    reg slow_q: bool;
+    reg slow_qq: bool;
+    fast_q := op == Op::Fast;
+    slow_q := op == Op::Slow;
+    slow_qq := slow_q;
+    let out = tail(fast_q | slow_qq);
+    out
+}
+"#,
+    )
+}
+
+#[test]
 fn follows_multiple_registered_controls_into_a_tuple_match() -> Result<(), String> {
     check(
         r#"
@@ -120,6 +162,10 @@ block route(op: bool, data: u8) -> u8 @0 {
 fn rejects_unbounded_control_domains() {
     assert_eq!(
         check("fn stage(op:u8)->u32 { u32:0 } block b(op:u8)->u8 @stage(op) { op }").unwrap_err(),
+        "block 'b': stage input domain exceeds 64 cases"
+    );
+    assert_eq!(
+        check("enum Op:u7 { A=0 } fn stage(op:Op)->u32 { u32:0 } block b(op:Op,x:u8)->u8 @stage(op) { x }").unwrap_err(),
         "block 'b': stage input domain exceeds 64 cases"
     );
 }

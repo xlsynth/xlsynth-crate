@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Evaluate a stage helper for every legal combination of its control inputs.
+//! Evaluate a stage helper for every hardware encoding of its control inputs.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
-use xlsynth_pir::IrValue;
+use xlsynth_pir::{IrBits, IrValue};
 
 use super::{Join, Stage, TimedValue};
 use crate::ast::{BinaryOp, Type};
@@ -28,51 +28,58 @@ pub(super) struct Case<'a> {
     remaining: Cell<usize>,
 }
 
-/// Enumerate each distinct hardware value, keeping enum spellings for errors.
+/// Enumerate every hardware encoding, keeping enum spellings for diagnostics.
 fn domain(
     ty: &Type,
     enums: &BTreeMap<String, CheckedEnum>,
 ) -> Result<Vec<(String, IrValue)>, String> {
-    match ty {
+    let (width, enumeration) = match ty {
         Type::Bool
         | Type::Bits {
             signed: false,
             width: 1,
-        } => Ok([false, true]
-            .into_iter()
-            .map(|value| (value.to_string(), IrValue::bool(value)))
-            .collect()),
-        Type::Enum { name, .. } => {
-            let def = &enums[name];
-            if def.value_count() > MAX_CASES {
-                return Err(format!("stage input domain exceeds {MAX_CASES} cases"));
-            }
-            let mut seen = HashSet::new();
-            Ok(def
-                .members
-                .iter()
-                .filter(|(_, bits)| seen.insert(*bits))
-                .map(|(member, bits)| (format!("{name}::{member}"), IrValue::Bits(bits.clone())))
-                .collect())
+        } => {
+            return Ok([false, true]
+                .into_iter()
+                .map(|value| (value.to_string(), IrValue::bool(value)))
+                .collect());
         }
+        Type::Enum { name, width, .. } => (*width, Some(&enums[name])),
         Type::Bits {
             signed: false,
             width,
-        } if *width <= MAX_CASES.ilog2() as usize => (0..1u64 << width)
-            .map(|value| {
-                Ok((
-                    value.to_string(),
-                    IrValue::make_ubits(*width, value).map_err(|e| e.to_string())?,
-                ))
-            })
-            .collect(),
-        Type::Bits { signed: false, .. } => {
-            Err(format!("stage input domain exceeds {MAX_CASES} cases"))
+        } => (*width, None),
+        _ => {
+            return Err(format!(
+                "stage input must be bool, an enum or small unsigned bits, got {ty}"
+            ));
         }
-        _ => Err(format!(
-            "stage input must be bool, an enum or small unsigned bits, got {ty}"
-        )),
+    };
+    if width > MAX_CASES.ilog2() as usize {
+        return Err(format!("stage input domain exceeds {MAX_CASES} cases"));
     }
+
+    // Enum ports are bits in RTL, and runtime casts can produce unnamed
+    // encodings. Check those too; checking only declared members is unsound.
+    let mut members = HashMap::new();
+    if let Some(def) = enumeration {
+        for (name, bits) in &def.members {
+            members.entry(bits.clone()).or_insert(name);
+        }
+    }
+    (0..1u64 << width)
+        .map(|raw| {
+            let bits = IrBits::make_ubits(width, raw).map_err(|e| e.to_string())?;
+            let label = match enumeration {
+                Some(def) => members.get(&bits).map_or_else(
+                    || format!("{}({raw})", def.name),
+                    |member| format!("{}::{member}", def.name),
+                ),
+                None => raw.to_string(),
+            };
+            Ok((label, IrValue::Bits(bits)))
+        })
+        .collect()
 }
 
 /// Resolve and evaluate the ordinary pure BX helper once per control case.
@@ -284,9 +291,8 @@ impl Case<'_> {
             .map_err(|error| format!("stage case evaluation failed: {error:?}"))
     }
 
-    /// A Boolean true absorbs OR, and false absorbs AND. The deciding input
-    /// must belong to this case's promised stage; a value known for an earlier
-    /// stage says nothing about the opcode currently at the output.
+    /// A Boolean true absorbs OR, and false absorbs AND, at the stage where
+    /// that bit is known. A later register or child can advance that stage.
     pub(super) fn binary(
         &self,
         expr: &TypedExpr,
@@ -302,12 +308,22 @@ impl Case<'_> {
             _ => None,
         };
         if let Some(bit) = absorbing {
+            // Prefer the promised stage when both operands decide the result
+            // at different stages; otherwise retain the intermediate stage.
+            let mut intermediate = None;
             for value in [&left, &right] {
-                if (value.stage == Stage::Independent || value.stage == Stage::At(self.stage))
-                    && value.boolean() == Some(bit)
-                {
+                if value.boolean() != Some(bit) {
+                    continue;
+                }
+                if value.stage == Stage::Independent || value.stage == Stage::At(self.stage) {
                     return Ok(value.clone());
                 }
+                if matches!(value.stage, Stage::At(_)) && intermediate.is_none() {
+                    intermediate = Some(value);
+                }
+            }
+            if let Some(value) = intermediate {
+                return Ok(value.clone());
             }
         }
         let stage = Join::Operator(*op).apply(left.stage, right.stage)?;
