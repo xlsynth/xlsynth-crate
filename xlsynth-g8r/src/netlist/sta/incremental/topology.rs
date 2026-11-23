@@ -5,6 +5,7 @@
 //! Backward dependencies can require an explicitly counted ordering fallback.
 
 use super::*;
+use crate::netlist::electrical::RiseFall;
 use anyhow::ensure;
 use std::collections::BTreeMap;
 
@@ -249,12 +250,11 @@ impl IncrementalSta<'_> {
     }
 
     /// Rise/fall capacitance at a canonical bit.
-    pub fn load_for_bit(&self, bit: NormalizedBitIndex) -> Option<[f64; 2]> {
+    pub fn load_for_bit(&self, bit: NormalizedBitIndex) -> Option<RiseFall<f64>> {
         let BitSource::Bit(root) = *self.bit_sources.get(bit.index())? else {
             return None;
         };
-        let load = self.capacitances.get(root.index())?;
-        Some([load.rise, load.fall])
+        self.capacitances.get(root.index()).copied()
     }
 
     /// Current cell delay/slew query diagnostics for a combinational graph.

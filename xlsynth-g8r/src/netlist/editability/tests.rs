@@ -60,7 +60,7 @@ fn assembled_stage_combines_editability_sta_and_electrical_rules() -> Result<()>
     assert_eq!(graph.launches, registers.instances().collect::<Vec<_>>());
     let root = graph.roots.iter().find(|r| !r.sinks.is_empty()).unwrap();
     assert_eq!(root.sinks.len(), 1);
-    assert_eq!(root.electrical.load.capacitance, [0.2, 0.2]);
+    assert_eq!(root.electrical.load.capacitance, RiseFall::both(0.2));
     assert_eq!(root.electrical.characterization.max_load, Some(10.0));
     assert_eq!(
         registers
@@ -80,12 +80,8 @@ fn assembled_stage_combines_editability_sta_and_electrical_rules() -> Result<()>
         &[root.source_bit],
     )?;
     let slew = slews[0].expect("STA measured Q slew");
-    let cap = root
-        .electrical
-        .load
-        .capacitance
-        .into_iter()
-        .fold(0.0, f64::max);
+    let capacitance = root.electrical.load.capacitance;
+    let cap = capacitance.rise.max(capacitance.fall);
     assert_eq!(
         root.electrical
             .limits
@@ -139,7 +135,7 @@ fn rebuilding_after_a_rewire_updates_exact_pins_load_and_timing() -> Result<()> 
         .find(|r| r.binding == root.binding)
         .unwrap();
     assert!(changed.sinks.is_empty());
-    assert_eq!(changed.electrical.load.capacitance, [0.0; 2]);
+    assert_eq!(changed.electrical.load.capacitance, RiseFall::default());
     assert_eq!(indexed_sink_count(&netlist, &lib, probe)?, 0);
     let (updated, slew_after) = time(&netlist)?;
     assert!(updated.worst_register_input_breakdown.is_none());
@@ -172,8 +168,8 @@ fn retargeting_an_output_alias_updates_load_and_launch_class() -> Result<()> {
     let before = analyze(&n)?;
     let q = first_driver(&before);
     assert_eq!(q.electrical.load.output_ports, 1);
-    assert_eq!(q.fixed_load, [0.5; 2]);
-    assert_eq!(q.electrical.load.capacitance, [0.7; 2]);
+    assert_eq!(q.fixed_load, RiseFall::both(0.5));
+    assert_eq!(q.electrical.load.capacitance, RiseFall::both(0.7));
     let sta = PreparedStaLibrary::new(&lib)?;
     let time = |n: &MappedNetlist| {
         sta.analyze_register_boundary_max_arrival(
@@ -197,7 +193,10 @@ fn retargeting_an_output_alias_updates_load_and_launch_class() -> Result<()> {
     );
     n.module.assigns[0].rhs = AssignExpr::Leaf(NetRef::Simple(d));
     let after = analyze(&n)?;
-    assert_eq!(first_driver(&after).electrical.load.capacitance, [0.0; 2]);
+    assert_eq!(
+        first_driver(&after).electrical.load.capacitance,
+        RiseFall::default()
+    );
     assert_eq!(first_driver(&after).electrical.load.output_ports, 0);
     assert!(time(&n)?.worst_register_input_breakdown.is_none());
     Ok(())
@@ -235,7 +234,7 @@ fn assembly_metadata_detects_invalid_graph_edits_and_allows_appends() -> Result<
         .find(|r| r.binding.instance.0 == first)
         .unwrap();
     assert_eq!(launch.sinks.len(), 2);
-    assert_eq!(launch.electrical.load.capacitance, [0.4; 2]);
+    assert_eq!(launch.electrical.load.capacitance, RiseFall::both(0.4));
 
     let mut with_ff = original.clone();
     let mut extra_ff = with_ff.module.instances[first].clone();

@@ -8,7 +8,7 @@ use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, Pin, PinDirection};
 use crate::netlist::connectivity::{PinConnection, exact::ExactConnectivity};
 use crate::netlist::electrical::{
-    InputLoad, Load, OutputCharacterization, PinLimits, SignalElectrical,
+    InputLoad, Load, OutputCharacterization, PinLimits, RiseFall, SignalElectrical,
 };
 use crate::netlist::mapped::MappedNetlist;
 use crate::netlist::normalized::{BitSource, NormalizedBitIndex, NormalizedNetlistModule};
@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 pub struct EditablePin {
     pub binding: PinConnection,
     pub original: NetRef,
-    pub capacitance: [f64; 2],
+    pub capacitance: RiseFall<f64>,
     pub fanout_load: f64,
 }
 
@@ -38,7 +38,7 @@ pub struct EditableOutput {
     pub pin_name: String,
     pub sinks: Vec<EditablePin>,
     /// Rise/fall capacitance that remains physically connected after editing.
-    pub fixed_load: [f64; 2],
+    pub fixed_load: RiseFall<f64>,
     pub fixed_sink_count: usize,
     pub fixed_fanout_load: f64,
     /// Replacing or deleting this source can affect clock or control logic.
@@ -235,7 +235,7 @@ pub fn analyze_editable_outputs(
                                 .ok_or_else(|| anyhow!("unresolved output pin"))?
                                 .to_owned(),
                             sinks: vec![],
-                            fixed_load: [0.; 2],
+                            fixed_load: RiseFall::default(),
                             fixed_sink_count: 0,
                             fixed_fanout_load: 0.,
                             in_control_fanin: false,
@@ -438,8 +438,8 @@ pub fn analyze_editable_outputs(
                         fanout_load: *fanout_load,
                     });
                 } else {
-                    driver.fixed_load[0] += cap[0];
-                    driver.fixed_load[1] += cap[1];
+                    driver.fixed_load.rise += cap.rise;
+                    driver.fixed_load.fall += cap.fall;
                     driver.fixed_sink_count += 1;
                     driver.fixed_fanout_load += fanout_load;
                 }
@@ -459,7 +459,7 @@ enum Role {
     Input {
         can_change_connection: bool,
         control: bool,
-        cap: [f64; 2],
+        cap: RiseFall<f64>,
         fanout_load: f64,
     },
     Output {

@@ -5,24 +5,41 @@
 
 use crate::liberty_model::{Library, Pin};
 
+/// Values for rising and falling signal transitions, respectively.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RiseFall<T> {
+    pub rise: T,
+    pub fall: T,
+}
+
+impl<T: Copy> RiseFall<T> {
+    /// Uses the same value for both transitions.
+    pub fn both(value: T) -> Self {
+        Self {
+            rise: value,
+            fall: value,
+        }
+    }
+}
+
 /// Nominal rise/fall input load. A maximum-capacitance rule is never a load.
 /// Callers that require valid characterization must reject non-finite or
 /// negative values rather than silently substitute a different load.
 #[inline]
-pub fn input_capacitance(pin: &Pin) -> [f64; 2] {
-    characterized_capacitance(pin).unwrap_or([0.0; 2])
+pub fn input_capacitance(pin: &Pin) -> RiseFall<f64> {
+    characterized_capacitance(pin).unwrap_or_default()
 }
 
 #[inline]
-fn characterized_capacitance(pin: &Pin) -> Option<[f64; 2]> {
+fn characterized_capacitance(pin: &Pin) -> Option<RiseFall<f64>> {
     let nominal = pin
         .capacitance
         .or(pin.rise_capacitance)
         .or(pin.fall_capacitance)?;
-    Some([
-        pin.rise_capacitance.unwrap_or(nominal),
-        pin.fall_capacitance.unwrap_or(nominal),
-    ])
+    Some(RiseFall {
+        rise: pin.rise_capacitance.unwrap_or(nominal),
+        fall: pin.fall_capacitance.unwrap_or(nominal),
+    })
 }
 
 /// Liberty weighted fanout contributed by an input pin.
@@ -41,7 +58,7 @@ pub(crate) fn rule_excess(measured: f64, limit: Option<f64>) -> f64 {
 /// Characterized input capacitance and Liberty weighted fanout contribution.
 #[derive(Clone, Copy, Debug)]
 pub struct InputLoad {
-    pub capacitance: [f64; 2],
+    pub capacitance: RiseFall<f64>,
     pub fanout: f64,
 }
 impl InputLoad {
@@ -50,7 +67,9 @@ impl InputLoad {
     pub fn for_pin(pin: &Pin) -> Option<Self> {
         let capacitance = characterized_capacitance(pin)?;
         let fanout = input_fanout_load(pin);
-        (capacitance.iter().all(|v| v.is_finite() && *v >= 0.0)
+        ([capacitance.rise, capacitance.fall]
+            .into_iter()
+            .all(|v| v.is_finite() && v >= 0.0)
             && fanout.is_finite()
             && fanout >= 0.0)
             .then_some(Self {
@@ -158,7 +177,7 @@ impl OutputCharacterization {
 /// capacitance is supplied separately because an edit can change the fanout.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Load {
-    pub capacitance: [f64; 2],
+    pub capacitance: RiseFall<f64>,
     pub weighted_fanout: f64,
     pub pins: usize,
     pub output_ports: usize,
@@ -166,14 +185,14 @@ pub struct Load {
 impl Load {
     pub fn with_outputs(output_ports: usize, output_load: f64) -> Self {
         Self {
-            capacitance: [output_load * output_ports as f64; 2],
+            capacitance: RiseFall::both(output_load * output_ports as f64),
             output_ports,
             ..Self::default()
         }
     }
     pub fn add_pin(&mut self, pin: InputLoad) {
-        self.capacitance[0] += pin.capacitance[0];
-        self.capacitance[1] += pin.capacitance[1];
+        self.capacitance.rise += pin.capacitance.rise;
+        self.capacitance.fall += pin.capacitance.fall;
         self.weighted_fanout += pin.fanout;
         self.pins += 1;
     }
@@ -272,22 +291,34 @@ mod tests {
             |pin| {
                 Some(if pin == id(0) {
                     InputLoad {
-                        capacitance: [0.25, 0.5],
+                        capacitance: RiseFall {
+                            rise: 0.25,
+                            fall: 0.5,
+                        },
                         fanout: 2.0,
                     }
                 } else {
                     InputLoad {
-                        capacitance: [0.5, 0.125],
+                        capacitance: RiseFall {
+                            rise: 0.5,
+                            fall: 0.125,
+                        },
                         fanout: 0.5,
                     }
                 })
             },
         )
         .unwrap();
-        assert_eq!(measured.load.capacitance, [1.25, 1.125]);
+        assert_eq!(
+            measured.load.capacitance,
+            RiseFall {
+                rise: 1.25,
+                fall: 1.125
+            }
+        );
         assert_eq!(measured.load.weighted_fanout, 2.5);
         assert_eq!((measured.load.pins, measured.load.output_ports), (2, 2));
-        assert!(measured.load.capacitance[0] > measured.characterization.max_load.unwrap());
+        assert!(measured.load.capacitance.rise > measured.characterization.max_load.unwrap());
         assert_eq!(limits.violations_known(1.25, 0.0, 0.0).capacitance, 0.0);
 
         let unknown = SignalPins {
@@ -333,13 +364,22 @@ mod tests {
         };
         assert!(InputLoad::for_pin(&pin).is_none());
         pin.rise_capacitance = Some(0.0);
-        assert_eq!(InputLoad::for_pin(&pin).unwrap().capacitance, [0.0; 2]);
+        assert_eq!(
+            InputLoad::for_pin(&pin).unwrap().capacitance,
+            RiseFall::default()
+        );
         pin.rise_capacitance = Some(0.25);
         let load = InputLoad::for_pin(&pin).unwrap();
-        assert_eq!(load.capacitance, [0.25, 0.25]);
+        assert_eq!(load.capacitance, RiseFall::both(0.25));
         assert_eq!(load.fanout, 1.0);
         pin.fall_capacitance = Some(0.5);
-        assert_eq!(InputLoad::for_pin(&pin).unwrap().capacitance, [0.25, 0.5]);
+        assert_eq!(
+            InputLoad::for_pin(&pin).unwrap().capacitance,
+            RiseFall {
+                rise: 0.25,
+                fall: 0.5
+            }
+        );
         for invalid in [-1.0, f64::NAN, f64::INFINITY] {
             pin.rise_capacitance = Some(invalid);
             assert!(InputLoad::for_pin(&pin).is_none());

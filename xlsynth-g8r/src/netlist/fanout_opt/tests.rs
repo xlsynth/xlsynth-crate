@@ -382,7 +382,7 @@ fn asymmetric_function_matching_is_by_named_pin_truth_not_cell_name() {
         },
         net: NetIndex(0),
         sinks: vec![],
-        load: [2.0; 2],
+        load: RiseFall::both(2.0),
         output_ports: 1,
         fixed_output_load: 1.0,
         slew_bound: 1000.0,
@@ -1203,10 +1203,10 @@ fn affine_wire_load_is_shared_by_graph_full_and_incremental_timing() -> Result<(
     let (_, _, graph) = measure(&original, &lib, &opts)?;
     let driver = graph.drivers.iter().find(|d| d.sinks.len() == 16).unwrap();
     // Sixteen pin loads, two external loads, and one affine wire term.
-    assert_eq!(driver.load, [22.5, 22.5]);
+    assert_eq!(driver.load, RiseFall::both(22.5));
     assert_eq!(driver.fixed_output_load, 2.0);
     let output_only = graph.drivers.iter().find(|d| d.sinks.is_empty()).unwrap();
-    assert_eq!(output_only.load, [1.5, 1.5]);
+    assert_eq!(output_only.load, RiseFall::both(1.5));
 
     let mut incremental = original.clone();
     let incremental_report = optimize_fanout(&mut incremental, &lib, opts.clone())?;
@@ -1270,7 +1270,7 @@ fn partition_includes_wire_per_sink_without_charging_ports_as_sinks() -> Result<
     opts.wire_load.capacitance_per_sink = 10.0;
     let g = graph(&mapped, &lib, &opts)?;
     let driver = g.drivers.iter().find(|d| d.sinks.len() == 4).unwrap();
-    assert_eq!(driver.load, [46.0, 46.0]);
+    assert_eq!(driver.load, RiseFall::both(46.0));
     let groups = partition(&driver.sinks, 2, driver.fixed_output_load);
     assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), vec![2, 2]);
     assert_eq!(

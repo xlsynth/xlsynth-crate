@@ -198,7 +198,8 @@ impl View<'_, '_> {
                 .load_for_bit(scalar_bit_index(d.net))
                 .ok_or_else(|| anyhow!("missing load"))?;
             ensure!(
-                actual.iter().zip(d.load).all(|(a, b)| (a - b).abs() < 1e-9),
+                (actual.rise - d.load.rise).abs() < 1e-9
+                    && (actual.fall - d.load.fall).abs() < 1e-9,
                 "oracle load at net {}",
                 d.net.0
             );

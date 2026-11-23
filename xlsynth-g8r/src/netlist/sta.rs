@@ -1177,11 +1177,7 @@ impl<'a> PreparedStaLibrary<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct EdgeLoadCapacitance {
-    pub(crate) rise: f64,
-    pub(crate) fall: f64,
-}
+pub(crate) type EdgeLoadCapacitance = crate::netlist::electrical::RiseFall<f64>;
 
 #[derive(Clone, Debug)]
 struct NetEndpoint {
@@ -2499,8 +2495,7 @@ fn effective_input_capacitance_by_edge(
 ) -> Result<EdgeLoadCapacitance> {
     // max_capacitance is a design-rule limit, not nominal pin capacitance.
     // Prefer edge-specific capacitance when provided; fall back to nominal.
-    let [rise, fall] = crate::netlist::electrical::input_capacitance(pin);
-    let capacitance = EdgeLoadCapacitance { rise, fall };
+    let capacitance = crate::netlist::electrical::input_capacitance(pin);
     validate_non_negative_finite(capacitance.rise, "rise capacitance", context)?;
     validate_non_negative_finite(capacitance.fall, "fall capacitance", context)?;
     Ok(capacitance)

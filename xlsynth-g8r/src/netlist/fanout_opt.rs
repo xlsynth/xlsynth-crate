@@ -13,7 +13,7 @@ use crate::liberty::cell_formula::parse_formula;
 use crate::liberty_model::{Library, Pin, PinDirection};
 use crate::netlist::connectivity::PinConnection;
 use crate::netlist::connectivity::directed::resolve_dense;
-use crate::netlist::electrical::{PinLimits, input_capacitance as pin_cap};
+use crate::netlist::electrical::{PinLimits, RiseFall, input_capacitance as pin_cap};
 use crate::netlist::io::resolve_symbol;
 use crate::netlist::mapped::MappedNetlist;
 use crate::netlist::normalized::{BitSource, NormalizedBitIndex};
@@ -21,9 +21,7 @@ use crate::netlist::parse::{
     AssignExpr, InstIndex, Net, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, PortDirection,
 };
 use crate::netlist::report::build_area_report;
-use crate::netlist::sta::{
-    EdgeLoadCapacitance, StaOptions, StaReport, TimingQueryDiagnosticCounts, WireLoadModel,
-};
+use crate::netlist::sta::{StaOptions, StaReport, TimingQueryDiagnosticCounts, WireLoadModel};
 use anyhow::{Result, anyhow, ensure};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -87,7 +85,7 @@ struct Driver {
     binding: PinConnection,
     net: NetIndex,
     sinks: Vec<Sink>,
-    load: [f64; 2],
+    load: RiseFall<f64>,
     output_ports: usize,
     fixed_output_load: f64,
     slew_bound: f64,
@@ -172,6 +170,7 @@ pub struct FanoutDecision {
     pub input_timing: Vec<(String, [f64; 4])>,
     pub sink_count: usize,
     pub output_ports: usize,
+    /// Serialized as `[rise, fall]` for compatibility with existing reports.
     pub old_load: [f64; 2],
     pub before: FanoutMetrics,
     pub after: FanoutMetrics,
@@ -394,7 +393,7 @@ fn graph(
             .collect::<Vec<_>>()
     };
     let mut sinks: BTreeMap<NetIndex, Vec<Sink>> = BTreeMap::new();
-    let mut loads: BTreeMap<NetIndex, [f64; 2]> = BTreeMap::new();
+    let mut loads: BTreeMap<NetIndex, RiseFall<f64>> = BTreeMap::new();
     let mut slew_bounds: BTreeMap<NetIndex, f64> = BTreeMap::new();
     let mut drivers = Vec::new();
     let mut seen_drivers = BTreeSet::new();
@@ -429,11 +428,11 @@ fn graph(
                     },
                     // Each moved sink carries its affine wire contribution.
                     // The constant term is common to all used group outputs.
-                    capacitance: cap[0].max(cap[1]) + options.wire_load.capacitance_per_sink,
+                    capacitance: cap.rise.max(cap.fall) + options.wire_load.capacitance_per_sink,
                 });
-                let load = loads.entry(n).or_insert([0.0; 2]);
-                load[0] += cap[0];
-                load[1] += cap[1];
+                let load = loads.entry(n).or_default();
+                load.rise += cap.rise;
+                load.fall += cap.fall;
                 let bound = cell
                     .pins
                     .iter()
@@ -451,7 +450,7 @@ fn graph(
                     },
                     net: n,
                     sinks: vec![],
-                    load: [0.0; 2],
+                    load: RiseFall::default(),
                     output_ports: 0,
                     fixed_output_load: 0.0,
                     slew_bound: f64::INFINITY,
@@ -476,9 +475,9 @@ fn graph(
                 .ok_or_else(|| anyhow!("missing output net"))?;
             if let Some(n) = roots[n.0] {
                 *ports.entry(n).or_default() += 1;
-                let load = loads.entry(n).or_insert([0.0; 2]);
-                load[0] += options.module_output_load;
-                load[1] += options.module_output_load;
+                let load = loads.entry(n).or_default();
+                load.rise += options.module_output_load;
+                load.fall += options.module_output_load;
             }
         }
     }
@@ -487,14 +486,9 @@ fn graph(
         d.load = loads.get(&d.net).copied().unwrap_or_default();
         d.output_ports = ports.get(&d.net).copied().unwrap_or_default();
         d.fixed_output_load = d.output_ports as f64 * options.module_output_load;
-        let mut load = EdgeLoadCapacitance {
-            rise: d.load[0],
-            fall: d.load[1],
-        };
         options
             .wire_load
-            .add_to(&mut load, d.sinks.len(), d.output_ports != 0)?;
-        d.load = [load.rise, load.fall];
+            .add_to(&mut d.load, d.sinks.len(), d.output_ports != 0)?;
         d.slew_bound = slew_bounds.get(&d.net).copied().unwrap_or(f64::INFINITY);
     }
     Ok(Graph {
@@ -604,7 +598,7 @@ fn report_metrics(
             .timing_for_net(d.net)
             .ok_or_else(|| anyhow!("missing driver timing"))?;
         let slew = timing.rise.transition.max(timing.fall.transition);
-        let load = d.load[0].max(d.load[1]);
+        let load = d.load.rise.max(d.load.fall);
         m.max_slew = m.max_slew.max(slew);
         m.max_load = m.max_load.max(load);
         m.max_fanout = m.max_fanout.max(d.sinks.len());
@@ -856,7 +850,7 @@ pub fn optimize_fanout(
                 .iter()
                 .find(|p| library.resolve_string(&p.name) == c.output)
                 .ok_or_else(|| anyhow!("missing pin"))?;
-            let load = d.load[0].max(d.load[1]);
+            let load = d.load.rise.max(d.load.fall);
             let slew = t.rise.transition.max(t.fall.transition);
             let limits = PinLimits::for_pin(p);
             let overloaded = load > limits.capacitance.unwrap_or(f64::INFINITY)
@@ -1089,7 +1083,7 @@ pub fn optimize_fanout(
             input_timing,
             sink_count: driver.sinks.len(),
             output_ports: driver.output_ports,
-            old_load: driver.load,
+            old_load: [driver.load.rise, driver.load.fall],
             before: current,
             after: accepted.clone(),
         });
