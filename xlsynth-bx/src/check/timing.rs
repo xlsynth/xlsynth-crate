@@ -8,6 +8,39 @@
 //! walk once per control case, also tracking values known at each stage.
 //! For `q + r`, it follows `q` to its register write, looks up input `r`,
 //! and checks that they meet at the same stage.
+//!
+//! The stage judgment is structural: `At(s)` assigns an expression to stage
+//! `s`, `Independent` fits any stage (for example a literal), and `Unknown`
+//! cannot satisfy an output annotation. A held register retains the stage of
+//! its write even though its current contents may come from an older input.
+//! Thus `At(s)` alone does not establish freshness or transaction identity.
+//!
+//! Case checking also tracks exact values. Fix a reference clock `t` and
+//! assume each case input has its enumerated value at `t + input_stage`.
+//! The intended invariant for `TimedValue { stage: At(s), known: Some(v) }`
+//! is that the expression equals `v` at `t + s` for every hardware trace
+//! satisfying those assumptions. An independent known value is constant at
+//! every clock. An unknown stage supplies no clock at which to use a known
+//! value. The inference rules preserve this interpretation as follows:
+//!
+//! - Inputs supply their declared stage and, in a case, the assumed value.
+//! - Ordinary combinational operators align operand stages and fold exact
+//!   values when available. A known true OR input or false AND input instead
+//!   determines the result at its own stage, regardless of the other input.
+//! - A mux aligns its selector with the selected data. Case facts may exclude
+//!   an arm; identical data on all arms makes the selector irrelevant.
+//! - A register aligns data and write guards, then adds one stage. Exact bits
+//!   survive only when the write is guaranteed and reset cannot override it;
+//!   a hold or possible reset discards the exact value.
+//! - A verified fixed-stage child translates its interface by one offset
+//!   shared by all its connected inputs and outputs. Its interface supplies
+//!   stages, not exact values.
+//!
+//! An output `@stage(op)` checks the resulting stage for each hardware
+//! encoding of the controls. This is not a proof that an invocation completes
+//! at that stage, that a valid signal is asserted, or that overlapping issues
+//! cannot collide on a shared resource. Those require separate protocol or
+//! scheduling properties.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};

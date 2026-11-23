@@ -1267,8 +1267,26 @@ combinational operands must align, and a register adds one stage. Each write
 guard must align with the data at the write edge, including enclosing guards
 in nested `if` statements. In the example, `q` and `r` are both at stage 1.
 When `en` is low, `q` holds its previous value and the sum still responds to
-`r`. A stage annotation checks alignment in the datapath. The block's enable
-and valid signals determine which transactions actually advance.
+`r`.
+
+The output annotation promises that BX can assign the declared stage to the
+output. It checks where data and control meet in the datapath; it does not
+promise that a new result arrives on that clock. For example, this passes:
+
+```text
+block held(clk, en: bool, x: u8) -> u8 @1 {
+    reg q: u8;
+    if en { q := x; }
+    q
+}
+```
+
+`q` is at stage 1 even when `en` is false and it holds an old value. Returning
+`q + x` instead fails because the adder would combine stages 1 and 0. In
+`add_held` above, `q + r` passes because both operands are at stage 1, but BX
+does not prove that they belong to the same transaction. A stage-1 output can
+also come from a stage-1 input rather than a register inside the block, and a
+constant can fit any stage.
 
 The checker follows names, unary and binary operators, casts, `if` and `match`
 expressions, and struct and tuple construction and field reads. A scalar
@@ -1335,6 +1353,12 @@ For Slow, `slow_qq` is true at stage 2, so it is true at stage 2.
 This example allows pulses from different operations to overlap.
 The OR can also feed a fixed-stage child: a one-cycle tail would move those
 two stages to 2 and 3, respectively.
+
+Case checking does not prove that operations can safely share a resource. If
+Slow reaches a shared tail at stage 6 and Fast reaches it at stage 3, issuing
+Fast three clocks after Slow sends both to the tail on the same clock. Their
+individual stage annotations can still pass. Ruling out that collision needs
+a separate constraint or proof about when operations may issue.
 
 A `match` or `if` selecting data still requires its selector and selected
 data to align. A stage-0 opcode cannot select stage-1 data. A guarded register
