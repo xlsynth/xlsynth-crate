@@ -86,21 +86,32 @@ pub(super) fn validate_declaration(block: &Block) -> Result<(), String> {
             return Err(format!("port '{name}' collides with a value parametric"));
         }
     }
-    validate_inference_sources(&block.type_params, &block.params, &block.callback_params)
+    validate_inference_sources(
+        &block.type_params,
+        &block.params,
+        &block.callback_params,
+        None,
+    )
 }
 
-/// Every type formal needs evidence from a data argument or the result of a
-/// callback whose inputs have already been inferred.
+/// Type formals must be inferable from data, the expected function result, or
+/// the result of a callback with already inferable inputs.
 pub(super) fn validate_inference_sources(
     types: &[String],
     params: &[Param],
     callbacks: &[CallbackParam],
+    result: Option<&Type>,
 ) -> Result<(), String> {
     let mut type_params: BTreeSet<_> = types.iter().map(String::as_str).collect();
     let mut input_names = Vec::new();
-    for param in params {
-        type_parameter_references(&param.ty, &mut input_names);
+    for ty in params.iter().map(|param| &param.ty).chain(result) {
+        type_parameter_references(ty, &mut input_names);
     }
+    let result_source = if result.is_some() {
+        " or the function result"
+    } else {
+        ""
+    };
     for name in input_names {
         type_params.remove(name);
     }
@@ -114,7 +125,7 @@ pub(super) fn validate_inference_sources(
             .find(|name| type_params.contains(**name))
         {
             return Err(format!(
-                "cannot infer type parameter '{missing}' before callable parameter '{}'; its input types must come from a data input or an earlier callback result",
+                "cannot infer type parameter '{missing}' before callable parameter '{}'; its input types must come from a data input or an earlier callback result{result_source}",
                 callback.name
             ));
         }
@@ -134,7 +145,7 @@ pub(super) fn validate_inference_sources(
             "any data input or callback result"
         };
         return Err(format!(
-            "cannot infer type parameter '{missing}': it does not appear in {source}"
+            "cannot infer type parameter '{missing}': it does not appear in {source}{result_source}"
         ));
     }
     Ok(())

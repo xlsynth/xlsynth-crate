@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::unroll::Shadowed;
-use super::{AssertionCache, BodyChecker, CheckedStmt, K, Type, TypedExpr};
+use super::{BodyChecker, CheckedStmt, K, TemporaryConstantBindings, Type, TypedExpr};
 use crate::ast::{
     BinaryOp, BindingPattern, ConstAssert, Expr, ForIterable, LetBinding, ScopeStatement, Stmt,
     WidthSliceType,
 };
-use crate::infer_literal::{
-    BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type,
-    has_concrete_element_type,
-};
+use crate::infer_literal::{BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type};
 use crate::typed::TEST_DISCARD_PREFIX;
 use crate::typed::{CONSTEXPR_PREFIX, ConstantBinding, ConstantUse};
 use std::borrow::Cow;
@@ -133,7 +130,7 @@ impl BodyChecker<'_, '_> {
 
     /// Count concrete callees that may lose their only call when an assertion
     /// is erased.
-    fn callee_specialization_count(&self) -> usize {
+    pub(super) fn callee_specialization_count(&self) -> usize {
         self.resolver.call_count()
             + self
                 .function_registry
@@ -159,10 +156,9 @@ impl BodyChecker<'_, '_> {
             let outer_kind = std::mem::replace(&mut self.kind, super::BodyKind::Function);
             let outer_use = std::mem::replace(&mut self.dslx_constant_use, ConstantUse::Assertion);
             let outer_match = std::mem::replace(&mut self.in_match_bytecode, false);
-            let outer_cache = self.assertion_cache.replace(AssertionCache {
-                first_local: start,
-                saved: Vec::new(),
-            });
+            let outer_cache = self
+                .assertion_cache
+                .replace(TemporaryConstantBindings::new(start));
             let ids = (
                 self.next_map,
                 self.next_counted_loop,
@@ -192,11 +188,9 @@ impl BodyChecker<'_, '_> {
             self.in_match_bytecode = outer_match;
             let cache = std::mem::replace(&mut self.assertion_cache, outer_cache)
                 .expect("active assertion cache");
-            for (name, binding) in cache.saved.into_iter().rev() {
-                self.constants.insert(name, binding);
-            }
+            cache.restore(&mut self.constants);
             if self.callee_specialization_count() > prior_callees {
-                self.decls.assertion_instantiated_callee.set(true);
+                self.decls.constexpr_instantiated_callee.set(true);
             }
             if !had_functions {
                 self.constant_functions = None;
@@ -472,7 +466,7 @@ impl BodyChecker<'_, '_> {
             && !super::has_aggregate_literal(expr)
             && self.contextual_struct_constructor(expr).is_none()
             && self.reference_type(expr).is_none()
-            && has_concrete_element_type(expr, self.common_widths())?
+            && self.has_concrete_element_type(expr)?
         {
             before_scope(self)?;
             let mut init = self.binding_initializer(expr, None, |checker, expr| {
@@ -885,6 +879,7 @@ impl BodyChecker<'_, '_> {
                             IrValue::make_ubits(32, index as u64).map_err(|e| e.to_string())?,
                         ),
                     }),
+                    constant_index: true,
                 },
                 _ => unreachable!("shared aggregate is a name or literal"),
             };

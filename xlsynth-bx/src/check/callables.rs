@@ -427,9 +427,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         name: &str,
         parametrics: &[Expr],
         args: &[Expr],
+        expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         if parametrics.is_empty() && !self.decls.function_templates.contains_key(name) {
-            return self.function_call(name, args);
+            return self.function_call(name, args, expected);
         }
         if !self.decls.function_templates.contains_key(name)
             && self.resolver.lookup(name)?.is_some()
@@ -447,7 +448,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             ));
         }
         if template.has_inferred_parametrics() {
-            return self.value_function_call(template, parametrics, args);
+            return self.value_function_call(template, parametrics, args, expected);
         }
         let callbacks = parametrics
             .iter()
@@ -650,7 +651,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             MapCallee::Builtin(builtin) => {
                 let mut saved = Vec::new();
                 self.bind_scoped_value(&parameter.name, element, None, &mut saved);
-                let result = self.builtin_call(builtin, &[Expr::Name(parameter.name.clone())]);
+                let result =
+                    self.builtin_call(builtin, &[Expr::Name(parameter.name.clone())], None);
                 self.leave_scope(saved);
                 return result.map(|(ty, kind)| TypedExpr { ty, kind });
             }

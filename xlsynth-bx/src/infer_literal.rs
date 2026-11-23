@@ -297,6 +297,8 @@ fn collect_minimum(
 #[derive(Clone, Copy)]
 enum MinimumContext<'a> {
     Concrete,
+    /// A sibling can supply a type to a call that needs a result constraint.
+    Siblings(&'a dyn Fn(&str, usize) -> Result<bool, String>),
     /// Module declarations need a concrete result even when an operator
     /// constrains both implicit operands to one bit.
     ConstantInitializer,
@@ -319,7 +321,10 @@ fn collect_fold_seed(
         return Ok(false);
     }
     let Some(mut seed) = seed_minimum else {
-        return Ok(matches!(calls, MinimumContext::Deferred { .. }));
+        return Ok(matches!(
+            calls,
+            MinimumContext::Deferred { .. } | MinimumContext::Siblings(_)
+        ));
     };
     seed.needs_accumulator_type = Some(fold_name);
     *minimum = Some(match minimum.take() {
@@ -337,16 +342,28 @@ fn collect_minimum_with_calls(
 ) -> Result<bool, String> {
     let next = match expr {
         Expr::Literal { ty: None, text } => Minimum::from_literal(text)?,
-        Expr::Call { .. } | Expr::MapBeforeUse { .. } | Expr::ParametricCall { .. }
-            if matches!(calls, MinimumContext::Deferred { .. }) =>
-        {
-            return Ok(true);
+        Expr::Call { name, .. }
+        | Expr::MapBeforeUse { name, .. }
+        | Expr::ParametricCall { name, .. } => {
+            return match calls {
+                MinimumContext::Deferred { .. } => Ok(true),
+                MinimumContext::Siblings(needs_result) => {
+                    let count = match expr {
+                        Expr::ParametricCall { parametrics, .. } => parametrics.len(),
+                        _ => 0,
+                    };
+                    needs_result(name, count)
+                }
+                _ => Ok(false),
+            };
         }
         Expr::Zero(_) => {
             // An intrinsic has an explicit result type; a local zero! function
             // has the same delayed result constraint as any other invocation.
             return match calls {
-                MinimumContext::Concrete | MinimumContext::ConstantInitializer => Ok(false),
+                MinimumContext::Concrete
+                | MinimumContext::ConstantInitializer
+                | MinimumContext::Siblings(_) => Ok(false),
                 MinimumContext::Deferred { zero_is_call } => zero_is_call(),
             };
         }
@@ -1170,20 +1187,21 @@ pub(crate) fn check_argument_array_sizes(arg: &Expr) -> Result<(), String> {
 pub(crate) fn has_concrete_element_type(
     expr: &Expr,
     locals: Option<WidthLookup<'_>>,
+    needs_result: &dyn Fn(&str, usize) -> Result<bool, String>,
 ) -> Result<bool, String> {
     if let Some(seed) = expr.unannotated_loop_seed() {
-        return has_concrete_element_type(seed, None);
+        return has_concrete_element_type(seed, None, needs_result);
     }
     match expr {
         Expr::If {
             then_value,
             else_value,
             ..
-        } => Ok(has_concrete_element_type(then_value, locals)?
-            || has_concrete_element_type(else_value, locals)?),
+        } => Ok(has_concrete_element_type(then_value, locals, needs_result)?
+            || has_concrete_element_type(else_value, locals, needs_result)?),
         Expr::Match { arms, .. } => {
             for arm in arms {
-                if has_concrete_element_type(&arm.value, locals)? {
+                if has_concrete_element_type(&arm.value, locals, needs_result)? {
                     return Ok(true);
                 }
             }
@@ -1191,7 +1209,7 @@ pub(crate) fn has_concrete_element_type(
         }
         Expr::Tuple(fields) => {
             for field in fields {
-                if !has_concrete_element_type(field, locals)? {
+                if !has_concrete_element_type(field, locals, needs_result)? {
                     return Ok(false);
                 }
             }
@@ -1199,7 +1217,7 @@ pub(crate) fn has_concrete_element_type(
         }
         Expr::Array(elements) => {
             for element in elements {
-                if has_concrete_element_type(element, locals)? {
+                if has_concrete_element_type(element, locals, needs_result)? {
                     return Ok(true);
                 }
             }
@@ -1208,8 +1226,29 @@ pub(crate) fn has_concrete_element_type(
         // An ellipsis without an annotation needs another operand or its
         // enclosing declaration to supply the full array length.
         Expr::ArrayLiteral { annotation, .. } => Ok(annotation.is_some()),
-        _ => Ok(!collect_minimum(expr, locals, &mut None)?),
+        _ => Ok(!collect_minimum_with_calls(
+            expr,
+            locals,
+            &mut None,
+            MinimumContext::Siblings(needs_result),
+        )?),
     }
+}
+
+/// A result-inferred expression with no literal width must wait for a typed
+/// sibling or the callee's completed signature before it can be checked.
+pub(crate) fn requires_sibling_type(
+    expr: &Expr,
+    locals: Option<WidthLookup<'_>>,
+    needs_result: &dyn Fn(&str, usize) -> Result<bool, String>,
+) -> Result<bool, String> {
+    let mut minimum = None;
+    Ok(collect_minimum_with_calls(
+        expr,
+        locals,
+        &mut minimum,
+        MinimumContext::Siblings(needs_result),
+    )? && minimum.is_none())
 }
 
 /// Merge unsized element constraints, or identify an element whose type can
@@ -1218,6 +1257,7 @@ pub(crate) fn has_concrete_element_type(
 pub(crate) fn common_type_hint(
     items: &[&Expr],
     locals: Option<WidthLookup<'_>>,
+    needs_result: &dyn Fn(&str, usize) -> Result<bool, String>,
 ) -> Result<CommonTypeHint, String> {
     let mut minimum = None;
     let mut constructor = None;
@@ -1232,18 +1272,23 @@ pub(crate) fn common_type_hint(
                 }
         ) {
             constructor.get_or_insert(i);
-        } else if !collect_minimum(expr, locals, &mut minimum)? {
+        } else if !collect_minimum_with_calls(
+            expr,
+            locals,
+            &mut minimum,
+            MinimumContext::Siblings(needs_result),
+        )? {
             return Ok(CommonTypeHint::FromExpr(i));
         }
     }
     if let Some(i) = constructor {
         return Ok(CommonTypeHint::FromExpr(i));
     }
-    Ok(CommonTypeHint::Minimum(
-        minimum
-            .ok_or("cannot infer an empty array's element type")?
-            .inferred_type()?,
-    ))
+    match minimum {
+        Some(minimum) => Ok(CommonTypeHint::Minimum(minimum.inferred_type()?)),
+        None if !items.is_empty() => Ok(CommonTypeHint::FromExpr(0)),
+        None => Err("cannot infer an empty array's element type".into()),
+    }
 }
 
 #[cfg(test)]
@@ -1276,7 +1321,8 @@ mod tests {
         }
         for (text, width) in [("255", 9), ("0xff", 8), ("0b11111111", 8)] {
             assert_eq!(
-                common_type_hint(&[&literal(text), &literal("-1")], None).unwrap(),
+                common_type_hint(&[&literal(text), &literal("-1")], None, &|_, _| Ok(false))
+                    .unwrap(),
                 CommonTypeHint::Minimum(Type::Bits {
                     signed: true,
                     width
