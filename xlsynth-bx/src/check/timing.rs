@@ -30,11 +30,11 @@
 //! - A mux aligns its selector with the selected data. Case facts may exclude
 //!   an arm; identical data on all arms makes the selector irrelevant.
 //! - A register aligns data and write guards, then adds one stage. Exact bits
-//!   survive only when the write is guaranteed and reset cannot override it;
-//!   a hold or possible reset discards the exact value.
-//! - A verified fixed-stage child translates its interface by one offset
-//!   shared by all its connected inputs and outputs. Its interface supplies
-//!   stages, not exact values.
+//!   survive only when the write is guaranteed and reset cannot override it; a
+//!   hold or possible reset discards the exact value.
+//! - A verified fixed-stage child translates its interface by one offset shared
+//!   by all its connected inputs and outputs. Its interface supplies stages,
+//!   not exact values.
 //!
 //! An output `@stage(op)` checks the resulting stage for each hardware
 //! encoding of the controls. This is not a proof that an invocation completes
