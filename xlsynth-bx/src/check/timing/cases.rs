@@ -11,8 +11,8 @@ use super::{Join, Stage, TimedValue};
 use crate::ast::{BinaryOp, Type};
 use crate::check::{MAX_TYPE_SIZE, compatible};
 use crate::typed::{
-    AvailableFunctions, CheckedBlock, CheckedEnum, CheckedStmt, ConstantBinding, ConstantFunctions,
-    ConstantUse, TypedExpr, TypedExprKind as K, bits,
+    AvailableFunctions, CheckedBlock, CheckedEnum, CheckedStmt, ConstantBinding, ConstantCallees,
+    ConstantFunctions, ConstantUse, TypedExpr, TypedExprKind as K, bits,
 };
 
 const MAX_CASES: usize = 64;
@@ -172,7 +172,10 @@ pub(super) fn enumerate<'a>(
                 &mut remaining,
                 true,
                 ConstantUse::Bx,
-                Some(&mut evaluator),
+                ConstantCallees {
+                    local: Some(&mut evaluator),
+                    imports: None,
+                },
                 enums,
             )
             .map_err(|e| format!("stage helper evaluation failed: {e:?}"))?
@@ -272,7 +275,7 @@ impl Case<'_> {
             &mut remaining,
             true,
             ConstantUse::Bx,
-            None,
+            ConstantCallees::default(),
             self.enums,
         );
         self.remaining.set(remaining);
