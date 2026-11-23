@@ -334,8 +334,7 @@ in the block body.
 ### Type parameters on structs
 
 Declare a type parameter with `<T>` or `<T: type>`. A type application such as
-`FlowOut<Packet>` supplies a type for each parameter. Type parameters and value
-parametrics belong to separate struct declarations.
+`FlowOut<Packet>` supplies a type for each parameter. A struct can interleave type parameters and value parametrics.
 
 ```text
 struct FlowOut<T> { pop_valid: bool, pop_data: T }
@@ -365,14 +364,35 @@ Each specialization exposes `pop_valid` and `pop_data` as named output ports.
 Here `pop_data` is one port of type `Packet`. A caller can read its fields with
 expressions such as `stage.pop_data.tag`.
 
+### Mixed type and value parameters
+
+Use a type parameter for an element's type and a value parametric for its
+count. Explicit arguments follow declaration order, including when a value
+parameter comes before a type parameter.
+
+```text
+struct Lanes<T, N: u32> { data: T[N], valid: bool }
+
+fn make<T, N: u32>(data: T[N]) -> Lanes<T, N> {
+    Lanes { data, valid: true }
+}
+```
+
+For `data: u16[4]`, the constructor infers `Lanes<u16, 4>`. You can
+supply the arguments directly with `Lanes::<u16, 4> { data, valid: true }`
+or supply a prefix with `Lanes<u16> { data, valid: true }`. A value
+parameter's type or default can use earlier bindings, as in
+`struct Stamp<N: u32, T, Init: T> { data: T[N] }`. Every binding
+participates in type identity, even when it does not appear in a field.
+
 ### Struct updates
 
 Use `..base` at the end of a struct literal to copy fields that the literal
 doesn't specify. Place `..base` after any explicit fields, with no trailing
 comma. The base expression is evaluated once and must have the same nominal
-struct type as the literal. The base can supply omitted value parametrics or
-infer a struct's type parameters when the entire argument list is omitted.
-Explicit arguments must agree with its specialization.
+struct type as the literal. The base can supply omitted type and value
+parameters, including the suffix of a mixed argument list. Explicit arguments
+must agree with its specialization.
 
 When the literal supplies every field explicitly, BX emits
 `useless_struct_splat` at `..`. To remove the splat, spell out any parametric

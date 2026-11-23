@@ -502,6 +502,7 @@ impl ImportedStructs {
             | Type::ParametricBits { .. }
             | Type::ParametricStruct { .. }
             | Type::TypeApplied { .. }
+            | Type::MixedApplied { .. }
             | Type::Bool
             | Type::Enum { .. } => false,
         }

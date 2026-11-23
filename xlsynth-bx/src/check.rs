@@ -14,8 +14,8 @@ use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, BlockStages, CallbackParam, Expr, ExternBlock, ExternFn, Function,
     FunctionParametricRef, InvariantDecl, InvariantLemma, LetBinding, MatchArm, MatchPattern,
-    Module, Param, SourcePosition, SourceSpan, Stmt, StructDef, StructLiteralArgs, StructSplat,
-    Type, UnaryOp, WidthSliceType,
+    Module, Param, SourcePosition, SourceSpan, Stmt, StructArgument, StructDef, StructLiteralArgs,
+    StructSplat, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -43,7 +43,7 @@ mod module_constants;
 mod scope;
 mod source_patterns;
 mod struct_parametrics;
-use struct_parametrics::StructApplication;
+use struct_parametrics::{BoundStructArgument, StructApplication, StructArguments};
 mod test_program;
 mod timing;
 mod tuple_match;
@@ -98,6 +98,31 @@ impl fmt::Display for Dimension<'_> {
     }
 }
 
+impl fmt::Display for StructArgument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Type(ty) => ty.fmt(f),
+            Self::Value(value) => Dimension(value).fmt(f),
+        }
+    }
+}
+
+/// Display the arguments of a struct in declaration order.
+fn display_application(
+    f: &mut fmt::Formatter<'_>,
+    name: &str,
+    args: impl IntoIterator<Item = impl fmt::Display>,
+) -> fmt::Result {
+    write!(f, "{name}<")?;
+    for (i, arg) in args.into_iter().enumerate() {
+        if i != 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "{arg}")?;
+    }
+    f.write_str(">")
+}
+
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -111,36 +136,12 @@ impl fmt::Display for Type {
             }
             Type::Bool => write!(f, "bool"),
             Type::Named(name) | Type::Enum { name, .. } => write!(f, "{name}"),
-            Type::Applied { name, args } => {
-                write!(f, "{name}<")?;
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{arg}")?;
-                }
-                write!(f, ">")
-            }
+            Type::Applied { name, args } => display_application(f, name, args),
             Type::ParametricStruct { name, args } => {
-                write!(f, "{name}<")?;
-                for (i, arg) in args.iter().enumerate() {
-                    if i != 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{}", Dimension(arg))?;
-                }
-                f.write_str(">")
+                display_application(f, name, args.iter().map(Dimension))
             }
-            Type::TypeApplied { name, args } => {
-                write!(f, "{name}<")?;
-                for (index, arg) in args.iter().enumerate() {
-                    if index != 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{arg}")?;
-                }
-                f.write_str(">")
-            }
+            Type::TypeApplied { name, args } => display_application(f, name, args),
+            Type::MixedApplied { name, args } => display_application(f, name, args),
             Type::Array { element, size } => write!(f, "{element}[{size}]"),
             Type::ParametricBits { signed, width } => match &**signed {
                 Expr::Bool(false) => write!(f, "uN[{}]", Dimension(width)),
@@ -591,6 +592,7 @@ impl<'m> BlockSpecializations<'m> {
                     name: p.name.clone(),
                     ty: types.materialize_type_applications(
                         bindings.concrete_type(&p.ty)?,
+                        Some(&bindings),
                         dimensions,
                         MAX_ELABORATION_DEPTH,
                     )?,
@@ -599,6 +601,7 @@ impl<'m> BlockSpecializations<'m> {
             .collect::<Result<_, String>>()?;
         let result = types.materialize_type_applications(
             bindings.concrete_type(&template.result)?,
+            Some(&bindings),
             dimensions,
             MAX_ELABORATION_DEPTH,
         )?;
@@ -674,6 +677,12 @@ pub(crate) fn source_type_nodes(ty: &Type) -> usize {
         Type::Applied { args, .. } => 1 + args.len(),
         Type::ParametricStruct { args, .. } => 1 + args.len(),
         Type::TypeApplied { args, .. } => 1 + args.iter().map(source_type_nodes).sum::<usize>(),
+        Type::MixedApplied { args, .. } => {
+            1 + args
+                .iter()
+                .map(|a| a.as_type().map_or(1, source_type_nodes))
+                .sum::<usize>()
+        }
         Type::Named(_) | Type::Enum { .. } | Type::Bool | Type::Bits { .. } => 1,
     }
 }
@@ -807,6 +816,10 @@ impl Declarations<'_> {
                 | Type::ParametricStruct { name, .. } => {
                     self.check_type_name_visibility(name, at)?
                 }
+                Type::MixedApplied { name, args } => {
+                    self.check_type_name_visibility(name, at)?;
+                    pending.extend(args.iter().rev().filter_map(StructArgument::as_type));
+                }
                 Type::TypeApplied { name, args } => {
                     self.check_type_name_visibility(name, at)?;
                     pending.extend(args.iter().rev());
@@ -892,12 +905,61 @@ fn resolve_type<'m>(
                 .collect::<Result<Vec<_>, _>>()?;
             types.resolve_struct_type_application(name, args, bindings, dimensions, remaining)
         }
+        Type::MixedApplied { name, args } => {
+            if is_local(name) {
+                return Err(format!("'{name}' names a local value here"));
+            }
+            dimensions
+                .decls
+                .check_type_name_visibility(name, dimensions.position)?;
+            if let Some(bindings) = bindings {
+                bindings.reject_value(name)?;
+                if bindings.has_unbound_variable(ty) {
+                    let template = types
+                        .structs
+                        .template(name)
+                        .ok_or_else(|| format!("unknown parametric struct '{name}'"))?;
+                    if template.parametric_bindings().skip(args.len()).any(|formal|
+                        !matches!(formal, crate::ast::StructParametricRef::Value(p) if p.default.is_some())
+                    ) {
+                        return Err(format!("missing required argument in type '{ty}'"));
+                    }
+                    let depth = child_type_budget(remaining)?;
+                    let args = args
+                        .iter()
+                        .map(|arg| match arg {
+                            StructArgument::Type(ty) => {
+                                resolve_type(ty, is_local, Some(bindings), dimensions, types, depth)
+                                    .map(StructArgument::Type)
+                            }
+                            StructArgument::Value(value) => {
+                                let mut checker = types.struct_scope(dimensions);
+                                checker.enclosing_type_locals = Some(is_local);
+                                checker.function_type_bindings = Some(bindings.clone());
+                                checker.check_deferred_expr_names(value)?;
+                                Ok(arg.clone())
+                            }
+                        })
+                        .collect::<Result<_, String>>()?;
+                    return Ok(Type::MixedApplied {
+                        name: name.clone(),
+                        args,
+                    });
+                }
+            }
+            let mut checker = types.struct_scope(dimensions);
+            checker.enclosing_type_locals = Some(is_local);
+            checker.function_type_bindings = bindings.cloned();
+            let args =
+                checker.struct_prefix_at(name, StructLiteralArgs::Mixed(args), remaining, None)?;
+            checker.struct_applied_type(name, &args, remaining)
+        }
         Type::ParametricStruct { name, args } => {
             let mut checker = types.struct_scope(dimensions);
             checker.enclosing_type_locals = Some(is_local);
             checker.function_type_bindings = bindings.cloned();
-            let args = checker.struct_value_prefix(name, StructLiteralArgs::Expressions(args))?;
-            checker.struct_value_type(name, &args, remaining)
+            let args = checker.struct_prefix(name, StructLiteralArgs::Expressions(args))?;
+            checker.struct_applied_type(name, &args, remaining)
         }
         Type::Named(name) | Type::Applied { name, .. } => {
             if is_local(name) {
@@ -948,12 +1010,12 @@ fn resolve_type<'m>(
                     _ => &[],
                 };
                 let mut checker = types.struct_scope(dimensions);
-                let args = checker.struct_value_prefix(name, StructLiteralArgs::Integers(args))?;
+                let args = checker.struct_prefix(name, StructLiteralArgs::Integers(args))?;
                 checker.specialize_struct(
                     template,
-                    struct_parametrics::StructArguments::Values {
+                    StructArguments {
                         explicit: &args,
-                        inferred: None,
+                        ..Default::default()
                     },
                     remaining,
                 )
@@ -1056,7 +1118,7 @@ impl<'m> TypeResolver<'_, 'm> {
             Some(bindings) => bindings.concrete_type(&application)?,
             None => application,
         };
-        self.materialize_type_applications(ty, dimensions, remaining)
+        self.materialize_type_applications(ty, bindings, dimensions, remaining)
     }
 
     /// Resolve struct applications whose arguments have already been resolved
@@ -1064,6 +1126,7 @@ impl<'m> TypeResolver<'_, 'm> {
     fn materialize_type_applications(
         &mut self,
         ty: Type,
+        bindings: Option<&Bindings>,
         dimensions: ModuleDimensions<'_, 'm>,
         remaining: usize,
     ) -> Result<Type, String> {
@@ -1076,26 +1139,61 @@ impl<'m> TypeResolver<'_, 'm> {
                 let budget = child_type_budget(remaining)?;
                 let args = args
                     .into_iter()
-                    .map(|arg| self.materialize_type_applications(arg, dimensions, budget))
+                    .map(|arg| {
+                        self.materialize_type_applications(arg, bindings, dimensions, budget)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 self.structs.update_imports(self.resolver)?;
                 self.struct_scope(dimensions).specialize_struct(
                     template,
-                    struct_parametrics::StructArguments::Types(&args),
+                    StructArguments {
+                        explicit: &args
+                            .into_iter()
+                            .map(BoundStructArgument::Type)
+                            .collect::<Vec<_>>(),
+                        ..Default::default()
+                    },
                     remaining,
                 )
+            }
+            Type::MixedApplied { name, args } => {
+                let budget = child_type_budget(remaining)?;
+                let args = args
+                    .into_iter()
+                    .map(|arg| match arg {
+                        StructArgument::Type(ty) => self
+                            .materialize_type_applications(ty, bindings, dimensions, budget)
+                            .map(StructArgument::Type),
+                        StructArgument::Value(_) => Ok(arg),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.structs.update_imports(self.resolver)?;
+                let mut checker = self.struct_scope(dimensions);
+                // Values may use a type formal in a cast or an annotated
+                // literal. Type arguments already carry the concrete caller
+                // identity.
+                checker.function_type_bindings = bindings.cloned();
+                let args = checker.struct_prefix_with_types(
+                    &name,
+                    StructLiteralArgs::Mixed(&args),
+                    |_, ty| Ok(ty.clone()),
+                )?;
+                checker.struct_applied_type(&name, &args, remaining)
             }
             Type::Tuple(fields) => {
                 let budget = child_type_budget(remaining)?;
                 fields
                     .into_iter()
-                    .map(|field| self.materialize_type_applications(field, dimensions, budget))
+                    .map(|field| {
+                        self.materialize_type_applications(field, bindings, dimensions, budget)
+                    })
                     .collect::<Result<_, _>>()
                     .map(Type::Tuple)
             }
             Type::Array { element, size } => Ok(Type::array(
                 self.materialize_type_applications(
                     *element,
+                    bindings,
                     dimensions,
                     child_type_budget(remaining)?,
                 )?,
@@ -1274,6 +1372,18 @@ fn type_parameter_references<'a>(ty: &'a Type, result: &mut Vec<&'a str>) {
     );
 }
 
+/// A symbolic mixed application retains constexpr arguments until its type
+/// arguments bind.
+fn has_mixed_application(ty: &Type) -> bool {
+    let mut mixed = false;
+    type_dependencies(
+        ty,
+        |ty, _| mixed |= matches!(ty, Type::MixedApplied { .. }),
+        |_| {},
+    );
+    mixed
+}
+
 /// Walk nominal dependencies and the expressions supplying dimensions without
 /// recursively copying potentially nested source types.
 fn type_dependencies<'a>(
@@ -1292,6 +1402,15 @@ fn type_dependencies<'a>(
                 if let Type::ParametricStruct { args, .. } = ty {
                     for arg in args {
                         dimension(arg);
+                    }
+                }
+            }
+            Type::MixedApplied { name, args } => {
+                nominal(ty, name);
+                for arg in args.iter().rev() {
+                    match arg {
+                        StructArgument::Type(arg) => pending.push(arg),
+                        StructArgument::Value(arg) => dimension(arg),
                     }
                 }
             }
@@ -1518,15 +1637,16 @@ impl BlockInterface {
                 type_nodes,
             });
         }
-        let mut outputs = if let Type::TypeApplied { name, .. } = result {
-            structs
-                .template(name)
-                .ok_or_else(|| unknown_declaration("struct", name))?
-                .fields
-                .clone()
-        } else {
-            output_ports(result, &structs.definitions)?
-        };
+        let mut outputs =
+            if let Type::TypeApplied { name, .. } | Type::MixedApplied { name, .. } = result {
+                structs
+                    .template(name)
+                    .ok_or_else(|| unknown_declaration("struct", name))?
+                    .fields
+                    .clone()
+            } else {
+                output_ports(result, &structs.definitions)?
+            };
         for output in &mut outputs {
             if let Some(reserved) = private_outputs {
                 while reserved.contains(&output.name) {
@@ -1677,21 +1797,11 @@ impl TypeShape {
             // the checker validates its full layout after resolution.
             Type::Applied { .. } | Type::ParametricStruct { .. } => Self::LEAF,
             Type::TypeApplied { name, args } => {
-                // Type arguments can be phantom. Count their syntax for
-                // substitution and validate the physical fields at interning.
-                let budget = child_type_budget(remaining)?;
-                let mut shape = Self {
-                    depth: 1,
-                    name_bytes: name.len(),
-                    ..Self::LEAF
-                };
-                for arg in args {
-                    let arg = Self::for_type(arg, budget, named_shape)?;
-                    shape.depth = shape.depth.max(arg.depth + 1);
-                    shape.source_nodes = shape.source_nodes.saturating_add(arg.source_nodes);
-                    shape.name_bytes = shape.name_bytes.saturating_add(arg.name_bytes);
-                }
-                shape
+                Self::application(name, args.iter(), args.len(), remaining, named_shape)?
+            }
+            Type::MixedApplied { name, args } => {
+                let types = args.iter().filter_map(StructArgument::as_type);
+                Self::application(name, types, args.len(), remaining, named_shape)?
             }
             Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
                 return Err("unresolved value-parametric dimension".into());
@@ -1708,6 +1818,31 @@ impl TypeShape {
             ));
         }
         Self::check_source_budget(shape.source_nodes, shape.name_bytes)?;
+        Ok(shape)
+    }
+
+    /// Count the source arguments of a symbolic application, including phantom
+    /// arguments. The concrete fields determine its IR layout after interning.
+    fn application<'t>(
+        name: &str,
+        types: impl Iterator<Item = &'t Type>,
+        argument_count: usize,
+        remaining: usize,
+        named_shape: &impl Fn(&str) -> Result<Self, String>,
+    ) -> Result<Self, String> {
+        let budget = child_type_budget(remaining)?;
+        let mut shape = Self {
+            depth: 1,
+            name_bytes: name.len(),
+            source_nodes: 1 + argument_count,
+            ..Self::LEAF
+        };
+        for arg in types {
+            let arg = Self::for_type(arg, budget, named_shape)?;
+            shape.depth = shape.depth.max(arg.depth + 1);
+            shape.source_nodes = shape.source_nodes.saturating_add(arg.source_nodes - 1);
+            shape.name_bytes = shape.name_bytes.saturating_add(arg.name_bytes);
+        }
         Ok(shape)
     }
 
@@ -3293,10 +3428,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     }
 
     /// Instantiate a type from a resolved block signature at a call site.
-    fn bound_block_type(&mut self, ty: &Type, bindings: &Bindings) -> Result<Type, String> {
+    fn bound_block_type(
+        &mut self,
+        owner: &str,
+        ty: &Type,
+        bindings: &Bindings,
+    ) -> Result<Type, String> {
         let ty = bindings.concrete_type(ty)?;
         self.with_type_resolver(|types, dimensions, _| {
-            types.materialize_type_applications(ty, dimensions, MAX_ELABORATION_DEPTH)
+            types.materialize_type_applications(
+                ty,
+                Some(bindings),
+                dimensions.decls.module_dimensions(owner),
+                MAX_ELABORATION_DEPTH,
+            )
         })
     }
 
@@ -3458,7 +3603,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         match child.result {
             Type::ParametricBits { .. }
             | Type::ParametricArray { .. }
-            | Type::TypeApplied { .. } => Err("unresolved block result dimension".into()),
+            | Type::TypeApplied { .. }
+            | Type::MixedApplied { .. } => Err("unresolved block result dimension".into()),
             Type::Tuple(_)
             | Type::Named(_)
             | Type::Applied { .. }
@@ -3917,20 +4063,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Struct { .. }
             | Expr::AppliedStruct { .. }
             | Expr::ParametricStruct { .. }
-            | Expr::TypeAppliedStruct { .. } => {
+            | Expr::TypeAppliedStruct { .. }
+            | Expr::MixedAppliedStruct { .. } => {
                 let literal = expr.struct_literal().expect("struct literal");
-                let values;
-                let application = match literal.args {
-                    StructLiteralArgs::Omitted => StructApplication::Named(literal.name),
-                    StructLiteralArgs::Types(types) => {
-                        StructApplication::Types(literal.name, types)
-                    }
-                    _ => {
-                        values = self.struct_value_prefix(literal.name, literal.args)?;
-                        StructApplication::Values(literal.name, &values)
-                    }
+                let args;
+                let application = if matches!(literal.args, StructLiteralArgs::Omitted) {
+                    StructApplication::Named(literal.name)
+                } else {
+                    args = self.struct_prefix(literal.name, literal.args)?;
+                    StructApplication::Applied(literal.name, &args)
                 };
-                self.struct_literal(application, literal.fields, literal.base, expected)
+                self.with_prepared_value(expr, |checker, expr| {
+                    let literal = expr.struct_literal().expect("prepared struct constructor");
+                    checker.struct_literal(application, literal.fields, literal.base, expected)
+                })
             }
             Expr::Field { value, name } => self.project_field(value, name),
             Expr::Call { name, args } => self.function_call(name, args, expected),
@@ -4135,6 +4281,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             | Type::Applied { .. }
             | Type::ParametricStruct { .. }
             | Type::TypeApplied { .. }
+            | Type::MixedApplied { .. }
             | Type::ParametricBits { .. }),
         ) = annotation
         {
@@ -4376,12 +4523,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         base: Option<(&StructSplat, TypedExpr)>,
         expected: Option<&Type>,
     ) -> Result<(Type, K), struct_parametrics::StructLiteralError> {
-        let mut supplied = BTreeMap::new();
-        for (field, value) in fields {
-            if supplied.insert(field.as_str(), value).is_some() {
-                return Err(format!("duplicate field '{source}.{field}'").into());
-            }
-        }
+        let mut supplied = struct_parametrics::struct_field_map(source, fields)?;
         let (ty, mut inputs, base) = if let Some((splat, base)) = base {
             self.check_struct_splat_type(source, &base.ty)?;
             if let Some(owner) = self.warning_owner
@@ -4778,9 +4920,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::UnrollFor(fold) if fold.annotation.is_none() => {
                 self.contains_inferred_aggregate(&fold.seed)
             }
-            Expr::Struct { .. } | Expr::AppliedStruct { .. } | Expr::ParametricStruct { .. } => {
-                self.contextual_struct_constructor(expr).is_some()
-            }
+            Expr::Struct { .. }
+            | Expr::AppliedStruct { .. }
+            | Expr::ParametricStruct { .. }
+            | Expr::MixedAppliedStruct { .. } => self.contextual_struct_constructor(expr).is_some(),
             Expr::Tuple(items) | Expr::Array(items) => items
                 .iter()
                 .any(|item| self.contains_inferred_aggregate(item)),

@@ -16,8 +16,9 @@ use crate::ast::{
     BinaryOp, BindingPattern, Block, BlockSource, CallbackParam, ConstDef, EnumDef, EnumMember,
     Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function, InvariantDecl, InvariantLemma,
     LetBinding, MapExpr, MatchArm, MatchPattern, Module, OutputCycles, Param, ParametricBinding,
-    SourceFile, SourcePosition, SourceSpan, StageAnnotation, Stmt, StructDef, StructSplat, Type,
-    TypeAlias, UnaryOp, UnrollFor, UsePath, WidthSliceType,
+    SourceFile, SourcePosition, SourceSpan, StageAnnotation, Stmt, StructArgument, StructDef,
+    StructParametricKind, StructSplat, Type, TypeAlias, UnaryOp, UnrollFor, UsePath,
+    WidthSliceType,
 };
 use crate::ast::{ConstAssert, ScopeStatement};
 
@@ -469,10 +470,14 @@ pub fn parse_module(source: &str) -> Result<Module, String> {
 pub(crate) fn parse_with_imports(
     source: &str,
     templates: &BTreeSet<String>,
-    type_structs: &BTreeSet<String>,
+    type_structs: &BTreeMap<String, Vec<StructParametricKind>>,
 ) -> Result<Module, String> {
     let mut parser = Parser::new(source, false)?;
-    parser.type_structs.extend(type_structs.iter().cloned());
+    for (name, kinds) in type_structs {
+        if let Some(grammar) = StructArgumentGrammar::from_kinds(kinds) {
+            parser.type_structs.insert(name.clone(), grammar);
+        }
+    }
     parser.module_with_imports(Some(templates))
 }
 
@@ -527,8 +532,8 @@ struct Parser<'s> {
     /// comparisons in a comma-separated expression list. Block callers can
     /// use function and block templates declared later in the source.
     callable_templates: BTreeMap<String, TemplateBinding>,
-    /// Local and imported struct templates whose arguments are types.
-    type_structs: BTreeSet<String>,
+    /// Local and imported structs that accept at least one type argument.
+    type_structs: BTreeMap<String, StructArgumentGrammar>,
     /// Module aliases and use bindings that can start a named literal
     /// annotation.
     literal_type_heads: BTreeSet<String>,
@@ -611,8 +616,38 @@ struct ParsedType {
 /// arguments.
 enum StructArguments {
     Concrete(Vec<u32>),
-    Computed { args: Vec<Expr>, height: usize },
-    Types { args: Vec<Type>, height: usize },
+    Computed {
+        args: Vec<Expr>,
+        height: usize,
+    },
+    Types {
+        args: Vec<Type>,
+        height: usize,
+    },
+    Mixed {
+        args: Vec<StructArgument>,
+        height: usize,
+    },
+}
+
+/// The grammar of an application that can contain a type argument. Other
+/// struct names follow the expression grammar used for DSLX value parameters.
+#[derive(Clone)]
+enum StructArgumentGrammar {
+    Types,
+    Mixed(Arc<[StructParametricKind]>),
+}
+
+impl StructArgumentGrammar {
+    fn from_kinds(kinds: &[StructParametricKind]) -> Option<Self> {
+        if !kinds.contains(&StructParametricKind::Type) {
+            None
+        } else if kinds.contains(&StructParametricKind::Value) {
+            Some(Self::Mixed(kinds.into()))
+        } else {
+            Some(Self::Types)
+        }
+    }
 }
 
 /// The explicit fields and optional final base in a struct literal.
@@ -724,17 +759,24 @@ impl ParsedExpr {
     }
 }
 
-/// Find the type formals following a declaration's opening angle. Annotations
-/// and defaults can use any of them, including one declared later in the list.
-fn declared_type_params<'s>(tokens: &[Token<'s>]) -> Vec<&'s str> {
+/// Scan a declaration's formal kinds, skipping nested annotations and defaults.
+fn declared_parametrics<'s>(
+    tokens: &[Token<'s>],
+    is_formal_name: fn(&str) -> bool,
+) -> Vec<(&'s str, StructParametricKind)> {
     let mut next_formal = true;
     let mut groups = 0usize;
     let mut angles = 0usize;
     let mut names = Vec::new();
     for ts in tokens.windows(3) {
         let text = ts[0].text;
-        if next_formal && is_use_identifier(text) && (ts[1].text != ":" || ts[2].text == "type") {
-            names.push(text);
+        if next_formal && is_formal_name(text) {
+            let kind = if ts[1].text != ":" || ts[2].text == "type" {
+                StructParametricKind::Type
+            } else {
+                StructParametricKind::Value
+            };
+            names.push((text, kind));
         }
         next_formal = false;
         match text {
@@ -759,7 +801,7 @@ impl<'s> Parser<'s> {
         let tokens = lex(source, Dialect::Bx, None)?;
         let mut callable_templates = BTreeMap::new();
         let mut header = None;
-        let mut type_structs = BTreeSet::new();
+        let mut type_structs = BTreeMap::new();
         let mut literal_type_heads = BTreeSet::new();
         let mut braces = 0usize;
         for (index, ts) in tokens.windows(3).enumerate() {
@@ -770,12 +812,14 @@ impl<'s> Parser<'s> {
                     literal_type_heads.insert(name.to_owned());
                 }
                 ("fn" | "block", _, "<") => header = Some(ts[1]),
-                ("struct", name, "<")
-                    if tokens.get(index + 3).is_some_and(|t| is_identifier(t.text))
-                        && (tokens.get(index + 4).is_some_and(|t| t.text != ":")
-                            || tokens.get(index + 5).is_some_and(|t| t.text == "type")) =>
-                {
-                    type_structs.insert(name.to_owned());
+                ("struct", name, "<") if braces == 0 => {
+                    let kinds: Vec<_> = declared_parametrics(&tokens[index + 3..], is_identifier)
+                        .into_iter()
+                        .map(|(_, kind)| kind)
+                        .collect();
+                    if let Some(grammar) = StructArgumentGrammar::from_kinds(&kinds) {
+                        type_structs.insert(name.to_owned(), grammar);
+                    }
                 }
                 (":", annotation, _) if annotation != "type" => {
                     // Only value and callable formals take explicit arguments.
@@ -1509,7 +1553,8 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// Parse an aggregate declaration and its type or value parametrics.
+    /// Parse an aggregate declaration and its interleaved type and value
+    /// formals.
     fn struct_def(&mut self, public: bool) -> Result<StructDef, String> {
         let name = self.ident()?;
         let mut type_params = Vec::new();
@@ -1530,9 +1575,6 @@ impl<'s> Parser<'s> {
                         );
                     }
                     if is_type {
-                        if !value_parametrics.is_empty() {
-                            return Err(p.error("a struct cannot mix type and value parameters"));
-                        }
                         let name = p.ident()?;
                         if p.eat(":") {
                             p.expect("type")?;
@@ -1540,10 +1582,8 @@ impl<'s> Parser<'s> {
                         p.type_params.insert(token.text);
                         type_params.push(name);
                     } else {
-                        if !type_params.is_empty() {
-                            return Err(p.error("a struct cannot mix type and value parameters"));
-                        }
-                        value_parametrics.push(p.value_parametric(value_parametrics.len())?);
+                        value_parametrics
+                            .push(p.value_parametric(type_params.len() + value_parametrics.len())?);
                     }
                     Ok(())
                 })
@@ -1681,10 +1721,14 @@ impl<'s> Parser<'s> {
             if self.peek(0) == ">" {
                 return Err(self.error("expected a function parameter"));
             }
-            for formal in declared_type_params(&self.tokens[self.pos..]) {
-                self.type_params.insert(formal);
-                self.bind_local(formal, NameKind::FunctionTypeParameter);
-                self.hide_callable(formal);
+            for (formal, kind) in
+                declared_parametrics(&self.tokens[self.pos..], is_function_identifier)
+            {
+                if kind == StructParametricKind::Type {
+                    self.type_params.insert(formal);
+                    self.bind_local(formal, NameKind::FunctionTypeParameter);
+                    self.hide_callable(formal);
+                }
             }
             self.list(">", |p| {
                 if p.peek(1) != ":" || p.peek(2) == "type" {
@@ -2331,23 +2375,47 @@ impl<'s> Parser<'s> {
         Ok(size)
     }
 
-    /// Read struct arguments using the declaration's parameter kind.
+    /// Read each explicit argument using its formal's type or value grammar.
     fn struct_arguments(&mut self, name: &str) -> Result<StructArguments, String> {
-        if self.type_structs.contains(name) {
-            self.expect("<")?;
-            let singleton_tuples = self.dslx_value_grammar();
-            let mut height = 0;
-            let args = self.nested(|p| {
-                p.list(">", |p| {
+        let Some(grammar) = self.type_structs.get(name).cloned() else {
+            let arguments = self.parsed_angle_arguments()?;
+            return self.classify_struct_arguments(arguments);
+        };
+        self.expect("<")?;
+        let singleton_tuples = self.dslx_value_grammar();
+        let mut height = 0;
+        self.nested(|p| match grammar {
+            StructArgumentGrammar::Types => {
+                let args = p.list(">", |p| {
                     let arg = p.parsed_ty(singleton_tuples)?;
                     height = height.max(arg.depth);
                     Ok(arg.value)
-                })
-            })?;
-            return Ok(StructArguments::Types { args, height });
-        }
-        let arguments = self.parsed_angle_arguments()?;
-        self.classify_struct_arguments(arguments)
+                })?;
+                Ok(StructArguments::Types { args, height })
+            }
+            StructArgumentGrammar::Mixed(kinds) => {
+                let mut formals = kinds.iter();
+                let args = p.list(">", |p| match formals.next() {
+                    Some(StructParametricKind::Type) => {
+                        let arg = p.parsed_ty(singleton_tuples)?;
+                        height = height.max(arg.depth);
+                        Ok(StructArgument::Type(arg.value))
+                    }
+                    Some(StructParametricKind::Value) => {
+                        let start = p.tokens[p.pos];
+                        let arg = p.parametric_argument()?;
+                        p.validate_struct_value_argument(start, &arg.value)?;
+                        height = height.max(arg.height);
+                        Ok(StructArgument::Value(arg.value))
+                    }
+                    None => Err(p.error(&format!(
+                        "struct '{name}' accepts at most {} parametric arguments",
+                        kinds.len()
+                    ))),
+                })?;
+                Ok(StructArguments::Mixed { args, height })
+            }
+        })
     }
 
     /// Read explicit value arguments before their enclosing syntax is known.
@@ -2381,15 +2449,9 @@ impl<'s> Parser<'s> {
         let mut concrete = Vec::new();
         for (arg, start) in args.iter().zip(starts) {
             let start = self.tokens[start];
-            if start.text == "{" {
-                continue;
-            }
-            if let Expr::Name(name) = arg {
-                validate_dslx_value_path(name)
-                    .map_err(|e| diagnostic(self.source, start.start, &e))?;
-                continue;
-            }
-            if let Expr::Literal { ty: None, text } = arg
+            self.validate_struct_value_argument(start, arg)?;
+            if start.text != "{"
+                && let Expr::Literal { ty: None, text } = arg
                 && let Ok(value) = text.parse::<u32>()
             {
                 concrete.push(value);
@@ -2400,6 +2462,17 @@ impl<'s> Parser<'s> {
         } else {
             StructArguments::Computed { args, height }
         })
+    }
+
+    /// Bare struct arguments name DSLX values. A braced expression follows
+    /// its own lexical expression grammar.
+    fn validate_struct_value_argument(&self, start: Token<'_>, arg: &Expr) -> Result<(), String> {
+        if start.text != "{"
+            && let Expr::Name(name) = arg
+        {
+            validate_dslx_value_path(name).map_err(|e| diagnostic(self.source, start.start, &e))?;
+        }
+        Ok(())
     }
 
     fn type_atom(&mut self, singleton_tuples: bool) -> Result<ParsedType, String> {
@@ -2493,27 +2566,22 @@ impl<'s> Parser<'s> {
                 || (self.peek(0) == "<"
                     && (!after_as || self.struct_arguments_end(self.pos).is_some()))
             {
-                match self.struct_arguments(&name)? {
-                    StructArguments::Concrete(args) => Type::Applied { name, args },
+                let (value, depth) = match self.struct_arguments(&name)? {
+                    StructArguments::Concrete(args) => (Type::Applied { name, args }, 0),
                     StructArguments::Computed { args, height } => {
-                        if height >= MAX_SYNTAX_DEPTH {
-                            return Err(self.error("type nesting exceeds 64 levels"));
-                        }
-                        return Ok(ParsedType {
-                            value: Type::ParametricStruct { name, args },
-                            depth: height + 1,
-                        });
+                        (Type::ParametricStruct { name, args }, height + 1)
                     }
                     StructArguments::Types { args, height } => {
-                        if height >= MAX_SYNTAX_DEPTH {
-                            return Err(self.error("type nesting exceeds 64 levels"));
-                        }
-                        return Ok(ParsedType {
-                            value: Type::TypeApplied { name, args },
-                            depth: height + 1,
-                        });
+                        (Type::TypeApplied { name, args }, height + 1)
                     }
+                    StructArguments::Mixed { args, height } => {
+                        (Type::MixedApplied { name, args }, height + 1)
+                    }
+                };
+                if depth > MAX_SYNTAX_DEPTH {
+                    return Err(self.error("type nesting exceeds 64 levels"));
                 }
+                return Ok(ParsedType { value, depth });
             } else {
                 Type::Named(name)
             }
@@ -3568,7 +3636,7 @@ impl<'s> Parser<'s> {
         }
         let name = self.name_or_qualified_member()?;
         let turbofish = self.eat_turbofish();
-        let type_struct = self.type_structs.contains(&name);
+        let type_struct = self.type_structs.contains_key(&name);
         let typed_struct_args = (turbofish && type_struct)
             .then(|| self.struct_arguments(&name))
             .transpose()?;
@@ -3628,7 +3696,8 @@ impl<'s> Parser<'s> {
             let mut height = match &struct_args {
                 Some(
                     StructArguments::Computed { height, .. }
-                    | StructArguments::Types { height, .. },
+                    | StructArguments::Types { height, .. }
+                    | StructArguments::Mixed { height, .. },
                 ) => *height,
                 _ => 0,
             };
@@ -3647,6 +3716,12 @@ impl<'s> Parser<'s> {
                     base,
                 },
                 Some(StructArguments::Types { args, .. }) => Expr::TypeAppliedStruct {
+                    name,
+                    args,
+                    fields,
+                    base,
+                },
+                Some(StructArguments::Mixed { args, .. }) => Expr::MixedAppliedStruct {
                     name,
                     args,
                     fields,
@@ -3950,9 +4025,9 @@ impl<'s> Parser<'s> {
                 visible_type(head.text)
                     && self
                         .type_structs
-                        .contains(&format!("{}::{}", head.text, member.text))
+                        .contains_key(&format!("{}::{}", head.text, member.text))
             }
-            [.., name] => visible_type(name.text) && self.type_structs.contains(name.text),
+            [.., name] => visible_type(name.text) && self.type_structs.contains_key(name.text),
             [] => false,
         }
     }
@@ -5915,7 +5990,7 @@ fn make<W: u32>(data: uN[W]) -> (Local<W>, Packet<W>, packets::Packet<W>) {
     (Local<W> { data }, Packet<W> { data }, packets::Packet<W> { data })
 }
 "#;
-        let module = parse_with_imports(source, &BTreeSet::new(), &BTreeSet::new())?;
+        let module = parse_with_imports(source, &BTreeSet::new(), &BTreeMap::new())?;
         assert!(matches!(&module.functions[0].body, Expr::Tuple(fields)
             if fields.len() == 3 && fields.iter().all(|field| matches!(field, Expr::ParametricStruct { .. }))));
         Ok(())
@@ -6042,6 +6117,22 @@ block stage<T>(clk, x: T) -> (FlowOut<Pair<T[2], (bool, u8)>>, Pair::<T, u8>) {
     }
 
     #[test]
+    fn struct_argument_lookahead_uses_bx_formal_names() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+struct Box<trait> { data: trait }
+struct Row<Self, mut: u32> { data: Self[mut] }
+#[allow(combinational_block)]
+pub block sample(a: Box<u8>, b: Row<u16, 2>) -> (u8, u16) {
+    (a.data, b.data[u32:0])
+}
+"#,
+        )?;
+        crate::check_module(&module)?;
+        Ok(())
+    }
+
+    #[test]
     fn imported_struct_type_parameters_are_disambiguated() -> Result<(), String> {
         let module = parse_with_imports(
             r#"
@@ -6052,7 +6143,10 @@ fn wrap<T>(x: T) -> (FlowOut<T>, library::FlowOut<(T, u8)>) {
 }
 "#,
             &BTreeSet::new(),
-            &BTreeSet::from(["FlowOut".into(), "library::FlowOut".into()]),
+            &BTreeMap::from([
+                ("FlowOut".into(), vec![StructParametricKind::Type]),
+                ("library::FlowOut".into(), vec![StructParametricKind::Type]),
+            ]),
         )?;
         let function = &module.functions[0];
         assert!(matches!(&function.result, Type::Tuple(types)
@@ -6065,14 +6159,80 @@ fn wrap<T>(x: T) -> (FlowOut<T>, library::FlowOut<(T, u8)>) {
     }
 
     #[test]
-    fn structs_reject_mixed_type_and_value_parametrics() {
-        for params in ["T, N: u32", "N: u32, T: type"] {
-            let source = format!("struct Mixed<{params}> {{ field: T }}");
-            let error = parse_module(&source).unwrap_err();
-            assert!(
-                error.contains("cannot mix type and value parameters"),
-                "{error}"
-            );
+    fn mixed_struct_arguments_follow_the_declaration_order() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+block wrap(clk, x: Outer<(bool, u8), 4>) -> Mixed::<1, Outer<(bool, u8), 4>, {u32:1 + u32:1}> {
+    Mixed<1, Outer<(bool, u8), 4>, {u32:1 + u32:1}> { field: x }
+}
+struct Outer<T, L: u32> { value: T[L] }
+struct Mixed<N: u32, T: type, M: u32 = {N}> { field: T }
+"#,
+        )?;
+        let mixed = &module.structs[1];
+        assert_eq!(mixed.type_params, ["T"]);
+        assert!(matches!(&mixed.value_parametrics[..], [
+            ParametricBinding { name: n, index: 0, default: None, .. },
+            ParametricBinding { name: m, index: 2, default: Some(Expr::Name(default)), .. },
+        ] if n == "N" && m == "M" && default == n));
+        assert_eq!(
+            mixed
+                .parametric_bindings()
+                .map(|p| p.kind())
+                .collect::<Vec<_>>(),
+            [
+                StructParametricKind::Value,
+                StructParametricKind::Type,
+                StructParametricKind::Value
+            ]
+        );
+        let block = &module.blocks[0];
+        let Type::MixedApplied { name, args } = &block.result else {
+            panic!("expected a mixed struct result annotation");
+        };
+        assert_eq!(name, "Mixed");
+        assert!(matches!(&args[..], [
+            StructArgument::Value(Expr::Literal { ty: None, text }),
+            StructArgument::Type(inner),
+            StructArgument::Value(Expr::Binary { op: BinaryOp::Add, .. }),
+        ] if text == "1" && inner == &block.params[0].ty));
+        assert!(
+            matches!(&block.output, Expr::MixedAppliedStruct { name: ctor, args: actual, .. }
+            if ctor == name && actual == args)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_struct_prefixes_use_the_imported_formal_kinds() -> Result<(), String> {
+        let module = parse_with_imports(
+            r#"
+use library;
+fn wrap<T>(value: T) -> library::Row::<T, 2> { library::Row<T> { value } }
+fn empty<T>(value: T) -> library::Row<T, 2> { library::Row::<> { value } }
+"#,
+            &BTreeSet::new(),
+            &BTreeMap::from([(
+                "library::Row".into(),
+                vec![StructParametricKind::Type, StructParametricKind::Value],
+            )]),
+        )?;
+        assert!(
+            matches!(&module.functions[0].body, Expr::MixedAppliedStruct { args, .. }
+            if args == &[StructArgument::Type(Type::Named("T".into()))])
+        );
+        assert!(
+            matches!(&module.functions[1].body, Expr::MixedAppliedStruct { args, .. }
+            if args.is_empty())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_structs_reject_arguments_outside_the_formal_grammar() {
+        for args in ["3, u8", "u8, u32", "u8, 1 + 1", "u8, _", "u8, 1, bool"] {
+            let source = format!("struct Row<T, N: u32> {{ value: T[N] }} type Bad = Row<{args}>;");
+            assert!(parse_module(&source).is_err(), "{source}");
         }
     }
 
@@ -6088,7 +6248,7 @@ block sample(clk, xs: u8[2]) -> (u8[2], u8[2]) {
 }
 "#,
             &BTreeSet::new(),
-            &BTreeSet::new(),
+            &BTreeMap::new(),
         )?;
         let Expr::Tuple(calls) = &module.functions[0].body else {
             panic!("expected two calls");
@@ -6314,7 +6474,7 @@ fn compare_member(a:u8, b:u8, x:u8) -> (bool,bool) { (K < a, b > (x)) }
 fn shadow(apply:u8, a:u8, b:u8, x:u8) -> (bool,bool) { (apply < a, b > (x)) }
 "#;
         let templates = BTreeSet::from(["lib::compose".to_string(), "apply".to_string()]);
-        let module = parse_with_imports(source, &templates, &BTreeSet::new())?;
+        let module = parse_with_imports(source, &templates, &BTreeMap::new())?;
         assert_eq!(module_uses(source)?, module.uses);
         let Expr::ParametricCall { name, args, .. } = &module.functions[0].body else {
             panic!("expected qualified template call");
@@ -6365,7 +6525,7 @@ fn apply(x: u8) -> u8 { zero!<left>(x) }
         ));
         let ambiguous = "use wire::zero!; fn f() -> u8 { zero!<Tag>() }";
         let templates = BTreeSet::from(["zero!".to_string()]);
-        let hinted = parse_with_imports(ambiguous, &templates, &BTreeSet::new())?;
+        let hinted = parse_with_imports(ambiguous, &templates, &BTreeMap::new())?;
         assert!(matches!(
             &hinted.functions[0].body,
             Expr::ParametricCall { parametrics, .. } if parametrics == &names(["Tag"])

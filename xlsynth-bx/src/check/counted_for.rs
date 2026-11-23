@@ -2,10 +2,11 @@
 
 //! Check a counted fold once with runtime bindings for the element and carry.
 
+use super::struct_parametrics::BoundStructArgument;
 use super::{BodyChecker, CheckedBinding, CheckedStmt, K, Param, Type, TypedExpr, compatible};
 use crate::ast::{Expr, ForIterable, ForLoop};
 use crate::infer_literal::{BindingWidths, Member, binding_widths, minimum_type};
-use crate::typed::{BoundParametricValue, TypedFor, TypedIterable};
+use crate::typed::{TypedFor, TypedIterable};
 use std::collections::BTreeSet;
 
 /// Static iteration shape and the value from which the loop reads its elements.
@@ -24,7 +25,7 @@ pub(super) enum CarryContext<'a> {
     Prepared(TypedExpr),
     StructPrefix {
         name: &'a str,
-        args: &'a [BoundParametricValue],
+        args: &'a [BoundStructArgument],
     },
 }
 

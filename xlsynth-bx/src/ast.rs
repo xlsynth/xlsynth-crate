@@ -131,9 +131,44 @@ pub enum Type {
         name: String,
         args: Vec<Type>,
     },
+    /// A native struct application whose declaration interleaves types and
+    /// values.
+    MixedApplied {
+        name: String,
+        args: Vec<StructArgument>,
+    },
+}
+
+/// An explicit argument to a struct with both type and value parameters.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum StructArgument {
+    Type(Type),
+    Value(Expr),
+}
+
+impl StructArgument {
+    pub(crate) fn as_type(&self) -> Option<&Type> {
+        match self {
+            Self::Type(ty) => Some(ty),
+            Self::Value(_) => None,
+        }
+    }
 }
 
 impl Type {
+    /// Borrow the argument list from any spelling of a struct application.
+    pub(crate) fn struct_application(&self) -> Option<(&str, StructLiteralArgs<'_>)> {
+        match self {
+            Self::Applied { name, args } => Some((name, StructLiteralArgs::Integers(args))),
+            Self::ParametricStruct { name, args } => {
+                Some((name, StructLiteralArgs::Expressions(args)))
+            }
+            Self::TypeApplied { name, args } => Some((name, StructLiteralArgs::Types(args))),
+            Self::MixedApplied { name, args } => Some((name, StructLiteralArgs::Mixed(args))),
+            _ => None,
+        }
+    }
+
     /// Construct an unsigned bit-vector type of the given width.
     pub(crate) fn unsigned(width: usize) -> Self {
         Self::Bits {
@@ -173,6 +208,42 @@ pub struct StructDef {
 impl StructDef {
     pub fn is_parametric(&self) -> bool {
         !self.type_params.is_empty() || !self.value_parametrics.is_empty()
+    }
+
+    /// Visit type and value parameters in their original declaration order.
+    pub fn parametric_bindings(&self) -> impl Iterator<Item = StructParametricRef<'_>> {
+        let mut types = self.type_params.iter();
+        let mut values = self.value_parametrics.iter().peekable();
+        (0..self.type_params.len() + self.value_parametrics.len()).filter_map(move |index| {
+            if let Some(value) = values.next_if(|p| p.index == index) {
+                Some(StructParametricRef::Value(value))
+            } else {
+                types.next().map(|name| StructParametricRef::Type(name))
+            }
+        })
+    }
+}
+
+/// A struct formal in declaration order.
+#[derive(Clone, Copy, Debug)]
+pub enum StructParametricRef<'a> {
+    Type(&'a str),
+    Value(&'a ParametricBinding),
+}
+
+/// The grammar expected for an argument in a struct parameter list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StructParametricKind {
+    Type,
+    Value,
+}
+
+impl StructParametricRef<'_> {
+    pub fn kind(self) -> StructParametricKind {
+        match self {
+            Self::Type(_) => StructParametricKind::Type,
+            Self::Value(_) => StructParametricKind::Value,
+        }
     }
 }
 
@@ -393,8 +464,8 @@ pub struct ParametricBinding {
     pub name: String,
     pub ty: Type,
     pub default: Option<Expr>,
-    /// Position in the declaration's combined list of value and callback
-    /// parameters.
+    /// Position among explicit parameters. A struct counts types and values,
+    /// while functions and blocks count values and callbacks.
     pub index: usize,
 }
 
@@ -539,6 +610,13 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
         base: Option<Box<StructSplat>>,
     },
+    /// A struct literal explicitly applying a mixed type and value declaration.
+    MixedAppliedStruct {
+        name: String,
+        args: Vec<StructArgument>,
+        fields: Vec<(String, Expr)>,
+        base: Option<Box<StructSplat>>,
+    },
     Field {
         value: Box<Expr>,
         name: String,
@@ -611,13 +689,48 @@ pub enum Expr {
     For(Box<ForLoop>),
 }
 
-/// The argument syntax written on a struct constructor.
+/// The argument syntax written on a struct constructor or type application.
 #[derive(Clone, Copy)]
 pub(crate) enum StructLiteralArgs<'a> {
     Omitted,
     Integers(&'a [u32]),
     Expressions(&'a [Expr]),
     Types(&'a [Type]),
+    Mixed(&'a [StructArgument]),
+}
+
+/// One argument borrowed from a homogeneous or mixed struct application.
+pub(crate) enum StructArgumentRef<'a> {
+    Integer(u32),
+    Value(&'a Expr),
+    Type(&'a Type),
+}
+
+impl<'a> StructLiteralArgs<'a> {
+    pub(crate) fn len(self) -> usize {
+        match self {
+            Self::Omitted => 0,
+            Self::Integers(args) => args.len(),
+            Self::Expressions(args) => args.len(),
+            Self::Types(args) => args.len(),
+            Self::Mixed(args) => args.len(),
+        }
+    }
+
+    /// Visit the arguments in source order without copying types or
+    /// expressions.
+    pub(crate) fn iter(self) -> impl Iterator<Item = StructArgumentRef<'a>> {
+        (0..self.len()).map(move |i| match self {
+            Self::Omitted => unreachable!("an omitted argument list is empty"),
+            Self::Integers(args) => StructArgumentRef::Integer(args[i]),
+            Self::Expressions(args) => StructArgumentRef::Value(&args[i]),
+            Self::Types(args) => StructArgumentRef::Type(&args[i]),
+            Self::Mixed(args) => match &args[i] {
+                StructArgument::Value(expr) => StructArgumentRef::Value(expr),
+                StructArgument::Type(ty) => StructArgumentRef::Type(ty),
+            },
+        })
+    }
 }
 
 /// A borrowed view of a struct constructor's arguments, fields, and splat.
@@ -659,6 +772,12 @@ impl Expr {
                 fields,
                 base,
             } => (name, StructLiteralArgs::Types(args), fields, base),
+            Self::MixedAppliedStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => (name, StructLiteralArgs::Mixed(args), fields, base),
             _ => return None,
         };
         Some(StructLiteral {

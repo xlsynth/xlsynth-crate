@@ -139,6 +139,7 @@ pub(crate) fn dslx_literal(ty: &Type, value: &IrValue) -> Result<String, String>
         )),
         Type::Named(_)
         | Type::Applied { .. }
+        | Type::MixedApplied { .. }
         | Type::ParametricStruct { .. }
         | Type::TypeApplied { .. } => Err(format!("cannot render fuzz input of named type {ty}")),
         Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
@@ -223,6 +224,7 @@ fn dslx_structural_type(ty: &Type) -> Option<String> {
         Type::Named(_)
         | Type::Enum { .. }
         | Type::Applied { .. }
+        | Type::MixedApplied { .. }
         | Type::ParametricStruct { .. }
         | Type::TypeApplied { .. }
         | Type::ParametricBits { .. }

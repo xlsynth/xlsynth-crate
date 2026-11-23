@@ -251,7 +251,7 @@ impl<'m> BodyChecker<'_, 'm> {
             .zip(formals)
             .map(|(input, p)| {
                 let ty = self
-                    .bound_block_type(&p.ty, &bindings)
+                    .bound_block_type(target, &p.ty, &bindings)
                     .map_err(|e| input_error(p, e))?;
                 self.finish_input(input, &ty).map_err(|e| input_error(p, e))
             })
@@ -265,10 +265,10 @@ impl<'m> BodyChecker<'_, 'm> {
 
     /// Combine evidence from complementary tuple fields or array elements
     /// across arguments that share a type variable.
-    pub(super) fn infer_input_groups(
+    pub(super) fn infer_input_groups<'p>(
         &mut self,
         inputs: &mut [Input<'_>],
-        formals: &[Param],
+        formals: impl IntoIterator<Item = &'p Param>,
         bindings: &mut Bindings,
         callee: &str,
     ) -> Result<(), String> {
@@ -555,7 +555,9 @@ impl<'m> BodyChecker<'_, 'm> {
             {
                 return Ok(pattern.contextual(arg));
             }
-            (Type::TypeApplied { .. }, _) if !bindings.has_unbound_variable(formal) => {
+            (Type::TypeApplied { .. } | Type::MixedApplied { .. }, _)
+                if !bindings.has_unbound_variable(formal) =>
+            {
                 return Ok(pattern.contextual(arg));
             }
             _ => {
