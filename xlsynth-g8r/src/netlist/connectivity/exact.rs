@@ -6,7 +6,7 @@
 //! treated as physical wires. Rebuild this view after changing connectivity.
 
 use super::super::normalized::{
-    BitExpr, BitIndex, BitSource, NormalizedNetlistModule, find_alias_root,
+    BitExpr, BitSource, NormalizedBitIndex, NormalizedNetlistModule, find_alias_root,
 };
 use super::super::parse::{InstIndex, PortDirection};
 use super::PinConnection;
@@ -25,7 +25,7 @@ pub enum WiringIssueKind {
 /// An issue and the electrical group it affects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WiringIssue {
-    pub bit: BitIndex,
+    pub bit: NormalizedBitIndex,
     pub kind: WiringIssueKind,
 }
 
@@ -41,10 +41,10 @@ pub struct SignalPins {
 /// Sparse index of the requested electrical groups, preserving netlist order.
 #[derive(Default, Debug)]
 pub struct PinIndex {
-    signals: HashMap<BitIndex, SignalPins>,
+    signals: HashMap<NormalizedBitIndex, SignalPins>,
 }
 impl PinIndex {
-    pub fn signal(&self, group: BitIndex) -> Option<&SignalPins> {
+    pub fn signal(&self, group: NormalizedBitIndex) -> Option<&SignalPins> {
         self.signals.get(&group)
     }
 }
@@ -55,13 +55,13 @@ impl PinIndex {
 /// direction when resolving signal values.
 pub struct ExactConnectivity<'n, 'm> {
     normalized: &'n NormalizedNetlistModule<'m>,
-    groups: Vec<BitIndex>,
+    groups: Vec<NormalizedBitIndex>,
     pub assigned: Vec<bool>,
     pub issues: Vec<WiringIssue>,
-    pub literals: Vec<(BitIndex, bool)>,
+    pub literals: Vec<(NormalizedBitIndex, bool)>,
     duplicate_instances: HashSet<InstIndex>,
-    pub output_ports: HashMap<BitIndex, usize>,
-    pub input_groups: HashSet<BitIndex>,
+    pub output_ports: HashMap<NormalizedBitIndex, usize>,
+    pub input_groups: HashSet<NormalizedBitIndex>,
 }
 impl<'n, 'm> ExactConnectivity<'n, 'm> {
     pub fn new(normalized: &'n NormalizedNetlistModule<'m>) -> Self {
@@ -71,7 +71,7 @@ impl<'n, 'm> ExactConnectivity<'n, 'm> {
         let mut literals = Vec::new();
         for assign in &normalized.assigns {
             for (&dst, expr) in assign.lhs_bits.iter().zip(&assign.rhs_bits) {
-                if std::mem::replace(&mut assigned[dst], true) {
+                if std::mem::replace(&mut assigned[dst.index()], true) {
                     issues.push(WiringIssue {
                         bit: dst,
                         kind: WiringIssueKind::RepeatedDestination,
@@ -87,7 +87,7 @@ impl<'n, 'm> ExactConnectivity<'n, 'm> {
                                 kind: WiringIssueKind::AliasCycle,
                             });
                         } else {
-                            groups[a] = b;
+                            groups[a.index()] = b;
                         }
                     }
                     BitExpr::Source(BitSource::Literal(value)) => literals.push((dst, *value)),
@@ -107,22 +107,24 @@ impl<'n, 'm> ExactConnectivity<'n, 'm> {
             }
         }
         for bit in 0..groups.len() {
-            groups[bit] = find_alias_root(&mut groups, bit);
+            groups[bit] = find_alias_root(&mut groups, NormalizedBitIndex::new(bit));
         }
         for issue in &mut issues {
-            issue.bit = groups[issue.bit];
+            issue.bit = groups[issue.bit.index()];
         }
         for (bit, _) in &mut literals {
-            *bit = groups[*bit];
+            *bit = groups[bit.index()];
         }
         let mut output_ports = HashMap::new();
         let mut input_groups = HashSet::new();
         for port in &normalized.ports {
             for &bit in &port.bits {
                 match port.direction {
-                    PortDirection::Output => *output_ports.entry(groups[bit]).or_default() += 1,
+                    PortDirection::Output => {
+                        *output_ports.entry(groups[bit.index()]).or_default() += 1
+                    }
                     PortDirection::Input | PortDirection::Inout => {
-                        input_groups.insert(groups[bit]);
+                        input_groups.insert(groups[bit.index()]);
                     }
                 }
             }
@@ -152,8 +154,8 @@ impl<'n, 'm> ExactConnectivity<'n, 'm> {
         self.duplicate_instances.contains(&instance)
     }
 
-    pub fn group(&self, bit: BitIndex) -> BitIndex {
-        self.groups[bit]
+    pub fn group(&self, bit: NormalizedBitIndex) -> NormalizedBitIndex {
+        self.groups[bit.index()]
     }
 
     /// Index only selected signals, avoiding a full adjacency allocation for
@@ -161,7 +163,7 @@ impl<'n, 'm> ExactConnectivity<'n, 'm> {
     /// return None for unknown masters or pins; those bindings are retained.
     pub fn index_pins(
         &self,
-        selected: &HashSet<BitIndex>,
+        selected: &HashSet<NormalizedBitIndex>,
         mut direction: impl FnMut(PinConnection) -> Option<PinDirection>,
     ) -> PinIndex {
         let mut index = PinIndex::default();

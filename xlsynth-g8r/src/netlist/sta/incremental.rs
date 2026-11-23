@@ -5,8 +5,8 @@
 
 use super::{
     CoverageConstantPropagation, EdgeLoadCapacitance, EdgeTiming, InstanceCoverageInputs,
-    InstanceTimingInputs, NetEndpoint, PinBitSource, PreparedStaLibrary, ResolvedTimingSource,
-    SignalTiming, SignalTimingSet, StaOptions, StaTimingType, TimingEvaluationContext,
+    InstanceTimingInputs, NetEndpoint, PinBitSource, PreparedStaLibrary, SignalTiming,
+    SignalTimingSet, StaOptions, StaTimingType, TimingEvaluationContext,
     TimingQueryDiagnosticCounts, analyze_assign_sources, canonicalize_pin_bit_source,
     combinational_output_pin_evaluation_order, effective_input_capacitance_by_edge,
     evaluate_instance_outputs, evaluate_register_setup_capture_arrival,
@@ -17,7 +17,7 @@ use crate::liberty::Library;
 use crate::liberty_model::{PinDirection, TimingArc};
 pub use crate::netlist::electrical::ElectricalViolations;
 use crate::netlist::electrical::{PinLimits, input_fanout_load};
-use crate::netlist::normalized::{BitSource, NormalizedNetlistModule};
+use crate::netlist::normalized::{BitSource, NormalizedBitIndex, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow, ensure};
 use serde::Serialize;
@@ -208,21 +208,21 @@ struct Instance {
     pin_order: Vec<String>,
     pins: HashMap<String, Vec<PinBitSource>>,
     known: HashMap<String, bool>,
-    outputs: Vec<usize>,
+    outputs: Vec<NormalizedBitIndex>,
     sequential: bool,
 }
 
 /// A physical output or a complete register capture boundary.
 #[derive(Clone, Copy)]
 pub enum TimingEndpoint {
-    Output(usize),
+    Output(NormalizedBitIndex),
     Capture(usize),
 }
 
 /// Sparse undo journal. Rejected and budget-interrupted trials restore exactly.
 #[derive(Default)]
 struct Undo {
-    bits: Vec<(usize, [Option<SignalTimingSet>; 2])>,
+    bits: Vec<(NormalizedBitIndex, [Option<SignalTimingSet>; 2])>,
     endpoints: Vec<(usize, [Option<f64>; 2])>,
     counts: Vec<(usize, TimingQueryDiagnosticCounts)>,
 }
@@ -245,7 +245,7 @@ pub struct TimingInstanceView<'a> {
     pub cell: usize,
     pub pins: &'a HashMap<String, Vec<BitSource>>,
     pub pin_order: &'a [String],
-    pub outputs: &'a [usize],
+    pub outputs: &'a [NormalizedBitIndex],
     pub sequential: bool,
 }
 
@@ -254,7 +254,7 @@ pub struct IncrementalSta<'lib> {
     lib: Arc<PreparedStaLibrary<'lib>>,
     bit_names: Vec<String>,
     bit_sources: Vec<BitSource>,
-    primary_inputs: BTreeSet<usize>,
+    primary_inputs: BTreeSet<NormalizedBitIndex>,
     instance_names: HashSet<String>,
     timing_constants: Vec<Option<bool>>,
     coverage_values: Vec<Option<bool>>,
@@ -427,13 +427,13 @@ impl<'lib> IncrementalSta<'lib> {
                 if let Some(source) = sources.first() {
                     match (pin.direction, *source) {
                         (d, BitSource::Bit(bit)) if d == PinDirection::Output as i32 => {
-                            if drivers[bit].replace(idx).is_some() {
+                            if drivers[bit.index()].replace(idx).is_some() {
                                 return Err(anyhow!("multiple drivers"));
                             }
                             outputs.push(bit);
                         }
                         (d, BitSource::Bit(bit)) if d == PinDirection::Input as i32 => {
-                            loads[bit].push((idx, name.clone()))
+                            loads[bit.index()].push((idx, name.clone()))
                         }
                         (_, BitSource::Literal(value)) => {
                             known.insert(name.clone(), value);
@@ -495,7 +495,7 @@ impl<'lib> IncrementalSta<'lib> {
                     && pin.timing_arcs.is_empty()
                     && let [BitSource::Bit(bit)] = sources.as_slice()
                 {
-                    constants[*bit] = lib.timing_constant(
+                    constants[bit.index()] = lib.timing_constant(
                         cells[i],
                         lib.pin_index(cells[i], name).expect("validated pin"),
                     )?;
@@ -512,15 +512,15 @@ impl<'lib> IncrementalSta<'lib> {
                     continue;
                 }
                 if let [BitSource::Bit(bit)] = sources.as_slice() {
-                    if let Some(value) = constants[*bit] {
+                    if let Some(value) = constants[bit.index()] {
                         inst.known.insert(name.clone(), value);
                     }
                     // Clock pins still impose electrical limits. Only a
                     // sequential cell cuts arrival propagation; a clock pin
                     // annotation on a combinational cell does not.
-                    consumers[*bit].push(i);
+                    consumers[bit.index()].push(i);
                     if !inst.sequential
-                        && let Some(driver) = drivers[*bit]
+                        && let Some(driver) = drivers[bit.index()]
                         && driver != i
                         && successors[driver].insert(i)
                     {
@@ -582,16 +582,16 @@ impl<'lib> IncrementalSta<'lib> {
         for port in &normalized.ports {
             for bit in &port.bits {
                 if port.direction == PortDirection::Input {
-                    timing[0][*bit] = Some(if registered {
+                    timing[0][bit.index()] = Some(if registered {
                         SignalTimingSet::from_primary_input_launch(source)
                     } else {
                         SignalTimingSet::from_single(source)
                     });
                 } else if seen_outputs.insert(*bit)
-                    && let ResolvedTimingSource::Bit(root) = resolved[*bit]
+                    && let BitSource::Bit(root) = resolved[bit.index()]
                 {
-                    external_load_counts[root] += 1;
-                    endpoints_by_bit[root].push(endpoints.len());
+                    external_load_counts[root.index()] += 1;
+                    endpoints_by_bit[root.index()].push(endpoints.len());
                     endpoints.push(TimingEndpoint::Output(root));
                 }
             }
@@ -609,7 +609,7 @@ impl<'lib> IncrementalSta<'lib> {
                     }
                     for source in sources {
                         if let BitSource::Bit(bit) = source {
-                            endpoints_by_bit[*bit].push(endpoints.len());
+                            endpoints_by_bit[bit.index()].push(endpoints.len());
                         }
                     }
                 }
@@ -622,10 +622,15 @@ impl<'lib> IncrementalSta<'lib> {
         let mut sta = Self {
             lib,
             bit_names: (0..n)
-                .map(|bit| normalized.render_bit(bit, nets, interner))
+                .map(|bit| normalized.render_bit(NormalizedBitIndex::new(bit), nets, interner))
                 .collect(),
             bit_sources: (0..n)
-                .map(|bit| canonicalize_pin_bit_source(BitSource::Bit(bit), &resolved))
+                .map(|bit| {
+                    canonicalize_pin_bit_source(
+                        BitSource::Bit(NormalizedBitIndex::new(bit)),
+                        &resolved,
+                    )
+                })
                 .collect(),
             primary_inputs: normalized
                 .ports
@@ -665,7 +670,7 @@ impl<'lib> IncrementalSta<'lib> {
             propagated: 0,
         };
         for bit in 0..n {
-            sta.capacitances[bit] = sta.compute_load(bit)?;
+            sta.capacitances[bit] = sta.compute_load(NormalizedBitIndex::new(bit))?;
         }
         for pos in 0..sta.topological.len() {
             sta.recompute(sta.topological[pos])?;
@@ -741,7 +746,7 @@ impl<'lib> IncrementalSta<'lib> {
             lib.pin(old, name)
                 .is_some_and(|pin| pin.direction == PinDirection::Input as i32)
                 && sources.iter().any(|source| {
-                    matches!(source, PinBitSource::Bit(bit) if self.drivers[*bit] == Some(i))
+                    matches!(source, PinBitSource::Bit(bit) if self.drivers[bit.index()] == Some(i))
                 })
         });
         let value = |cell_idx: usize, pin_idx: usize, supported: bool| {
@@ -803,9 +808,9 @@ impl<'lib> IncrementalSta<'lib> {
     }
 
     /// Re-sums just one edited net to avoid accumulating subtraction roundoff.
-    fn compute_load(&self, bit: usize) -> Result<EdgeLoadCapacitance> {
+    fn compute_load(&self, bit: NormalizedBitIndex) -> Result<EdgeLoadCapacitance> {
         let mut cap = EdgeLoadCapacitance::default();
-        for (inst, name) in &self.loads[bit] {
+        for (inst, name) in &self.loads[bit.index()] {
             let pin = self
                 .lib
                 .pin(self.cells[*inst], name)
@@ -816,15 +821,15 @@ impl<'lib> IncrementalSta<'lib> {
         }
         // Match full STA's original sink order, then each physical output
         // port load, so trial/report arithmetic also agrees bit for bit.
-        for _ in 0..self.external_load_counts[bit] {
+        for _ in 0..self.external_load_counts[bit.index()] {
             cap.rise += self.module_output_load;
             cap.fall += self.module_output_load;
         }
-        if self.drivers[bit].is_some() {
+        if self.drivers[bit.index()].is_some() {
             self.wire_load.add_to(
                 &mut cap,
-                self.loads[bit].len(),
-                self.external_load_counts[bit] != 0,
+                self.loads[bit.index()].len(),
+                self.external_load_counts[bit.index()] != 0,
             )?;
         }
         Ok(cap)
@@ -837,7 +842,7 @@ impl<'lib> IncrementalSta<'lib> {
         let inst = &self.instances[i];
         for mode in 0..if self.registered { 2 } else { 1 } {
             for bit in &inst.outputs {
-                self.timing[mode][*bit] = None;
+                self.timing[mode][bit.index()] = None;
             }
             evaluate_instance_outputs(
                 InstanceTimingInputs {
@@ -847,7 +852,7 @@ impl<'lib> IncrementalSta<'lib> {
                     known_pin_values: &inst.known,
                     output_pin_order: &self.orders[i],
                     instance_name: &inst.name,
-                    render_bit: &|bit| self.bit_names[bit].clone(),
+                    render_bit: &|bit| self.bit_names[bit.index()].clone(),
                     register_boundaries: self.registered,
                     is_sequential: inst.sequential,
                     launch_register: mode == 1,
@@ -899,7 +904,7 @@ impl<'lib> IncrementalSta<'lib> {
             .take(if self.registered { 2 } else { 1 })
         {
             *value = match self.endpoints[endpoint] {
-                TimingEndpoint::Output(bit) => self.timing[mode][bit]
+                TimingEndpoint::Output(bit) => self.timing[mode][bit.index()]
                     .as_ref()
                     .and_then(SignalTimingSet::worst_arrival_candidate)
                     .map(|t| t.timing.arrival),
@@ -930,7 +935,7 @@ impl<'lib> IncrementalSta<'lib> {
                         if let Some(sources) = self.instances[i].pins.get(name) {
                             for source in sources {
                                 if let BitSource::Bit(bit) = source
-                                    && let Some(timing) = &self.timing[mode][*bit]
+                                    && let Some(timing) = &self.timing[mode][bit.index()]
                                     && let Some(capture) = evaluate_register_setup_capture_arrival(
                                         self.lib.library,
                                         &arcs,
@@ -1007,18 +1012,18 @@ impl<'lib> IncrementalSta<'lib> {
     }
 
     /// Driver of a canonical bit, if driven by an instance.
-    pub fn driver_for_bit(&self, bit: usize) -> Option<usize> {
-        self.drivers.get(bit).copied().flatten()
+    pub fn driver_for_bit(&self, bit: NormalizedBitIndex) -> Option<usize> {
+        self.drivers.get(bit.index()).copied().flatten()
     }
 
     /// Input-pin loads in deterministic capacitance-summation order.
-    pub fn loads_for_bit(&self, bit: usize) -> &[(usize, String)] {
-        &self.loads[bit]
+    pub fn loads_for_bit(&self, bit: NormalizedBitIndex) -> &[(usize, String)] {
+        &self.loads[bit.index()]
     }
 
     /// Number of physical module outputs loading a canonical bit.
-    pub fn output_load_count(&self, bit: usize) -> usize {
-        self.external_load_counts[bit]
+    pub fn output_load_count(&self, bit: NormalizedBitIndex) -> usize {
+        self.external_load_counts[bit.index()]
     }
 
     /// Whether a stable instance name is already present.
@@ -1034,7 +1039,7 @@ impl<'lib> IncrementalSta<'lib> {
     }
 
     /// Output pin driving a canonical bit from this instance.
-    pub fn output_pin_index(&self, instance: usize, bit: usize) -> Option<usize> {
+    pub fn output_pin_index(&self, instance: usize, bit: NormalizedBitIndex) -> Option<usize> {
         let inst = self.instances.get(instance)?;
         let outputs = &self.orders[instance];
         // Ordinary scalar cells have one output. Reuse its prepared pin index
@@ -1109,8 +1114,8 @@ impl<'lib> IncrementalSta<'lib> {
             }
             for source in sources {
                 if let BitSource::Bit(bit) = source
-                    && let Some(driver) = self.drivers[*bit]
-                    && let Some(arrival) = self.timing[mode][*bit]
+                    && let Some(driver) = self.drivers[bit.index()]
+                    && let Some(arrival) = self.timing[mode][bit.index()]
                         .as_ref()
                         .and_then(SignalTimingSet::worst_arrival_candidate)
                 {
@@ -1157,9 +1162,11 @@ impl<'lib> IncrementalSta<'lib> {
             let mut fanout = 0.0_f64;
             if let Some(bit) = bit {
                 if pin.direction == PinDirection::Output as i32 {
-                    cap = self.capacitances[bit].rise.max(self.capacitances[bit].fall);
+                    cap = self.capacitances[bit.index()]
+                        .rise
+                        .max(self.capacitances[bit.index()].fall);
                     if limits.fanout.is_some() {
-                        fanout = self.loads[bit]
+                        fanout = self.loads[bit.index()]
                             .iter()
                             .map(|(load, name)| {
                                 input_fanout_load(
@@ -1173,7 +1180,7 @@ impl<'lib> IncrementalSta<'lib> {
                 }
                 if limits.transition.is_some() {
                     for timing in &self.timing {
-                        if let Some(t) = &timing[bit] {
+                        if let Some(t) = &timing[bit.index()] {
                             for edge in t.rise.iter().chain(t.fall.iter()) {
                                 transition = transition.max(edge.timing.transition);
                             }
@@ -1203,20 +1210,22 @@ impl<'lib> IncrementalSta<'lib> {
             self.propagated += 1;
             let start = undo.bits.len();
             for bit in &self.instances[inst].outputs {
+                let index = bit.index();
                 undo.bits.push((
                     *bit,
-                    [self.timing[0][*bit].clone(), self.timing[1][*bit].clone()],
+                    [self.timing[0][index].clone(), self.timing[1][index].clone()],
                 ));
             }
             undo.counts.push((inst, self.query_counts[inst]));
             self.recompute(inst)?;
             affected.insert(inst);
             for (bit, old) in &undo.bits[start..] {
-                if old[0] == self.timing[0][*bit] && old[1] == self.timing[1][*bit] {
+                let index = bit.index();
+                if old[0] == self.timing[0][index] && old[1] == self.timing[1][index] {
                     continue;
                 }
                 if let Some(limits) = limits
-                    && self.endpoints_by_bit[*bit].iter().any(|endpoint| {
+                    && self.endpoints_by_bit[index].iter().any(|endpoint| {
                         matches!(self.endpoints[*endpoint], TimingEndpoint::Output(_))
                     })
                 {
@@ -1225,7 +1234,7 @@ impl<'lib> IncrementalSta<'lib> {
                     // constraints can depend on other pending inputs and
                     // remain part of the complete endpoint update below.
                     for (mode, timing) in self.timing.iter().enumerate() {
-                        if let Some(arrival) = timing[*bit]
+                        if let Some(arrival) = timing[index]
                             .as_ref()
                             .and_then(SignalTimingSet::worst_arrival_candidate)
                             && arrival.timing.arrival
@@ -1235,8 +1244,8 @@ impl<'lib> IncrementalSta<'lib> {
                         }
                     }
                 }
-                endpoints.extend(self.endpoints_by_bit[*bit].iter().copied());
-                for consumer in &self.consumers[*bit] {
+                endpoints.extend(self.endpoints_by_bit[index].iter().copied());
+                for consumer in &self.consumers[index] {
                     affected.insert(*consumer);
                     if !self.instances[*consumer].sequential {
                         queue.insert((self.positions[*consumer], *consumer));

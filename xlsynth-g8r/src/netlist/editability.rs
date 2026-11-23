@@ -11,7 +11,7 @@ use crate::netlist::electrical::{
     InputLoad, Load, OutputCharacterization, PinLimits, SignalElectrical,
 };
 use crate::netlist::mapped::MappedNetlist;
-use crate::netlist::normalized::{BitIndex, BitSource, NormalizedNetlistModule};
+use crate::netlist::normalized::{BitSource, NormalizedBitIndex, NormalizedNetlistModule};
 use crate::netlist::parse::{InstIndex, NetRef, PortId};
 use crate::netlist::register_mapping::AssembledRegisters;
 use crate::netlist::sequential_liberty::classify_tied_ff_data;
@@ -75,7 +75,7 @@ pub fn analyze_editable_outputs(
     let n = NormalizedNetlistModule::new(&netlist.module, &netlist.nets, &netlist.interner)?;
     let count = n.bit_count();
     let wiring = ExactConnectivity::new(&n);
-    let group = |bit: BitIndex| wiring.group(bit);
+    let group = |bit: NormalizedBitIndex| wiring.group(bit);
     let mut written = wiring.assigned.clone();
     let mut blocked = vec![false; count];
     let mut control: Vec<_> = wiring
@@ -84,20 +84,20 @@ pub fn analyze_editable_outputs(
         .map(|issue| {
             log::debug!(
                 "uneditable electrical group {}: {:?}",
-                issue.bit,
+                issue.bit.index(),
                 issue.kind
             );
             issue.bit
         })
         .collect();
     for &g in control.iter().chain(&wiring.input_groups) {
-        blocked[g] = true;
+        blocked[g.index()] = true;
     }
     let outputs = &wiring.output_ports;
     let mut constants = HashMap::new();
     for &(bit, value) in &wiring.literals {
         if constants.insert(bit, value).is_some() {
-            blocked[bit] = true;
+            blocked[bit.index()] = true;
         }
     }
     if let Some(bindings) = assembled {
@@ -168,7 +168,7 @@ pub fn analyze_editable_outputs(
                 if conn.bits.len() > 1 {
                     for source in &conn.bits {
                         if let BitSource::Bit(b) = source {
-                            blocked[group(*b)] = true;
+                            blocked[group(*b).index()] = true;
                             control.push(group(*b));
                         }
                     }
@@ -177,7 +177,7 @@ pub fn analyze_editable_outputs(
             };
             let g = group(*bit);
             if duplicate_pin {
-                blocked[g] = true;
+                blocked[g.index()] = true;
                 control.push(g);
             }
             match role {
@@ -189,12 +189,12 @@ pub fn analyze_editable_outputs(
                     limits,
                     characterization,
                 }) => {
-                    if std::mem::replace(&mut written[*bit], true) {
-                        blocked[g] = true;
+                    if std::mem::replace(&mut written[bit.index()], true) {
+                        blocked[g.index()] = true;
                     }
                     if let Some(level) = constant {
                         if constants.insert(g, *level).is_some() {
-                            blocked[g] = true;
+                            blocked[g.index()] = true;
                         }
                     }
                     if shape.combinational {
@@ -238,18 +238,18 @@ pub fn analyze_editable_outputs(
                             },
                         };
                         if drivers.insert(g, root).is_some() {
-                            blocked[g] = true;
+                            blocked[g.index()] = true;
                         }
                     }
                 }
                 None | Some(Role::Unknown) => {
-                    blocked[g] = true;
+                    blocked[g.index()] = true;
                     control.push(g);
                 }
             }
         }
     }
-    constants.retain(|bit, _| !blocked[*bit]);
+    constants.retain(|bit, _| !blocked[bit.index()]);
     // A conditional timing arc may be active at one gate and inactive at
     // another instance of the same master. Memoize by the actually bound
     // input bits, including tie-cell outputs and simple assigns.
@@ -322,7 +322,7 @@ pub fn analyze_editable_outputs(
                 Some(Role::Output { state: true, .. })
                     if coverage.is_none_or(|(_, priced)| !priced.contains(&conn.port)) =>
                 {
-                    blocked[group(*bit)] = true
+                    blocked[group(*bit).index()] = true
                 }
                 Some(Role::Input { movable, .. })
                     if coverage.is_none_or(|(data, priced)| {
@@ -364,7 +364,7 @@ pub fn analyze_editable_outputs(
             }
         }
     }
-    drivers.retain(|g, _| !blocked[*g]);
+    drivers.retain(|g, _| !blocked[g.index()]);
     for (group, driver) in &mut drivers {
         driver.in_control_fanin = visited.contains(group);
         driver.fixed_load = driver.electrical.load.capacitance;

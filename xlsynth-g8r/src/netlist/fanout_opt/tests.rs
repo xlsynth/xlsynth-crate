@@ -309,12 +309,8 @@ fn rejection_accounts_for_replication_loading_upstream() {
         .unwrap()
         .net;
     assert!(
-        after_sta
-            .timing_for_net(NetIndex(upstream))
-            .unwrap()
-            .rise
-            .arrival
-            > sta.timing_for_net(NetIndex(upstream)).unwrap().rise.arrival + 200.0
+        after_sta.timing_for_net(upstream).unwrap().rise.arrival
+            > sta.timing_for_net(upstream).unwrap().rise.arrival + 200.0
     );
     assert!(after.worst_delay > before.worst_delay);
     let mut repaired = original.clone();
@@ -384,7 +380,7 @@ fn asymmetric_function_matching_is_by_named_pin_truth_not_cell_name() {
             instance: InstIndex(0),
             connection: 2,
         },
-        net: 0,
+        net: NetIndex(0),
         sinks: vec![],
         load: [2.0; 2],
         output_ports: 1,

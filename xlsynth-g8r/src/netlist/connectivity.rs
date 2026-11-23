@@ -12,7 +12,7 @@ pub mod exact;
 
 use crate::liberty::IndexedLibrary;
 use crate::liberty_model::PinDirection;
-use crate::netlist::normalized::{BitIndex, BitSource, NormalizedNetlistModule};
+use crate::netlist::normalized::{BitSource, NormalizedBitIndex, NormalizedNetlistModule};
 use crate::netlist::parse::{InstIndex, Net, NetIndex, NetlistModule, PortDirection, PortId};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -47,7 +47,7 @@ pub struct InstancePortInfo {
     pub dir: PinDirection,
     /// All normalized net bits reachable from this port's connection
     /// expression. Literal, unknown, and unconnected sources are omitted.
-    pub bits: Vec<BitIndex>,
+    pub bits: Vec<NormalizedBitIndex>,
 }
 
 /// Block-level attachment for a normalized net bit that touches one or more
@@ -72,12 +72,12 @@ pub struct NetlistConnectivity<'a> {
     /// it.
     pub bit_neighbors: Vec<BitNeighbors>,
     /// For each normalized bit index, assign-source bits that feed it.
-    pub assign_fanin_bits: Vec<Vec<BitIndex>>,
+    pub assign_fanin_bits: Vec<Vec<NormalizedBitIndex>>,
     /// For each normalized bit index, assign-destination bits fed by it.
-    pub assign_fanout_bits: Vec<Vec<BitIndex>>,
+    pub assign_fanout_bits: Vec<Vec<NormalizedBitIndex>>,
     /// Sparse map from normalized bits that touch module ports to their
     /// block-port roles.
-    pub block_port_bits: HashMap<BitIndex, BlockPortBoundary>,
+    pub block_port_bits: HashMap<NormalizedBitIndex, BlockPortBoundary>,
     /// For each instance index in `module.instances`, the list of its ports,
     /// pin directions, and connected normalized bits. Ports for each instance
     /// are stored in a deterministic order by port name.
@@ -121,34 +121,34 @@ impl<'a> NetlistConnectivity<'a> {
     }
 
     /// Returns the instances and ports that drive normalized `bit`.
-    pub fn drivers_for_bit(&self, bit: BitIndex) -> &[(InstIndex, PortId)] {
-        &self.bit_neighbors[bit].drivers
+    pub fn drivers_for_bit(&self, bit: NormalizedBitIndex) -> &[(InstIndex, PortId)] {
+        &self.bit_neighbors[bit.index()].drivers
     }
 
     /// Returns the instances and ports that load normalized `bit`.
-    pub fn loads_for_bit(&self, bit: BitIndex) -> &[(InstIndex, PortId)] {
-        &self.bit_neighbors[bit].loads
+    pub fn loads_for_bit(&self, bit: NormalizedBitIndex) -> &[(InstIndex, PortId)] {
+        &self.bit_neighbors[bit.index()].loads
     }
 
     /// Returns assign-source bits that feed normalized `bit`.
-    pub fn assign_fanin_bits(&self, bit: BitIndex) -> &[BitIndex] {
-        self.assign_fanin_bits[bit].as_slice()
+    pub fn assign_fanin_bits(&self, bit: NormalizedBitIndex) -> &[NormalizedBitIndex] {
+        self.assign_fanin_bits[bit.index()].as_slice()
     }
 
     /// Returns assign-destination bits fed by normalized `bit`.
-    pub fn assign_fanout_bits(&self, bit: BitIndex) -> &[BitIndex] {
-        self.assign_fanout_bits[bit].as_slice()
+    pub fn assign_fanout_bits(&self, bit: NormalizedBitIndex) -> &[NormalizedBitIndex] {
+        self.assign_fanout_bits[bit.index()].as_slice()
     }
 
     /// Returns true if normalized `bit` is attached to at least one module
     /// port (input, output, or inout).
-    pub fn is_block_port_bit(&self, bit: BitIndex) -> bool {
+    pub fn is_block_port_bit(&self, bit: NormalizedBitIndex) -> bool {
         self.block_port_bits.contains_key(&bit)
     }
 
     /// Returns the sparse block-port boundary metadata for normalized `bit`,
     /// if any.
-    pub fn bit_block_port_boundary(&self, bit: BitIndex) -> Option<&BlockPortBoundary> {
+    pub fn bit_block_port_boundary(&self, bit: NormalizedBitIndex) -> Option<&BlockPortBoundary> {
         self.block_port_bits.get(&bit)
     }
 
@@ -165,21 +165,21 @@ impl<'a> NetlistConnectivity<'a> {
     /// Renders one normalized bit through the underlying parsed netlist names.
     pub fn render_bit(
         &self,
-        bit: BitIndex,
+        bit: NormalizedBitIndex,
         interner: &StringInterner<StringBackend<SymbolU32>>,
     ) -> String {
         self.normalized.render_bit(bit, self.nets, interner)
     }
 
     /// Returns the parsed net containing normalized `bit`.
-    pub fn net_for_bit(&self, bit: BitIndex) -> NetIndex {
+    pub fn net_for_bit(&self, bit: NormalizedBitIndex) -> NetIndex {
         self.normalized.bit(bit).net
     }
 }
 
 fn build_block_port_bits(
     normalized: &NormalizedNetlistModule<'_>,
-) -> HashMap<BitIndex, BlockPortBoundary> {
+) -> HashMap<NormalizedBitIndex, BlockPortBoundary> {
     let mut block_port_bits = HashMap::new();
     for port in &normalized.ports {
         for bit in &port.bits {
@@ -211,7 +211,7 @@ fn create_empty_bit_neighbors(bits_len: usize) -> Vec<BitNeighbors> {
 
 fn build_assign_connectivity(
     normalized: &NormalizedNetlistModule<'_>,
-) -> (Vec<Vec<BitIndex>>, Vec<Vec<BitIndex>>) {
+) -> (Vec<Vec<NormalizedBitIndex>>, Vec<Vec<NormalizedBitIndex>>) {
     let mut assign_fanin_bits = vec![Vec::new(); normalized.bit_count()];
     let mut assign_fanout_bits = vec![Vec::new(); normalized.bit_count()];
     for assign in &normalized.assigns {
@@ -221,8 +221,8 @@ fn build_assign_connectivity(
             rhs_bits.sort_unstable();
             rhs_bits.dedup();
             for rhs_bit in rhs_bits {
-                extend_unique_bit(&mut assign_fanin_bits[lhs_bit], rhs_bit);
-                extend_unique_bit(&mut assign_fanout_bits[rhs_bit], lhs_bit);
+                extend_unique_bit(&mut assign_fanin_bits[lhs_bit.index()], rhs_bit);
+                extend_unique_bit(&mut assign_fanout_bits[rhs_bit.index()], lhs_bit);
             }
         }
     }
@@ -276,7 +276,7 @@ fn build_instance_connectivity(
             bit_indices.sort_unstable();
             bit_indices.dedup();
             for bit_idx in bit_indices {
-                let neighbors = &mut bit_neighbors[bit_idx];
+                let neighbors = &mut bit_neighbors[bit_idx.index()];
                 match dir {
                     PinDirection::Output => {
                         extend_unique_endpoint(&mut neighbors.drivers, (inst_idx, connection.port))
@@ -312,7 +312,7 @@ fn extend_unique_endpoint(endpoints: &mut Vec<(InstIndex, PortId)>, endpoint: (I
     }
 }
 
-fn extend_unique_bit(bits: &mut Vec<BitIndex>, bit: BitIndex) {
+fn extend_unique_bit(bits: &mut Vec<NormalizedBitIndex>, bit: NormalizedBitIndex) {
     if !bits.contains(&bit) {
         bits.push(bit);
     }
@@ -584,7 +584,7 @@ mod tests {
 
         // Instance 0: INVX1 u1
         let ports_u1 = conn.instance_ports(InstIndex(0), &interner);
-        let mut rendered_u1: Vec<(String, PinDirection, Vec<BitIndex>)> = Vec::new();
+        let mut rendered_u1: Vec<(String, PinDirection, Vec<NormalizedBitIndex>)> = Vec::new();
         for p in ports_u1.iter() {
             let name = interner
                 .resolve(p.port)
@@ -604,7 +604,7 @@ mod tests {
 
         // Instance 1: INVX1 u2
         let ports_u2 = conn.instance_ports(InstIndex(1), &interner);
-        let mut rendered_u2: Vec<(String, PinDirection, Vec<BitIndex>)> = Vec::new();
+        let mut rendered_u2: Vec<(String, PinDirection, Vec<NormalizedBitIndex>)> = Vec::new();
         for p in ports_u2.iter() {
             let name = interner
                 .resolve(p.port)

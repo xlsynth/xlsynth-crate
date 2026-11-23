@@ -11,6 +11,7 @@ use crate::aig::gate::{Input, Output};
 use crate::aig::sequential_cleanup::{SequentialCleanupStats, cleanup_sequential_gate_fn};
 use crate::aig::{AigBitVector, AigNode, AigOperand, GateFn, SequentialGateFn, TransitionInputId};
 use crate::liberty_model::{ClockGate, Library};
+use crate::netlist::bit_ref::DeclaredBitNumber;
 use crate::netlist::io::ParsedNetlist;
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssign, NetlistAssignKind, NetlistInstance,
@@ -585,7 +586,7 @@ fn bit_ref(net: NetIndex, bit: usize, width: usize) -> NetRef {
     if width == 1 {
         NetRef::Simple(net)
     } else {
-        NetRef::BitSelect(net, bit as u32)
+        NetRef::BitSelect(net, DeclaredBitNumber(bit as u32))
     }
 }
 

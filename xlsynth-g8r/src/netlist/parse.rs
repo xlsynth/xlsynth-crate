@@ -5,6 +5,7 @@
 //! For the structural `assign` subset used by `ugv2aig`, see
 //! `src/netlist/UGV.md`.
 
+use super::bit_ref::DeclaredBitNumber;
 use super::proto::MAX_CONCAT_DEPTH;
 use num_bigint::BigUint;
 use std::collections::{HashMap, HashSet};
@@ -18,7 +19,7 @@ use xlsynth_vast::is_system_verilog_keyword;
 pub type PortId = SymbolU32;
 pub type NetId = SymbolU32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NetIndex(pub usize);
 
 /// Index into `NetlistModule.instances`.
@@ -43,13 +44,13 @@ impl Net {
     }
 
     /// Returns the declared numeric index of this net's least-significant bit.
-    pub fn declared_lsb_number(&self) -> u32 {
-        self.width.map(|(_, lsb)| lsb).unwrap_or(0)
+    pub fn declared_lsb_number(&self) -> DeclaredBitNumber {
+        DeclaredBitNumber(self.width.map(|(_, lsb)| lsb).unwrap_or(0))
     }
 
     /// Converts a declared bit number into the lsb-based offset used by
     /// `AigBitVector` and structural-assign bookkeeping.
-    pub fn bit_offset(&self, bit_number: u32) -> Option<usize> {
+    pub fn bit_offset(&self, DeclaredBitNumber(bit_number): DeclaredBitNumber) -> Option<usize> {
         match self.width {
             Some((msb, lsb)) => {
                 let min_bit = msb.min(lsb);
@@ -71,7 +72,7 @@ impl Net {
     }
 
     /// Converts an lsb-based offset back into the declared bit number.
-    pub fn bit_number(&self, bit_offset: usize) -> Option<u32> {
+    pub fn bit_number(&self, bit_offset: usize) -> Option<DeclaredBitNumber> {
         if bit_offset >= self.width_bits() {
             return None;
         }
@@ -79,12 +80,12 @@ impl Net {
             Some((msb, lsb)) => {
                 let offset = bit_offset as u32;
                 if msb >= lsb {
-                    Some(lsb + offset)
+                    Some(DeclaredBitNumber(lsb + offset))
                 } else {
-                    Some(lsb - offset)
+                    Some(DeclaredBitNumber(lsb - offset))
                 }
             }
-            None => Some(0),
+            None => Some(DeclaredBitNumber(0)),
         }
     }
 }
@@ -141,8 +142,8 @@ impl NetlistModule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetRef {
     Simple(NetIndex),
-    BitSelect(NetIndex, u32),       // b[5]
-    PartSelect(NetIndex, u32, u32), // b[msb:lsb]
+    BitSelect(NetIndex, DeclaredBitNumber), // b[5]
+    PartSelect(NetIndex, u32, u32),         // b[msb:lsb]
     Literal(IrBits),
     UnknownLiteral(usize),
     Unconnected,
@@ -1445,7 +1446,9 @@ impl<R: Read + 'static> Parser<R> {
                                 }
                                 Ok(NetRef::PartSelect(net_idx, msb, lsb))
                             }
-                            TokenPayload::CBrack => Ok(NetRef::BitSelect(net_idx, msb)),
+                            TokenPayload::CBrack => {
+                                Ok(NetRef::BitSelect(net_idx, DeclaredBitNumber(msb)))
+                            }
                             _ => Err(ScanError {
                                 message: "expected ':' or ']' in net reference".to_string(),
                                 span: next2.span,
@@ -3122,7 +3125,10 @@ endmodule
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].assigns.len(), 1);
         assert_eq!(modules[0].assigns[0].kind, NetlistAssignKind::Continuous);
-        assert!(matches!(modules[0].assigns[0].lhs, NetRef::BitSelect(_, 1)));
+        assert!(matches!(
+            modules[0].assigns[0].lhs,
+            NetRef::BitSelect(_, DeclaredBitNumber(1))
+        ));
         assert!(matches!(
             modules[0].assigns[0].rhs,
             AssignExpr::Leaf(NetRef::Literal(_))
@@ -4083,7 +4089,7 @@ wire [255:0] a;"#;
         let inst = parser3.parse_instance().expect("no error");
         assert_eq!(inst.connections.len(), 1);
         match &inst.connections[0].1 {
-            NetRef::BitSelect(_, idx) => assert_eq!(*idx, 5),
+            NetRef::BitSelect(_, idx) => assert_eq!(*idx, DeclaredBitNumber(5)),
             _ => panic!("Expected BitSelect net ref"),
         }
         // Instance with .A(b[7:0])
@@ -4577,7 +4583,7 @@ endmodule
         // And the instance should have one connection with a BitSelect
         let inst = &modules[0].instances[0];
         match inst.connections[0].1 {
-            NetRef::BitSelect(_, idx) => assert_eq!(idx, 3),
+            NetRef::BitSelect(_, idx) => assert_eq!(idx, DeclaredBitNumber(3)),
             ref other => panic!("expected BitSelect, got {:?}", other),
         }
     }

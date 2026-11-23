@@ -17,7 +17,7 @@
 use crate::liberty::IndexedLibrary;
 use crate::liberty_model::PinDirection;
 use crate::netlist::connectivity::NetlistConnectivity;
-use crate::netlist::normalized::BitIndex;
+use crate::netlist::normalized::NormalizedBitIndex;
 use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use string_interner::symbol::SymbolU32;
@@ -234,10 +234,10 @@ fn resolve_to_string(
 
 fn reachable_bits_for_traversal(
     ctx: &ModuleConeContext<'_>,
-    start_bit: BitIndex,
+    start_bit: NormalizedBitIndex,
     direction: TraversalDirection,
     stop: StopCondition,
-) -> Vec<BitIndex> {
+) -> Vec<NormalizedBitIndex> {
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
     let mut reachable = Vec::new();

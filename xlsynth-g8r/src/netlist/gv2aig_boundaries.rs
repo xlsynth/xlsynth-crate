@@ -13,7 +13,7 @@ use crate::liberty::cell_formula::{EmitContext, Term};
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::gatefn_from_netlist::build_cell_formula_map;
 use crate::netlist::hierarchy::{ElaboratedModuleBoundary, ElaboratedNetlist};
-use crate::netlist::normalized::{BitExpr, BitIndex, BitSource, NormalizedNetlistModule};
+use crate::netlist::normalized::{BitExpr, BitSource, NormalizedBitIndex, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, PortDirection};
 
 mod feedback;
@@ -139,9 +139,9 @@ enum PreparedDriver {
 
 /// One pending action in the iterative dependency traversal.
 enum Frame {
-    Enter(BitIndex),
+    Enter(NormalizedBitIndex),
     Emit {
-        bit: BitIndex,
+        bit: NormalizedBitIndex,
         driver: PreparedDriver,
     },
 }
@@ -209,7 +209,7 @@ impl<'a> BoundaryExtractor<'a> {
             if port.direction == PortDirection::Input {
                 let port_name = elaborated.interner.resolve(port.name).unwrap().to_string();
                 for &bit in &port.bits {
-                    drivers[bit].push(BitDriver::ModuleInput {
+                    drivers[bit.index()].push(BitDriver::ModuleInput {
                         port_name: port_name.clone(),
                     });
                 }
@@ -217,7 +217,7 @@ impl<'a> BoundaryExtractor<'a> {
         }
         for (assign_index, assign) in normalized.assigns.iter().enumerate() {
             for (rhs_bit_index, &bit) in assign.lhs_bits.iter().enumerate() {
-                drivers[bit].push(BitDriver::Assign {
+                drivers[bit.index()].push(BitDriver::Assign {
                     assign_index,
                     rhs_bit_index,
                 });
@@ -267,7 +267,7 @@ impl<'a> BoundaryExtractor<'a> {
                         type_name, instance_name, pin_name
                     ));
                 };
-                drivers[*bit].push(BitDriver::CellOutput {
+                drivers[bit.index()].push(BitDriver::CellOutput {
                     instance_index,
                     connection_index,
                 });
@@ -342,7 +342,7 @@ impl<'a> BoundaryExtractor<'a> {
             let input = self.builder.add_input(source.name.clone(), bits.len());
             for (offset, &bit) in bits.iter().enumerate() {
                 let owner = format!("{}[{}]", source.name, offset);
-                if let Some(previous) = &self.source_owners[bit] {
+                if let Some(previous) = &self.source_owners[bit.index()] {
                     return Err(format!(
                         "source '{}' selects net bit '{}' already selected by source '{}'",
                         owner,
@@ -350,8 +350,8 @@ impl<'a> BoundaryExtractor<'a> {
                         previous
                     ));
                 }
-                self.source_owners[bit] = Some(owner);
-                self.values[bit] = Some(*input.get_lsb(offset));
+                self.source_owners[bit.index()] = Some(owner);
+                self.values[bit.index()] = Some(*input.get_lsb(offset));
             }
         }
         for sink in &boundaries.sinks {
@@ -373,7 +373,10 @@ impl<'a> BoundaryExtractor<'a> {
     }
 
     /// Resolves a source selector to canonical signal bits.
-    fn resolve_source(&self, selector: &Gv2AigSourceSelector) -> Result<Vec<BitIndex>, String> {
+    fn resolve_source(
+        &self,
+        selector: &Gv2AigSourceSelector,
+    ) -> Result<Vec<NormalizedBitIndex>, String> {
         match selector {
             Gv2AigSourceSelector::ModuleInput {
                 instance_name,
@@ -392,7 +395,7 @@ impl<'a> BoundaryExtractor<'a> {
         instance_name: &str,
         port_name: &str,
         expected_direction: PortDirection,
-    ) -> Result<Vec<BitIndex>, String> {
+    ) -> Result<Vec<NormalizedBitIndex>, String> {
         if instance_name.is_empty() {
             let port = self
                 .normalized
@@ -438,7 +441,11 @@ impl<'a> BoundaryExtractor<'a> {
     }
 
     /// Resolves and validates one mapped cell output pin selected as a source.
-    fn cell_output_bit(&self, instance_name: &str, pin_name: &str) -> Result<BitIndex, String> {
+    fn cell_output_bit(
+        &self,
+        instance_name: &str,
+        pin_name: &str,
+    ) -> Result<NormalizedBitIndex, String> {
         let instance_index = self
             .instance_index_by_name
             .get(instance_name)
@@ -479,36 +486,36 @@ impl<'a> BoundaryExtractor<'a> {
 
     /// Resolves one sink bit with iterative DFS so long netlist chains do not
     /// recurse.
-    fn resolve_bit(&mut self, root: BitIndex) -> Result<AigOperand, String> {
+    fn resolve_bit(&mut self, root: NormalizedBitIndex) -> Result<AigOperand, String> {
         let mut stack = vec![Frame::Enter(root)];
         while let Some(frame) = stack.pop() {
             match frame {
                 Frame::Enter(bit) => {
-                    if self.values[bit].is_some() {
+                    if self.values[bit.index()].is_some() {
                         continue;
                     }
-                    if self.active[bit] {
+                    if self.active[bit.index()] {
                         return Err(format!(
                             "dependency cycle reaches net bit '{}' in the selected cone",
                             self.render_bit(bit)
                         ));
                     }
-                    self.active[bit] = true;
+                    self.active[bit.index()] = true;
                     let (driver, dependencies) = self.prepare_bit(bit)?;
                     stack.push(Frame::Emit { bit, driver });
                     for dependency in dependencies.into_iter().rev() {
-                        if self.values[dependency].is_none() {
+                        if self.values[dependency.index()].is_none() {
                             stack.push(Frame::Enter(dependency));
                         }
                     }
                 }
                 Frame::Emit { bit, driver } => {
                     self.emit_prepared(bit, driver)?;
-                    self.active[bit] = false;
+                    self.active[bit.index()] = false;
                 }
             }
         }
-        self.values[root].ok_or_else(|| {
+        self.values[root.index()].ok_or_else(|| {
             format!(
                 "internal error: net bit '{}' was not resolved",
                 self.render_bit(root)
@@ -518,8 +525,11 @@ impl<'a> BoundaryExtractor<'a> {
 
     /// Prepares the driver of one reached bit and returns it with its net-bit
     /// dependencies.
-    fn prepare_bit(&mut self, bit: BitIndex) -> Result<(PreparedDriver, Vec<BitIndex>), String> {
-        let driver = match self.drivers[bit].as_slice() {
+    fn prepare_bit(
+        &mut self,
+        bit: NormalizedBitIndex,
+    ) -> Result<(PreparedDriver, Vec<NormalizedBitIndex>), String> {
+        let driver = match self.drivers[bit.index()].as_slice() {
             [] => return Err(format!("net bit '{}' has no driver", self.render_bit(bit))),
             [driver] => driver.clone(),
             drivers => {
@@ -683,7 +693,11 @@ impl<'a> BoundaryExtractor<'a> {
     }
 
     /// Emits a prepared bit after all of its dependencies have been resolved.
-    fn emit_prepared(&mut self, bit: BitIndex, prepared: PreparedDriver) -> Result<(), String> {
+    fn emit_prepared(
+        &mut self,
+        bit: NormalizedBitIndex,
+        prepared: PreparedDriver,
+    ) -> Result<(), String> {
         let value = match prepared {
             PreparedDriver::Assign {
                 assign_index,
@@ -716,11 +730,11 @@ impl<'a> BoundaryExtractor<'a> {
                 formula.emit_formula_term(&mut self.builder, &input_map, &context)?
             }
         };
-        self.values[bit] = Some(value);
+        self.values[bit.index()] = Some(value);
         Ok(())
     }
 
-    fn render_bit(&self, bit: BitIndex) -> String {
+    fn render_bit(&self, bit: NormalizedBitIndex) -> String {
         self.normalized.render_bit(bit, self.nets, self.interner)
     }
 }
@@ -750,8 +764,12 @@ fn resolved_source(
     builder: &mut GateBuilder,
 ) -> Result<AigOperand, String> {
     match source {
-        BitSource::Bit(bit) => values[bit]
-            .ok_or_else(|| format!("internal error: dependency bit {} is unresolved", bit)),
+        BitSource::Bit(bit) => values[bit.index()].ok_or_else(|| {
+            format!(
+                "internal error: dependency bit {} is unresolved",
+                bit.index()
+            )
+        }),
         BitSource::Literal(true) => Ok(builder.get_true()),
         BitSource::Literal(false) => Ok(builder.get_false()),
         BitSource::Unknown => Err("unknown literal in selected cone".to_string()),

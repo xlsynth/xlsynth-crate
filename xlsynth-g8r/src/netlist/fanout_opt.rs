@@ -12,9 +12,11 @@
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty_model::{Library, Pin, PinDirection};
 use crate::netlist::connectivity::PinConnection;
+use crate::netlist::connectivity::directed::resolve_dense;
 use crate::netlist::electrical::{PinLimits, input_capacitance as pin_cap};
 use crate::netlist::io::resolve_symbol;
 use crate::netlist::mapped::MappedNetlist;
+use crate::netlist::normalized::{BitSource, NormalizedBitIndex};
 use crate::netlist::parse::{
     AssignExpr, InstIndex, Net, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, PortDirection,
 };
@@ -83,7 +85,7 @@ struct Sink {
 #[derive(Clone, Debug)]
 struct Driver {
     binding: PinConnection,
-    net: usize,
+    net: NetIndex,
     sinks: Vec<Sink>,
     load: [f64; 2],
     output_ports: usize,
@@ -95,7 +97,7 @@ struct Driver {
 /// source.
 struct Graph {
     drivers: Vec<Driver>,
-    roots: Vec<Option<usize>>,
+    roots: Vec<Option<NetIndex>>,
     cells: Vec<usize>,
 }
 
@@ -279,8 +281,14 @@ fn choices_prepared(
     Ok(out)
 }
 
+/// Fanout optimization owns a module with one bit per net in declaration
+/// order. Appended scalar wires follow the same order.
+fn scalar_bit_index(net: NetIndex) -> NormalizedBitIndex {
+    NormalizedBitIndex::new(net.0)
+}
+
 /// Reads the scalar source of a connection; unsupported widths fail closed.
-fn source(reference: &NetRef, roots: &[Option<usize>]) -> Result<Option<usize>> {
+fn source(reference: &NetRef, roots: &[Option<NetIndex>]) -> Result<Option<NetIndex>> {
     match reference {
         NetRef::Simple(n) => Ok(roots[n.0]),
         NetRef::Literal(v) if v.get_bit_count() == 1 => Ok(None),
@@ -346,9 +354,10 @@ fn graph(
         .map(|(i, c)| (c.name.as_str(), (i, c)))
         .collect();
     let mut cells = Vec::with_capacity(netlist.module.instances.len());
-    use crate::netlist::connectivity::directed::{AssignedSource, ResolvedSource};
     let roots = if netlist.module.assigns.is_empty() {
-        (0..netlist.nets.len()).map(Some).collect()
+        (0..netlist.nets.len())
+            .map(|index| Some(NetIndex(index)))
+            .collect()
     } else {
         let mut aliases = vec![None; netlist.nets.len()];
         for a in &netlist.module.assigns {
@@ -360,9 +369,9 @@ fn graph(
                 return Err(anyhow!("non-scalar alias lhs"));
             };
             let rhs = match &a.rhs {
-                AssignExpr::Leaf(NetRef::Simple(n)) => AssignedSource::Alias(n.0),
+                AssignExpr::Leaf(NetRef::Simple(n)) => BitSource::Bit(*n),
                 AssignExpr::Leaf(NetRef::Literal(v)) if v.get_bit_count() == 1 => {
-                    AssignedSource::Unknown
+                    BitSource::Unknown
                 }
                 _ => {
                     return Err(anyhow!(
@@ -375,18 +384,18 @@ fn graph(
                 "multiple alias drivers"
             );
         }
-        crate::netlist::connectivity::directed::resolve(&aliases)
+        resolve_dense(&aliases)
             .map_err(|_| anyhow!("cyclic scalar alias"))?
             .into_iter()
             .map(|source| match source {
-                ResolvedSource::Bit(bit) => Some(bit),
-                ResolvedSource::Literal(_) | ResolvedSource::Unknown => None,
+                BitSource::Bit(bit) => Some(bit),
+                BitSource::Literal(_) | BitSource::Unknown => None,
             })
             .collect::<Vec<_>>()
     };
-    let mut sinks: BTreeMap<usize, Vec<Sink>> = BTreeMap::new();
-    let mut loads: BTreeMap<usize, [f64; 2]> = BTreeMap::new();
-    let mut slew_bounds: BTreeMap<usize, f64> = BTreeMap::new();
+    let mut sinks: BTreeMap<NetIndex, Vec<Sink>> = BTreeMap::new();
+    let mut loads: BTreeMap<NetIndex, [f64; 2]> = BTreeMap::new();
+    let mut slew_bounds: BTreeMap<NetIndex, f64> = BTreeMap::new();
     let mut drivers = Vec::new();
     let mut seen_drivers = BTreeSet::new();
     for (i, inst) in netlist.module.instances.iter().enumerate() {
@@ -454,7 +463,7 @@ fn graph(
     for (i, n) in netlist.nets.iter().enumerate() {
         net_by_name.entry(n.name).or_insert(NetIndex(i));
     }
-    let mut ports = BTreeMap::<usize, usize>::new();
+    let mut ports = BTreeMap::<NetIndex, usize>::new();
     for p in &netlist.module.ports {
         ensure!(
             p.direction != PortDirection::Inout,
@@ -592,7 +601,7 @@ fn report_metrics(
             .find(|p| library.resolve_string(&p.name) == pname)
             .ok_or_else(|| anyhow!("unknown pin"))?;
         let timing = sta
-            .timing_for_net(NetIndex(d.net))
+            .timing_for_net(d.net)
             .ok_or_else(|| anyhow!("missing driver timing"))?;
         let slew = timing.rise.transition.max(timing.fall.transition);
         let load = d.load[0].max(d.load[1]);
@@ -751,7 +760,7 @@ fn input_context(
         }
         let name = resolve_symbol(&netlist.interner, *pin, "pin")?;
         if let Some(n) = source(r, &g.roots)? {
-            if let Some(t) = sta.timing_for_net(NetIndex(n)) {
+            if let Some(t) = sta.timing_for_net(n) {
                 out.push((
                     name,
                     [
@@ -840,7 +849,7 @@ pub fn optimize_fanout(
                 continue;
             };
             let t = sta
-                .timing_for_net(NetIndex(d.net))
+                .timing_for_net(d.net)
                 .ok_or_else(|| anyhow!("missing driver timing"))?;
             let p = library.cells[c.index]
                 .pins
