@@ -5,7 +5,7 @@
 use xlsynth_pir::ir::{Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::math::ceil_log2;
 use xlsynth_pir::{IrBits, IrValue};
-use xlsynth_vast::{Expr, GenerateLoop, LiteralFormat, LogicRef};
+use xlsynth_vast::{Expr, GenerateLoop, LiteralFormat, LogicRef, VastError};
 
 use crate::BlockCodegenError;
 use crate::block::{BlockEmitter, Value, unsupported_invoke, validate_external_identifier};
@@ -497,10 +497,8 @@ impl BlockEmitter<'_, '_> {
     }
 
     /// Returns a signed interpretation preserving the original packed width.
-    fn signed(&mut self, expression: Expr) -> Expr {
-        self.file
-            .make_function_call("$signed", &[&expression])
-            .expect("system function name is nonempty")
+    fn signed(&mut self, expression: Expr) -> Result<Expr, VastError> {
+        self.file.make_function_call("$signed", &[&expression])
     }
 
     /// Lowers ordinary arithmetic, comparison, shift, division, and gate nodes.
@@ -522,7 +520,7 @@ impl BlockEmitter<'_, '_> {
             Binop::Shll => self.file.make_shll(&lhs.expr, &rhs.expr),
             Binop::Shrl => self.file.make_shrl(&lhs.expr, &rhs.expr),
             Binop::Shra => {
-                let signed_lhs = self.signed(lhs.expr);
+                let signed_lhs = self.signed(lhs.expr)?;
                 let shifted = self.file.make_shra(&signed_lhs, &rhs.expr);
                 self.file.make_function_call("$unsigned", &[&shifted])?
             }
@@ -533,8 +531,8 @@ impl BlockEmitter<'_, '_> {
             Binop::Ult => self.file.make_lt(&lhs.expr, &rhs.expr),
             Binop::Ule => self.file.make_le(&lhs.expr, &rhs.expr),
             Binop::Sgt | Binop::Sge | Binop::Slt | Binop::Sle => {
-                let left = self.signed(lhs.expr);
-                let right = self.signed(rhs.expr);
+                let left = self.signed(lhs.expr)?;
+                let right = self.signed(rhs.expr)?;
                 match op {
                     Binop::Sgt => self.file.make_gt(&left, &right),
                     Binop::Sge => self.file.make_ge(&left, &right),
@@ -575,13 +573,13 @@ impl BlockEmitter<'_, '_> {
         let is_zero = self.file.make_eq(&rhs.expr, &rhs_zero);
         let left = if matches!(op, Binop::Sdiv | Binop::Smod) {
             let resized = self.resize_signed(lhs, lhs_width, result_width)?;
-            self.signed(resized)
+            self.signed(resized)?
         } else {
             self.resize_unsigned(lhs, lhs_width, result_width)?
         };
         let right = if matches!(op, Binop::Sdiv | Binop::Smod) {
             let resized = self.resize_signed(rhs, rhs_width, result_width)?;
-            self.signed(resized)
+            self.signed(resized)?
         } else {
             self.resize_unsigned(rhs, rhs_width, result_width)?
         };
@@ -1221,7 +1219,7 @@ impl BlockEmitter<'_, '_> {
         let mut values = Vec::with_capacity(operands.len());
         for (&operand, &signed) in operands.iter().zip(&signed_operands) {
             let value = self.numeric_value(operand)?.expr;
-            let value = if signed { self.signed(value) } else { value };
+            let value = if signed { self.signed(value)? } else { value };
             values.push(self.file.emit_expression(&value));
         }
         let arguments = if values.is_empty() {

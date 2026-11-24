@@ -2515,7 +2515,7 @@ impl VastFile {
         &mut self,
         name: &str,
         rhs: &Expr,
-        local: bool,
+        kind: ParameterKind,
         definition: Option<Def>,
         int_kind: bool,
     ) -> (LogicRef, MemberData) {
@@ -2526,7 +2526,7 @@ impl VastFile {
         (
             reference,
             MemberData::Parameter {
-                local,
+                local: kind == ParameterKind::Localparam,
                 def: definition,
                 name: name.to_owned(),
                 rhs: *rhs,
@@ -2642,14 +2642,13 @@ impl VastFile {
         module: VastModule,
         name: &str,
         rhs: &Expr,
-        local: bool,
+        kind: ParameterKind,
         definition: Option<Def>,
         int_kind: bool,
     ) -> Result<LogicRef, VastError> {
         let module_index = self.check(module.0);
-        let kind = if local { "localparam" } else { "parameter" };
-        self.check_unique_module_name(module, name, kind)?;
-        let (reference, member) = self.parameter_member(name, rhs, local, definition, int_kind);
+        self.check_unique_module_name(module, name, parameter_kind_name(kind, false))?;
+        let (reference, member) = self.parameter_member(name, rhs, kind, definition, int_kind);
         self.push_member(module, member);
         self.ast.modules[module_index]
             .defined_names
@@ -2664,7 +2663,7 @@ impl VastFile {
         name: &str,
         rhs: &Expr,
     ) -> Result<ParameterRef, VastError> {
-        self.add_module_parameter(module, name, rhs, false, None, false)
+        self.add_module_parameter(module, name, rhs, ParameterKind::Parameter, None, false)
             .map(|reference| ParameterRef(reference.0))
     }
 
@@ -2676,8 +2675,15 @@ impl VastFile {
         rhs: &Expr,
     ) -> Result<ParameterRef, VastError> {
         let name = self.ast.defs[self.check(definition.0)].name.clone();
-        self.add_module_parameter(module, &name, rhs, false, Some(*definition), false)
-            .map(|reference| ParameterRef(reference.0))
+        self.add_module_parameter(
+            module,
+            &name,
+            rhs,
+            ParameterKind::Parameter,
+            Some(*definition),
+            false,
+        )
+        .map(|reference| ParameterRef(reference.0))
     }
 
     /// Adds an untyped module-local parameter, rejecting duplicate names.
@@ -2687,7 +2693,7 @@ impl VastFile {
         name: &str,
         rhs: &Expr,
     ) -> Result<LocalparamRef, VastError> {
-        self.add_module_parameter(module, name, rhs, true, None, false)
+        self.add_module_parameter(module, name, rhs, ParameterKind::Localparam, None, false)
             .map(|reference| LocalparamRef(reference.0))
     }
 
@@ -2699,8 +2705,15 @@ impl VastFile {
         rhs: &Expr,
     ) -> Result<LocalparamRef, VastError> {
         let name = self.ast.defs[self.check(definition.0)].name.clone();
-        self.add_module_parameter(module, &name, rhs, true, Some(*definition), false)
-            .map(|reference| LocalparamRef(reference.0))
+        self.add_module_parameter(
+            module,
+            &name,
+            rhs,
+            ParameterKind::Localparam,
+            Some(*definition),
+            false,
+        )
+        .map(|reference| LocalparamRef(reference.0))
     }
 
     /// Adds an `int`-typed module-local parameter, rejecting duplicate names.
@@ -2710,7 +2723,7 @@ impl VastFile {
         name: &str,
         rhs: &Expr,
     ) -> Result<LocalparamRef, VastError> {
-        self.add_module_parameter(module, name, rhs, true, None, true)
+        self.add_module_parameter(module, name, rhs, ParameterKind::Localparam, None, true)
             .map(|reference| LocalparamRef(reference.0))
     }
 
@@ -3105,7 +3118,8 @@ impl VastFile {
         name: &str,
         rhs: &Expr,
     ) -> LocalparamRef {
-        let (reference, member) = self.parameter_member(name, rhs, true, None, false);
+        let (reference, member) =
+            self.parameter_member(name, rhs, ParameterKind::Localparam, None, false);
         self.push_generate_member(generate, member);
         LocalparamRef(reference.0)
     }
@@ -3118,7 +3132,13 @@ impl VastFile {
         rhs: &Expr,
     ) -> LocalparamRef {
         let name = self.ast.defs[self.check(definition.0)].name.clone();
-        let (reference, member) = self.parameter_member(&name, rhs, true, Some(*definition), false);
+        let (reference, member) = self.parameter_member(
+            &name,
+            rhs,
+            ParameterKind::Localparam,
+            Some(*definition),
+            false,
+        );
         self.push_generate_member(generate, member);
         LocalparamRef(reference.0)
     }

@@ -301,9 +301,8 @@ pub fn build_pipeline(
         let destination = config.layout.after_stage(i);
         let stage_output_name = stage_output_wire_name(i);
         let stage_output_type = file.make_bit_vector_type(destination.width() as i64, false)?;
-        let stage_output_wire = file
-            .add_wire(outer_module, &stage_output_name, &stage_output_type)
-            .map_err(|e| xlsynth::XlsynthError(e.to_string()))?;
+        let stage_output_wire =
+            file.add_wire(outer_module, &stage_output_name, &stage_output_type)?;
 
         // Instantiate the stage module with the current inputs.
         let mut stage_port_names = Vec::new();
@@ -367,9 +366,7 @@ pub fn build_pipeline(
             for port in &destination.ports {
                 let vast_type = file.make_bit_vector_type(port.bits.len() as i64, false)?;
                 let wire_name = slice_wire_name(layer, &port.name);
-                let wire = file
-                    .add_wire(outer_module, &wire_name, &vast_type)
-                    .map_err(|e| xlsynth::XlsynthError(e.to_string()))?;
+                let wire = file.add_wire(outer_module, &wire_name, &vast_type)?;
                 let slice_expr = file
                     .make_slice(
                         &stage_output_wire.to_indexable_expr(),

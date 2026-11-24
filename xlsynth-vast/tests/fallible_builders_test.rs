@@ -2,7 +2,9 @@
 
 //! Recoverable validation for VAST builders.
 
-use xlsynth_vast::{SvArgument, VastFile, VastFileType};
+use xlsynth_vast::{
+    LogicRef, SvArgument, VastDataType, VastError, VastFile, VastFileType, VastModule,
+};
 
 #[test]
 fn invalid_net_types_do_not_mutate_the_module_or_reserve_the_name() {
@@ -61,24 +63,22 @@ fn two_state_bit_widths_return_errors_and_can_be_corrected() {
 
 #[test]
 fn all_port_builders_report_name_collisions_without_mutation() {
-    for direction in ["input", "output", "logic input", "logic output"] {
+    type PortBuilder =
+        fn(&mut VastFile, VastModule, &str, &VastDataType) -> Result<LogicRef, VastError>;
+    let cases: [(PortBuilder, &str); 5] = [
+        (VastFile::add_input, "input"),
+        (VastFile::add_output, "output"),
+        (VastFile::add_inout, "inout"),
+        (VastFile::add_logic_input, "input"),
+        (VastFile::add_logic_output, "output"),
+    ];
+    for (builder, kind) in cases {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("Ports");
         let logic = file.make_scalar_type();
         file.add_wire(module, "pin", &logic).unwrap();
         let before = file.emit();
-        let result = match direction {
-            "input" => file.add_input(module, "pin", &logic),
-            "output" => file.add_output(module, "pin", &logic),
-            "logic input" => file.add_logic_input(module, "pin", &logic),
-            "logic output" => file.add_logic_output(module, "pin", &logic),
-            _ => unreachable!(),
-        };
-        let kind = if direction.ends_with("input") {
-            "input"
-        } else {
-            "output"
-        };
+        let result = builder(&mut file, module, "pin", &logic);
         assert_eq!(
             result.unwrap_err().to_string(),
             format!(
