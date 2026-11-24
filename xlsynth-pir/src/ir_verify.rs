@@ -11,8 +11,8 @@ use crate::ir_deduce::deduce_graph_result_type;
 mod package;
 
 pub(crate) use package::{
-    CalleeLookup, validate_fn_with, validate_opaque_extern_ports,
-    verify_block_structure_in_package, verify_package_inout_hierarchies, verify_package_structure,
+    CalleeLookup, ExternModelBindings, validate_block_with_targets, validate_fn_with,
+    validate_opaque_extern_ports, verify_package_inout_hierarchies, verify_package_structure,
 };
 pub use package::{InstantiationPortDirection, ValidationError as VerifyError};
 
@@ -44,8 +44,27 @@ pub fn verify_block_in_package(
     package::validate_block(block, pkg, member_index)
 }
 
+#[cfg(test)]
+thread_local! {
+    static PACKAGE_VERIFICATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Resets the counter used by deterministic incremental-verification tests.
+#[cfg(test)]
+pub(crate) fn reset_package_verify_count() {
+    PACKAGE_VERIFICATION_COUNT.set(0);
+}
+
+/// Returns the number of full package checks performed on this test thread.
+#[cfg(test)]
+pub(crate) fn package_verify_count() -> usize {
+    PACKAGE_VERIFICATION_COUNT.get()
+}
+
 /// Verifies an entire PIR package, including function and block context.
 pub fn verify_package(pkg: &Package) -> Result<(), VerifyError> {
+    #[cfg(test)]
+    PACKAGE_VERIFICATION_COUNT.set(PACKAGE_VERIFICATION_COUNT.get() + 1);
     package::validate_package(pkg)
 }
 

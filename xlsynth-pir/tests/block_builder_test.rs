@@ -13,6 +13,7 @@ use xlsynth_pir::ir::{
     Block, InstantiationKind, MemberType, NodePayload, OpaqueExternPort, OpaqueExternPortKind,
     Package, PackageMember, Type,
 };
+use xlsynth_pir::ir_builder::FunctionBatch;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_rebase_ids::package_max_emitted_node_id;
@@ -506,6 +507,258 @@ fn package_finalization_rejects_missing_or_mismatched_declarations_atomically() 
             .is_err()
     );
     assert_eq!(package.to_string(), before);
+}
+
+/// Connects a leaf output back to its own input through the parent.
+fn feedback_builder(name: &str, leaf: &Block) -> BlockBuilder {
+    let mut builder = BlockBuilder::new(name);
+    let inst = builder.instantiate("u", leaf).unwrap();
+    let out = builder.instantiation_output(inst, "y").unwrap();
+    builder.instantiation_input(inst, "x", out).unwrap();
+    builder
+}
+
+#[test]
+fn batch_checks_parent_cycles_and_can_retry_the_same_name() {
+    let leaf = leaf_block();
+    let mut package = Package {
+        name: "hierarchy".into(),
+        file_table: xlsynth_pir::ir::FileTable::new(),
+        members: vec![PackageMember::Block(leaf.clone())],
+        top: Some(("leaf".into(), MemberType::Block)),
+    };
+    let mut expected = package.clone();
+    let mut batch = FunctionBatch::new(&mut package).unwrap();
+    for name in ["first", "second"] {
+        assert!(matches!(
+            batch.append_block(feedback_builder(name, &leaf)),
+            Err(BuilderError::CombinationalCycle { .. })
+        ));
+        batch.append_block(parent_builder(name, &leaf)).unwrap();
+        parent_builder(name, &leaf)
+            .build_into_package(&mut expected)
+            .unwrap();
+    }
+    assert_eq!(package.to_string(), expected.to_string());
+    assert_standard_package(&package);
+}
+
+#[test]
+fn new_batch_rechecks_a_child_edited_between_batches() {
+    let mut constant = BlockBuilder::new("leaf");
+    constant.input_port("x", Type::Bits(8)).unwrap();
+    let zero = constant.literal(bits(8, 0)).unwrap();
+    constant.output_port("y", zero).unwrap();
+    let mut package = constant.build_package("edited").unwrap();
+    let mut batch = FunctionBatch::new(&mut package).unwrap();
+    let parent = parent_builder("first", batch.package().get_block("leaf").unwrap());
+    batch.append_block(parent).unwrap();
+
+    // Same ports and IDs, but the new output depends on the input.
+    *package.get_block_mut("leaf").unwrap() = leaf_block();
+    let feedback = feedback_builder("second", package.get_block("leaf").unwrap());
+    let mut next = FunctionBatch::new(&mut package).unwrap();
+    assert!(matches!(
+        next.append_block(feedback),
+        Err(BuilderError::CombinationalCycle { .. })
+    ));
+}
+
+#[test]
+fn batch_resolves_preexisting_function_and_block_with_the_same_name() {
+    let source = r#"package mixed
+fn shared(a: bits[4] id=1) -> bits[4] {
+  ret inverse: bits[4] = not(a, id=2)
+}
+block shared(x: bits[8], y: bits[8]) {
+  x: bits[8] = input_port(name=x, id=3)
+  y: () = output_port(x, name=y, id=4)
+}
+"#;
+    let mut package = Parser::new(source).parse_and_verify_package().unwrap();
+    let mut batch = FunctionBatch::new(&mut package).unwrap();
+    let mut wrapper = parent_builder("wrapper", batch.package().get_block("shared").unwrap());
+    let arg = wrapper.input_port("arg", Type::Bits(4)).unwrap();
+    let call = wrapper
+        .invoke(batch.package().get_fn("shared").unwrap(), &[arg])
+        .unwrap();
+    wrapper.output_port("called", call).unwrap();
+    batch.append_block(wrapper).unwrap();
+
+    assert!(matches!(
+        batch.append_block(BlockBuilder::new("shared")),
+        Err(BuilderError::DuplicateName(_))
+    ));
+    let mut function = FnBuilder::new("after_wrapper");
+    let x = function.param("x", Type::Bits(8)).unwrap();
+    batch.append(function, x).unwrap();
+    assert_pir_package(&package);
+}
+
+#[test]
+fn batch_extern_model_bindings_are_checked_transactionally() {
+    let mut package = BlockBuilder::new("model_a")
+        .build_package("extern_models")
+        .unwrap();
+    BlockBuilder::new("model_b")
+        .build_into_package(&mut package)
+        .unwrap();
+    let model_a = package.get_block("model_a").unwrap().clone();
+    let model_b = package.get_block("model_b").unwrap().clone();
+    let parameters = BTreeMap::from([("WIDTH".to_string(), "8".to_string())]);
+    let mut initial = BlockBuilder::new("initial");
+    initial
+        .instantiate_extern_block_with_parameters("u", &model_a, "rtl", parameters.clone())
+        .unwrap();
+    initial.build_into_package(&mut package).unwrap();
+
+    let mut batch = FunctionBatch::new(&mut package).unwrap();
+    let before = batch.package().to_string();
+    let mut rejected = BlockBuilder::new("candidate");
+    rejected
+        .instantiate_extern_block("fresh", &model_a, "fresh_rtl")
+        .unwrap();
+    rejected
+        .instantiate_extern_block_with_parameters("bad", &model_b, "rtl", parameters.clone())
+        .unwrap();
+    let error = batch.append_block(rejected).unwrap_err();
+    assert_eq!(
+        error,
+        BuilderError::InvalidOperation(
+            "external module 'rtl' with parameter overrides {WIDTH:\"8\"} uses behavioral model \
+             'model_a' in instance 'initial.u' and conflicting model 'model_b' in instance \
+             'candidate.bad'"
+                .to_string()
+        )
+    );
+    assert_eq!(batch.package().to_string(), before);
+
+    // A rejected candidate must not register either its name or its fresh
+    // binding.
+    let mut retry = BlockBuilder::new("candidate");
+    retry
+        .instantiate_extern_block("fresh", &model_b, "fresh_rtl")
+        .unwrap();
+    retry
+        .instantiate_extern_block_with_parameters("valid", &model_a, "rtl", parameters)
+        .unwrap();
+    retry
+        .instantiate_extern_block_with_parameters(
+            "different_width",
+            &model_b,
+            "rtl",
+            BTreeMap::from([("WIDTH".to_string(), "16".to_string())]),
+        )
+        .unwrap();
+    batch.append_block(retry).unwrap();
+
+    let mut conflict = BlockBuilder::new("within_candidate");
+    conflict
+        .instantiate_extern_block("first", &model_a, "new_rtl")
+        .unwrap();
+    conflict
+        .instantiate_extern_block("second", &model_b, "new_rtl")
+        .unwrap();
+    assert!(batch.append_block(conflict).is_err());
+    let mut retry = BlockBuilder::new("within_candidate");
+    retry
+        .instantiate_extern_block("valid", &model_b, "new_rtl")
+        .unwrap();
+    batch.append_block(retry).unwrap();
+    assert_pir_package(&package);
+}
+
+#[test]
+fn batch_handles_behavioral_and_opaque_extern_inouts() {
+    let ty = Type::Bits(8);
+    let mut leaf = BlockBuilder::new("model");
+    let pin = leaf.declare_inout_net("pin", ty.clone()).unwrap();
+    leaf.ext_inout_port("pad", ty.clone(), pin).unwrap();
+    let mut package = leaf.build_package("inouts").unwrap();
+    let model = package.get_block("model").unwrap().clone();
+    let mut batch = FunctionBatch::new(&mut package).unwrap();
+    let mut wrapper = BlockBuilder::new("wrapper");
+    let bus = wrapper.declare_inout_net("bus", ty.clone()).unwrap();
+    wrapper.ext_inout_port("pad", ty.clone(), bus).unwrap();
+    let behavioral = wrapper
+        .instantiate_extern_block("behavioral", &model, "modeled_rtl")
+        .unwrap();
+    wrapper.bind_inout_net(behavioral, "pad", bus).unwrap();
+    let opaque = wrapper
+        .instantiate_opaque_extern_block(
+            "opaque",
+            "opaque_rtl",
+            vec![OpaqueExternPort {
+                name: "pad".to_string(),
+                kind: OpaqueExternPortKind::Inout(ty),
+            }],
+        )
+        .unwrap();
+    wrapper.bind_inout_net(opaque, "pad", bus).unwrap();
+    batch.append_block(wrapper).unwrap();
+    assert_pir_package(&package);
+}
+
+#[test]
+fn batch_follows_behavioral_extern_dependencies_but_stops_at_opaque_instances() {
+    let model = leaf_block();
+    let mut package = Package {
+        name: "external_cycles".to_string(),
+        file_table: xlsynth_pir::ir::FileTable::new(),
+        members: vec![PackageMember::Block(model.clone())],
+        top: None,
+    };
+    let mut batch = FunctionBatch::new(&mut package).unwrap();
+    let mut feedback = BlockBuilder::new("feedback");
+    let instance = feedback
+        .instantiate_extern_block("u", &model, "external_rtl")
+        .unwrap();
+    let output = feedback.instantiation_output(instance, "y").unwrap();
+    feedback.instantiation_input(instance, "x", output).unwrap();
+    assert!(matches!(
+        batch.append_block(feedback),
+        Err(BuilderError::CombinationalCycle { .. })
+    ));
+
+    let mut opaque = BlockBuilder::new("feedback");
+    let instance = opaque
+        .instantiate_opaque_extern_block(
+            "u",
+            "external_rtl",
+            vec![
+                OpaqueExternPort {
+                    name: "x".to_string(),
+                    kind: OpaqueExternPortKind::Input(Type::Bits(8)),
+                },
+                OpaqueExternPort {
+                    name: "y".to_string(),
+                    kind: OpaqueExternPortKind::Output(Type::Bits(8)),
+                },
+            ],
+        )
+        .unwrap();
+    let output = opaque.instantiation_output(instance, "y").unwrap();
+    opaque.instantiation_input(instance, "x", output).unwrap();
+    batch.append_block(opaque).unwrap();
+    assert_pir_package(&package);
+}
+
+#[test]
+fn batch_id_overflow_leaves_ids_and_names_available_for_retry() {
+    let mut existing = BlockBuilder::new("existing");
+    existing.input_port("x", Type::Bits(1)).unwrap();
+    let mut package = existing.build_package("ids").unwrap();
+    let block = package.get_block_mut("existing").unwrap();
+    let input = block.get_input_port("x").unwrap();
+    block.get_node_mut(input).text_id = usize::MAX;
+    let mut batch = FunctionBatch::new(&mut package).unwrap();
+    let before = batch.package().to_string();
+    let mut rejected = BlockBuilder::new("addition");
+    rejected.input_port("x", Type::Bits(1)).unwrap();
+    assert!(batch.append_block(rejected).is_err());
+    assert_eq!(batch.package().to_string(), before);
+    batch.append_block(BlockBuilder::new("addition")).unwrap();
+    assert_pir_package(&package);
 }
 
 #[test]

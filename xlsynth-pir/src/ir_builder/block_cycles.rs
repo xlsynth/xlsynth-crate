@@ -13,6 +13,9 @@ use crate::ir_utils::operands;
 type InputDependencies = BTreeSet<String>;
 type OutputDependencies = BTreeMap<String, InputDependencies>;
 
+// Bound summaries retained between independent append operations.
+const MAX_RETAINED_DEPENDENCY_ENTRIES: usize = 131_072;
+
 /// Boundary relations of one block definition. All aliases of an electrical
 /// net share a representative port in the dependency summary.
 #[derive(Default)]
@@ -183,7 +186,7 @@ impl<'a> DependencyGraph<'a> {
 #[derive(Default)]
 pub(crate) struct BlockHierarchy {
     summaries: BTreeMap<String, BlockSummary>,
-    active: BTreeSet<String>,
+    dependency_entries: usize,
 }
 
 /// Checks implicit instance connections as well as explicit graph edges.
@@ -192,39 +195,73 @@ pub(crate) struct BlockHierarchy {
 /// reaching each output. Registers cut dependencies, so sequential feedback is
 /// permitted. External blocks use their behavioral model's dependencies.
 /// Foreign-function implementations are opaque to this analysis.
-pub(super) fn verify_block_combinational_cycles(
-    block: &Block,
-    package: &Package,
-) -> Result<(), BuilderError> {
+#[cfg(test)]
+fn verify_block_combinational_cycles(block: &Block, package: &Package) -> Result<(), BuilderError> {
     // Only children need interface summaries; nobody consumes the root's.
-    BlockHierarchy::default()
-        .verify_graph(block, package)
-        .map(|_| ())
+    BlockHierarchy::default().check(block, &|name| package.get_block(name))
 }
 
 impl BlockHierarchy {
-    /// Memoizes only each child's interface dependencies, not interior nodes.
+    /// Checks one candidate and bounds summaries retained for later appends.
+    pub(crate) fn check<'p>(
+        &mut self,
+        block: &Block,
+        get_block: &dyn Fn(&str) -> Option<&'p Block>,
+    ) -> Result<(), BuilderError> {
+        let result = self
+            .verify_graph(block, get_block, &mut BTreeSet::new())
+            .map(|_| ());
+        self.evict_if_over_budget(MAX_RETAINED_DEPENDENCY_ENTRIES);
+        result
+    }
+
+    /// Evicts only between complete checks so dependencies remain available
+    /// throughout recursive traversal, including a check that fails.
+    fn evict_if_over_budget(&mut self, limit: usize) {
+        if self.dependency_entries > limit {
+            self.summaries.clear();
+            self.dependency_entries = 0;
+        }
+    }
+
+    /// Memoizes a boundary summary for package-wide inout verification.
     pub(crate) fn summarize(
         &mut self,
         block: &Block,
         package: &Package,
     ) -> Result<(), BuilderError> {
+        self.summarize_with(block, &|name| package.get_block(name), &mut BTreeSet::new())
+    }
+
+    /// Memoizes only each child's interface dependencies, not interior nodes.
+    fn summarize_with<'p>(
+        &mut self,
+        block: &Block,
+        get_block: &dyn Fn(&str) -> Option<&'p Block>,
+        active: &mut BTreeSet<String>,
+    ) -> Result<(), BuilderError> {
         if self.summaries.contains_key(&block.name) {
             return Ok(());
         }
-        let graph = self.verify_graph(block, package)?;
+        let graph = self.verify_graph(block, get_block, active)?;
         let summary = graph_output_dependencies(block, &graph)?;
+        let entries = 1
+            + summary.outputs.len()
+            + summary.outputs.values().map(BTreeSet::len).sum::<usize>()
+            + summary.port_classes.len();
+        self.dependency_entries = self.dependency_entries.saturating_add(entries);
         self.summaries.insert(block.name.clone(), summary);
         Ok(())
     }
 
     /// Checks the hierarchy and returns cycle-free, instance-aware graph edges.
-    fn verify_graph<'a>(
+    fn verify_graph<'a, 'p>(
         &mut self,
         block: &'a Block,
-        package: &Package,
+        get_block: &dyn Fn(&str) -> Option<&'p Block>,
+        active: &mut BTreeSet<String>,
     ) -> Result<DependencyGraph<'a>, BuilderError> {
-        if !self.active.insert(block.name.clone()) {
+        if !active.insert(block.name.clone()) {
             return Err(invalid(format!(
                 "recursive block instantiation involving '{}'",
                 block.name
@@ -232,8 +269,7 @@ impl BlockHierarchy {
         }
         for instance in &block.instantiations {
             if let Some(child_name) = instance.referenced_block() {
-                let child = package
-                    .get_block(child_name)
+                let child = get_block(child_name)
                     .ok_or_else(|| invalid(format!("missing child block '{child_name}'")))?;
                 if child.clock_port_name().is_some() && block.clock_port_name().is_none() {
                     return Err(invalid(format!(
@@ -241,10 +277,8 @@ impl BlockHierarchy {
                         child.name, block.name
                     )));
                 }
-                // Validate even children with no visible outputs: their
-                // internal combinational logic can still
-                // contain an invalid cycle.
-                self.summarize(child, package)?;
+                // Check unobserved children as well as visible output cones.
+                self.summarize_with(child, get_block, active)?;
             }
         }
         let definitions: BTreeMap<_, _> = block
@@ -344,7 +378,7 @@ impl BlockHierarchy {
             }
         }
         verify_graph_acyclic(block, &graph)?;
-        self.active.remove(&block.name);
+        active.remove(&block.name);
         Ok(graph)
     }
 }
@@ -592,9 +626,30 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
 
         let mut root_check = BlockHierarchy::default();
         root_check
-            .verify_graph(package.get_top_block().unwrap(), &package)
+            .verify_graph(
+                package.get_top_block().unwrap(),
+                &|name| package.get_block(name),
+                &mut BTreeSet::new(),
+            )
             .unwrap();
         assert!(root_check.summaries.is_empty());
+    }
+
+    #[test]
+    fn cached_dependency_entries_are_evicted_between_checks() {
+        let mut builder = BlockBuilder::new("leaf");
+        let input = builder.input_port("input", Type::Bits(1)).unwrap();
+        builder.output_port("output", input).unwrap();
+        let package = builder.build_package("cache_budget").unwrap();
+        let leaf = package.get_top_block().unwrap();
+        let mut hierarchy = BlockHierarchy::default();
+        hierarchy.summarize(leaf, &package).unwrap();
+        assert_eq!(hierarchy.dependency_entries, 3);
+        hierarchy.evict_if_over_budget(1);
+        assert!(hierarchy.summaries.is_empty());
+        assert_eq!(hierarchy.dependency_entries, 0);
+        hierarchy.summarize(leaf, &package).unwrap();
+        assert_eq!(hierarchy.dependency_entries, 3);
     }
 
     #[test]

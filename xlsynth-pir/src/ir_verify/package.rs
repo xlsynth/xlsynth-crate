@@ -830,6 +830,73 @@ pub(crate) fn verify_package_structure(p: &Package) -> Result<(), ValidationErro
     Ok(())
 }
 
+/// Tracks the behavioral model assigned to each external module and parameter
+/// binding.
+#[derive(Default)]
+pub(crate) struct ExternModelBindings {
+    bindings: HashMap<String, HashMap<BTreeMap<String, String>, (String, String)>>,
+}
+
+impl ExternModelBindings {
+    /// Indexes external model bindings from an already verified package.
+    pub(crate) fn from_package(package: &Package) -> Result<Self, ValidationError> {
+        let mut bindings = Self::default();
+        for member in &package.members {
+            if let PackageMember::Block(block) = member {
+                bindings.try_insert_block(block)?;
+            }
+        }
+        Ok(bindings)
+    }
+
+    /// Checks an entire block before committing its new external model
+    /// bindings.
+    pub(crate) fn try_insert_block(&mut self, block: &Block) -> Result<(), ValidationError> {
+        let mut pending: HashMap<String, HashMap<BTreeMap<String, String>, (String, String)>> =
+            HashMap::new();
+        for inst in &block.instantiations {
+            let InstantiationKind::BehavioralExternBlock {
+                module_name,
+                parameters,
+                ..
+            } = &inst.kind
+            else {
+                continue;
+            };
+            let first = self
+                .bindings
+                .get(module_name)
+                .and_then(|models| models.get(parameters))
+                .or_else(|| {
+                    pending
+                        .get(module_name)
+                        .and_then(|models| models.get(parameters))
+                });
+            if let Some((first_model, first_instance)) = first {
+                if first_model != &inst.block {
+                    return Err(ValidationError::ExternBlockModelConflict {
+                        module_name: module_name.clone(),
+                        parameters: parameters.clone(),
+                        first_model: first_model.clone(),
+                        first_instance: first_instance.clone(),
+                        model: inst.block.clone(),
+                        instance: format!("{}.{}", block.name, inst.name),
+                    });
+                }
+            } else {
+                pending.entry(module_name.clone()).or_default().insert(
+                    parameters.clone(),
+                    (inst.block.clone(), format!("{}.{}", block.name, inst.name)),
+                );
+            }
+        }
+        for (module_name, models) in pending {
+            self.bindings.entry(module_name).or_default().extend(models);
+        }
+        Ok(())
+    }
+}
+
 /// Checks external module bindings in package order, with an optional block
 /// replacing a member or being appended by the block builder.
 fn verify_extern_block_models<'a>(
@@ -850,31 +917,9 @@ fn verify_extern_block_models<'a>(
     let appended = replacement
         .filter(|(index, _)| *index >= members.len())
         .map(|(_, block)| block);
-    let mut bindings = HashMap::new();
+    let mut bindings = ExternModelBindings::default();
     for block in blocks.chain(appended) {
-        for inst in &block.instantiations {
-            let InstantiationKind::BehavioralExternBlock {
-                module_name,
-                parameters,
-                ..
-            } = &inst.kind
-            else {
-                continue;
-            };
-            let (first_block, first_inst) = bindings
-                .entry((module_name.as_str(), parameters))
-                .or_insert((block, inst));
-            if first_inst.block != inst.block {
-                return Err(ValidationError::ExternBlockModelConflict {
-                    module_name: module_name.clone(),
-                    parameters: parameters.clone(),
-                    first_model: first_inst.block.clone(),
-                    first_instance: format!("{}.{}", first_block.name, first_inst.name),
-                    model: inst.block.clone(),
-                    instance: format!("{}.{}", block.name, inst.name),
-                });
-            }
-        }
+        bindings.try_insert_block(block)?;
     }
     Ok(())
 }
@@ -1005,13 +1050,23 @@ fn validate_block_with(
     member_index: usize,
     lookup: CalleeLookup<'_, '_>,
 ) -> Result<(), ValidationError> {
+    let prior_blocks = collect_prior_blocks(parent, member_index);
+    validate_block_with_targets(f, &|name| prior_blocks.get(name).copied(), lookup)
+}
+
+/// Checks one new block against the blocks and functions visible at its
+/// insertion point.
+pub(crate) fn validate_block_with_targets<'p>(
+    f: &Block,
+    get_block: &dyn std::ops::Fn(&str) -> Option<&'p Block>,
+    lookup: CalleeLookup<'_, '_>,
+) -> Result<(), ValidationError> {
     validate_block_ports(f)?;
     validate_block_resources(f)?;
-    let prior_blocks = collect_prior_blocks(parent, member_index);
-    for inst in f.instantiations.iter() {
+    for inst in &f.instantiations {
         match &inst.kind {
             InstantiationKind::Block | InstantiationKind::BehavioralExternBlock { .. }
-                if !prior_blocks.contains_key(&inst.block) =>
+                if get_block(&inst.block).is_none() =>
             {
                 return Err(ValidationError::InstantiationBlockNotFound {
                     func: f.name.clone(),
@@ -1019,7 +1074,7 @@ fn validate_block_with(
                     block: inst.block.clone(),
                 });
             }
-            InstantiationKind::Extern if parent.get_fn(&inst.block).is_none() => {
+            InstantiationKind::Extern if lookup.get(&inst.block).is_none() => {
                 return Err(ValidationError::InstantiationForeignFunctionNotFound {
                     func: f.name.clone(),
                     instantiation: inst.name.clone(),
@@ -1027,12 +1082,12 @@ fn validate_block_with(
                 });
             }
             _ => {
-                // The declared target exists with the kind required by this
-                // instance.
+                // Opaque targets are inline, and other targets were resolved
+                // above.
             }
         }
     }
-    let instantiation_info = build_instantiation_info(f, &prior_blocks, parent)?;
+    let instantiation_info = build_instantiation_info(f, get_block, lookup)?;
     validate_graph_with(
         f,
         Some(lookup),
@@ -1045,7 +1100,7 @@ fn validate_block_with(
         Some(&instantiation_info),
         true,
     )?;
-    validate_inout_bindings(f, &prior_blocks)?;
+    validate_inout_bindings(f, get_block)?;
     validate_block_registers(f)
 }
 
@@ -1107,9 +1162,9 @@ pub(crate) fn validate_opaque_extern_ports(ports: &[OpaqueExternPort]) -> Result
 }
 
 /// Checks declared net types, local drivers, and bindings of all child inouts.
-fn validate_inout_bindings(
+fn validate_inout_bindings<'p>(
     block: &Block,
-    prior: &HashMap<String, &Block>,
+    get_block: &dyn std::ops::Fn(&str) -> Option<&'p Block>,
 ) -> Result<(), ValidationError> {
     let error = |reason: String| ValidationError::BlockInvariantViolation {
         block: block.name.clone(),
@@ -1134,7 +1189,7 @@ fn validate_inout_bindings(
     let mut expected = BTreeMap::new();
     for inst in &block.instantiations {
         if let Some(child_name) = inst.referenced_block() {
-            let child = prior[child_name];
+            let child = get_block(child_name).expect("child block missing after target validation");
             for port in child.inout_ports() {
                 let Some(NodePayload::ExtInoutPort {
                     name, port_type, ..
@@ -2255,10 +2310,10 @@ fn collect_prior_blocks<'a>(
     prior
 }
 
-fn build_instantiation_info(
+fn build_instantiation_info<'p>(
     block: &Block,
-    prior_blocks: &std::collections::HashMap<String, &Block>,
-    parent: &Package,
+    get_block: &dyn std::ops::Fn(&str) -> Option<&'p Block>,
+    lookup: CalleeLookup<'_, '_>,
 ) -> Result<BTreeMap<String, InstantiationInfo>, ValidationError> {
     let mut info_map = BTreeMap::new();
     for inst in &block.instantiations {
@@ -2290,10 +2345,12 @@ fn build_instantiation_info(
             continue;
         }
         if inst.kind == InstantiationKind::Extern {
-            let foreign_function = parent
-                .get_fn(&inst.block)
+            let foreign_function = lookup
+                .get(&inst.block)
                 .expect("foreign function missing after target validation");
-            validate_fn_signature(foreign_function)?;
+            if matches!(lookup, CalleeLookup::Unverified(_)) {
+                validate_fn_signature(foreign_function)?;
+            }
             let mut input_types = BTreeMap::new();
             for param in foreign_function.param_nodes() {
                 collect_external_port_types(param.param_name(), &param.ty, &mut input_types);
@@ -2310,9 +2367,12 @@ fn build_instantiation_info(
             );
             continue;
         }
-        let callee = prior_blocks
-            .get(&inst.block)
-            .expect("prior block missing after check");
+        let callee =
+            get_block(&inst.block).ok_or_else(|| ValidationError::InstantiationBlockNotFound {
+                func: block.name.clone(),
+                instantiation: inst.name.clone(),
+                block: inst.block.clone(),
+            })?;
         let input_types = callee
             .input_ports()
             .map(|port| {

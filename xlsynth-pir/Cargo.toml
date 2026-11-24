@@ -40,3 +40,7 @@ path = "src/lib.rs"
 [[bench]]
 name = "eco"
 harness = false
+
+[[bench]]
+name = "block_batch_scaling"
+harness = false
