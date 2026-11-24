@@ -4,7 +4,7 @@ use super::*;
 use crate::liberty::model::{LibraryBuilder, TimingType};
 use crate::liberty::parser::parse_liberty_files;
 use crate::netlist::io::{ParsedNetlist, read_gv_from_str};
-use crate::netlist::normalized::BitSource;
+use crate::netlist::normalized::{BitSource, NormalizedBitIndex};
 use crate::netlist::sta::incremental::{TimingEdit, TimingInstance, TimingMutation, TrialOptions};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -13,7 +13,7 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 /// A small load- and slew-sensitive library with explicitly sized equivalents.
-fn library() -> Result<Library> {
+pub(in crate::netlist) fn library() -> Result<Library> {
     let mut text = String::from(
         r#"library(test) {
         lu_table_template(delay) { variable_1: input_net_transition; variable_2: total_output_net_capacitance; index_1("0,10"); index_2("0,10"); }
@@ -2324,7 +2324,11 @@ fn compare_combinational_state(
     )?;
     assert_eq!(sta.bit_count(), full.net_timing.len());
     for (bit, expected) in full.net_timing.iter().enumerate() {
-        assert_eq!(sta.timing_for_bit(bit), *expected, "bit {bit}");
+        assert_eq!(
+            sta.timing_for_bit(NormalizedBitIndex::new(bit)),
+            *expected,
+            "bit {bit}"
+        );
     }
     assert_eq!(sta.score().input_to_output, full.worst_output_arrival);
     assert_eq!(
@@ -2353,7 +2357,7 @@ fn topology_and_resize_clients_share_transaction_state_and_budgets() -> Result<(
         .unwrap();
     let small = library.cells.iter().position(|c| c.name == "BUF1").unwrap();
     let large = library.cells.iter().position(|c| c.name == "BUF4").unwrap();
-    let new_bit = sta.bit_count();
+    let new_bit = NormalizedBitIndex::new(sta.bit_count());
     let edit = TimingEdit {
         new_bits: 1,
         mutations: vec![
@@ -2361,7 +2365,7 @@ fn topology_and_resize_clients_share_transaction_state_and_budgets() -> Result<(
                 name: "extra".into(),
                 cell: small,
                 connections: vec![
-                    ("A".into(), BitSource::Bit(net)),
+                    ("A".into(), BitSource::Bit(NormalizedBitIndex::new(net))),
                     ("Y".into(), BitSource::Bit(new_bit)),
                 ],
             }),

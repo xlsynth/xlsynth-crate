@@ -15,9 +15,9 @@
 //! deterministic order.
 
 use crate::liberty::IndexedLibrary;
-use crate::liberty_model::{PinDirection, SequentialKind};
+use crate::liberty_model::PinDirection;
 use crate::netlist::connectivity::NetlistConnectivity;
-use crate::netlist::normalized::BitIndex;
+use crate::netlist::normalized::NormalizedBitIndex;
 use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use string_interner::symbol::SymbolU32;
@@ -162,9 +162,7 @@ impl<'a> ModuleConeContext<'a> {
 
             if let Some(cell) = lib.get_cell(type_name.as_str()) {
                 let is_dff = if dff_cell_names.is_empty() {
-                    cell.sequential
-                        .iter()
-                        .any(|state| state.kind == SequentialKind::Ff as i32)
+                    cell.has_ff_group()
                 } else {
                     dff_cell_names.contains(&cell.name)
                 };
@@ -236,10 +234,10 @@ fn resolve_to_string(
 
 fn reachable_bits_for_traversal(
     ctx: &ModuleConeContext<'_>,
-    start_bit: BitIndex,
+    start_bit: NormalizedBitIndex,
     direction: TraversalDirection,
     stop: StopCondition,
-) -> Vec<BitIndex> {
+) -> Vec<NormalizedBitIndex> {
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
     let mut reachable = Vec::new();

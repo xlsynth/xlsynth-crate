@@ -5,9 +5,10 @@
 use crate::liberty::cell_formula::{EmitContext as FormulaEmitContext, Term, parse_formula};
 use crate::liberty::indexed::IndexedLibrary;
 use crate::liberty_model::{Cell, Library, PinDirection};
+use crate::netlist::connectivity::directed::{ResolvedAssignments, SparseAssignments};
 use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, read_gv_from_path};
 use crate::netlist::normalized::{
-    BitExpr, BitIndex, BitSource, NormalizedInstance, NormalizedNetlistModule,
+    BitExpr, BitSource, NormalizedBitIndex, NormalizedInstance, NormalizedNetlistModule,
 };
 use crate::netlist::parse::NetlistModule;
 use crate::netlist::sequential_liberty::get_sequential_ff_clock_spec;
@@ -110,28 +111,30 @@ struct ClockGatePassthroughSpec {
 struct ClockGatePassthroughInstance {
     instance_name: String,
     clock_source: BitSource,
-    output_bit: BitIndex,
+    output_bit: NormalizedBitIndex,
 }
 
 struct ClockGatePassthroughAnalysis {
     passthroughs: Vec<ClockGatePassthroughInstance>,
     elided_instance_names: HashSet<String>,
-    bit_aliases: HashMap<BitIndex, BitIndex>,
+    bit_aliases: HashMap<NormalizedBitIndex, NormalizedBitIndex>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResolvedWiringSource {
-    Bit(BitIndex),
+    Bit(NormalizedBitIndex),
     Literal(bool),
 }
 
+/// Directed preserved wiring, resolved once for all block-conversion queries.
+/// Index only assigned bits so sparse wiring does not allocate for the module.
 struct WiringAssignResolver {
-    source_by_lhs: HashMap<BitIndex, BitSource>,
+    resolved: ResolvedAssignments<NormalizedBitIndex>,
 }
 
 impl WiringAssignResolver {
     fn new(normalized: &NormalizedNetlistModule<'_>, parsed: &ParsedNetlist) -> Result<Self> {
-        let mut source_by_lhs = HashMap::new();
+        let mut assignments = SparseAssignments::new();
         for assign in &normalized.assigns {
             for (lhs_bit, rhs_expr) in assign.lhs_bits.iter().copied().zip(&assign.rhs_bits) {
                 let source = match rhs_expr {
@@ -147,7 +150,7 @@ impl WiringAssignResolver {
                         )));
                     }
                 };
-                if source_by_lhs.insert(lhs_bit, source).is_some() {
+                if !assignments.insert(lhs_bit, source) {
                     return Err(anyhow!(format!(
                         "gv2block found multiple preserved wiring assigns for '{}'",
                         normalized.render_bit(lhs_bit, &parsed.nets, &parsed.interner)
@@ -155,46 +158,35 @@ impl WiringAssignResolver {
                 }
             }
         }
-        let resolver = Self { source_by_lhs };
-        for lhs_bit in resolver.source_by_lhs.keys().copied() {
-            resolver.resolve_source(BitSource::Bit(lhs_bit), normalized, parsed)?;
+        let resolved = assignments.resolve().map_err(|bit| {
+            anyhow!(format!(
+                "gv2block found a preserved wiring-assign cycle at '{}'",
+                normalized.render_bit(bit, &parsed.nets, &parsed.interner)
+            ))
+        })?;
+        if resolved.sources().contains(&BitSource::Unknown) {
+            return Err(anyhow!(
+                "gv2block does not support unknown literal preserved wiring"
+            ));
         }
-        Ok(resolver)
+        Ok(Self { resolved })
     }
 
-    fn has_lhs(&self, bit_idx: BitIndex) -> bool {
-        self.source_by_lhs.contains_key(&bit_idx)
+    fn has_lhs(&self, bit_idx: NormalizedBitIndex) -> bool {
+        self.resolved.get(bit_idx).is_some()
     }
 
-    fn resolve_source(
-        &self,
-        source: BitSource,
-        normalized: &NormalizedNetlistModule<'_>,
-        parsed: &ParsedNetlist,
-    ) -> Result<ResolvedWiringSource> {
-        let mut seen_bits = HashSet::new();
-        let mut current = source;
-        loop {
-            match current {
-                BitSource::Bit(bit_idx) => {
-                    if !seen_bits.insert(bit_idx) {
-                        return Err(anyhow!(format!(
-                            "gv2block found a preserved wiring-assign cycle at '{}'",
-                            normalized.render_bit(bit_idx, &parsed.nets, &parsed.interner)
-                        )));
-                    }
-                    let Some(next_source) = self.source_by_lhs.get(&bit_idx).copied() else {
-                        return Ok(ResolvedWiringSource::Bit(bit_idx));
-                    };
-                    current = next_source;
-                }
-                BitSource::Literal(value) => return Ok(ResolvedWiringSource::Literal(value)),
-                BitSource::Unknown => {
-                    return Err(anyhow!(
-                        "gv2block does not support unknown literal preserved wiring"
-                    ));
-                }
-            }
+    fn resolve_source(&self, source: BitSource) -> Result<ResolvedWiringSource> {
+        let source = match source {
+            BitSource::Bit(bit) => self.resolved.get(bit).unwrap_or(source),
+            BitSource::Literal(_) | BitSource::Unknown => source,
+        };
+        match source {
+            BitSource::Bit(bit) => Ok(ResolvedWiringSource::Bit(bit)),
+            BitSource::Literal(value) => Ok(ResolvedWiringSource::Literal(value)),
+            BitSource::Unknown => Err(anyhow!(
+                "gv2block does not support unknown literal preserved wiring"
+            )),
         }
     }
 }
@@ -223,7 +215,7 @@ impl BitDrivers {
 
     fn set_node_bit(
         &mut self,
-        bit_idx: BitIndex,
+        bit_idx: NormalizedBitIndex,
         node: BValue,
         wiring: &WiringAssignResolver,
         normalized: &NormalizedNetlistModule<'_>,
@@ -234,7 +226,7 @@ impl BitDrivers {
 
     fn set_input_bit(
         &mut self,
-        bit_idx: BitIndex,
+        bit_idx: NormalizedBitIndex,
         port_node: BValue,
         bit_offset: usize,
         port_width: usize,
@@ -257,7 +249,7 @@ impl BitDrivers {
 
     fn set_driver(
         &mut self,
-        bit_idx: BitIndex,
+        bit_idx: NormalizedBitIndex,
         driver: BitDriver,
         wiring: &WiringAssignResolver,
         normalized: &NormalizedNetlistModule<'_>,
@@ -269,10 +261,10 @@ impl BitDrivers {
                 normalized.render_bit(bit_idx, &parsed.nets, &parsed.interner)
             )));
         }
-        let entry = self.drivers.get_mut(bit_idx).ok_or_else(|| {
+        let entry = self.drivers.get_mut(bit_idx.index()).ok_or_else(|| {
             anyhow!(format!(
                 "normalized bit index {} is out of range for gv2block driver table",
-                bit_idx
+                bit_idx.index()
             ))
         })?;
         if entry.replace(driver).is_some() {
@@ -284,8 +276,12 @@ impl BitDrivers {
         Ok(())
     }
 
-    fn materialize_bit(&self, bit_idx: BitIndex, b: &mut BlockBuilder) -> Result<Option<BValue>> {
-        let Some(driver) = self.drivers.get(bit_idx).copied().flatten() else {
+    fn materialize_bit(
+        &self,
+        bit_idx: NormalizedBitIndex,
+        b: &mut BlockBuilder,
+    ) -> Result<Option<BValue>> {
+        let Some(driver) = self.drivers.get(bit_idx.index()).copied().flatten() else {
             return Ok(None);
         };
         Ok(Some(match driver {
@@ -426,16 +422,14 @@ fn source_bit_only(
     sources: &[BitSource],
     what: &str,
     wiring: &WiringAssignResolver,
-    normalized: &NormalizedNetlistModule<'_>,
-    parsed: &ParsedNetlist,
-) -> Result<BitIndex> {
+) -> Result<NormalizedBitIndex> {
     let [source] = sources else {
         return Err(anyhow!(format!(
             "{} must connect exactly one bit in gv2block",
             what
         )));
     };
-    match wiring.resolve_source(*source, normalized, parsed)? {
+    match wiring.resolve_source(*source)? {
         ResolvedWiringSource::Bit(bit_idx) => Ok(bit_idx),
         ResolvedWiringSource::Literal(_) => Err(anyhow!(format!(
             "{} must be driven by a net bit in gv2block",
@@ -449,7 +443,7 @@ fn target_bit_only(
     what: &str,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
-) -> Result<BitIndex> {
+) -> Result<NormalizedBitIndex> {
     let [BitSource::Bit(bit_idx)] = sources else {
         return Err(anyhow!(format!(
             "{} must connect exactly one net bit in gv2block; got {}",
@@ -461,12 +455,12 @@ fn target_bit_only(
 }
 
 fn resolve_clock_bit(
-    bit_idx: BitIndex,
+    bit_idx: NormalizedBitIndex,
     wiring: &WiringAssignResolver,
-    clock_gate_bit_aliases: &HashMap<BitIndex, BitIndex>,
+    clock_gate_bit_aliases: &HashMap<NormalizedBitIndex, NormalizedBitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
-) -> Result<BitIndex> {
+) -> Result<NormalizedBitIndex> {
     let mut seen_bits = HashSet::new();
     let mut current_bit = bit_idx;
     loop {
@@ -476,13 +470,12 @@ fn resolve_clock_bit(
                 normalized.render_bit(current_bit, &parsed.nets, &parsed.interner)
             )));
         }
-        current_bit =
-            match wiring.resolve_source(BitSource::Bit(current_bit), normalized, parsed)? {
-                ResolvedWiringSource::Bit(bit_idx) => bit_idx,
-                ResolvedWiringSource::Literal(_) => {
-                    return Err(anyhow!("gv2block clock pin is driven by a literal"));
-                }
-            };
+        current_bit = match wiring.resolve_source(BitSource::Bit(current_bit))? {
+            ResolvedWiringSource::Bit(bit_idx) => bit_idx,
+            ResolvedWiringSource::Literal(_) => {
+                return Err(anyhow!("gv2block clock pin is driven by a literal"));
+            }
+        };
         let Some(next_bit) = clock_gate_bit_aliases.get(&current_bit).copied() else {
             return Ok(current_bit);
         };
@@ -491,7 +484,7 @@ fn resolve_clock_bit(
 }
 
 fn render_clock_bit(
-    bit_idx: BitIndex,
+    bit_idx: NormalizedBitIndex,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
 ) -> String {
@@ -559,8 +552,6 @@ fn collect_clock_gate_passthroughs(
                 inst_name, spec.clock_pin
             ),
             wiring,
-            normalized,
-            parsed,
         )?;
 
         if let Some(existing) = bit_aliases.insert(output_bit, clock_bit) {
@@ -594,7 +585,7 @@ fn apply_clock_gate_passthroughs(
     parsed: &ParsedNetlist,
     bit_drivers: &mut BitDrivers,
     b: &mut BlockBuilder,
-) -> Result<HashSet<BitIndex>> {
+) -> Result<HashSet<NormalizedBitIndex>> {
     let mut pending_passthroughs = passthroughs.to_vec();
     let mut unresolved_passthrough_output_bits = HashSet::new();
 
@@ -603,7 +594,7 @@ fn apply_clock_gate_passthroughs(
         let mut next_pending = Vec::new();
         for passthrough in pending_passthroughs {
             let ResolvedWiringSource::Bit(clock_bit) =
-                wiring.resolve_source(passthrough.clock_source, normalized, parsed)?
+                wiring.resolve_source(passthrough.clock_source)?
             else {
                 return Err(anyhow!(format!(
                     "clock-gate instance '{}' clock pin is driven by a literal",
@@ -860,7 +851,7 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<BlockBu
 }
 
 fn add_input_bit_driver(
-    bit_idx: BitIndex,
+    bit_idx: NormalizedBitIndex,
     bit_offset: usize,
     port_width: usize,
     port_node: BValue,
@@ -881,7 +872,7 @@ fn add_literal_bit(b: &mut BlockBuilder, value: bool) -> Result<BValue> {
 fn resolved_wiring_source_to_node(
     source: ResolvedWiringSource,
     bit_drivers: &BitDrivers,
-    unresolved_passthrough_output_bits: &HashSet<BitIndex>,
+    unresolved_passthrough_output_bits: &HashSet<NormalizedBitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
     b: &mut BlockBuilder,
@@ -915,7 +906,7 @@ fn materialize_sources_to_node(
     empty_width: usize,
     wiring: &WiringAssignResolver,
     bit_drivers: &BitDrivers,
-    unresolved_passthrough_output_bits: &HashSet<BitIndex>,
+    unresolved_passthrough_output_bits: &HashSet<NormalizedBitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
     b: &mut BlockBuilder,
@@ -927,7 +918,7 @@ fn materialize_sources_to_node(
 
     let mut parts = Vec::with_capacity(sources.len());
     for source in sources.iter().rev().copied() {
-        let resolved = wiring.resolve_source(source, normalized, parsed)?;
+        let resolved = wiring.resolve_source(source)?;
         parts.push(resolved_wiring_source_to_node(
             resolved,
             bit_drivers,
@@ -946,10 +937,10 @@ fn materialize_sources_to_node(
 }
 
 fn materialize_bits_to_node(
-    bits: &[BitIndex],
+    bits: &[NormalizedBitIndex],
     wiring: &WiringAssignResolver,
     bit_drivers: &BitDrivers,
-    unresolved_passthrough_output_bits: &HashSet<BitIndex>,
+    unresolved_passthrough_output_bits: &HashSet<NormalizedBitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
     b: &mut BlockBuilder,
@@ -971,14 +962,13 @@ fn materialize_bits_to_node(
 
 fn source_resolves_to_clock(
     source: BitSource,
-    selected_clock_bit: BitIndex,
+    selected_clock_bit: NormalizedBitIndex,
     wiring: &WiringAssignResolver,
-    clock_gate_bit_aliases: &HashMap<BitIndex, BitIndex>,
+    clock_gate_bit_aliases: &HashMap<NormalizedBitIndex, NormalizedBitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
 ) -> Result<bool> {
-    let ResolvedWiringSource::Bit(bit_idx) = wiring.resolve_source(source, normalized, parsed)?
-    else {
+    let ResolvedWiringSource::Bit(bit_idx) = wiring.resolve_source(source)? else {
         return Ok(false);
     };
     Ok(
@@ -988,7 +978,7 @@ fn source_resolves_to_clock(
 }
 
 fn top_input_port_name_for_bit(
-    bit_idx: BitIndex,
+    bit_idx: NormalizedBitIndex,
     normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
 ) -> Option<String> {
@@ -1025,7 +1015,7 @@ fn build_top_block(
         bit_aliases: clock_gate_bit_aliases,
     } = collect_clock_gate_passthroughs(normalized, parsed, lib_indexed, wiring)?;
 
-    let mut selected_clock_bit: Option<BitIndex> = None;
+    let mut selected_clock_bit: Option<NormalizedBitIndex> = None;
     let mut selected_clock_port_name_raw: Option<String> = None;
 
     for inst in &normalized.instances {
@@ -1066,8 +1056,6 @@ fn build_top_block(
                     .unwrap_or("<unknown>")
             ),
             wiring,
-            normalized,
-            parsed,
         )?;
         let clock_bit = resolve_clock_bit(
             raw_clock_bit,

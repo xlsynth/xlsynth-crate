@@ -162,6 +162,7 @@ impl<'a> Engine<'a> {
         let sta = &self.sta;
         StaReport {
             net_timing: (0..sta.bit_count())
+                .map(NormalizedBitIndex::new)
                 .map(|bit| sta.timing_for_bit(bit))
                 .collect(),
             worst_output_arrival: sta.score().input_to_output,
@@ -194,12 +195,13 @@ impl View<'_, '_> {
         for d in &graph.drivers {
             let actual = self
                 .sta
-                .load_for_bit(d.net)
+                .load_for_bit(scalar_bit_index(d.net))
                 .ok_or_else(|| anyhow!("missing load"))?;
             ensure!(
-                actual.iter().zip(d.load).all(|(a, b)| (a - b).abs() < 1e-9),
+                (actual.rise - d.load.rise).abs() < 1e-9
+                    && (actual.fall - d.load.fall).abs() < 1e-9,
                 "oracle load at net {}",
-                d.net
+                d.net.0
             );
         }
         Ok(())
@@ -210,7 +212,7 @@ impl View<'_, '_> {
             "oracle net count"
         );
         for (n, expected) in full.net_timing.iter().enumerate() {
-            let actual = self.sta.timing_for_bit(n);
+            let actual = self.sta.timing_for_bit(NormalizedBitIndex::new(n));
             match (actual, expected) {
                 (Some(a), Some(b)) => ensure!(
                     [

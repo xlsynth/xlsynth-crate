@@ -64,6 +64,25 @@ impl Term {
         }
     }
 
+    /// Packed truth table for at most six inputs in the supplied pin order.
+    /// Row bit `i` binds `inputs[i]`; return `None` if any row is unresolved.
+    pub(crate) fn truth_table(&self, inputs: &[String]) -> Option<u64> {
+        if inputs.len() > 6 {
+            return None;
+        }
+        let mut values: HashMap<_, _> = inputs.iter().cloned().map(|name| (name, false)).collect();
+        let mut result = 0;
+        for row in 0..1usize << inputs.len() {
+            for (bit, name) in inputs.iter().enumerate() {
+                *values.get_mut(name)? = row & (1 << bit) != 0;
+            }
+            if self.evaluate_partial(&values)? {
+                result |= 1 << row;
+            }
+        }
+        Some(result)
+    }
+
     fn collect_inputs(&self, v: &mut Vec<String>) {
         match self {
             Term::Input(s) => v.push(s.clone()),
@@ -299,6 +318,18 @@ fn parse_atom(tokens: &[Tok]) -> Result<(Term, &[Tok]), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin order controls row encoding; an unbound input cannot become a
+    /// silently invented truth-table value.
+    #[test]
+    fn packed_truth_table_preserves_pin_order_and_unresolved_rows() {
+        let term = parse_formula("A & !B").unwrap();
+        assert_eq!(term.truth_table(&["A".into(), "B".into()]), Some(0b0010));
+        assert_eq!(term.truth_table(&["B".into(), "A".into()]), Some(0b0100));
+        assert_eq!(term.truth_table(&["A".into()]), None);
+        let seven = vec![String::from("A"); 7];
+        assert_eq!(term.truth_table(&seven), None);
+    }
     use crate::{
         aig::gate::AigBitVector,
         gate_builder::{GateBuilder, GateBuilderOptions},

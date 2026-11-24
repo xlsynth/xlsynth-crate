@@ -36,6 +36,41 @@ fn effective_axis<'a>(explicit: &'a [f64], template: Option<&'a [f64]>) -> &'a [
     }
 }
 
+/// Names and effective knots of timing axes. Explicit table indices take
+/// precedence over template indices, as in Liberty interpolation.
+#[inline]
+pub(crate) fn timing_axes<'a, const N: usize>(
+    library: &'a Library,
+    table: &'a TimingTable,
+) -> [(&'a str, &'a [f64]); N] {
+    let template = library
+        .timing_table_shape(table)
+        .template_id
+        .checked_sub(1)
+        .and_then(|i| library.lu_table_templates.get(i as usize));
+    effective_axes(library, library.timing_table_axes(table), template)
+}
+
+/// Resolve explicit LUT indices against an already selected template. Template
+/// validation and its diagnostics belong to the caller.
+#[inline]
+pub(crate) fn effective_axes<'a, const N: usize>(
+    library: &'a Library,
+    axes: [&'a [f64]; 3],
+    template: Option<&'a LuTableTemplate>,
+) -> [(&'a str, &'a [f64]); N] {
+    debug_assert!(N <= 3);
+    std::array::from_fn(|axis| {
+        let (name, fallback) = match (template, axis) {
+            (Some(t), 0) => (t.variable_1_str(library), Some(t.index_1.as_slice())),
+            (Some(t), 1) => (t.variable_2_str(library), Some(t.index_2.as_slice())),
+            (Some(t), 2) => (t.variable_3_str(library), Some(t.index_3.as_slice())),
+            _ => ("", None),
+        };
+        (name, effective_axis(axes[axis], fallback))
+    })
+}
+
 fn template_for_shape<'a>(
     library: &'a Library,
     template_id: u32,
@@ -71,26 +106,12 @@ fn timing_layout<'a>(
 ) -> Result<RawLutLayout<'a>> {
     let shape = library.timing_table_shape(table);
     let template = template_for_shape(library, shape.template_id, "lu_table_template", context)?;
-    let explicit = library.timing_table_axes(table);
+    let axes = effective_axes::<3>(library, library.timing_table_axes(table), template);
     Ok(RawLutLayout {
         dimensions: &shape.dimensions,
         values: library.timing_table_values(table),
-        axes: [
-            effective_axis(explicit[0], template.map(|value| value.index_1.as_slice())),
-            effective_axis(explicit[1], template.map(|value| value.index_2.as_slice())),
-            effective_axis(explicit[2], template.map(|value| value.index_3.as_slice())),
-        ],
-        variables: [
-            template
-                .map(|value| value.variable_1_str(library))
-                .unwrap_or(""),
-            template
-                .map(|value| value.variable_2_str(library))
-                .unwrap_or(""),
-            template
-                .map(|value| value.variable_3_str(library))
-                .unwrap_or(""),
-        ],
+        axes: axes.map(|(_, knots)| knots),
+        variables: axes.map(|(name, _)| name),
     })
 }
 
@@ -101,26 +122,12 @@ fn power_layout<'a>(
 ) -> Result<RawLutLayout<'a>> {
     let shape = library.power_table_shape(table);
     let template = template_for_shape(library, shape.template_id, "power_lut_template", context)?;
-    let explicit = library.power_table_axes(table);
+    let axes = effective_axes::<3>(library, library.power_table_axes(table), template);
     Ok(RawLutLayout {
         dimensions: &shape.dimensions,
         values: library.power_table_values(table),
-        axes: [
-            effective_axis(explicit[0], template.map(|value| value.index_1.as_slice())),
-            effective_axis(explicit[1], template.map(|value| value.index_2.as_slice())),
-            effective_axis(explicit[2], template.map(|value| value.index_3.as_slice())),
-        ],
-        variables: [
-            template
-                .map(|value| value.variable_1_str(library))
-                .unwrap_or(""),
-            template
-                .map(|value| value.variable_2_str(library))
-                .unwrap_or(""),
-            template
-                .map(|value| value.variable_3_str(library))
-                .unwrap_or(""),
-        ],
+        axes: axes.map(|(_, knots)| knots),
+        variables: axes.map(|(name, _)| name),
     })
 }
 

@@ -73,7 +73,7 @@ fn encode_ref(reference: &NetRef, range: &Range<usize>, concat_depth: usize) -> 
         NetRef::Simple(index) => pb::r#ref::Kind::Net(local_net(*index, range)?),
         NetRef::BitSelect(index, left) => pb::r#ref::Kind::Select(pb::Select {
             net: local_net(*index, range)?,
-            left: *left,
+            left: left.0,
             right: None,
         }),
         NetRef::PartSelect(index, left, right) => pb::r#ref::Kind::Select(pb::Select {
