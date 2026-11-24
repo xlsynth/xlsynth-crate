@@ -663,7 +663,6 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    #[cfg(feature = "unstable-dslx-specialize")]
     #[test]
     fn param_specialization_requires_multiple_phases() -> Result<(), XlsynthError> {
         let source = r#"
@@ -716,7 +715,6 @@ fn identity<N: u32>(x: bits[N]) -> bits[N] { x }
         assert!(message.contains("Top function 'does_not_exist'"));
     }
 
-    #[cfg(feature = "unstable-dslx-specialize")]
     #[test]
     fn parametric_top_with_bindings_is_specialized() {
         let source = r#"
@@ -756,7 +754,6 @@ fn top<N: u32>(x: bits[N]) -> bits[N] { helper(x) }
         );
     }
 
-    #[cfg(feature = "unstable-dslx-specialize")]
     #[test]
     fn specialization_select_poly_regression() {
         let source = r#"
@@ -790,7 +787,6 @@ pub fn top() -> uN[6] {
         assert!(!specialized.source.contains("fn select_poly<"));
     }
 
-    #[cfg(feature = "unstable-dslx-specialize")]
     #[test]
     fn specialization_fails_for_higher_order_parametric_helper() {
         let source = r#"
@@ -882,7 +878,6 @@ pub fn top() -> (uN[23], uN[23]) {
         assert!(!specialized.source.contains("discard_sign_bit(val"));
     }
 
-    #[cfg(feature = "unstable-dslx-specialize")]
     #[test]
     fn specialization_rewrites_nested_call_chain() -> Result<(), XlsynthError> {
         let source = r#"
@@ -1069,7 +1064,6 @@ pub fn top() -> u32 {
         Ok(())
     }
 
-    #[cfg(feature = "unstable-dslx-specialize")]
     #[test]
     fn specialization_handles_multiple_environments() -> Result<(), XlsynthError> {
         let source = r#"
@@ -1106,7 +1100,6 @@ pub fn top() -> (bits[4], bits[6]) {
         Ok(())
     }
 
-    #[cfg(feature = "unstable-dslx-specialize")]
     #[test]
     fn specialization_deduplicates_identical_environments() -> Result<(), XlsynthError> {
         fn count_occurrences(haystack: &str, needle: &str) -> usize {

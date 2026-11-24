@@ -58,7 +58,6 @@ pretty_assertions = "1.4.1"
 [features]
 default = []
 iverilog-tests = []
-unstable-dslx-specialize = ["xlsynth-prover/unstable-dslx-specialize"]
 has-boolector = ["xlsynth-prover/has-boolector", "xlsynth-autocov/has-boolector"]
 has-easy-smt = ["xlsynth-prover/has-easy-smt", "xlsynth-autocov/has-easy-smt"]
 has-bitwuzla = [
