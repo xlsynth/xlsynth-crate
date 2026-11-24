@@ -2,7 +2,7 @@
 
 //! Hierarchical combinational dependencies without cloning or expanding blocks.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::{BlockCycleConnection, BlockCycleStep, BuilderError};
 use crate::ir::{
@@ -285,23 +285,56 @@ impl BlockHierarchy {
                 block.name
             )));
         }
-        for instance in &block.instantiations {
-            if let Some(child_name) = instance.referenced_block() {
+        // Each frame advances one instance at a time so a deep hierarchy does
+        // not consume the process stack. A completed child is summarized before
+        // its parent graph is built.
+        let mut pending = vec![(block, 0usize)];
+        while let Some((parent, next)) = pending.last_mut() {
+            if let Some(instance) = parent.instantiations.get(*next) {
+                *next += 1;
+                let Some(child_name) = instance.referenced_block() else {
+                    continue;
+                };
                 let child = package
                     .get_block(child_name)
                     .ok_or_else(|| invalid(format!("missing child block '{child_name}'")))?;
-                if child.clock_port_name().is_some() && block.clock_port_name().is_none() {
+                if child.clock_port_name().is_some() && parent.clock_port_name().is_none() {
                     return Err(invalid(format!(
                         "clocked child '{}' requires a clock on parent block '{}'",
-                        child.name, block.name
+                        child.name, parent.name
                     )));
                 }
-                // Validate even children with no visible outputs: their
-                // internal combinational logic can still
-                // contain an invalid cycle.
-                self.summarize(child, package)?;
+                if self.summaries.contains_key(&child.name) {
+                    continue;
+                }
+                if !self.active.insert(child.name.clone()) {
+                    return Err(invalid(format!(
+                        "recursive block instantiation involving '{}'",
+                        child.name
+                    )));
+                }
+                pending.push((child, 0));
+            } else {
+                let (completed, _) = pending.pop().expect("active hierarchy frame");
+                if pending.is_empty() {
+                    break;
+                }
+                let graph = self.verify_graph_local(completed)?;
+                let summary = graph_output_dependencies(completed, &graph)?;
+                self.summaries.insert(completed.name.clone(), summary);
+                self.active.remove(&completed.name);
             }
         }
+        let graph = self.verify_graph_local(block)?;
+        self.active.remove(&block.name);
+        Ok(graph)
+    }
+
+    /// Checks one block after its child summaries have been prepared.
+    fn verify_graph_local<'a>(
+        &self,
+        block: &'a Block,
+    ) -> Result<DependencyGraph<'a>, BuilderError> {
         let definitions: BTreeMap<_, _> = block
             .instantiations
             .iter()
@@ -399,7 +432,6 @@ impl BlockHierarchy {
             }
         }
         verify_graph_acyclic(block, &graph)?;
-        self.active.remove(&block.name);
         Ok(graph)
     }
 }
@@ -494,69 +526,247 @@ fn cycle_error(block: &Block, graph: &DependencyGraph, path: &[(usize, usize)]) 
     }
 }
 
-/// Traces each output cone in a checked graph, retaining only interface sets.
-///
-/// Each output visits a reachable node/edge at most once. The scratch storage
-/// is O(nodes), independent of transitive dependency sizes at interior nodes;
-/// only the output-to-input relation itself can require quadratic storage.
+/// One named boundary vertex used to summarize a block's dependencies.
+struct Boundary<'a> {
+    name: &'a str,
+    node: NodeRef,
+}
+
+/// Collects interface dependencies without expanding data bits. Public inout
+/// net representatives participate on both sides of the boundary, excluding
+/// their own zero-length path.
 fn graph_output_dependencies(
     block: &Block,
     graph: &DependencyGraph,
 ) -> Result<BlockSummary, BuilderError> {
-    // Tag visits by output instead of clearing O(nodes) storage for each cone.
-    let mut visited = vec![None; graph.edges.len()];
-    let mut pending = Vec::new();
     let mut summary = BlockSummary::default();
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
     for port in &block.ports {
-        let (name, root) = match port {
+        match port {
+            BlockPort::Input(reference) => {
+                let Some(NodePayload::InputPort { name, .. }) =
+                    block.nodes.get(reference.index).map(|n| &n.payload)
+                else {
+                    return Err(invalid("block input references an invalid node"));
+                };
+                inputs.push(Boundary {
+                    name,
+                    node: *reference,
+                });
+            }
             BlockPort::Output(reference) => {
                 let Some(NodePayload::OutputPort { name, .. }) =
                     block.nodes.get(reference.index).map(|n| &n.payload)
                 else {
                     return Err(invalid("block output references an invalid node"));
                 };
-                (name.as_str(), *reference)
+                outputs.push(Boundary {
+                    name,
+                    node: *reference,
+                });
             }
             BlockPort::Inout(reference) => {
                 let name = block.port_name(*reference);
-                let root = graph.public_nets[name];
-                let representative = graph.classes[root.index - block.nodes.len()]
+                let node = graph.public_nets[name];
+                let representative = graph.classes[node.index - block.nodes.len()]
                     .public_name
                     .expect("public net has a representative");
                 summary
                     .port_classes
                     .insert(name.to_string(), representative.to_string());
-                if representative != name {
-                    continue;
+                if representative == name {
+                    inputs.push(Boundary { name, node });
+                    outputs.push(Boundary { name, node });
                 }
-                (name, root)
             }
-            BlockPort::Clock(_) | BlockPort::Input(_) => continue,
-        };
-        let inputs = summary.outputs.entry(name.to_string()).or_default();
-        visited[root.index] = Some(root);
-        pending.push(root);
-        while let Some(vertex) = pending.pop() {
-            if let Some(node) = block.nodes.get(vertex.index) {
-                if let NodePayload::InputPort { name, .. } = &node.payload {
-                    inputs.insert(name.clone());
+            BlockPort::Clock(_) => {}
+        }
+    }
+    let input_nodes: Vec<_> = inputs.iter().map(|port| port.node).collect();
+    let output_nodes: Vec<_> = outputs.iter().map(|port| port.node).collect();
+    let mut cones = PortCones::new(graph.edges.len());
+    let drivers = collect_port_dependencies(&graph.edges, &input_nodes, &output_nodes, &mut cones);
+    for (output, sources) in outputs.into_iter().zip(drivers) {
+        summary.outputs.insert(
+            output.name.to_string(),
+            sources
+                .into_iter()
+                .map(|index| inputs[index].name.to_string())
+                .collect(),
+        );
+    }
+    Ok(summary)
+}
+
+/// Finds boundary pairs by advancing whichever traversal has made less useful
+/// progress. A group of up to 64 ports shares each visited edge, and the
+/// opposite direction can take over at a group boundary.
+fn collect_port_dependencies(
+    dependencies: &[Vec<NodeRef>],
+    inputs: &[NodeRef],
+    outputs: &[NodeRef],
+    search: &mut PortCones,
+) -> Vec<Vec<usize>> {
+    let mut drivers = vec![Vec::new(); outputs.len()];
+    if inputs.is_empty() || outputs.is_empty() {
+        return drivers;
+    }
+    let mut input_index = vec![usize::MAX; dependencies.len()];
+    let mut output_index = vec![usize::MAX; dependencies.len()];
+    for (index, node) in inputs.iter().enumerate() {
+        input_index[node.index] = index;
+    }
+    for (index, node) in outputs.iter().enumerate() {
+        output_index[node.index] = index;
+    }
+    let mut input_groups = inputs.chunks(u64::BITS as usize);
+    let mut output_groups = outputs.chunks(u64::BITS as usize);
+    let mut completed_inputs = vec![false; inputs.len()];
+    let mut completed_outputs = vec![false; outputs.len()];
+    let mut users = None;
+    let edge_count = dependencies
+        .iter()
+        .fold(0usize, |n, edges| n.saturating_add(edges.len()));
+    let quantum = dependencies.len().saturating_add(edge_count);
+    let mut from_inputs = inputs.len() < outputs.len();
+    while input_groups.len() != 0 && output_groups.len() != 0 {
+        if from_inputs {
+            let edges = users.get_or_insert_with(|| {
+                let mut users = vec![Vec::new(); dependencies.len()];
+                for (index, args) in dependencies.iter().enumerate() {
+                    for arg in args {
+                        users[arg.index].push(NodeRef { index });
+                    }
                 }
-            } else if let Some(name) = graph.classes[vertex.index - block.nodes.len()].public_name
-                && vertex != root
-            {
-                // Other public nets can be externally driven. The root net
-                // summarizes its own drivers, independent of its alias names.
-                inputs.insert(name.to_string());
+                users
+            });
+            search.advance(
+                &mut input_groups,
+                edges,
+                quantum,
+                &input_index,
+                &mut completed_inputs,
+                |dest, sources, ports| {
+                    let row = output_index[dest.index];
+                    if row != usize::MAX && !completed_outputs[row] {
+                        for source in reached_ports(sources, ports) {
+                            if source != dest {
+                                drivers[row].push(input_index[source.index]);
+                            }
+                        }
+                    }
+                },
+            );
+        } else {
+            search.advance(
+                &mut output_groups,
+                dependencies,
+                quantum,
+                &output_index,
+                &mut completed_outputs,
+                |dest, sources, ports| {
+                    let column = input_index[dest.index];
+                    if column != usize::MAX && !completed_inputs[column] {
+                        for output in reached_ports(sources, ports) {
+                            if output != dest {
+                                drivers[output_index[output.index]].push(column);
+                            }
+                        }
+                    }
+                },
+            );
+        }
+        from_inputs = !from_inputs;
+    }
+    drivers
+}
+
+/// Enumerates starting ports whose paths reached a common destination.
+fn reached_ports(mut mask: u64, ports: &[NodeRef]) -> impl Iterator<Item = NodeRef> {
+    std::iter::from_fn(move || {
+        if mask == 0 {
+            return None;
+        }
+        let index = mask.trailing_zeros() as usize;
+        mask &= mask - 1;
+        Some(ports[index])
+    })
+}
+
+/// Coalesces up to 64 boundary cones in reusable graph-sized scratch storage.
+struct PortCones {
+    masks: Vec<(u64, u64)>,
+    ready: VecDeque<NodeRef>,
+    touched: Vec<NodeRef>,
+    #[cfg(test)]
+    work: usize,
+}
+
+impl PortCones {
+    /// Allocates scratch storage once for both traversal directions.
+    fn new(nodes: usize) -> Self {
+        Self {
+            masks: vec![(0, 0); nodes],
+            ready: VecDeque::new(),
+            touched: Vec::new(),
+            #[cfg(test)]
+            work: 0,
+        }
+    }
+
+    /// Advances complete port groups until the work reaches one graph scan.
+    fn advance(
+        &mut self,
+        groups: &mut std::slice::Chunks<'_, NodeRef>,
+        edges: &[Vec<NodeRef>],
+        mut budget: usize,
+        source_index: &[usize],
+        completed: &mut [bool],
+        mut visit: impl FnMut(NodeRef, u64, &[NodeRef]),
+    ) {
+        while let Some(ports) = groups.next() {
+            for (bit, &node) in ports.iter().enumerate() {
+                self.masks[node.index] = (1 << bit, 1 << bit);
+                self.ready.push_back(node);
+                self.touched.push(node);
             }
-            for dependency in &graph.edges[vertex.index] {
-                if visited[dependency.index] != Some(root) {
-                    visited[dependency.index] = Some(root);
-                    pending.push(*dependency);
+            while let Some(node) = self.ready.pop_front() {
+                let delta = std::mem::take(&mut self.masks[node.index].1);
+                let work = 1 + edges[node.index].len();
+                budget = budget.saturating_sub(work);
+                #[cfg(test)]
+                {
+                    self.work += work;
                 }
+                for &next in &edges[node.index] {
+                    let (seen, pending) = &mut self.masks[next.index];
+                    let new = delta & !*seen;
+                    if new == 0 {
+                        continue;
+                    }
+                    if *seen == 0 {
+                        self.touched.push(next);
+                    }
+                    if *pending == 0 {
+                        self.ready.push_back(next);
+                    }
+                    *seen |= new;
+                    *pending |= new;
+                }
+            }
+            for dest in self.touched.drain(..) {
+                let (sources, _) = std::mem::take(&mut self.masks[dest.index]);
+                visit(dest, sources, ports);
+            }
+            for port in ports {
+                completed[source_index[port.index]] = true;
+            }
+            if budget == 0 {
+                break;
             }
         }
     }
-    Ok(summary)
 }
 
 fn invalid(reason: impl Into<String>) -> BuilderError {
@@ -573,6 +783,149 @@ mod tests {
     fn check(source: &str) -> Result<(), BuilderError> {
         let package = Parser::new(source).parse_and_verify_package().unwrap();
         verify_block_combinational_cycles(package.get_top_block().unwrap(), &package)
+    }
+
+    #[test]
+    fn shared_output_cone_is_traversed_once() {
+        let chain = 1_500;
+        let output_count = 1_024;
+        let mut edges = vec![Vec::new(); chain + output_count + 2];
+        for index in 2..chain + 2 {
+            edges[index].push(NodeRef { index: index - 1 });
+        }
+        let outputs: Vec<_> = (chain + 2..edges.len())
+            .map(|index| {
+                edges[index].push(NodeRef { index: chain + 1 });
+                NodeRef { index }
+            })
+            .collect();
+        let mut search = PortCones::new(edges.len());
+        let drivers =
+            collect_port_dependencies(&edges, &[NodeRef { index: 1 }], &outputs, &mut search);
+        assert!(drivers.iter().all(|row| row == &[0]));
+        let graph_work = edges.len() + edges.iter().map(Vec::len).sum::<usize>();
+        assert!(
+            search.work <= graph_work,
+            "shared cone work {} exceeds one graph scan {graph_work}",
+            search.work
+        );
+    }
+
+    #[test]
+    fn grouped_cones_preserve_boundary_pairs_after_switching_direction() {
+        for (input_count, output_count) in [(65, 66), (66, 65)] {
+            let mut child = BlockBuilder::new("child");
+            let mut expected = OutputDependencies::new();
+            let mut groups = Vec::new();
+            let mut all_inputs = BTreeSet::new();
+            for group in ["a", "b"] {
+                let mut ports = Vec::new();
+                let mut names = BTreeSet::new();
+                for i in 0..input_count {
+                    let name = format!("{group}_in_{i}");
+                    ports.push(child.input_port(&name, Type::Bits(1)).unwrap());
+                    names.insert(name);
+                }
+                let shared = child.concat(&ports).unwrap();
+                for i in 0..output_count {
+                    let name = format!("{group}_out_{i}");
+                    child.output_port(&name, shared).unwrap();
+                    expected.insert(name, names.clone());
+                }
+                groups.push(shared);
+                all_inputs.extend(names);
+            }
+            let both = child.concat(&groups).unwrap();
+            child.output_port("both", both).unwrap();
+            expected.insert("both".into(), all_inputs);
+            let tail = child.input_port("tail", Type::Bits(1)).unwrap();
+            child.output_port("last", tail).unwrap();
+            expected.insert("last".into(), BTreeSet::from(["tail".into()]));
+
+            let package = child.build_package("cones").unwrap();
+            let mut hierarchy = BlockHierarchy::default();
+            hierarchy
+                .summarize(package.get_top_block().unwrap(), &package)
+                .unwrap();
+            assert_eq!(hierarchy.summaries["child"].outputs, expected);
+        }
+    }
+
+    /// Compare grouped traversal against an independent per-output DFS on
+    /// reconvergent DAGs spanning multiple boundary groups.
+    #[test]
+    fn grouped_dependencies_match_a_scalar_graph_oracle() {
+        for (input_count, output_count) in [(65, 80), (80, 65)] {
+            for seed in 0..8u64 {
+                let count = 1 + input_count + 45 + output_count;
+                let mut edges = vec![Vec::new(); count];
+                let mut state = seed + 1;
+                for (index, args) in edges.iter_mut().enumerate().skip(input_count + 1) {
+                    for _ in 0..3 {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        args.push(NodeRef {
+                            index: 1 + state as usize % (index - 1),
+                        });
+                    }
+                }
+                let inputs: Vec<_> = (1..=input_count).map(|index| NodeRef { index }).collect();
+                let outputs: Vec<_> = (count - output_count..count)
+                    .map(|index| NodeRef { index })
+                    .collect();
+                let mut search = PortCones::new(count);
+                let actual = collect_port_dependencies(&edges, &inputs, &outputs, &mut search);
+                for (output, actual) in outputs.iter().zip(actual) {
+                    let mut pending = vec![*output];
+                    let mut visited = vec![false; count];
+                    let mut expected = BTreeSet::new();
+                    while let Some(current) = pending.pop() {
+                        if std::mem::replace(&mut visited[current.index], true) {
+                            continue;
+                        }
+                        if (1..=input_count).contains(&current.index) {
+                            expected.insert(current.index - 1);
+                        }
+                        pending.extend(&edges[current.index]);
+                    }
+                    assert_eq!(
+                        actual.into_iter().collect::<BTreeSet<_>>(),
+                        expected,
+                        "seed {seed}, output {}",
+                        output.index
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn public_inout_aliases_share_a_boundary_without_self_dependency() {
+        let source = r#"package aliases
+top block child(a: bits[1], alias: bits[1], sensed: bits[1]) {
+  ext_inout_net wire(bits[1])
+  a: () = ext_inout_port(name=a, net=wire, id=1)
+  alias: () = ext_inout_port(name=alias, net=wire, id=2)
+  read: bits[1] = ext_inout_read(net=wire, id=3)
+  sensed: () = output_port(read, name=sensed, id=4)
+}
+"#;
+        let package = Parser::new(source).parse_and_verify_package().unwrap();
+        let mut hierarchy = BlockHierarchy::default();
+        hierarchy
+            .summarize(package.get_top_block().unwrap(), &package)
+            .unwrap();
+        let summary = &hierarchy.summaries["child"];
+        assert_eq!(
+            summary.port_classes,
+            BTreeMap::from([("a".into(), "a".into()), ("alias".into(), "a".into()),])
+        );
+        assert_eq!(
+            summary.outputs,
+            BTreeMap::from([
+                ("a".into(), BTreeSet::new()),
+                ("sensed".into(), BTreeSet::from(["a".into()])),
+            ])
+        );
     }
 
     #[test]

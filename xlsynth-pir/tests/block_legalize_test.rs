@@ -196,3 +196,52 @@ fn excessive_intermediate_bit_width_is_rejected() {
         "unexpected error: {error}"
     );
 }
+
+/// Reused definitions must be counted per instance before any body is copied.
+#[test]
+fn excessive_hierarchy_expansion_is_rejected_before_flattening() {
+    let mut leaf = BlockBuilder::new("level0");
+    let input = leaf.input_port("d", Type::Bits(1)).unwrap();
+    leaf.output_port("q", input).unwrap();
+    let mut package = leaf.build_package("binary_hierarchy").unwrap();
+    for depth in 1..=20 {
+        let child_name = format!("level{}", depth - 1);
+        let child = package.get_block(&child_name).unwrap();
+        let mut parent = BlockBuilder::new(&format!("level{depth}"));
+        let input = parent.input_port("d", Type::Bits(1)).unwrap();
+        let first = parent.instantiate("first", child).unwrap();
+        let second = parent.instantiate("second", child).unwrap();
+        parent.instantiation_input(first, "d", input).unwrap();
+        parent.instantiation_input(second, "d", input).unwrap();
+        let output = parent.instantiation_output(first, "q").unwrap();
+        let _ = parent.instantiation_output(second, "q").unwrap();
+        parent.output_port("q", output).unwrap();
+        parent.build_into_package(&mut package).unwrap();
+    }
+    let error = legalize_block_hierarchy(&package, "level20").unwrap_err();
+    assert!(error.contains("flattened-node budget"), "{error}");
+    let error = xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "level20")
+        .err()
+        .expect("evaluation must reject expansion before elaborating");
+    assert!(
+        error.to_string().contains("projected-node budget"),
+        "{error}"
+    );
+}
+
+/// An explicitly stored canonical name must follow the rewritten opcode.
+#[test]
+fn legalization_accepts_canonical_names_on_rewritten_wiring() {
+    let mut package = shifted_feedback(4);
+    for node in &mut package.get_top_block_mut().unwrap().nodes {
+        if matches!(
+            node.payload,
+            xlsynth_pir::ir::NodePayload::BitSlice { .. } | xlsynth_pir::ir::NodePayload::Nary(..)
+        ) {
+            node.name = Some(format!("{}.{}", node.payload.get_operator(), node.text_id));
+        }
+    }
+    verify_package(&package).unwrap();
+    let legalized = legalize_block_hierarchy(&package, "root").unwrap();
+    verify_package(&legalized).unwrap();
+}

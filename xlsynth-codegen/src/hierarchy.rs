@@ -50,6 +50,80 @@ mod tests {
         super::verify_hierarchy(package.get_top_block().unwrap(), package, true)
     }
 
+    /// Hierarchy validation must use heap-backed traversal even for a long
+    /// chain whose block definitions contain no logic.
+    #[test]
+    fn deep_acyclic_hierarchy_does_not_consume_the_process_stack() {
+        let depth = 2_000;
+        let mut source = String::from(
+            r#"package deep
+block layer0() {}
+"#,
+        );
+        for layer in 1..depth {
+            let top = if layer + 1 == depth { "top " } else { "" };
+            source.push_str(&format!(
+                r#"{top}block layer{layer}() {{
+  instantiation u(block=layer{}, kind=block)
+}}
+"#,
+                layer - 1,
+            ));
+        }
+        let package = parse_package(&source);
+        assert_eq!(verify_hierarchy(&package), Ok(()));
+    }
+
+    /// Selected output summaries cross the same hierarchy depth when root
+    /// feedback requires structural refinement.
+    #[test]
+    fn deep_structural_feedback_uses_iterative_selected_summaries() {
+        let depth = 2_000;
+        let mut source = String::from(
+            r#"package deep_feedback
+block layer0(d: bits[2], q: bits[2]) {
+  d: bits[2] = input_port(name=d, id=1)
+  low: bits[1] = bit_slice(d, start=0, width=1, id=2)
+  zero: bits[1] = literal(value=0, id=3)
+  shifted: bits[2] = concat(low, zero, id=4)
+  q: () = output_port(shifted, name=q, id=5)
+}
+"#,
+        );
+        let mut id = 6;
+        for layer in 1..depth {
+            source.push_str(&format!(
+                r#"block layer{layer}(d: bits[2], q: bits[2]) {{
+  instantiation u(block=layer{}, kind=block)
+  d: bits[2] = input_port(name=d, id={id})
+  child: bits[2] = instantiation_output(instantiation=u, port_name=q, id={})
+  bind: () = instantiation_input(d, instantiation=u, port_name=d, id={})
+  q: () = output_port(child, name=q, id={})
+}}
+"#,
+                layer - 1,
+                id + 1,
+                id + 2,
+                id + 3,
+            ));
+            id += 4;
+        }
+        source.push_str(&format!(
+            r#"top block root(result: bits[2]) {{
+  instantiation u(block=layer{}, kind=block)
+  child: bits[2] = instantiation_output(instantiation=u, port_name=q, id={id})
+  bind: () = instantiation_input(child, instantiation=u, port_name=d, id={})
+  result: () = output_port(child, name=result, id={})
+}}
+"#,
+            depth - 1,
+            id + 1,
+            id + 2,
+        ));
+        let package = parse_package(&source);
+        assert_eq!(verify_hierarchy(&package), Ok(()));
+    }
+
     #[test]
     fn nested_child_feedback_is_rejected_transitively() {
         let package = parse_package(

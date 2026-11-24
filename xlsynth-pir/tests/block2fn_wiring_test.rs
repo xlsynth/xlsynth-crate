@@ -3,7 +3,9 @@
 //! Function conversion automatically legalizes acyclic structural feedback.
 
 use xlsynth_pir::block_legalize::legalize_block_hierarchy;
-use xlsynth_pir::block2fn::{Block2FnOptions, block_ir_to_fn, block_package_to_fn};
+use xlsynth_pir::block2fn::{
+    Block2FnOptions, block_ir_to_fn, block_package_to_fn, block_package_to_fn_package,
+};
 use xlsynth_pir::ir::{Package, Type};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser::Parser;
@@ -227,5 +229,181 @@ top block wrapper(spare: bits[1], control: bits[1], result: bits[1]) {
             FnEvalResult::Success(result) => assert_eq!(result.value, IrValue::bool(false)),
             FnEvalResult::Failure(error) => panic!("function evaluation failed: {error:?}"),
         }
+    }
+}
+
+/// Register collapse can introduce a word-level cycle in otherwise acyclic
+/// bit wiring, independently of hierarchy inlining.
+#[test]
+fn legalizes_feedback_introduced_by_register_collapse() {
+    let source = r#"package collapsed_feedback
+top block root(clk: clock, seed: bits[1], result: bits[4]) {
+  reg saved(bits[4])
+  seed: bits[1] = input_port(name=seed, id=1)
+  q: bits[4] = register_read(register=saved, id=2)
+  low: bits[3] = bit_slice(q, start=0, width=3, id=3)
+  driver: bits[4] = concat(low, seed, id=4)
+  write: () = register_write(driver, register=saved, id=5)
+  result: () = output_port(q, name=result, id=6)
+}"#;
+    let package = parse(source);
+    for seed in 0..=1 {
+        assert_eq!(
+            evaluate(
+                &package,
+                &[IrValue::make_ubits(1, seed).unwrap()],
+                &Default::default(),
+            ),
+            IrValue::make_ubits(4, 15 * seed).unwrap(),
+        );
+    }
+    let cyclic = parse(&source.replace("start=0", "start=1"));
+    let error = block_package_to_fn(&cyclic, &Default::default()).unwrap_err();
+    assert!(error.contains("cycle"), "unexpected error: {error}");
+}
+
+/// Tying a reset input before feedback legalization keeps the private block's
+/// reset declaration, registers, and write operands mutually consistent.
+#[test]
+fn reset_ties_remain_valid_during_feedback_legalization() {
+    let source = r#"package reset_tie
+block leaf(d: bits[4], q: bits[4]) {
+  d: bits[4] = input_port(name=d, id=1)
+  q: () = output_port(d, name=q, id=2)
+}
+top block root(clk: clock, rst: bits[1], seed: bits[1], result: bits[4]) {
+  #![reset(port="rst", asynchronous=false, active_low=false)]
+  reg saved(bits[1], reset_value=0)
+  instantiation u(block=leaf, kind=block)
+  rst: bits[1] = input_port(name=rst, id=3)
+  seed: bits[1] = input_port(name=seed, id=4)
+  old: bits[1] = register_read(register=saved, id=5)
+  write: () = register_write(seed, register=saved, reset=rst, id=6)
+  q: bits[4] = instantiation_output(instantiation=u, port_name=q, id=7)
+  low: bits[3] = bit_slice(q, start=0, width=3, id=8)
+  driver: bits[4] = concat(low, seed, id=9)
+  drive: () = instantiation_input(driver, instantiation=u, port_name=d, id=10)
+  result: () = output_port(q, name=result, id=11)
+}"#;
+    let package = parse(source);
+    let original = package.to_string();
+    for reset in 0..=1 {
+        let mut options = Block2FnOptions::default();
+        options.tie_input_ports.insert(
+            "rst".into(),
+            IrValue::make_ubits(1, reset).unwrap().to_bits().unwrap(),
+        );
+        for seed in 0..=1 {
+            assert_eq!(
+                evaluate(&package, &[IrValue::make_ubits(1, seed).unwrap()], &options,),
+                IrValue::make_ubits(4, 15 * seed).unwrap(),
+            );
+        }
+    }
+    assert_eq!(package.to_string(), original);
+}
+
+/// A native function's implementation becomes visible to tie-driven
+/// simplification on a private feedback graph.
+#[test]
+fn tied_control_simplifies_feedback_through_native_invoke() {
+    let source = r#"package tied_invoke
+fn gate(d: bits[1] id=1, c: bits[1] id=2) -> bits[1] {
+  ret result: bits[1] = and(d, c, id=3)
+}
+block leaf(d: bits[1], c: bits[1], q: bits[1]) {
+  d: bits[1] = input_port(name=d, id=4)
+  c: bits[1] = input_port(name=c, id=5)
+  masked: bits[1] = invoke(d, c, to_apply=gate, id=6)
+  q: () = output_port(masked, name=q, id=7)
+}
+top block root(control: bits[1], result: bits[1]) {
+  instantiation u(block=leaf, kind=block)
+  control: bits[1] = input_port(name=control, id=8)
+  q: bits[1] = instantiation_output(instantiation=u, port_name=q, id=9)
+  dd: () = instantiation_input(q, instantiation=u, port_name=d, id=10)
+  cc: () = instantiation_input(control, instantiation=u, port_name=c, id=11)
+  result: () = output_port(q, name=result, id=12)
+}"#;
+    let package = parse(source);
+    let original = package.to_string();
+    for control in 0..=1 {
+        let mut options = Block2FnOptions::default();
+        options.tie_input_ports.insert(
+            "control".into(),
+            IrValue::make_ubits(1, control).unwrap().to_bits().unwrap(),
+        );
+        if control == 0 {
+            assert_eq!(evaluate(&package, &[], &options), IrValue::bool(false));
+        } else {
+            let error = block_package_to_fn(&package, &options).unwrap_err();
+            assert!(error.contains("cycle"), "unexpected error: {error}");
+        }
+    }
+    assert_eq!(package.to_string(), original);
+
+    // Expansion can itself remove the apparent feedback when a native
+    // function ignores the argument that participates in the loop.
+    let independent = parse(&source.replace("and(d, c, id=3)", "identity(c, id=3)"));
+    let mut options = Block2FnOptions::default();
+    options.tie_input_ports.insert(
+        "control".into(),
+        IrValue::make_ubits(1, 1).unwrap().to_bits().unwrap(),
+    );
+    assert_eq!(evaluate(&independent, &[], &options), IrValue::bool(true));
+}
+
+/// An unmarked package uses its first block as the implicit top. Unrelated
+/// definitions do not need to be flattened or cycle-checked for projection.
+#[test]
+fn unmarked_package_projects_only_its_implicit_top() {
+    let source = r#"package implicit_top
+block first(x: bits[1], result: bits[1]) {
+  x: bits[1] = input_port(name=x, id=1)
+  result: () = output_port(x, name=result, id=2)
+}
+block unrelated(result: bits[1]) {
+  instantiation u(block=first, kind=block)
+  q: bits[1] = instantiation_output(instantiation=u, port_name=result, id=3)
+  feed: () = instantiation_input(q, instantiation=u, port_name=x, id=4)
+  result: () = output_port(q, name=result, id=5)
+}"#;
+    let package = parse(source);
+    assert_eq!(
+        evaluate(
+            &package,
+            &[IrValue::bool(true)],
+            &Block2FnOptions::default(),
+        ),
+        IrValue::bool(true),
+    );
+}
+
+/// Const propagation must clear a canonical name when it changes the opcode.
+#[test]
+fn const_propagation_preserves_valid_programmatic_node_names() {
+    let source = r#"package canonical_name
+top block root(x: bits[1], result: bits[1]) {
+  x: bits[1] = input_port(name=x, id=1)
+  zero: bits[1] = literal(value=0, id=2)
+  value: bits[1] = and(x, zero, id=3)
+  result: () = output_port(value, name=result, id=4)
+}"#;
+    let mut package = parse(source);
+    let node = package
+        .get_top_block_mut()
+        .unwrap()
+        .nodes
+        .iter_mut()
+        .find(|node| node.text_id == 3)
+        .unwrap();
+    node.name = Some("and.3".into());
+    xlsynth_pir::ir_verify::verify_package(&package).unwrap();
+
+    let result = block_package_to_fn_package(&package, &Default::default()).unwrap();
+    xlsynth_pir::ir_verify::verify_package(&result).unwrap();
+    match eval_fn(result.get_top_fn().unwrap(), &[IrValue::bool(true)]) {
+        FnEvalResult::Success(value) => assert_eq!(value.value, IrValue::bool(false)),
+        FnEvalResult::Failure(error) => panic!("function evaluation failed: {error:?}"),
     }
 }

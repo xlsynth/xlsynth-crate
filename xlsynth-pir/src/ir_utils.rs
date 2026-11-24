@@ -934,7 +934,8 @@ pub fn make_constant_shrl_bit_slice_expr(
 
 /// Replaces the payload (and optionally the type) of `target` in `f`.
 ///
-/// The node index and references from its users are unchanged. To redirect
+/// The node index and references from its users are unchanged. Assigned names
+/// are retained, while operator-ID names follow the new opcode. To redirect
 /// users to another node, use [`replace_node_with_ref`].
 pub fn replace_node_payload(
     f: &mut NodeGraph,
@@ -961,7 +962,7 @@ pub fn replace_node_payload(
     new_payload
         .validate(f)
         .map_err(|e| format!("replace_node_payload: {e}"))?;
-    f.nodes[target.index].payload = new_payload;
+    f.nodes[target.index].replace_payload(new_payload);
     if let Some(ty) = new_type {
         f.nodes[target.index].ty = ty;
     }

@@ -677,7 +677,7 @@ Inlines blocks and converts Block IR into a PIR package with a top function and 
 - Applies `--tie-input-ports` constants to the private proof graph and removes those ports from the resulting function signature. Ties are available to feedback simplification and legalization.
 - Optionally removes output ports (`--drop-output-ports`).
 - Simplifies tied inputs, such as an `input_valid` mux choosing between register output and new data; a constant select can remove the feedback dependency.
-- Collapses registers into wires. If a cycle is created after collapsing, an error is returned.
+- Collapses register reads onto their write data as wires, ignoring reset and load-enable controls for this combinational proof model. Structurally acyclic feedback is legalized; a genuine cycle is rejected.
 - Removes clock port.
 - Converts the resulting combinational block into a function.
 
@@ -703,7 +703,7 @@ xlsynth-driver block2sv simplified.block.ir > output.sv
 
 ### `block-legalize`: lower Block IR for whole-node consumers
 
-Flattens the selected block hierarchy and rewrites acyclic structural feedback into a whole-node dependency graph. This standalone command exposes the feedback lowering that `block2fn` invokes automatically when ordinary inlining cannot schedule the wiring. It does not apply `block2fn` input ties; `block2fn` applies those to its private proof graph before legalization. Use it to inspect the resulting Block IR or provide it to other whole-node consumers. It changes the hierarchy, unlike `block-simplify`; SystemVerilog emission does not require it. Actual combinational cycles and opaque external instances are rejected. Array operations use canonical XLS bounds semantics; proofs of legalized IR do not cover unchecked SV array indexing for out-of-bounds indices. The pass rejects lowerings that exceed its explicit array-expansion or proof-graph size limits to avoid runaway evaluation and proof costs.
+Flattens the selected block hierarchy and rewrites acyclic structural feedback into a whole-node dependency graph. This standalone command exposes the feedback lowering that `block2fn` invokes automatically when ordinary inlining cannot schedule the wiring. It does not apply `block2fn` input ties; `block2fn` applies those to its private proof graph before legalization. Use it to inspect the resulting Block IR or provide it to other whole-node consumers. It changes the hierarchy, unlike `block-simplify`; SystemVerilog emission does not require it. Actual combinational cycles and opaque external instances are rejected. Array operations use canonical XLS bounds semantics; proofs of legalized IR do not cover unchecked SV array indexing for out-of-bounds indices. The pass checks a conservative flattened-node estimate before expanding the hierarchy and rejects lowerings that exceed its array-expansion or proof-helper limits.
 
 The marked block top is used by default, or the only block if the package has no marked block top. Use `--top <BLOCK>` to select a different top, or when an unmarked package contains multiple blocks.
 

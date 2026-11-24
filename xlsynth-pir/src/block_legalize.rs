@@ -25,13 +25,157 @@ use projection::{Demand, Recipe, Selection, needs_aggregate_expansion, project};
 /// opaque external instances are rejected; the input package is never changed.
 /// Simplification, when desired, is a separate preceding pass. Array reads
 /// and updates use canonical XLS bounds semantics; this is not equivalent to
-/// unchecked SV array indexing for out-of-bounds indices. Explicit expansion
-/// and proof-graph size limits reject impractically large lowerings.
+/// unchecked SV array indexing for out-of-bounds indices. A conservative
+/// hierarchy-expansion preflight and proof-helper limits reject impractically
+/// large lowerings before they allocate the corresponding graphs.
 pub fn legalize_block_hierarchy(package: &Package, top: &str) -> Result<Package, String> {
+    check_flatten_budget(package, top)?;
     match crate::block_inline::flatten_block_hierarchy(package, top) {
         Ok(flattened) => Ok(flattened),
         Err(original) => legalize_after_inline_failure(package, top, original),
     }
+}
+
+const MAX_EXPANSION_NODES: usize = 1_000_000;
+
+/// Bounds prospective flattened bodies before either inlining path allocates
+/// them. Estimates are memoized by definition and charged once per instance;
+/// generated intermediate definitions count toward the same allocation limit.
+pub(crate) fn check_flatten_budget(package: &Package, top: &str) -> Result<(), String> {
+    check_expansion_budget(
+        package,
+        top,
+        ExpansionCost::FlattenedBodies,
+        MAX_EXPANSION_NODES,
+    )
+}
+
+/// Bounds the one fully projected instance graph without charging temporary
+/// flattened definitions that evaluation never constructs.
+pub(crate) fn check_projection_budget(package: &Package, top: &str) -> Result<(), String> {
+    check_expansion_budget(
+        package,
+        top,
+        ExpansionCost::ProjectedHierarchy,
+        MAX_EXPANSION_NODES,
+    )
+}
+
+/// Distinguishes the live intermediate bodies of flattening from a single
+/// elaborated projection of the selected hierarchy.
+#[derive(Clone, Copy)]
+enum ExpansionCost {
+    FlattenedBodies,
+    ProjectedHierarchy,
+}
+
+impl ExpansionCost {
+    /// Counts nodes owned by one instance, including simulator state parameters
+    /// and the top-level input parameters and result tuple.
+    fn local_nodes(self, block: &Block, root: bool) -> Option<usize> {
+        match self {
+            Self::FlattenedBodies => Some(block.nodes.len()),
+            Self::ProjectedHierarchy => {
+                let nodes = block.nodes.len().checked_add(block.registers.len())?;
+                if root {
+                    nodes
+                        .checked_add(block.input_ports().count())?
+                        .checked_add(2)
+                } else {
+                    Some(nodes)
+                }
+            }
+        }
+    }
+
+    /// Reports the specific prospective allocation that exceeded its limit.
+    fn error(self, limit: usize) -> String {
+        let kind = match self {
+            Self::FlattenedBodies => "flattened-node",
+            Self::ProjectedHierarchy => "projected-node",
+        };
+        format!("block expansion exceeds its {kind} budget ({limit} estimated nodes)")
+    }
+}
+
+/// Estimates each definition once and charges its expanded size per instance.
+fn check_expansion_budget(
+    package: &Package,
+    top: &str,
+    cost: ExpansionCost,
+    limit: usize,
+) -> Result<(), String> {
+    let root = package
+        .get_block(top)
+        .ok_or_else(|| format!("block '{top}' not found"))?;
+    if cost
+        .local_nodes(root, true)
+        .is_none_or(|nodes| nodes > limit)
+    {
+        return Err(cost.error(limit));
+    }
+    if root.instantiations.is_empty() {
+        return Ok(());
+    }
+    let blocks: HashMap<_, _> = package
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            crate::ir::PackageMember::Block(block) => Some((block.name.as_str(), block)),
+            _ => None,
+        })
+        .collect();
+    let mut states = HashMap::<&str, u8>::new();
+    let mut sizes = HashMap::<&str, usize>::new();
+    let mut pending = vec![(top, false)];
+    let mut allocated = 0usize;
+    while let Some((name, complete)) = pending.pop() {
+        let block = blocks
+            .get(name)
+            .ok_or_else(|| format!("missing child block '{name}'"))?;
+        if complete {
+            let mut size = cost
+                .local_nodes(block, name == top)
+                .ok_or_else(|| cost.error(limit))?;
+            for instance in &block.instantiations {
+                let Some(child) = instance.referenced_block() else {
+                    continue;
+                };
+                size = size
+                    .checked_add(sizes[child])
+                    .ok_or_else(|| cost.error(limit))?;
+                if size > limit {
+                    return Err(cost.error(limit));
+                }
+            }
+            if matches!(cost, ExpansionCost::FlattenedBodies) && !block.instantiations.is_empty() {
+                allocated = allocated
+                    .checked_add(size)
+                    .ok_or_else(|| cost.error(limit))?;
+                if allocated > limit {
+                    return Err(cost.error(limit));
+                }
+            }
+            sizes.insert(name, size);
+            states.insert(name, 2);
+            continue;
+        }
+        match states.get(name) {
+            Some(2) => continue,
+            Some(1) => return Err(format!("recursive block instantiation involving '{name}'")),
+            _ => {}
+        }
+        states.insert(name, 1);
+        pending.push((name, true));
+        pending.extend(
+            block
+                .instantiations
+                .iter()
+                .rev()
+                .filter_map(|instance| instance.referenced_block().map(|child| (child, false))),
+        );
+    }
+    Ok(())
 }
 
 /// Refines a failed ordinary inline only when its selected hierarchy has a node
@@ -81,6 +225,7 @@ fn finish_legalization(
     top: &str,
     preprocess: impl FnOnce(&mut Block, &mut usize) -> Result<(), String>,
 ) -> Result<Package, String> {
+    check_flatten_budget(package, top)?;
     let mut result = crate::block_inline::flatten_block_hierarchy_for_legalization(package, top)?;
     let mut last_id = package_max_emitted_node_id(&result);
     let flattened = result.get_block_mut(top).ok_or("flattened block missing")?;
@@ -124,7 +269,7 @@ pub(crate) fn legalize_node_graph(block: &mut NodeGraph, mut last_id: usize) -> 
         budget = next_budget;
         block.nodes.extend(pending);
         for (index, payload) in edits {
-            block.nodes[index].payload = payload;
+            block.nodes[index].replace_payload(payload);
         }
     }
     Ok(())
@@ -350,7 +495,7 @@ fn cut_empty_operands(
                 arg
             }
         });
-        block.nodes[index].payload = payload;
+        block.nodes[index].replace_payload(payload);
     }
     Ok(!zeros.is_empty())
 }
@@ -615,5 +760,45 @@ impl<'a> Resolver<'a> {
             pos: self.block.get_node(origin).pos.clone(),
         });
         Ok(node)
+    }
+}
+
+#[cfg(test)]
+mod expansion_tests {
+    use super::*;
+    use crate::{BlockBuilder, ir::Type};
+
+    /// A unary hierarchy has one small projected graph but many flattened
+    /// intermediate bodies that must be charged only to flattening.
+    #[test]
+    fn projection_does_not_charge_flattening_intermediates() {
+        let mut leaf = BlockBuilder::new("level0");
+        let d = leaf.input_port("d", Type::Bits(1)).unwrap();
+        leaf.output_port("q", d).unwrap();
+        let mut package = leaf.build_package("unary").unwrap();
+        assert!(
+            check_expansion_budget(&package, "level0", ExpansionCost::ProjectedHierarchy, 3)
+                .is_err()
+        );
+        for depth in 1..=10 {
+            let mut parent = BlockBuilder::new(&format!("level{depth}"));
+            let d = parent.input_port("d", Type::Bits(1)).unwrap();
+            let child = parent
+                .instantiate(
+                    "u",
+                    package.get_block(&format!("level{}", depth - 1)).unwrap(),
+                )
+                .unwrap();
+            parent.instantiation_input(child, "d", d).unwrap();
+            let q = parent.instantiation_output(child, "q").unwrap();
+            parent.output_port("q", q).unwrap();
+            parent.build_into_package(&mut package).unwrap();
+        }
+        assert!(
+            check_expansion_budget(&package, "level10", ExpansionCost::FlattenedBodies, 100)
+                .is_err()
+        );
+        check_expansion_budget(&package, "level10", ExpansionCost::ProjectedHierarchy, 100)
+            .unwrap();
     }
 }

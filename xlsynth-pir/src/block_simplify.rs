@@ -12,21 +12,21 @@ use crate::ir::{
 use crate::ir_eval::eval_pure_if_supported;
 use crate::ir_rebase_ids::package_max_emitted_node_id;
 use crate::ir_utils::operands;
-use crate::ir_value_utils::zero_ir_value_for_type;
+use crate::ir_value_utils::{ir_bits_to_usize, zero_ir_value_for_type};
 use crate::ir_verify::verify_package;
 use crate::{IrBits, IrValue};
 
 /// Simplifies local constants and lowers statically controlled wiring in every
 /// block, after expanding native function invokes. Block instance boundaries
 /// are not crossed, foreign invokes stay opaque, and the hierarchy is
-/// unchanged. Constant materialization is bounded to keep compact aggregate
-/// operations compact.
+/// unchanged. Constant materialization and native-call expansion are bounded
+/// per block and across selected definitions.
 ///
-/// Block and port names, instantiations, and original node IDs, names, and
-/// source positions are preserved. Additional wiring nodes receive fresh
-/// package-wide IDs. The input is unchanged if simplification fails.
+/// Block and port names, instantiations, and original node IDs, user-assigned
+/// names, and source positions are preserved. Additional wiring nodes receive
+/// fresh package-wide IDs. The input is unchanged if simplification fails.
 pub fn simplify_block_package(package: &Package) -> Result<Package, String> {
-    simplify_blocks(package, None)
+    simplify_blocks(package, None, MAX_INLINED_NODES_TOTAL)
 }
 
 /// Simplifies only the chosen block and reachable block definitions, leaving
@@ -48,21 +48,36 @@ pub fn simplify_block_hierarchy(package: &Package, top: &str) -> Result<Package,
                 .filter_map(|instance| instance.referenced_block()),
         );
     }
-    simplify_blocks(package, Some(&reachable))
+    simplify_blocks(package, Some(&reachable), MAX_INLINED_NODES_TOTAL)
 }
 
 /// Expands and simplifies a bounded set of block definitions in two phases.
-fn simplify_blocks(package: &Package, selected: Option<&HashSet<&str>>) -> Result<Package, String> {
-    let mut inliner =
-        BlockInvokeInliner::new(package).map_err(|err| format!("invalid input package: {err}"))?;
+fn simplify_blocks(
+    package: &Package,
+    selected: Option<&HashSet<&str>>,
+    total_inline_limit: usize,
+) -> Result<Package, String> {
+    let mut inliner = BlockInvokeInliner::new_structural(package)
+        .map_err(|err| format!("invalid input package: {err}"))?;
     let mut result = package.clone();
+    let mut added_nodes = 0usize;
     for member in &mut result.members {
         if let PackageMember::Block(block) = member
             && selected.is_none_or(|names| names.contains(block.name.as_str()))
-            && let Cow::Owned(expanded) =
-                inliner.inline_native_calls(&block.name, MAX_INLINED_NODES_PER_BLOCK)?
         {
-            *block = expanded;
+            let remaining = total_inline_limit - added_nodes;
+            let limit = remaining.min(MAX_INLINED_NODES_PER_BLOCK);
+            let expanded = inliner.inline_native_calls(&block.name, limit).map_err(|error| {
+                if remaining < MAX_INLINED_NODES_PER_BLOCK {
+                    format!("{error} (native invoke cumulative budget: {remaining} of {total_inline_limit} added nodes remain)")
+                } else {
+                    error
+                }
+            })?;
+            if let Cow::Owned(expanded) = expanded {
+                added_nodes += expanded.nodes.len().saturating_sub(block.nodes.len());
+                *block = expanded;
+            }
         }
     }
     // Expansion allocates IDs across all blocks. Wiring helpers must begin
@@ -234,7 +249,7 @@ fn simplify_node(block: &mut Block, index: usize, last_id: &mut usize) -> Result
     if let Some(value) = fold_literals(block, &node) {
         let replacement = NodePayload::Literal(value);
         if replacement != node.payload {
-            block.nodes[index].payload = replacement;
+            block.nodes[index].replace_payload(replacement);
             return Ok(true);
         }
         return Ok(false);
@@ -339,13 +354,14 @@ fn simplify_node(block: &mut Block, index: usize, last_id: &mut usize) -> Result
     if let Some(payload) = replacement
         && payload != node.payload
     {
-        block.nodes[index].payload = payload;
+        block.nodes[index].replace_payload(payload);
         return Ok(true);
     }
     Ok(false)
 }
 
 const MAX_INLINED_NODES_PER_BLOCK: usize = 100_000;
+const MAX_INLINED_NODES_TOTAL: usize = 1_000_000;
 const MAX_WIRING_PROJECTION_TASKS: usize = 256;
 const MAX_CONSTANT_BITS: usize = 4096;
 const MAX_CONSTANT_VALUE_NODES: usize = 256;
@@ -872,12 +888,7 @@ fn literal_bits(block: &Block, arg: NodeRef) -> Option<&IrBits> {
 
 /// Converts an arbitrary-width constant to a saturating host index.
 fn literal_offset(block: &Block, arg: NodeRef) -> Option<usize> {
-    literal_bits(block, arg).map(|bits| {
-        bits.to_u64()
-            .ok()
-            .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(usize::MAX)
-    })
+    literal_bits(block, arg).map(|bits| ir_bits_to_usize(bits).unwrap_or(usize::MAX))
 }
 
 /// Preserves a named node while forwarding an operand or its known literal.
@@ -959,6 +970,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn constant_multiplication_uses_the_annotated_signed_or_unsigned_width() {
+        let original = parse(
+            r#"package multiplication
+top block top(un: bits[4], uw: bits[12], sn: bits[4], sw: bits[12]) {
+  a: bits[4] = literal(value=13, id=1)
+  b: bits[4] = literal(value=5, id=2)
+  unsigned_narrow: bits[4] = umul(a, b, id=3)
+  unsigned_wide: bits[12] = umul(a, b, id=4)
+  signed_narrow: bits[4] = smul(a, b, id=5)
+  signed_wide: bits[12] = smul(a, b, id=6)
+  un: () = output_port(unsigned_narrow, name=un, id=7)
+  uw: () = output_port(unsigned_wide, name=uw, id=8)
+  sn: () = output_port(signed_narrow, name=sn, id=9)
+  sw: () = output_port(signed_wide, name=sw, id=10)
+}
+"#,
+        );
+        let simplified = simplify_block_package(&original).unwrap();
+        for (name, width, expected) in [
+            ("unsigned_narrow", 4, 1),
+            ("unsigned_wide", 12, 65),
+            ("signed_narrow", 4, 1),
+            ("signed_wide", 12, 0xff1),
+        ] {
+            assert_eq!(
+                named(&simplified, "top", name).payload,
+                NodePayload::Literal(IrValue::make_ubits(width, expected).unwrap())
+            );
+        }
+        let before = BlockEvaluator::prepare(&original, "top").unwrap();
+        let after = BlockEvaluator::prepare(&simplified, "top").unwrap();
+        let before_state = before.initial_state(RegisterInit::AllZeros).unwrap();
+        let after_state = after.initial_state(RegisterInit::AllZeros).unwrap();
+        assert_eq!(
+            before.step(&before_state, &[]).unwrap().outputs,
+            after.step(&after_state, &[]).unwrap().outputs
+        );
     }
 
     #[test]
@@ -1573,5 +1624,92 @@ top block sample(y: bits[1]) {
             block.nodes.last().unwrap().payload,
             NodePayload::OutputPort { .. }
         ));
+    }
+
+    #[test]
+    fn simplification_can_remove_inout_feedback_but_still_rejects_real_cycles() {
+        let source = r#"package feedback
+top block top() {
+  ext_inout_net bus(bits[1])
+  zero: bits[1] = literal(value=0, id=1)
+  one: bits[1] = literal(value=1, id=2)
+  read: bits[1] = ext_inout_read(net=bus, id=3)
+  gated: bits[1] = and(read, zero, id=4)
+  drive: () = ext_inout_drive(gated, one, net=bus, id=5)
+}
+"#;
+        let original = Parser::new(source).parse_package().unwrap();
+        assert!(verify_package(&original).is_err());
+        let simplified = simplify_block_package(&original).unwrap();
+        assert_eq!(
+            named(&simplified, "top", "gated").payload,
+            NodePayload::Literal(IrValue::bool(false))
+        );
+        verify_package(&simplified).unwrap();
+
+        let cyclic = source.replace("and(read, zero", "or(read, zero");
+        let original = Parser::new(&cyclic).parse_package().unwrap();
+        assert!(
+            simplify_block_package(&original)
+                .unwrap_err()
+                .contains("combinational cycle")
+        );
+    }
+
+    #[test]
+    fn opcode_rewrites_clear_canonical_node_names() {
+        let mut original = parse(
+            r#"package names
+top block top(x: bits[1], result: bits[1]) {
+  x: bits[1] = input_port(name=x, id=1)
+  zero: bits[1] = literal(value=0, id=2)
+  gate: bits[1] = and(x, zero, id=3)
+  result: () = output_port(gate, name=result, id=4)
+}
+"#,
+        );
+        let index = original
+            .get_block("top")
+            .unwrap()
+            .nodes
+            .iter()
+            .position(|n| n.text_id == 3)
+            .unwrap();
+        for name in ["and.3".to_string(), format!("and.{}0", usize::MAX)] {
+            original.get_block_mut("top").unwrap().nodes[index].name = Some(name);
+            verify_package(&original).unwrap();
+            let simplified = simplify_block_package(&original).unwrap();
+            let rewritten = &simplified.get_block("top").unwrap().nodes[index];
+            assert_eq!(rewritten.name, None);
+            assert!(matches!(rewritten.payload, NodePayload::Literal(_)));
+            verify_package(&simplified).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_call_expansion_has_a_cumulative_budget() {
+        let package = parse(
+            r#"package calls
+fn invert(x: bits[1] id=1) -> bits[1] {
+  ret value: bits[1] = not(x, id=2)
+}
+block first(x: bits[1], y: bits[1]) {
+  x: bits[1] = input_port(name=x, id=3)
+  value: bits[1] = invoke(x, to_apply=invert, id=4)
+  y: () = output_port(value, name=y, id=5)
+}
+top block second(x: bits[1], y: bits[1]) {
+  x: bits[1] = input_port(name=x, id=6)
+  value: bits[1] = invoke(x, to_apply=invert, id=7)
+  y: () = output_port(value, name=y, id=8)
+}
+"#,
+        );
+        assert!(
+            simplify_blocks(&package, None, 1)
+                .unwrap_err()
+                .contains("cumulative budget")
+        );
+        simplify_blocks(&package, None, 2).unwrap();
     }
 }

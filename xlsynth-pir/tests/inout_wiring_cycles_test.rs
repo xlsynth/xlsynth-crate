@@ -121,3 +121,73 @@ top block root(seed: bits[1]) {
         Err(BuilderError::CombinationalCycle { .. })
     ));
 }
+
+/// Builds selected feedback across a child's public inout and its parent net.
+/// A second child port optionally passively joins two parent net names.
+fn child_inout_feedback(aliased: bool, cyclic: bool) -> String {
+    let child_alias = if aliased {
+        "  alias: () = ext_inout_port(name=alias, net=local, id=8)\n"
+    } else {
+        ""
+    };
+    let child_signature = if aliased { ", alias: bits[2]" } else { "" };
+    let parent_alias = if aliased {
+        "  ext_inout_net other(bits[2])\n  alias: () = ext_instantiation_inout(instantiation=u, port_name=alias, net=other, id=17)\n"
+    } else {
+        ""
+    };
+    let read_net = if aliased { "other" } else { "net" };
+    let (start, driven) = if cyclic {
+        (1, "concat(zero2, selected, id=14)")
+    } else {
+        (0, "concat(selected, seed, id=14)")
+    };
+    format!(
+        r#"package child_inout_feedback
+block child(bus: bits[2]{child_signature}) {{
+  ext_inout_net local(bits[2])
+  bus: () = ext_inout_port(name=bus, net=local, id=1)
+{child_alias}  one: bits[1] = literal(value=1, id=2)
+  zero: bits[1] = literal(value=0, id=3)
+  sample: bits[2] = ext_inout_read(net=local, id=4)
+  low: bits[1] = bit_slice(sample, start=0, width=1, id=5)
+  driven: bits[2] = concat(low, zero, id=6)
+  drive: () = ext_inout_drive(driven, one, net=local, id=7)
+}}
+top block parent(seed: bits[1], result: bits[2]) {{
+  ext_inout_net net(bits[2])
+  instantiation u(block=child, kind=block)
+{parent_alias}  seed: bits[1] = input_port(name=seed, id=9)
+  bind: () = ext_instantiation_inout(instantiation=u, port_name=bus, net=net, id=10)
+  one2: bits[1] = literal(value=1, id=11)
+  zero2: bits[1] = literal(value=0, id=12)
+  sample2: bits[2] = ext_inout_read(net={read_net}, id=13)
+  selected: bits[1] = bit_slice(sample2, start={start}, width=1, id=18)
+  driven2: bits[2] = {driven}
+  drive2: () = ext_inout_drive(driven2, one2, net=net, id=15)
+  result: () = output_port(sample2, name=result, id=16)
+}}"#
+    )
+}
+
+#[test]
+fn child_inout_cross_bit_dependencies_reject_parent_feedback() {
+    for aliased in [false, true] {
+        let source = child_inout_feedback(aliased, true);
+        let package = Parser::new(&source).parse_package().unwrap();
+        assert!(verify_package(&package).is_err());
+        assert!(matches!(
+            verify_block_wiring_cycles(package.get_top_block().unwrap(), &package),
+            Err(BuilderError::CombinationalCycle { .. })
+        ));
+    }
+}
+
+#[test]
+fn child_inout_cross_bit_dependencies_preserve_acyclic_parent_wiring() {
+    for aliased in [false, true] {
+        let source = child_inout_feedback(aliased, false);
+        let package = Parser::new(&source).parse_and_verify_package().unwrap();
+        verify_block_wiring_cycles(package.get_top_block().unwrap(), &package).unwrap();
+    }
+}

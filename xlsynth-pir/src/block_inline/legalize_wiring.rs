@@ -196,7 +196,8 @@ impl<'a> Wiring<'a> {
                             self.register_names.insert(label.clone(), 1);
                         }
                     }
-                    let local_name = assigned_name(node)
+                    let local_name = node
+                        .assigned_name()
                         .map(|n| uniquify_name(&format!("{name}__{n}"), &mut self.node_names));
                     (mapped, local_name)
                 }
@@ -237,7 +238,7 @@ impl<'a> Wiring<'a> {
             } else if matches!(node.payload, NodePayload::InstantiationInput { .. }) {
                 // An ordinary user of a connection sink still sees its unit
                 // value.
-                replace_payload(node, NodePayload::Tuple(vec![]));
+                node.replace_payload(NodePayload::Tuple(vec![]));
             } else {
                 node.payload = remap_payload_with(&node.payload, |(_, arg)| driver(arg));
             }
@@ -298,7 +299,7 @@ impl<'a> Wiring<'a> {
                         } else {
                             NodePayload::Unop(Unop::Identity, node)
                         };
-                        replace_payload(root, payload);
+                        root.replace_payload(payload);
                         break;
                     }
                     _ => {
@@ -342,21 +343,4 @@ fn destinations(
         mapping.push(dest);
     }
     Ok(mapping)
-}
-
-/// Returns a user-assigned name, excluding the canonical operator-ID spelling.
-fn assigned_name(node: &Node) -> Option<&str> {
-    node.name.as_deref().filter(|name| {
-        !name.rsplit_once('.').is_some_and(|(op, id)| {
-            op == node.payload.get_operator() && id.parse::<usize>() == Ok(node.text_id)
-        })
-    })
-}
-
-/// Replaces an operation while preserving only an explicitly assigned name.
-fn replace_payload(node: &mut Node, payload: NodePayload) {
-    if assigned_name(node).is_none() {
-        node.name = None;
-    }
-    node.payload = payload;
 }

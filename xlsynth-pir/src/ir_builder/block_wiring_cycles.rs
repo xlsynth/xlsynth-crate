@@ -70,6 +70,15 @@ struct Context<'a> {
 type SummaryKey = (usize, String, Part);
 type InputDependency = (String, Part);
 
+/// Pending work for one lazily computed selected child-output summary.
+struct SummaryFrame {
+    key: SummaryKey,
+    root: Demand,
+    pending: Vec<(Demand, usize)>,
+    visited: HashSet<Demand>,
+    inputs: BTreeSet<InputDependency>,
+}
+
 /// Summaries map selected child outputs to selected formal inputs. They are
 /// independent of parent tie-offs, so each definition can be analyzed once.
 struct Hierarchy<'a> {
@@ -509,8 +518,8 @@ impl<'a> Hierarchy<'a> {
     }
 
     /// Memoizes boundary input parts used by a selected ordinary output or
-    /// locally driven public inout. A net's own ambient input is excluded from
-    /// its driven-value summary.
+    /// locally driven public inout. Only the initial zero-length path from an
+    /// inout to itself is excluded; selected paths through its drivers remain.
     fn summary(
         &mut self,
         context: usize,
@@ -522,18 +531,104 @@ impl<'a> Hierarchy<'a> {
             self.budget.edges(result.len())?;
             return Ok(result.clone());
         }
-        let scope = &self.contexts[context];
+
+        let mut frames = vec![self.summary_frame(key)?];
+        loop {
+            let frame = frames.last_mut().expect("active summary frame");
+            let Some((demand, cursor)) = frame.pending.pop() else {
+                let frame = frames.pop().expect("completed summary frame");
+                self.budget.preflight_edges(frame.inputs.len())?;
+                let result: Vec<_> = frame.inputs.into_iter().collect();
+                if self.summaries.len() >= MAX_CACHED_SUMMARIES
+                    || self.cached_dependencies.saturating_add(result.len())
+                        > MAX_CACHED_DEPENDENCIES
+                {
+                    self.summaries.clear();
+                    self.cached_dependencies = 0;
+                }
+                self.cached_dependencies += result.len();
+                self.summaries.insert(frame.key, result.clone());
+                if frames.is_empty() {
+                    self.budget.edges(result.len())?;
+                    return Ok(result);
+                }
+                continue;
+            };
+            if cursor == 0 {
+                if !frame.visited.insert(demand.clone()) {
+                    continue;
+                }
+                // Charge the selected demand before descending into a child's
+                // summary so the state budget also bounds pending frames.
+                self.budget.state()?;
+            }
+            // Child summaries must be ready before dependencies() visits the
+            // demand. Keep the binding cursor so wide inout nets are scanned
+            // once while their children are prepared.
+            if let Some((key, next)) = self.missing_summary(&demand, cursor) {
+                frames
+                    .last_mut()
+                    .expect("active summary frame")
+                    .pending
+                    .push((demand, next));
+                frames.push(self.summary_frame(key)?);
+                continue;
+            }
+            // Computing a child can evict older cache entries. Recheck the
+            // completed prefix before calling dependencies(), which expects
+            // every child summary to be available without recursive work.
+            if cursor != 0
+                && let Some((key, next)) = self.missing_summary(&demand, 0)
+            {
+                frames
+                    .last_mut()
+                    .expect("active summary frame")
+                    .pending
+                    .push((demand, next));
+                frames.push(self.summary_frame(key)?);
+                continue;
+            }
+            let frame = frames.last_mut().expect("active summary frame");
+            let scope = &self.contexts[demand.context];
+            let block = scope.block;
+            if let Some(node) = block.nodes.get(demand.node.index) {
+                if let NodePayload::InputPort { name, .. } = &node.payload {
+                    frame.inputs.insert((name.clone(), demand.part));
+                    continue;
+                }
+            } else {
+                let class = demand.node.index - block.nodes.len();
+                if demand != frame.root
+                    && let Some(name) =
+                        scope.inouts.as_ref().expect("inouts indexed").classes[class].public_name
+                {
+                    frame.inputs.insert((name.to_owned(), demand.part.clone()));
+                }
+            }
+            let dependencies = self.dependencies(&demand)?;
+            frames
+                .last_mut()
+                .expect("active summary frame")
+                .pending
+                .extend(dependencies.into_iter().map(|demand| (demand, 0)));
+        }
+    }
+
+    /// Starts an explicit work frame for an ordinary output or public inout.
+    fn summary_frame(&self, key: SummaryKey) -> Result<SummaryFrame, BuilderError> {
+        let (context, port, part) = &key;
+        let scope = &self.contexts[*context];
         let block = scope.block;
         let root_net = scope
             .inouts
             .as_ref()
             .expect("inouts indexed")
             .public_nets
-            .get(port)
+            .get(port.as_str())
             .copied();
         let root = if let Some(class) = root_net {
             Demand::value(
-                context,
+                *context,
                 NodeRef {
                     index: block.nodes.len() + class,
                 },
@@ -543,50 +638,48 @@ impl<'a> Hierarchy<'a> {
             let sink = block.get_output_port(port).ok_or_else(|| {
                 invalid(format!("unknown output '{port}' on child '{}'", block.name))
             })?;
-            Demand::driver(context, sink, part.clone())
+            Demand::driver(*context, sink, part.clone())
         };
-        let mut pending = vec![root];
-        let mut visited = HashSet::new();
-        let mut inputs = BTreeSet::new();
-        while let Some(demand) = pending.pop() {
-            if !visited.insert(demand.clone()) {
-                continue;
-            }
-            self.budget.state()?;
-            if let Some(node) = block.nodes.get(demand.node.index) {
-                if let NodePayload::InputPort { name, .. } = &node.payload {
-                    inputs.insert((name.clone(), demand.part));
-                    continue;
-                }
-            } else {
-                let class = demand.node.index - block.nodes.len();
-                if Some(class) != root_net
-                    && let Some(name) = self.contexts[context]
-                        .inouts
-                        .as_ref()
-                        .expect("inouts indexed")
-                        .classes[class]
-                        .public_name
-                {
-                    inputs.insert((name.to_owned(), demand.part.clone()));
-                }
-            }
-            pending.extend(self.dependencies(&demand)?);
-        }
-        self.budget.preflight_edges(inputs.len())?;
-        let result: Vec<_> = inputs.into_iter().collect();
-        if result.len() <= MAX_CACHED_DEPENDENCIES {
-            if self.summaries.len() >= MAX_CACHED_SUMMARIES
-                || self.cached_dependencies.saturating_add(result.len()) > MAX_CACHED_DEPENDENCIES
+        Ok(SummaryFrame {
+            key,
+            pending: vec![(root.clone(), 0)],
+            root,
+            visited: HashSet::new(),
+            inputs: BTreeSet::new(),
+        })
+    }
+
+    /// Finds the next uncached child boundary needed to evaluate one demand.
+    /// Keep this preflight in sync with the child-summary calls in
+    /// `dependencies_inner`; those calls must hit the cache during a summary.
+    fn missing_summary(&self, demand: &Demand, cursor: usize) -> Option<(SummaryKey, usize)> {
+        let scope = &self.contexts[demand.context];
+        if demand.node.index >= scope.block.nodes.len() {
+            let class = demand.node.index - scope.block.nodes.len();
+            for (index, &(instance, port)) in
+                scope.net_children[class].iter().enumerate().skip(cursor)
             {
-                self.summaries.clear();
-                self.cached_dependencies = 0;
+                let child = scope.children[instance];
+                let key = (child, port.to_owned(), demand.part.clone());
+                if !self.summaries.contains_key(&key) {
+                    return Some((key, index + 1));
+                }
             }
-            self.budget.edges(result.len())?;
-            self.cached_dependencies += result.len();
-            self.summaries.insert(key, result.clone());
+        } else if cursor == 0
+            && !demand.driver
+            && !is_empty(&scope.block.nodes[demand.node.index].ty, &demand.part)
+            && let NodePayload::InstantiationOutput {
+                instantiation,
+                port_name,
+            } = &scope.block.nodes[demand.node.index].payload
+            && let Some(&child) = scope.children.get(instantiation.as_str())
+        {
+            let key = (child, port_name.clone(), demand.part.clone());
+            if !self.summaries.contains_key(&key) {
+                return Some((key, 1));
+            }
         }
-        Ok(result)
+        None
     }
 
     /// Maps a child's ordinary input or inout boundary to its parent driver.
@@ -1414,6 +1507,56 @@ top block root(seed: bits[1], result: bits[2]) {
         assert_eq!(cache.hierarchy.contexts.len(), 64);
         assert!(cache.state.iter().all(|&state| state == 2));
         assert!(cache.hierarchy.budget.states < 64);
+    }
+
+    /// A selected public inout can immediately request its child's matching
+    /// summary, so budget accounting must stop descent before visiting leaves.
+    #[test]
+    fn summary_state_budget_bounds_pending_child_frames() {
+        let depth = 8;
+        let mut source = String::from(
+            r#"package passive
+block layer0(bus: bits[1]) {
+  ext_inout_net net(bits[1])
+  bus: () = ext_inout_port(name=bus, net=net, id=1)
+}
+"#,
+        );
+        let mut id = 2;
+        for layer in 1..depth {
+            let top = if layer + 1 == depth { "top " } else { "" };
+            let child = layer - 1;
+            let binding_id = id + 1;
+            source.push_str(&format!(
+                r#"{top}block layer{layer}(bus: bits[1]) {{
+  ext_inout_net net(bits[1])
+  instantiation u(block=layer{child}, kind=block)
+  bus: () = ext_inout_port(name=bus, net=net, id={id})
+  bind: () = ext_instantiation_inout(instantiation=u, port_name=bus, net=net, id={binding_id})
+}}
+"#
+            ));
+            id += 2;
+        }
+        let package = Parser::new(&source).parse_and_verify_package().unwrap();
+        let mut cache = BlockWiringHierarchy::new(BlockWiringCycleOptions::default());
+        let root = cache
+            .index_root(package.get_top_block().unwrap(), &package)
+            .unwrap();
+        for context in (0..cache.hierarchy.contexts.len()).rev() {
+            cache.hierarchy.index_inouts(context).unwrap();
+        }
+        cache.hierarchy.budget.max_states = 2;
+        let error = cache
+            .hierarchy
+            .summary(root, "bus", &Part::bits(0, 1))
+            .err()
+            .expect("summary descent must exhaust its state budget");
+        assert!(error.to_string().contains("selected-state budget"));
+        assert!(
+            cache.hierarchy.summaries.is_empty(),
+            "the traversal reached a leaf before exhausting its state budget"
+        );
     }
 
     #[test]

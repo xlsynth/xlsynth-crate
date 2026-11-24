@@ -305,6 +305,7 @@ pub(super) fn prepare(package: &Package, top: &str) -> Result<Prepared, String> 
     let block = package
         .get_block(top)
         .ok_or_else(|| format!("block '{top}' not found"))?;
+    crate::block_legalize::check_projection_budget(package, top)?;
     let instances = elaborate(package, block)?;
     let fields = |port| BlockEvalField {
         name: block.port_name(port).to_owned(),

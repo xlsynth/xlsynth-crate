@@ -69,6 +69,13 @@ impl<'a> BlockInvokeInliner<'a> {
         Ok(Self::from_verified_package(package))
     }
 
+    /// Validates structure and callees without requiring inout feedback to
+    /// have been removed by a forthcoming transformation.
+    pub(crate) fn new_structural(package: &'a Package) -> Result<Self, String> {
+        verify_package_structure(package).map_err(|error| error.to_string())?;
+        Ok(Self::from_verified_package(package))
+    }
+
     /// Indexes callees after verification has established valid call targets
     /// and IDs.
     fn from_verified_package(package: &'a Package) -> Self {
@@ -204,19 +211,7 @@ impl<'a> BlockInvokeInliner<'a> {
             };
             // Retain user-assigned names. Explicit operator.<id> spellings
             // must follow the new operator instead.
-            let call = &mut expanded.nodes[index];
-            if call
-                .name
-                .as_deref()
-                .and_then(|name| name.strip_prefix(call.payload.get_operator()))
-                .and_then(|suffix| suffix.strip_prefix('.'))
-                .is_some_and(|digits| {
-                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
-                })
-            {
-                call.name = None;
-            }
-            call.payload = replacement;
+            expanded.nodes[index].replace_payload(replacement);
             index += 1;
         }
         expanded.compact_and_toposort()?;

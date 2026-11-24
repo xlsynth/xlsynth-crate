@@ -38,6 +38,19 @@ fn acyclic_hierarchy(width: usize, count: usize) -> Package {
     package
 }
 
+/// Creates many output ports sharing one long combinational cone.
+fn shared_output_cone(chain_len: usize, output_count: usize) -> Package {
+    let mut block = BlockBuilder::new("shared");
+    let mut value = block.input_port("data", Type::Bits(1)).unwrap();
+    for _ in 0..chain_len {
+        value = block.not(value).unwrap();
+    }
+    for i in 0..output_count {
+        block.output_port(&format!("out_{i}"), value).unwrap();
+    }
+    block.build_package("shared_cone").unwrap()
+}
+
 /// Creates a whole-node cycle whose individual wires form an acyclic shift.
 fn shift_feedback() -> Package {
     Parser::new(
@@ -111,6 +124,17 @@ fn block_cycles(c: &mut Criterion) {
             BenchmarkId::new("legalize_acyclic", width),
             &width,
             |b, _| b.iter(|| legalize_block_hierarchy(black_box(&package), "root").unwrap()),
+        );
+    }
+    for outputs in [32, 1_024] {
+        let package = shared_output_cone(1_500, outputs);
+        let top = package.get_top_block().unwrap();
+        group.bench_with_input(
+            BenchmarkId::new("wiring_shared_cone", outputs),
+            &outputs,
+            |b, _| {
+                b.iter(|| verify_block_wiring_cycles(black_box(top), black_box(&package)).unwrap())
+            },
         );
     }
     for depth in [8, 64] {

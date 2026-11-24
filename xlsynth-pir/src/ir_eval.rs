@@ -1177,6 +1177,31 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
     }
 }
 
+/// Applies the annotated result width for operations whose internal pure
+/// computation can produce a different width.
+fn coerce_pure_value_to_node_type(node: &ir::Node, value: IrValue) -> IrValue {
+    match &node.payload {
+        ir::NodePayload::Binop(binop @ (ir::Binop::Smul | ir::Binop::Umul), _, _) => {
+            match (&node.ty, value.as_bits()) {
+                (ir::Type::Bits(width), Ok(bits)) if matches!(binop, ir::Binop::Smul) => {
+                    IrValue::from_bits(&eval_sign_resize_bits(bits, *width))
+                }
+                (ir::Type::Bits(width), Ok(bits)) => {
+                    IrValue::from_bits(&eval_zero_resize_bits(bits, *width))
+                }
+                _ => value,
+            }
+        }
+        ir::NodePayload::Decode { .. } => match (&node.ty, value.as_bits()) {
+            (ir::Type::Bits(width), Ok(bits)) if bits.get_bit_count() > *width => {
+                IrValue::from_bits(&bits.width_slice(0, *width as i64))
+            }
+            _ => value,
+        },
+        _ => value,
+    }
+}
+
 pub(crate) fn eval_pure_if_supported(n: &ir::Node, operand_values: &[&IrValue]) -> Option<IrValue> {
     match n.payload {
         ir::NodePayload::Nil
@@ -1196,7 +1221,10 @@ pub(crate) fn eval_pure_if_supported(n: &ir::Node, operand_values: &[&IrValue]) 
         | ir::NodePayload::Map { .. }
         | ir::NodePayload::Cover { .. }
         | ir::NodePayload::CountedFor { .. } => None,
-        _ => Some(eval_pure(n, operand_values)),
+        _ => Some(coerce_pure_value_to_node_type(
+            n,
+            eval_pure(n, operand_values),
+        )),
     }
 }
 
@@ -2583,37 +2611,7 @@ fn eval_fn_impl<'a, 'ir>(
                 eval_pure_from_env(node, &env)
             }
         };
-        // Coerce only for specific nodes where a wider internal computation is
-        // permitted by semantics but the annotated type narrows (e.g.
-        // smul/umul, or decode results). For other nodes we do not
-        // coerce.
-        let coerced: IrValue = match &node.payload {
-            ir::NodePayload::Binop(binop @ (ir::Binop::Smul | ir::Binop::Umul), _, _) => {
-                match (&node.ty, value.to_bits()) {
-                    (ir::Type::Bits(expected_w), Ok(bits)) => {
-                        if matches!(binop, ir::Binop::Smul) {
-                            IrValue::from_bits(&eval_sign_resize_bits(&bits, *expected_w))
-                        } else {
-                            IrValue::from_bits(&eval_zero_resize_bits(&bits, *expected_w))
-                        }
-                    }
-                    _ => value.clone(),
-                }
-            }
-            ir::NodePayload::Decode { .. } => match (&node.ty, value.to_bits()) {
-                (ir::Type::Bits(expected_w), Ok(bits)) => {
-                    let got_w = bits.get_bit_count();
-                    if got_w > *expected_w {
-                        let sliced = bits.width_slice(0, *expected_w as i64);
-                        IrValue::from_bits(&sliced)
-                    } else {
-                        value.clone()
-                    }
-                }
-                _ => value.clone(),
-            },
-            _ => value.clone(),
-        };
+        let coerced = coerce_pure_value_to_node_type(node, value);
         // Verify the computed value conforms to the node's annotated type,
         // include node context.
         assert_value_conforms_to_type(&node.ty, &coerced, node);

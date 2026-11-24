@@ -6,8 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth_pir::IrBits;
 use xlsynth_pir::block_inline::{
-    extract_modeled_block_hierarchy, inline_all_blocks_in_package,
-    reject_reachable_opaque_extern_blocks,
+    extract_modeled_block_hierarchy, reject_reachable_opaque_extern_blocks,
 };
 use xlsynth_pir::block_legalize::legalize_block_hierarchy;
 use xlsynth_pir::dce::remove_dead_nodes;
@@ -153,12 +152,8 @@ fn lower_block_package_with_clock_policy(
     ir_verify::verify_package(package)
         .map_err(|e| format!("block2sequential: input package validation failed: {e}"))?;
     validate_hierarchical_sequential_metadata(package, &top_name, child_clock)?;
-    let mut inlined_package = package.clone();
-    inlined_package.top = Some((top_name.clone(), MemberType::Block));
-    if inline_all_blocks_in_package(&mut inlined_package).is_err() {
-        inlined_package = legalize_block_hierarchy(package, &top_name)
-            .map_err(|e| format!("block2sequential: block inlining failed: {e}"))?;
-    }
+    let inlined_package = legalize_block_hierarchy(package, &top_name)
+        .map_err(|e| format!("block2sequential: block inlining failed: {e}"))?;
     ir_verify::verify_package(&inlined_package)
         .map_err(|e| format!("block2sequential: inlined package validation failed: {e}"))?;
 
