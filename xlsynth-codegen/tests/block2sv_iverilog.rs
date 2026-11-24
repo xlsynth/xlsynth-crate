@@ -201,6 +201,30 @@ endmodule
     }
 }
 
+/// Checks all encodings of an anonymous enum output, including unnamed values.
+#[test]
+fn anonymous_enum_output_preserves_every_bit_pattern() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/goldens/block2sv/structure/inline_enum_output.golden.ir");
+    let fixture = parse_golden_fixture(&path, &fs::read_to_string(&path).unwrap()).unwrap();
+    let generated = execute_golden_fixture(&fixture).unwrap();
+    let testbench = r#"
+module tb;
+  logic [1:0] data;
+  wire [1:0] result;
+  inline_enum_output dut(.*);
+  initial begin
+    for (int i = 0; i < 4; i++) begin
+      data = i; #1;
+      if (result !== data) $fatal(1, "enum encoding %b became %b", data, result);
+    end
+    $finish;
+  end
+endmodule
+"#;
+    simulate_typed_ports("anonymous enum output", &format!("{generated}{testbench}"));
+}
+
 /// Checks unsigned comparisons and registered slices of signed packed inputs.
 #[test]
 fn custom_typed_inputs_follow_xls_semantics_across_registers() {

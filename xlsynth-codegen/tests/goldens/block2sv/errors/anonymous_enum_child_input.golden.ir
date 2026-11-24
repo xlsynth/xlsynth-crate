@@ -1,0 +1,16 @@
+package anonymous_enum_child_input
+
+block inline_child(data: bits[2], result: bits[2]) {
+  data: bits[2] = input_port(name=data, sv_type="/* child port */ enum logic [1:0] { A=0, B=1 }", id=1)
+  result: () = output_port(data, name=result, id=2)
+}
+
+top block enum_parent(data: bits[2], result: bits[2]) {
+  instantiation child(block=inline_child, kind=block)
+  data: bits[2] = input_port(name=data, id=3)
+  child_input: () = instantiation_input(data, instantiation=child, port_name=data, id=4)
+  child_output: bits[2] = instantiation_output(instantiation=child, port_name=result, id=5)
+  result: () = output_port(child_output, name=result, id=6)
+}
+
+// EXPECT-ERROR: input `data` of instance `child` uses an anonymous SystemVerilog enum; use a named typedef so the parent can cast its connection

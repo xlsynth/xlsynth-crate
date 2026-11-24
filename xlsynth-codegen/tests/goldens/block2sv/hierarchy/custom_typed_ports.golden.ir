@@ -1,7 +1,7 @@
 package typed_hierarchy
 
 block typed_child(code: bits[2], pair: bits[2], inverted: bits[2], forwarded: bits[2]) {
-  code: bits[2] = input_port(name=code, sv_type="data__1", id=1)
+  code: bits[2] = input_port(name=code, sv_type="/* child */ data__1 /* trailing */", id=1)
   pair: bits[2] = input_port(name=pair, sv_type="types::pair_t", id=2)
   not.3: bits[2] = not(code, id=3)
   inverted: () = output_port(not.3, name=inverted, sv_type="data__1", id=4)

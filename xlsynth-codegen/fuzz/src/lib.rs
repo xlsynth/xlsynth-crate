@@ -2,10 +2,14 @@
 
 //! Shared public block generators and independent codegen reference oracles.
 
+#[cfg(test)]
+mod aggregate_audit;
 pub mod coverage;
 mod dslx_types;
 pub mod input;
 pub mod iverilog;
+#[cfg(test)]
+mod operator_audit;
 pub mod port_type_coverage;
 pub mod port_types;
 pub mod preflight;

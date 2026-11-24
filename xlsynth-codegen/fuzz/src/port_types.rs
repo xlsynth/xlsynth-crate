@@ -60,7 +60,7 @@ pub fn check_with_progress(data: &[u8]) -> (Result<(), ToolError>, Option<String
 }
 
 /// Applies the selected DSLX port types and compares emitted RTL with PIR.
-fn check_package(
+pub(crate) fn check_package(
     mut package: Package,
     choices: &[u8],
     codegen: &BlockCodegenOptions,

@@ -43,7 +43,9 @@ fn custom_port_types_compile_with_slang() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/block2sv");
     for relative_path in [
         "structure/custom_typed_unsigned_compare.golden.ir",
+        "structure/custom_typed_bit_slices.golden.ir",
         "structure/inline_port_type.golden.ir",
+        "structure/inline_enum_output.golden.ir",
         "registers/custom_typed_registered_compare.golden.ir",
         "extern/custom_typed_scalar_argument.golden.ir",
         "hierarchy/custom_typed_ports.golden.ir",

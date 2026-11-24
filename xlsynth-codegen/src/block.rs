@@ -503,9 +503,20 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Represents an external SV type named or declared by a port annotation.
     fn external_type(&mut self, name: &str) -> VastDataType {
-        match name.rsplit_once("::") {
-            Some((package, ty)) => self.file.make_extern_package_type(package, ty),
-            None => self.file.make_extern_type(name),
+        let Some(parts) = named_type_parts(name) else {
+            return self.file.make_extern_type(skip_sv_type_trivia(name));
+        };
+        let (ty, scope) = parts.split_last().expect("named type has an identifier");
+        let ty = sv_type_identifier_spelling(ty);
+        if scope.is_empty() {
+            self.file.make_extern_type(&ty)
+        } else {
+            let package = scope
+                .iter()
+                .map(|part| sv_type_identifier_spelling(part))
+                .collect::<Vec<_>>()
+                .join("::");
+            self.file.make_extern_package_type(&package, &ty)
         }
     }
 
@@ -835,9 +846,17 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 unreachable!("verified block output")
             };
             let expr = self.cast_port_value(value.expr, sv_type.as_deref());
-            let assignment = self
-                .file
-                .make_continuous_assignment(&signal.to_expr(), &expr);
+            let target = signal.to_expr();
+            let target = if self.options.emit_sv_types
+                && sv_type.as_deref().is_some_and(is_inline_enum_type)
+            {
+                // An anonymous enum has no name available for a cast; a packed
+                // concatenation assignment writes its bits without conversion.
+                self.file.make_concat(&[&target])
+            } else {
+                target
+            };
+            let assignment = self.file.make_continuous_assignment(&target, &expr);
             self.file
                 .add_member_continuous_assignment(self.module, assignment);
         }
@@ -866,6 +885,12 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                         unreachable!("verified child input")
                     };
                     if let Some(sv_type) = sv_type.as_deref() {
+                        if is_inline_enum_type(sv_type) {
+                            return Err(BlockCodegenError::InvalidBlock(format!(
+                                "input `{name}` of instance `{}` uses an anonymous SystemVerilog enum; use a named typedef so the parent can cast its connection",
+                                instance.name
+                            )));
+                        }
                         let key = (instance.name.clone(), name.clone());
                         if let Some(expr) = self.instance_inputs.get(&key).copied() {
                             let cast = self.cast_port_value(expr, Some(sv_type));
@@ -1307,12 +1332,72 @@ fn substitute_external_template(
 
 /// Returns the first identifier of a simple or scope-qualified SV type name.
 fn named_type_root(name: &str) -> Option<&str> {
-    let mut parts = name.split("::").map(str::trim);
-    let root = parts.next()?;
-    if !is_type_identifier(root) || !parts.all(is_type_identifier) {
-        return None;
-    }
+    let parts = named_type_parts(name)?;
+    let root = parts[0];
     Some(root.strip_prefix('\\').unwrap_or(root))
+}
+
+/// Parses a scope-qualified SV type reference, allowing trivia between tokens.
+fn named_type_parts(mut text: &str) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    loop {
+        text = skip_sv_type_trivia(text);
+        let end = if text.starts_with('\\') {
+            text.find(char::is_whitespace).unwrap_or(text.len())
+        } else {
+            text.find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+                .unwrap_or(text.len())
+        };
+        let identifier = &text[..end];
+        if !is_type_identifier(identifier) {
+            return None;
+        }
+        parts.push(identifier);
+        text = skip_sv_type_trivia(&text[end..]);
+        if text.is_empty() {
+            return Some(parts);
+        }
+        text = text.strip_prefix("::")?;
+    }
+}
+
+/// Restores the required whitespace terminator for escaped SV identifiers.
+fn sv_type_identifier_spelling(identifier: &str) -> String {
+    if identifier.starts_with('\\') {
+        format!("{identifier} ")
+    } else {
+        identifier.to_owned()
+    }
+}
+
+/// Recognizes an anonymous enum declaration at a port annotation boundary.
+fn is_inline_enum_type(name: &str) -> bool {
+    skip_sv_type_trivia(name)
+        .strip_prefix("enum")
+        .is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_some_and(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+        })
+}
+
+/// Skips whitespace and comments before the first token of an SV type.
+fn skip_sv_type_trivia(mut text: &str) -> &str {
+    loop {
+        text = text.trim_start();
+        if let Some(rest) = text.strip_prefix("/*") {
+            if let Some((_, remaining)) = rest.split_once("*/") {
+                text = remaining;
+                continue;
+            }
+        } else if let Some(rest) = text.strip_prefix("//") {
+            if let Some((_, remaining)) = rest.split_once('\n') {
+                text = remaining;
+                continue;
+            }
+        }
+        return text;
+    }
 }
 
 /// Recognizes ordinary and escaped identifiers in an SV type name.
