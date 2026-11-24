@@ -2,7 +2,7 @@
 
 //! Blocks have graph-resident data ports and explicit sequential resources.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 
 use crate::ir::{Fn, Instantiation, Node, NodeGraph, NodePayload, NodeRef, Register, Type};
@@ -47,6 +47,58 @@ pub struct Block {
     pub instantiations: Vec<Instantiation>,
 }
 
+/// The read and write nodes for each declared register in an unchanged block.
+/// Build this once when making several lookups; borrowing the block prevents
+/// its graph from changing while the index is in use.
+#[derive(Debug)]
+pub struct RegisterAccesses<'a> {
+    by_name: HashMap<&'a str, RegisterNodes>,
+}
+
+/// All nodes accessing one register, in graph storage order.
+#[derive(Debug, Default)]
+struct RegisterNodes {
+    reads: Vec<NodeRef>,
+    writes: Vec<NodeRef>,
+}
+
+impl RegisterAccesses<'_> {
+    /// Returns the register's single read node, or an error if it has none or
+    /// more than one.
+    pub fn read(&self, register: &str) -> Result<NodeRef, String> {
+        Self::only_node(register, "read", &self.nodes(register)?.reads)
+    }
+
+    /// Returns all write nodes for the register, including an empty slice if
+    /// the register has not been wired up yet.
+    pub fn writes(&self, register: &str) -> Result<&[NodeRef], String> {
+        Ok(&self.nodes(register)?.writes)
+    }
+
+    /// Returns the only write node, or an error if there are zero or multiple
+    /// writes. XLS permits multiple enabled writes to one register.
+    pub fn unique_write(&self, register: &str) -> Result<NodeRef, String> {
+        Self::only_node(register, "write", self.writes(register)?)
+    }
+
+    fn nodes(&self, register: &str) -> Result<&RegisterNodes, String> {
+        self.by_name
+            .get(register)
+            .ok_or_else(|| format!("unknown register '{register}'"))
+    }
+
+    /// Require exactly one read or write rather than silently choosing one.
+    fn only_node(register: &str, kind: &str, nodes: &[NodeRef]) -> Result<NodeRef, String> {
+        match nodes {
+            [node] => Ok(*node),
+            _ => Err(format!(
+                "register '{register}' has {} {kind} nodes, expected exactly one",
+                nodes.len()
+            )),
+        }
+    }
+}
+
 impl Deref for Block {
     type Target = NodeGraph;
 
@@ -62,6 +114,34 @@ impl DerefMut for Block {
 }
 
 impl Block {
+    /// Index register reads and writes in one pass over the graph. Only
+    /// declared registers are included; use the verifier to check malformed IR.
+    pub fn register_accesses(&self) -> RegisterAccesses<'_> {
+        let mut by_name: HashMap<_, RegisterNodes> = self
+            .registers
+            .iter()
+            .map(|register| (register.name.as_str(), RegisterNodes::default()))
+            .collect();
+        for (index, node) in self.nodes.iter().enumerate() {
+            match &node.payload {
+                NodePayload::RegisterRead { register } => {
+                    if let Some(nodes) = by_name.get_mut(register.as_str()) {
+                        nodes.reads.push(NodeRef { index });
+                    }
+                }
+                NodePayload::RegisterWrite { register, .. } => {
+                    if let Some(nodes) = by_name.get_mut(register.as_str()) {
+                        nodes.writes.push(NodeRef { index });
+                    }
+                }
+                _ => {
+                    // Other nodes do not read or write a register.
+                }
+            }
+        }
+        RegisterAccesses { by_name }
+    }
+
     /// Collects the names already in use when adding ports or inlining nodes.
     pub fn occupied_names(&self) -> HashSet<String> {
         let mut names: HashSet<_> = self
@@ -514,6 +594,77 @@ impl std::fmt::Display for Block {
 mod tests {
     use super::*;
     use crate::ir_parser::Parser;
+    use crate::ir_verify::verify_package;
+
+    const REGISTER_BLOCK: &str = r#"package registers
+
+top block b(clk: clock, data: bits[8], en: bits[1], out: bits[8]) {
+  reg q(bits[8])
+  reg r(bits[8])
+  data: bits[8] = input_port(name=data, id=1)
+  en: bits[1] = input_port(name=en, id=2)
+  disabled: bits[1] = not(en, id=3)
+  q_read: bits[8] = register_read(register=q, id=4)
+  r_read: bits[8] = register_read(register=r, id=5)
+  q_enabled: () = register_write(data, register=q, load_enable=en, id=6)
+  q_disabled: () = register_write(data, register=q, load_enable=disabled, id=7)
+  r_write: () = register_write(data, register=r, id=8)
+  out: () = output_port(q_read, name=out, id=9)
+}
+"#;
+
+    #[test]
+    fn register_accesses_distinguish_unique_and_multiple_writes() {
+        let package = Parser::new(REGISTER_BLOCK).parse_package().unwrap();
+        verify_package(&package).unwrap();
+        let block = package.get_block("b").unwrap();
+        let registers = block.register_accesses();
+
+        assert_eq!(block.get_node(registers.read("q").unwrap()).text_id, 4);
+        let writes: Vec<_> = registers
+            .writes("q")
+            .unwrap()
+            .iter()
+            .map(|node| block.get_node(*node).text_id)
+            .collect();
+        assert_eq!(writes, vec![6, 7]);
+        assert_eq!(
+            registers.unique_write("q").unwrap_err(),
+            "register 'q' has 2 write nodes, expected exactly one"
+        );
+        assert_eq!(
+            block.get_node(registers.unique_write("r").unwrap()).text_id,
+            8
+        );
+        assert_eq!(
+            registers.read("missing").unwrap_err(),
+            "unknown register 'missing'"
+        );
+    }
+
+    #[test]
+    fn register_accesses_report_incomplete_or_ambiguous_registers() {
+        let mut package = Parser::new(REGISTER_BLOCK).parse_package().unwrap();
+        let block = package.get_block_mut("b").unwrap();
+        let registers = block.register_accesses();
+        let read = registers.read("q").unwrap();
+        let write = registers.unique_write("r").unwrap();
+
+        // Transformations can temporarily have duplicate reads or no write.
+        let duplicate = block.get_node(read).clone();
+        block.nodes.push(duplicate);
+        block.get_node_mut(write).payload = NodePayload::Nil;
+        let registers = block.register_accesses();
+        assert_eq!(
+            registers.read("q").unwrap_err(),
+            "register 'q' has 2 read nodes, expected exactly one"
+        );
+        assert!(registers.writes("r").unwrap().is_empty());
+        assert_eq!(
+            registers.unique_write("r").unwrap_err(),
+            "register 'r' has 0 write nodes, expected exactly one"
+        );
+    }
 
     #[test]
     fn function_conversion_has_explicit_aggregate_output_arity() {
