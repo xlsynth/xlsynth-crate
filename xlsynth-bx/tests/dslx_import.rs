@@ -25,6 +25,17 @@ fn write_module(root: &Path, relative_path: &str, source: &str) -> io::Result<()
     fs::write(path, source)
 }
 
+/// Native declarations linked by the entry point of a BX or DSLX package.
+fn imported_names(package: &Package, entry: &str) -> BTreeSet<String> {
+    package
+        .members
+        .iter()
+        .map(|m| &m.graph().name)
+        .filter(|name| name.as_str() != entry)
+        .cloned()
+        .collect()
+}
+
 /// Evaluates the entire block, including its linked calls, for one u8 input.
 fn run_block(package: &Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
     let block = package.get_top_block().ok_or("expected a top block")?;
@@ -59,6 +70,50 @@ fn assert_import_rejected(module: &str, body: &str, result: &str, options: &Impo
         .is_err(),
         "{native}"
     );
+}
+
+#[test]
+fn nominal_specializations_share_native_names_with_explicit_value_calls()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(root.path(), "left.x", "pub enum Mode : u2 { A=0, B=1 }")?;
+    write_module(root.path(), "right.x", "pub enum Mode : u2 { A=1, B=0 }")?;
+    write_module(
+        root.path(),
+        "ops.x",
+        r#"#![feature(generics)]
+import left;
+import right;
+fn classify<T: type>(x:T)->bool { x == T::A }
+fn classify__Mode(x:u2)->bool { x == u2:0 }
+pub fn compare<N:u32>(x:left::Mode, y:right::Mode)->(bool, bool, bool) {
+    (classify(x), classify(y), classify__Mode(N as u2))
+}"#,
+    )?;
+    let call = "ops::compare<1>(x,y)";
+    let bx = format!(
+        "use left; use right; use ops; #[allow(combinational_block)] block b(clk,x:left::Mode,y:right::Mode)->(bool,bool,bool) {{ {call} }}"
+    );
+    let linked = compile_with_options(
+        &bx,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &search_paths(&[root.path()]),
+    )?;
+    let caller = parse_and_typecheck(
+        &format!(
+            "import left; import right; import ops; fn main(x:left::Mode,y:right::Mode)->(bool,bool,bool) {{ {call} }}"
+        ),
+        "caller.x",
+        "caller",
+        &mut ImportData::new(None, &[root.path()]),
+    )?;
+    let native = Parser::new(&caller.to_ir_text()?).parse_and_verify_package()?;
+    assert_eq!(
+        imported_names(&linked, "b"),
+        imported_names(&native, "__caller__main")
+    );
+    Ok(())
 }
 
 #[test]
@@ -817,22 +872,51 @@ fn imported_module_errors_report_the_original_path_across_checks() -> Result<(),
 }
 
 #[test]
+fn a_frame_like_parameter_name_preserves_the_following_call_target() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    // In native IR the argument is immediately followed by ", to_apply=" and
+    // the specialized callee. The digits in the argument belong to its name.
+    write_module(
+        root.path(),
+        "ops.x",
+        r#"#![feature(generics)]
+fn keep<T: type>(x: T) -> T { x }
+pub fn run(x_0T__1_A_0__120_x: u8) -> u8 { keep(x_0T__1_A_0__120_x) }"#,
+    )?;
+    let bx = "use ops; #[allow(combinational_block)] block run(clk, x: u8) -> u8 { ops::run(x) }";
+    let package = compile_with_options(
+        bx,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &search_paths(&[root.path()]),
+    )?;
+    assert!(package.get_fn("_0T__3_ops_0__4_keep__T3_u8_").is_some());
+    assert_eq!(run_block(&package, 42)?, IrValue::make_ubits(8, 42)?);
+    Ok(())
+}
+
+#[test]
 fn imported_lambda_symbols_match_native_source_spans_across_checks() -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;
     let modules = root.path().join("lambda search-path");
     write_module(
         &modules,
-        "wire.x",
-        "pub fn adjust(x: u8) -> u8 { x + u8:1 }",
+        "nested/wire.x",
+        r#"#![feature(generics)]
+pub enum Flag : u1 { On = 1 }
+fn keep<T: type>(x:T)->T { x }
+pub fn adjust(x: u8) -> u8 { keep((Flag::On, x)).1 + u8:1 }"#,
     )?;
     // A native lambda symbol includes its filename and both endpoint columns.
     // Putting the import on this line makes relocation affect both columns.
+    // Its enclosing function has a frame-like name. The synthetic loop must
+    // preserve both that name and the specialized lambda that follows it.
     write_module(
         &modules,
         "wire_x.x",
-        "import wire; pub fn score(x: u8, arr: u8[2]) -> u8[2] { map(arr, |i| wire::adjust(i + x)) }",
+        "import nested.wire; pub fn run_0T__1_A_0__20_x(x: u8, arr: u8[2]) -> u8[2] { map(arr, |i| wire::adjust(i + x)) }",
     )?;
-    let bx = "use wire_x; #[allow(combinational_block)] block run(clk, x: u8, arr: u8[2]) -> u8[2] { wire_x::score(x, arr) }";
+    let bx = "use wire_x; #[allow(combinational_block)] block run(clk, x: u8, arr: u8[2]) -> u8[2] { wire_x::run_0T__1_A_0__20_x(x, arr) }";
     let options = search_paths(&[&modules]);
     let compile = || {
         compile_with_options(
@@ -847,26 +931,18 @@ fn imported_lambda_symbols_match_native_source_spans_across_checks() -> Result<(
 
     let mut data = ImportData::new(None, &[&modules]);
     let caller = parse_and_typecheck(
-        "import wire_x; fn main(x: u8, arr: u8[2]) -> u8[2] { wire_x::score(x, arr) }",
+        "import wire_x; fn main(x: u8, arr: u8[2]) -> u8[2] { wire_x::run_0T__1_A_0__20_x(x, arr) }",
         "caller.x",
         "caller",
         &mut data,
     )?;
     let native = Parser::new(&caller.to_ir_text()?).parse_and_verify_package()?;
-    let imported_names = |package: &Package, entry: &str| -> BTreeSet<String> {
-        package
-            .members
-            .iter()
-            .map(|m| &m.graph().name)
-            .filter(|name| name.as_str() != entry)
-            .cloned()
-            .collect()
-    };
     let expected = imported_names(&native, "__caller__main");
     assert!(
         expected
             .iter()
-            .any(|name| name.starts_with("__wire_x__lambda_capture_struct_at_"))
+            .any(|name| name.starts_with("_0T__")
+                && name.contains("lambda_5Fcapture_5Fstruct_5Fat_"))
     );
     assert_eq!(imported_names(&first, "run"), expected);
     Ok(())

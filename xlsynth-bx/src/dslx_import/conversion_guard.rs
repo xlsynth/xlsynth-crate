@@ -72,9 +72,9 @@ fn scalar_or_array(mut ty: Type) -> bool {
     !ty.is_enum() && ty.is_bits_like().is_some()
 }
 
-/// v0.61 can produce invalid symbols or silently merge concrete nominal and
-/// tuple type arguments. Value parameters (including u32 struct dimensions)
-/// have an IR value and use the converter's ordinary value specialization.
+/// Check the supported type-valued bindings for concrete parametric struct
+/// imports. Value parameters (including u32 struct dimensions) have an IR
+/// value and use the converter's ordinary value specialization.
 fn unsupported_type_binding(site: &Site) -> Option<String> {
     let bindings = site.callee.env.bindings();
     for (name, actual) in bindings {
@@ -142,6 +142,11 @@ fn named_sibling(instances: &HashSet<Instance>) -> Result<Option<String>, String
             None,
         )
         .map_err(|e| e.to_string())?;
+        if symbol.starts_with("_0T__") {
+            // Type specializations have a disjoint prefix from every named
+            // sibling.
+            continue;
+        }
         let local = symbol
             .strip_prefix("__bx__")
             .ok_or("unexpected native DSLX specialization spelling")?;
@@ -282,8 +287,8 @@ pub(super) fn check(
     }
 }
 
-/// v0.61 drops closing tuple delimiters from type-valued arguments. Distinct
-/// bindings of the same declaration must still have distinct native symbols.
+/// Checks that distinct bindings of the same declaration have distinct native
+/// IR symbols.
 fn check_type_symbols(instances: &HashSet<Instance>) -> Result<(), String> {
     let mut functions = HashMap::<&Function, Vec<&ParametricEnv>>::new();
     for instance in instances {

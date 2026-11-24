@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ffi::CString;
 use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::ir_analysis::{IrAnalysis, IrAnalysisLevel};
-use crate::lib_support::{self, c_str_to_rust, xls_function_jit_run, xls_make_function_jit};
+use crate::lib_support::{
+    self, c_str_to_rust, trace_messages_to_rust, xls_ffi_call, xls_ffi_call_noreturn,
+    xls_function_jit_run, xls_make_function_jit,
+};
 pub use crate::lib_support::{RunResult, TraceMessage};
 use crate::xlsynth_error::XlsynthError;
 use crate::{
@@ -369,6 +373,91 @@ impl IrFunctionJit {
     pub fn run(&self, args: &[XlsIrValue]) -> Result<RunResult, XlsynthError> {
         let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
         xls_function_jit_run(&package_read_guard, self.ptr, args)
+    }
+}
+
+/// A stateful interpreter for the procs in an IR package.
+///
+/// The runtime owns the package because the interpreter borrows its IR.
+/// For proc-scoped channels, select the top proc before constructing the
+/// runtime. Channel names then refer to the top proc's boundary channels.
+///
+/// ```
+/// use xlsynth::{IrPackage, IrProcRuntime, XlsIrValue, XlsynthError};
+///
+/// fn run_one(package: IrPackage, input: &XlsIrValue) -> Result<Option<XlsIrValue>, XlsynthError> {
+///     let mut runtime = IrProcRuntime::new(package)?;
+///     runtime.write("in", input)?;
+///     runtime.tick()?;
+///     runtime.try_read("out")
+/// }
+/// ```
+pub struct IrProcRuntime {
+    package: IrPackage,
+    ptr: *mut xlsynth_sys::CIrProcRuntime,
+}
+
+impl IrProcRuntime {
+    /// Creates an interpreter with fresh proc state and channel queues.
+    pub fn new(package: IrPackage) -> Result<Self, XlsynthError> {
+        let mut ptr = std::ptr::null_mut();
+        package.with_write(
+            |guard| xls_ffi_call!(xlsynth_sys::xls_proc_runtime_create, guard.mut_c_ptr(); ptr),
+        )?;
+        Ok(Self { package, ptr })
+    }
+
+    /// Advances each proc by up to one iteration and reports execution errors,
+    /// including deadlock. A new tick discards the previous tick's traces.
+    pub fn tick(&mut self) -> Result<(), XlsynthError> {
+        self.package.with_write(|_guard| {
+            xls_ffi_call_noreturn!(xlsynth_sys::xls_proc_runtime_tick, self.ptr)
+        })
+    }
+
+    /// Writes a value to a named channel. The caller retains the value.
+    pub fn write(&mut self, channel_name: &str, value: &XlsIrValue) -> Result<(), XlsynthError> {
+        let name = CString::new(channel_name).map_err(|e| XlsynthError(e.to_string()))?;
+        self.package.with_write(|_guard| {
+            xls_ffi_call_noreturn!(
+                xlsynth_sys::xls_proc_runtime_write,
+                self.ptr,
+                name.as_ptr(),
+                value.ptr
+            )
+        })
+    }
+
+    /// Reads an owned value from a named channel, or returns `None` if empty.
+    pub fn try_read(&mut self, channel_name: &str) -> Result<Option<XlsIrValue>, XlsynthError> {
+        let name = CString::new(channel_name).map_err(|e| XlsynthError(e.to_string()))?;
+        let mut ptr = std::ptr::null_mut();
+        self.package.with_write(|_guard| {
+            xls_ffi_call!(xlsynth_sys::xls_proc_runtime_try_read, self.ptr, name.as_ptr(); ptr)
+        })?;
+        if ptr.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(XlsIrValue { ptr }))
+        }
+    }
+
+    /// Drains traces from the latest successful or failed tick. Each proc's
+    /// messages are in emission order. Ordering across procs is unspecified.
+    pub fn take_trace_messages(&mut self) -> Vec<TraceMessage> {
+        let mut messages = std::ptr::null_mut();
+        let mut count = 0;
+        self.package.with_write(|_guard| unsafe {
+            xlsynth_sys::xls_proc_runtime_take_trace_messages(self.ptr, &mut messages, &mut count);
+            trace_messages_to_rust(messages, count)
+        })
+    }
+}
+
+impl Drop for IrProcRuntime {
+    fn drop(&mut self) {
+        // Drop runs while the package and its proc definitions are still alive.
+        unsafe { xlsynth_sys::xls_proc_runtime_free(self.ptr) }
     }
 }
 

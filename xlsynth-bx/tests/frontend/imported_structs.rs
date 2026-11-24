@@ -368,23 +368,28 @@ pub fn via<N:u32>(v:uN[N], x:u2)->u2 {{
 }
 
 #[test]
-fn colliding_nested_tuple_specializations_are_diagnosed_before_conversion()
--> Result<(), Box<dyn Error>> {
+fn nested_tuple_specializations_retain_their_distinct_shapes() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     fs::write(
         dir.path().join("ops.x"),
         r#"#![feature(generics)]
-pub enum Mode : u2 { A=0 }
-pub fn eq<T: type>(x: T) -> bool { x == x }
+pub enum Mode : u2 { A=0, B=1 }
+pub fn eq<T: type>(x: T, y: T) -> bool { x == y }
 pub fn hidden(x: Mode) -> (bool, bool) {
-    (eq((x, (u8:0, u8:1), u8:2)), eq((x, (u8:0, u8:1, u8:2))))
+    (
+        eq((x, (u8:0, u8:1), u8:2), (Mode::A, (u8:0, u8:1), u8:2)),
+        eq((x, (u8:0, u8:1, u8:2)), (Mode::B, (u8:0, u8:1, u8:2))),
+    )
 }
 pub fn mapped(x: Mode) -> (bool, bool) {
     map([x], hidden)[u32:0]
 }
 pub fn lambda(x: Mode) -> (bool, bool) {
     map([x], |v: Mode| -> (bool,bool) {
-        (eq((v, (u8:0, u8:1), u8:2)), eq((v, (u8:0, u8:1, u8:2))))
+        (
+            eq((v, (u8:0, u8:1), u8:2), (Mode::A, (u8:0, u8:1), u8:2)),
+            eq((v, (u8:0, u8:1, u8:2)), (Mode::B, (u8:0, u8:1, u8:2))),
+        )
     })[u32:0]
 }
 struct Pair<N:u32> { v:uN[N] }
@@ -414,16 +419,24 @@ pub fn high_byte<T:type>(x:T)->bool {
     )?;
     let options = search_paths(&[dir.path()]);
     for body in [
-        "(ops::eq((x,(u8:0,u8:1),u8:2)),ops::eq((x,(u8:0,u8:1,u8:2))))",
+        r#"(
+            ops::eq((x,(u8:0,u8:1),u8:2), (ops::Mode::A,(u8:0,u8:1),u8:2)),
+            ops::eq((x,(u8:0,u8:1,u8:2)), (ops::Mode::B,(u8:0,u8:1,u8:2))),
+        )"#,
         "ops::hidden(x)",
         "ops::mapped(x)",
         "ops::lambda(x)",
     ] {
         let bx = format!("use ops; block sample(clk,x:ops::Mode)->(bool,bool) {{ {body} }}");
-        assert_eq!(
-            check_module_with_options(&parse_module(&bx)?, &options).unwrap_err(),
-            "compiling DSLX import 'ops': distinct specializations of DSLX function 'eq' have the same native IR symbol"
-        );
+        let checked = check_module_with_options(&parse_module(&bx)?, &options)?;
+        let evaluator = BlockEvaluator::lower(&checked, &bx)?;
+        for mode in [0, 1] {
+            assert_eq!(
+                evaluator.evaluate(&[IrValue::make_ubits(2, mode)?])?,
+                IrValue::make_tuple(&[IrValue::bool(mode == 0), IrValue::bool(mode == 1)]),
+                "{body} with mode {mode}"
+            );
+        }
     }
     for function in ["via", "mapped_via"] {
         let bx = format!(
@@ -437,7 +450,7 @@ pub fn high_byte<T:type>(x:T)->bool {
         );
     }
     for body in [
-        "ops::eq((x,(u8:0,u8:1),u8:2))",
+        "ops::eq((x,(u8:0,u8:1),u8:2), (x,(u8:0,u8:1),u8:2))",
         "ops::mapped_ok(u2:0,x)",
         "ops::low_byte(x)",
         "ops::high_byte(x)",

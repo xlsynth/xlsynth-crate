@@ -34,6 +34,8 @@ pub(crate) struct NativeSourceFiles {
     subjects: BTreeSet<String>,
     short_components: BTreeMap<String, String>,
     renamed_modules: Vec<(String, String)>,
+    /// Escaped module identifiers used in native type specialization frames.
+    typed_modules: BTreeMap<String, String>,
 }
 
 impl NativeSourceFiles {
@@ -47,7 +49,7 @@ impl NativeSourceFiles {
     /// replaced.
     pub(in crate::import_structs) fn capture_with_overrides(
         graph: &OutlineGraph,
-        mut overrides: BTreeMap<String, RelocatedSource>,
+        overrides: BTreeMap<String, Vec<u8>>,
     ) -> Result<Self, String> {
         let runfiles = XlsRunfiles::from_env();
         let (directory, namespace) = loop {
@@ -89,6 +91,7 @@ impl NativeSourceFiles {
             base_text.len() + 2 * namespace.len() + 22,
         )?;
         let mut renamed_modules = Vec::new();
+        let mut typed_modules = BTreeMap::new();
         let mut roots = Vec::new();
         let mut sources = BTreeMap::new();
         // XLS uses sanitized filenames in generated identifiers. Put paths
@@ -97,6 +100,10 @@ impl NativeSourceFiles {
         let mut collisions = BTreeMap::<String, usize>::new();
         for source in graph.sources() {
             let encoded = encode_subject(&source.subject, &short_components);
+            typed_modules.insert(
+                escape_identifier(&format!("{namespace}.{namespace}.{encoded}")),
+                escape_identifier(&source.subject),
+            );
             let relative = format!("{}.x", encoded.replace('.', "/"));
             if encoded != source.subject {
                 renamed_modules.push((encoded, source.subject.clone()));
@@ -110,10 +117,7 @@ impl NativeSourceFiles {
                 .join(&namespace)
                 .join(relative);
             *index += 1;
-            let rewritten = overrides.remove(&source.subject);
-            let bytes = rewritten
-                .as_ref()
-                .map_or(source.source.as_slice(), |s| &s.bytes);
+            let bytes = overrides.get(&source.subject).unwrap_or(&source.source);
             let mut relocated =
                 relocate_dslx_imports(bytes, &namespace, &short_components, &subjects);
             if let Some(aliases) = graph.value_aliases.get(&source.subject) {
@@ -122,9 +126,6 @@ impl NativeSourceFiles {
                         format!("\npub type {alias} = {original};\n").as_bytes(),
                     );
                 }
-            }
-            if let Some(rewritten) = rewritten {
-                relocated.columns = relocated.columns.with_original(rewritten.columns);
             }
             fs::create_dir_all(physical.parent().expect("snapshot source has a parent"))
                 .and_then(|()| fs::write(&physical, &relocated.bytes))
@@ -153,6 +154,7 @@ impl NativeSourceFiles {
             subjects,
             short_components,
             renamed_modules,
+            typed_modules,
         })
     }
 
@@ -221,10 +223,10 @@ impl NativeSourceFiles {
     /// scopes and loop-body references. Slash-delimited file_number paths
     /// stay available for source and column mapping after parsing.
     pub(crate) fn restore_ir_names(&self, text: &str) -> String {
+        let mut text = self.restore_typed_names(text);
         if !text.contains(&self.namespace) {
-            return text.to_owned();
+            return text;
         }
-        let mut text = text.to_owned();
         if text.contains(&self.mangled_directory) {
             let mut sources: Vec<_> = self.sources.values().collect();
             sources.sort_by_key(|s| Reverse(s.mangled_physical.len()));
@@ -249,9 +251,141 @@ impl NativeSourceFiles {
         text.replace(&self.mangled_prefix, "")
     }
 
+    /// Restore length-prefixed type specializations, including ones embedded
+    /// in synthetic loop-body names.
+    fn restore_typed_names(&self, text: &str) -> String {
+        let namespace = escape_identifier(&self.namespace);
+        if !text.contains(&namespace) {
+            return text.to_owned();
+        }
+        const PREFIX: &str = "_0T__";
+        let mut parts = text.split(PREFIX);
+        let mut result = String::with_capacity(text.len());
+        result.push_str(parts.next().unwrap_or_default());
+        // A synthetic loop name can join an ordinary caller and a specialized
+        // callee. A frame-like spelling in the caller must not consume the
+        // callee's prefix. DSLX escapes literal underscores in typed
+        // identifiers.
+        for part in parts {
+            result.push_str(PREFIX);
+            if let Some((name, tail)) = self.restore_typed_name(part, &namespace) {
+                result.push_str(&name);
+                result.push_str(tail);
+            } else {
+                result.push_str(part);
+            }
+        }
+        result
+    }
+
+    /// A typed name frames its module, scope, function, and each T/V binding.
+    fn restore_typed_name<'a>(
+        &self,
+        mut rest: &'a str,
+        namespace: &str,
+    ) -> Option<(String, &'a str)> {
+        let mut result = String::new();
+        for convention in ["itok__", "pnext__"] {
+            if let Some(tail) = rest.strip_prefix(convention) {
+                result.push_str(convention);
+                rest = tail;
+                break;
+            }
+        }
+        for separator in ["", "_", "_"] {
+            let (identifier, tail) = take_frame(rest.strip_prefix(separator)?)?;
+            result.push_str(separator);
+            let restored = self.restore_identifier(identifier, namespace);
+            push_frame(&mut result, restored.as_deref().unwrap_or(identifier));
+            rest = tail;
+        }
+        let mut separator = "__";
+        while let Some(binding) = rest.strip_prefix(separator) {
+            let Some(kind) = binding.chars().next().filter(|c| matches!(c, 'T' | 'V')) else {
+                break;
+            };
+            let Some((payload, tail)) = take_frame(&binding[1..]) else {
+                break;
+            };
+            result.push_str(separator);
+            result.push(kind);
+            if kind == 'T' && payload.contains(namespace) {
+                push_frame(
+                    &mut result,
+                    &self.restore_type_identifiers(payload, namespace),
+                );
+            } else {
+                push_frame(&mut result, payload);
+            }
+            rest = tail;
+            separator = "_";
+        }
+        Some((result, rest))
+    }
+
+    /// The nominal type tags for enums, structs, procs, sums, and modules are
+    /// followed by a framed owner. Only replace exact snapshot owners. The
+    /// first four also frame the declaration name, which for a generated
+    /// lambda capture struct can include a source span.
+    fn restore_type_identifiers(&self, mut ty: &str, namespace: &str) -> String {
+        let mut result = String::new();
+        while let Some(index) = ty.find(['e', 'r', 'p', 'z', 'd']) {
+            let tag = ty.as_bytes()[index];
+            result.push_str(&ty[..=index]);
+            ty = &ty[index + 1..];
+            if let Some((owner, tail)) = take_frame(ty)
+                && let Some(original) = self.typed_modules.get(owner)
+            {
+                push_frame(&mut result, original);
+                ty = tail;
+                if tag != b'd'
+                    && let Some((name, tail)) = take_frame(ty)
+                {
+                    let restored = self.restore_identifier(name, namespace);
+                    push_frame(&mut result, restored.as_deref().unwrap_or(name));
+                    ty = tail;
+                }
+            }
+        }
+        result.push_str(ty);
+        result
+    }
+
+    /// Decode only identifiers containing this snapshot's escaped namespace.
+    fn restore_identifier(&self, escaped: &str, namespace: &str) -> Option<String> {
+        if let Some(original) = self.typed_modules.get(escaped) {
+            return Some(original.clone());
+        }
+        if !escaped.contains(namespace) {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        let mut rest = escaped.as_bytes();
+        while let Some((&byte, tail)) = rest.split_first() {
+            if byte.is_ascii_alphanumeric() {
+                bytes.push(byte);
+                rest = tail;
+            } else if byte == b'_' {
+                let (hex, tail) = tail.split_at_checked(2)?;
+                bytes.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+                rest = tail;
+            } else {
+                return None;
+            }
+        }
+        let decoded = String::from_utf8(bytes).ok()?;
+        let restored = self.restore_source_text(decoded.clone());
+        (restored != decoded).then(|| escape_identifier(&restored))
+    }
+
     /// Restore filenames, one-based source positions, and module names in
     /// native errors, including filenames containing spaces.
-    pub(crate) fn remap_diagnostic(&self, mut message: String) -> String {
+    pub(crate) fn remap_diagnostic(&self, message: String) -> String {
+        self.restore_ir_names(&self.restore_source_text(message))
+    }
+
+    /// Restore source locations and qualified module names in unescaped text.
+    fn restore_source_text(&self, mut message: String) -> String {
         let mut paths: Vec<_> = self.sources.iter().collect();
         paths.sort_by_key(|(physical, _)| Reverse(physical.as_os_str().len()));
         for (physical, source) in paths {
@@ -274,10 +408,48 @@ impl NativeSourceFiles {
                     &original.replace('.', "::"),
                 );
         }
-        self.restore_ir_names(&message)
+        message
             .replace(&format!("{0}.{0}.", self.namespace), "")
             .replace(&format!("{0}::{0}::", self.namespace), "")
     }
+}
+
+/// Read a length-prefixed payload without crossing the end of an IR identifier.
+fn take_frame(text: &str) -> Option<(&str, &str)> {
+    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+    let (count, rest) = text.split_at(digits);
+    if count.is_empty() || (digits > 1 && count.starts_with('0')) {
+        return None;
+    }
+    let (payload, tail) = rest
+        .strip_prefix('_')?
+        .split_at_checked(count.parse().ok()?)?;
+    payload
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        .then_some((payload, tail))
+}
+
+fn push_frame(result: &mut String, payload: &str) {
+    result.push_str(&payload.len().to_string());
+    result.push('_');
+    result.push_str(payload);
+}
+
+/// DSLX escapes each non-alphanumeric byte as an underscore and two hex digits.
+fn escape_identifier(text: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut escaped = String::new();
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            escaped.push(char::from(byte));
+        } else {
+            escaped.push('_');
+            escaped.push(char::from(HEX[usize::from(byte >> 4)]));
+            escaped.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+    }
+    escaped
 }
 
 fn encode_subject(subject: &str, short: &BTreeMap<String, String>) -> String {
