@@ -54,9 +54,9 @@ impl BlockEmitter<'_, '_> {
                 continue;
             }
             let name = self.unique_name(&helper.name());
-            let result_type = self.bits_type(helper.result_width());
+            let result_type = self.bits_type(helper.result_width())?;
             let handle = self.file.add_function(self.module, &name, &result_type)?;
-            let input_type = self.bits_type(helper.input_width);
+            let input_type = self.bits_type(helper.input_width)?;
             let is_select = matches!(helper.kind, PriorityKind::Select { .. });
             let input = self.file.function_add_logic_input(
                 handle,
@@ -170,7 +170,7 @@ impl BlockEmitter<'_, '_> {
             .expect("priority helper was predeclared");
         Ok(self
             .file
-            .make_function_call(name, &arguments.iter().collect::<Vec<_>>()))
+            .make_function_call(name, &arguments.iter().collect::<Vec<_>>())?)
     }
 
     /// Forms one branch result, using static wiring for normalization shifts.

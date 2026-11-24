@@ -7,9 +7,10 @@ use std::fmt::Write;
 use crate::VastFile;
 use crate::model::{
     AlwaysKind, BinaryOp, CaseStatement, Conditional, DataKind, Expr, ExprData, FileItem,
-    FunctionData, GenerateLoop, Instantiation, IntegerTypeKind, MemberData, ModuleData,
-    ModulePortDirection, StatementData, TypeData, UnaryOp, VastAlwaysBase, VastDataType,
-    VastFileType, VastFunction, VastStatementBlock,
+    FunctionData, GenerateLoop, Instantiation, IntegerTypeKind, LogicState, MemberData, ModuleData,
+    ModulePortDirection, PackageImport, ParameterKind, ParameterPortDeclaration, StatementData,
+    SvArgument, TypeData, UnaryOp, VastAlwaysBase, VastDataType, VastFileType, VastFunction,
+    VastStatementBlock,
 };
 
 /// Emits all file members in insertion order, with one terminating newline
@@ -24,6 +25,7 @@ pub(crate) fn emit_file(file: &VastFile) -> String {
             FileItem::Include(path) => {
                 write!(result, "`include \"{path}\"").expect("writing to String cannot fail");
             }
+            FileItem::Import(import) => result.push_str(&emit_package_import(import)),
             FileItem::Comment(text) => result.push_str(&emit_comment(text)),
             FileItem::BlankLine => {
                 // The common terminating newline below is the entire blank
@@ -39,8 +41,13 @@ pub(crate) fn emit_file(file: &VastFile) -> String {
 pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
     match &file.ast.expressions[expr.0.index] {
         ExprData::Name { name, .. } => name.clone(),
+        ExprData::ExternalValue { package, name } => match package {
+            Some(package) => format!("{package}::{name}"),
+            None => name.clone(),
+        },
         ExprData::Literal { text, .. } | ExprData::InlineVerilog { text } => text.clone(),
         ExprData::StringLiteral { value } => emit_string_literal(value),
+        ExprData::TimeLiteral { magnitude, unit } => format!("{magnitude}{}", unit.suffix()),
         ExprData::Unary { op, arg } => {
             let operand = emit_expr(file, *arg);
             // Keep unary operators out of a size cast's constant expression.
@@ -139,16 +146,24 @@ pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
         ExprData::ArrayAssignmentPattern(elements) => {
             format!("'{{{}}}", join_expressions(file, elements))
         }
+        ExprData::StructAssignmentPattern(members) => {
+            let members = members
+                .iter()
+                .map(|(name, value)| format!("{name}: {}", emit_expr(file, *value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("'{{{members}}}")
+        }
         ExprData::WidthCast { width, value } => emit_width_cast(file, *width, *value),
         ExprData::TypeCast { data_type, value } => emit_data_type_cast(file, *data_type, *value),
         ExprData::PosEdge(value) => format!("posedge {}", emit_expr(file, *value)),
         ExprData::NegEdge(value) => format!("negedge {}", emit_expr(file, *value)),
         ExprData::Macro { name, args } => match args {
-            Some(expressions) => format!("`{name}({})", join_expressions(file, expressions)),
+            Some(arguments) => format!("`{name}({})", join_arguments(file, arguments)),
             None => format!("`{name}"),
         },
         ExprData::FunctionCall { name, args } => {
-            format!("{name}({})", join_expressions(file, args))
+            format!("{name}({})", join_arguments(file, args))
         }
     }
 }
@@ -162,7 +177,6 @@ fn emit_string_literal(value: &str) -> String {
             '"' => escaped.push_str("\\\""),
             '\\' => escaped.push_str("\\\\"),
             '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
             control if control.is_ascii_control() => {
                 write!(escaped, "\\{:03o}", control as u32).expect("writing to String cannot fail");
@@ -186,7 +200,10 @@ fn emit_width_cast(file: &VastFile, width: Expr, value: Expr) -> String {
 /// fragment.
 fn emit_data_type_cast(file: &VastFile, data_type: VastDataType, value: Expr) -> String {
     match &file.ast.data_types[data_type.0.index] {
-        TypeData::Scalar { signed } => {
+        TypeData::Scalar {
+            signed,
+            state: LogicState::FourState,
+        } => {
             let cast = format!("logic'({})", emit_expr(file, value));
             if *signed {
                 format!("signed'({cast})")
@@ -194,22 +211,40 @@ fn emit_data_type_cast(file: &VastFile, data_type: VastDataType, value: Expr) ->
                 cast
             }
         }
-        TypeData::BitVector { width, signed, .. } => {
+        TypeData::Scalar {
+            state: LogicState::TwoState,
+            ..
+        } => {
+            format!(
+                "{}'({})",
+                emit_type(file, data_type),
+                emit_expr(file, value)
+            )
+        }
+        TypeData::BitVector { signed, .. } => {
+            // The sign cast prevents parsers from treating a nested
+            // type-reference cast as a type operand in comparisons. The target
+            // preserves width, sign, and state.
             let sign = if *signed { "signed" } else { "unsigned" };
-            format!("{sign}'({})", emit_width_cast(file, *width, value))
+            format!(
+                "{sign}'(type({})'({}))",
+                emit_complete_type(file, data_type),
+                emit_expr(file, value)
+            )
         }
         TypeData::Integer { signed, kind } => {
-            let keyword = match kind {
-                IntegerTypeKind::Integer => "integer",
-                IntegerTypeKind::Int => "int",
-            };
+            let keyword = kind.keyword();
             let cast = format!("{keyword}'({})", emit_expr(file, value));
-            if *signed {
+            let default_signed = *kind != IntegerTypeKind::Time;
+            if *signed == default_signed {
                 cast
+            } else if *signed {
+                format!("signed'({cast})")
             } else {
                 format!("unsigned'({cast})")
             }
         }
+        TypeData::String => format!("string'({})", emit_expr(file, value)),
         TypeData::Extern { .. } => {
             format!(
                 "{}'({})",
@@ -226,37 +261,53 @@ fn emit_data_type_cast(file: &VastFile, data_type: VastDataType, value: Expr) ->
 /// Returns the textual representation of a data type without its identifier.
 pub(crate) fn emit_type(file: &VastFile, data_type: VastDataType) -> String {
     match &file.ast.data_types[data_type.0.index] {
-        TypeData::Scalar { signed } => {
-            if *signed {
-                "signed".to_owned()
-            } else {
-                String::new()
-            }
-        }
+        TypeData::String => "string".to_owned(),
+        TypeData::Scalar { signed, state } => match state {
+            LogicState::FourState if *signed => "signed".to_owned(),
+            LogicState::FourState => String::new(),
+            LogicState::TwoState if *signed => "bit signed".to_owned(),
+            LogicState::TwoState => "bit".to_owned(),
+        },
         TypeData::BitVector {
             width,
             width_value,
             signed,
-        } => {
-            let signed_prefix = if *signed { "signed " } else { "" };
-            format!(
-                "{signed_prefix}[{}:0]",
-                width_limit(file, *width, *width_value)
-            )
-        }
+            state,
+        } => emit_integral_vector_type(
+            *state,
+            *signed,
+            &format!("[{}:0]", width_limit(file, *width, *width_value)),
+        ),
         TypeData::Extern { package, name } => match package {
             Some(package) => format!("{package}::{name}"),
             None => name.clone(),
         },
-        TypeData::Integer { signed, .. } => {
-            if *signed {
-                String::new()
-            } else {
-                "unsigned".to_owned()
+        TypeData::Integer { signed, kind } => match kind {
+            IntegerTypeKind::Integer | IntegerTypeKind::Int => {
+                if *signed {
+                    String::new()
+                } else {
+                    "unsigned".to_owned()
+                }
             }
-        }
+            IntegerTypeKind::Time if *signed => "time signed".to_owned(),
+            IntegerTypeKind::Time => "time".to_owned(),
+            _ if *signed => kind.keyword().to_owned(),
+            _ => format!("{} unsigned", kind.keyword()),
+        },
         TypeData::PackedArray { .. } => emit_packed_array_type(file, data_type),
         TypeData::UnpackedArray { element, .. } => emit_type(file, *element),
+    }
+}
+
+/// Emits a two-state bit or four-state logic vector's type fragment and
+/// dimensions.
+fn emit_integral_vector_type(state: LogicState, signed: bool, dimensions: &str) -> String {
+    match (state, signed) {
+        (LogicState::TwoState, true) => format!("bit signed {dimensions}"),
+        (LogicState::TwoState, false) => format!("bit {dimensions}"),
+        (LogicState::FourState, true) => format!("signed {dimensions}"),
+        (LogicState::FourState, false) => dimensions.to_owned(),
     }
 }
 
@@ -278,13 +329,15 @@ fn emit_packed_array_type(file: &VastFile, data_type: VastDataType) -> String {
             width,
             width_value,
             signed,
-        } => {
-            let signed_prefix = if *signed { "signed " } else { "" };
-            format!(
-                "{signed_prefix}{dimension_text}[{}:0]",
+            state,
+        } => emit_integral_vector_type(
+            *state,
+            *signed,
+            &format!(
+                "{dimension_text}[{}:0]",
                 width_limit(file, *width, *width_value)
-            )
-        }
+            ),
+        ),
         _ => {
             let element_type = emit_type(file, element);
             if element_type.is_empty() {
@@ -332,28 +385,52 @@ fn emit_type_with_identifier(file: &VastFile, data_type: VastDataType, name: &st
     result
 }
 
+/// Emits an import declaration at file, module header, or module body scope.
+fn emit_package_import(import: &PackageImport) -> String {
+    format!("import {}::{};", import.package, import.item)
+}
+
 /// Emits a module header and its ordered module members.
 fn emit_module(file: &VastFile, module: &ModuleData) -> String {
     let mut result = format!("module {}", module.name);
+    for import in &module.imports {
+        result.push(' ');
+        result.push_str(&emit_package_import(import));
+    }
     if !module.parameter_ports.is_empty() {
         result.push_str(" #(\n");
         for (index, parameter) in module.parameter_ports.iter().enumerate() {
             if index != 0 {
                 result.push_str(",\n");
             }
-            result.push_str("  parameter ");
-            if let Some(data_type) = parameter.data_type {
-                result.push_str(&emit_declaration_without_semicolon(
-                    file,
-                    parameter_data_kind(file, data_type),
-                    data_type,
-                    &parameter.name,
-                ));
-            } else {
-                result.push_str(&parameter.name);
-            }
-            write!(result, " = {}", emit_expr(file, parameter.value))
+            write!(result, "  {} ", parameter_keyword(parameter.kind))
                 .expect("writing to String cannot fail");
+            match &parameter.declaration {
+                ParameterPortDeclaration::Value { data_type, default } => {
+                    if let Some(data_type) = data_type {
+                        result.push_str(&emit_declaration_without_semicolon(
+                            file,
+                            parameter_data_kind(file, *data_type),
+                            *data_type,
+                            &parameter.name,
+                        ));
+                    } else {
+                        result.push_str(&parameter.name);
+                    }
+                    if let Some(default) = default {
+                        write!(result, " = {}", emit_expr(file, *default))
+                            .expect("writing to String cannot fail");
+                    }
+                }
+                ParameterPortDeclaration::Type { default } => {
+                    write!(result, "type {}", parameter.name)
+                        .expect("writing to String cannot fail");
+                    if let Some(default) = default {
+                        write!(result, " = {}", emit_complete_type(file, *default))
+                            .expect("writing to String cannot fail");
+                    }
+                }
+            }
         }
         result.push_str("\n)");
         if !module.ports.is_empty() {
@@ -361,7 +438,15 @@ fn emit_module(file: &VastFile, module: &ModuleData) -> String {
         }
     }
 
+    let needs_explicit_port_list = !module.imports.is_empty() && module.parameter_ports.is_empty();
+    if needs_explicit_port_list {
+        result.push(' ');
+    }
+
     if module.ports.is_empty() {
+        if needs_explicit_port_list {
+            result.push_str("()");
+        }
         result.push_str(";\n");
     } else {
         result.push_str("(\n");
@@ -375,8 +460,11 @@ fn emit_module(file: &VastFile, module: &ModuleData) -> String {
                 ModulePortDirection::Output => "output",
                 ModulePortDirection::InOut => "inout",
             };
-            let kind = if port.direction != ModulePortDirection::InOut
-                && is_user_defined(file, port.data_type)
+            let kind = if base_integer_kind(file, port.data_type) == Some(IntegerTypeKind::Int) {
+                DataKind::Int
+            } else if port.direction != ModulePortDirection::InOut
+                && uses_complete_type(file, port.data_type)
+                && !(port.kind == DataKind::Wire && is_time_type(file, port.data_type))
             {
                 DataKind::User
             } else {
@@ -404,14 +492,46 @@ fn emit_module(file: &VastFile, module: &ModuleData) -> String {
     result
 }
 
+/// Emits the complete spelling of a type, including its built-in base kind.
+fn emit_complete_type(file: &VastFile, data_type: VastDataType) -> String {
+    emit_declaration_without_semicolon(file, parameter_data_kind(file, data_type), data_type, "")
+        .trim_end()
+        .to_owned()
+}
+
+/// Returns the selected parameter declaration keyword.
+fn parameter_keyword(kind: ParameterKind) -> &'static str {
+    match kind {
+        ParameterKind::Parameter => "parameter",
+        ParameterKind::Localparam => "localparam",
+    }
+}
+
 /// Chooses the complete declaration kind corresponding to a parameter type.
 fn parameter_data_kind(file: &VastFile, data_type: VastDataType) -> DataKind {
     match &file.ast.data_types[data_type.0.index] {
-        TypeData::Scalar { .. } | TypeData::BitVector { .. } => DataKind::Logic,
-        TypeData::Extern { .. } => DataKind::User,
+        TypeData::Scalar {
+            state: LogicState::FourState,
+            ..
+        }
+        | TypeData::BitVector {
+            state: LogicState::FourState,
+            ..
+        } => DataKind::Logic,
+        TypeData::Scalar {
+            state: LogicState::TwoState,
+            ..
+        }
+        | TypeData::BitVector {
+            state: LogicState::TwoState,
+            ..
+        }
+        | TypeData::Extern { .. }
+        | TypeData::String => DataKind::User,
         TypeData::Integer { kind, .. } => match kind {
             IntegerTypeKind::Integer => DataKind::Integer,
             IntegerTypeKind::Int => DataKind::Int,
+            _ => DataKind::User,
         },
         TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
             parameter_data_kind(file, *element)
@@ -422,6 +542,16 @@ fn parameter_data_kind(file: &VastFile, data_type: VastDataType) -> DataKind {
 /// Emits one module member without the containing module's indentation.
 fn emit_member(file: &VastFile, member: &MemberData) -> String {
     match member {
+        MemberData::TimeUnit(value) => format!(
+            "timeunit {}{};",
+            value.magnitude.value(),
+            value.unit.suffix()
+        ),
+        MemberData::TimePrecision(value) => format!(
+            "timeprecision {}{};",
+            value.magnitude.value(),
+            value.unit.suffix()
+        ),
         MemberData::Declaration {
             kind,
             name,
@@ -455,6 +585,7 @@ fn emit_member(file: &VastFile, member: &MemberData) -> String {
             )
         }
         MemberData::Instantiation(handle) => emit_instantiation(file, *handle),
+        MemberData::Import(import) => emit_package_import(import),
         MemberData::Function(handle) => emit_function(file, *handle),
         MemberData::Always(handle) => emit_always(file, *handle),
         MemberData::Generate(handle) => emit_generate(file, *handle),
@@ -481,6 +612,15 @@ fn emit_member(file: &VastFile, member: &MemberData) -> String {
             };
             format!("{keyword} {declaration} = {};", emit_expr(file, *rhs))
         }
+        MemberData::TypeParameter {
+            kind,
+            name,
+            default,
+        } => format!(
+            "{} type {name} = {};",
+            parameter_keyword(*kind),
+            emit_complete_type(file, *default)
+        ),
         MemberData::Conditional(handle) => emit_conditional(file, *handle),
         MemberData::Comment(text) => emit_comment(text),
         MemberData::BlankLine => String::new(),
@@ -500,7 +640,7 @@ fn emit_function(file: &VastFile, handle: VastFunction) -> String {
         .inputs
         .iter()
         .map(|input| {
-            let kind = if is_user_defined(file, input.data_type) {
+            let kind = if uses_complete_type(file, input.data_type) {
                 DataKind::User
             } else {
                 input.kind
@@ -536,11 +676,8 @@ fn emit_function(file: &VastFile, handle: VastFunction) -> String {
 /// Formats a function result with an explicit SystemVerilog storage type.
 fn function_result_declaration(file: &VastFile, function: &FunctionData) -> String {
     match &file.ast.data_types[function.result_type.0.index] {
-        TypeData::Integer { kind, .. } => {
-            let declaration_kind = match kind {
-                IntegerTypeKind::Integer => DataKind::Integer,
-                IntegerTypeKind::Int => DataKind::Int,
-            };
+        TypeData::Integer { .. } => {
+            let declaration_kind = parameter_data_kind(file, function.result_type);
             emit_declaration_without_semicolon(
                 file,
                 declaration_kind,
@@ -549,7 +686,7 @@ fn function_result_declaration(file: &VastFile, function: &FunctionData) -> Stri
             )
         }
         _ if file.file_type == VastFileType::SystemVerilog
-            && !is_user_defined(file, function.result_type) =>
+            && !uses_complete_type(file, function.result_type) =>
         {
             emit_declaration_without_semicolon(
                 file,
@@ -569,6 +706,30 @@ fn emit_declaration_without_semicolon(
     data_type: VastDataType,
     name: &str,
 ) -> String {
+    if let Some(atom) = base_integer_kind(file, data_type) {
+        let atom_kind = match atom {
+            IntegerTypeKind::Integer => Some(DataKind::Integer),
+            IntegerTypeKind::Int => Some(DataKind::Int),
+            _ => None,
+        };
+        if let Some(atom_kind) = atom_kind {
+            if kind == DataKind::Wire && atom == IntegerTypeKind::Integer {
+                return format!(
+                    "wire {}",
+                    emit_declaration_without_semicolon(file, atom_kind, data_type, name)
+                );
+            }
+            if matches!(kind, DataKind::Reg | DataKind::Logic) {
+                return emit_declaration_without_semicolon(file, atom_kind, data_type, name);
+            }
+        }
+    }
+    let kind =
+        if matches!(kind, DataKind::Reg | DataKind::Logic) && uses_complete_type(file, data_type) {
+            DataKind::User
+        } else {
+            kind
+        };
     let kind_spelling = match kind {
         DataKind::Reg => "reg",
         DataKind::Wire => "wire",
@@ -728,12 +889,12 @@ fn emit_instantiation(file: &VastFile, handle: Instantiation) -> String {
             if index != 0 {
                 result.push_str(",\n");
             }
-            write!(result, "  .{name}({})", emit_expr(file, *expr))
+            write!(result, "  .{name}({})", emit_argument(file, *expr))
                 .expect("writing to String cannot fail");
         }
         result.push_str("\n) ");
     }
-    write!(result, "{} (\n", instantiation.instance_name).expect("writing to String cannot fail");
+    writeln!(result, "{} (", instantiation.instance_name).expect("writing to String cannot fail");
     for (index, (name, expr)) in instantiation.ports.iter().enumerate() {
         if index != 0 {
             result.push_str(",\n");
@@ -771,6 +932,23 @@ fn emit_comment(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Emits an argument according to whether it denotes a value or type.
+fn emit_argument(file: &VastFile, argument: SvArgument) -> String {
+    match argument {
+        SvArgument::Value(value) => emit_expr(file, value),
+        SvArgument::Type(data_type) => emit_complete_type(file, data_type),
+    }
+}
+
+/// Joins mixed arguments with the same comma spacing as ordinary expressions.
+fn join_arguments(file: &VastFile, arguments: &[SvArgument]) -> String {
+    arguments
+        .iter()
+        .map(|argument| emit_argument(file, *argument))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Joins expressions with the comma spacing used by the C++ VAST emitter.
@@ -825,13 +1003,47 @@ fn packed_dimensions(dimensions: &[i64]) -> String {
     result
 }
 
-/// Reports whether the data type ultimately names a user-defined type.
-fn is_user_defined(file: &VastFile, data_type: VastDataType) -> bool {
+/// Returns the built-in integer atom behind any unpacked array dimensions.
+fn base_integer_kind(file: &VastFile, data_type: VastDataType) -> Option<IntegerTypeKind> {
     match &file.ast.data_types[data_type.0.index] {
-        TypeData::Extern { .. } => true,
-        TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
-            is_user_defined(file, *element)
+        TypeData::Integer { kind, .. } => Some(*kind),
+        TypeData::UnpackedArray { element, .. } => base_integer_kind(file, *element),
+        _ => None,
+    }
+}
+
+/// Reports whether this type already includes its complete type keyword or
+/// name.
+fn uses_complete_type(file: &VastFile, data_type: VastDataType) -> bool {
+    match &file.ast.data_types[data_type.0.index] {
+        TypeData::Scalar {
+            state: LogicState::TwoState,
+            ..
         }
+        | TypeData::BitVector {
+            state: LogicState::TwoState,
+            ..
+        }
+        | TypeData::Extern { .. }
+        | TypeData::String => true,
+        TypeData::Integer { kind, .. } => {
+            !matches!(kind, IntegerTypeKind::Integer | IntegerTypeKind::Int)
+        }
+        TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
+            uses_complete_type(file, *element)
+        }
+        _ => false,
+    }
+}
+
+/// Reports whether a declared type is an integral four-state `time` atom.
+fn is_time_type(file: &VastFile, data_type: VastDataType) -> bool {
+    match &file.ast.data_types[data_type.0.index] {
+        TypeData::Integer {
+            kind: IntegerTypeKind::Time,
+            ..
+        } => true,
+        TypeData::UnpackedArray { element, .. } => is_time_type(file, *element),
         _ => false,
     }
 }
@@ -944,7 +1156,9 @@ fn is_digits_or_identifier(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Expr, LiteralFormat, ModulePortDirection, VastFile, VastFileType, VastModule};
+    use crate::{
+        Expr, LiteralFormat, ModulePortDirection, ParameterKind, VastFile, VastFileType, VastModule,
+    };
 
     /// Confirms that all lightweight AST references are independently copyable.
     #[test]
@@ -965,7 +1179,7 @@ mod tests {
         let module = first.add_module("first");
         let foreign_type = second.make_scalar_type();
 
-        first.add_input(module, "bad", &foreign_type);
+        first.add_input(module, "bad", &foreign_type).unwrap();
     }
 
     /// Rejects foreign expressions even when they are nested inside a builder.
@@ -986,9 +1200,9 @@ mod tests {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("duplicates");
         let scalar = file.make_scalar_type();
-        file.add_input(module, "z", &scalar);
-        file.add_wire(module, "a", &scalar);
-        file.add_wire(module, "middle", &scalar);
+        file.add_input(module, "z", &scalar).unwrap();
+        file.add_wire(module, "a", &scalar).unwrap();
+        file.add_wire(module, "middle", &scalar).unwrap();
 
         let register_error = file
             .add_reg(module, "a", &scalar)
@@ -1009,41 +1223,52 @@ mod tests {
         );
     }
 
-    /// Keeps the former infallible-port behavior for an invalid duplicate.
+    /// Reports duplicate port declarations without mutating the module.
     #[test]
-    #[should_panic(expected = "module ports must have unique names")]
-    fn duplicate_ports_panic() {
+    fn duplicate_ports_return_an_error() {
         let mut file = VastFile::new(VastFileType::Verilog);
         let module = file.add_module("duplicate_port");
         let scalar = file.make_scalar_type();
-        file.add_input(module, "signal", &scalar);
-        file.add_output(module, "signal", &scalar);
+        file.add_input(module, "signal", &scalar).unwrap();
+        let error = file.add_output(module, "signal", &scalar).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "FAILED_PRECONDITION: Attempted to declare output with name 'signal' multiple times in the same module. Already defined: [signal]"
+        );
     }
 
-    /// Keeps the former infallible-wire behavior for an invalid duplicate.
+    /// Reports duplicate wire declarations through the fallible wire API.
     #[test]
-    #[should_panic(expected = "module wires must have unique names")]
-    fn duplicate_wires_panic() {
+    fn duplicate_wires_return_an_error() {
         let mut file = VastFile::new(VastFileType::Verilog);
         let module = file.add_module("duplicate_wire");
         let scalar = file.make_scalar_type();
-        file.add_wire(module, "signal", &scalar);
-        file.add_wire(module, "signal", &scalar);
+        file.add_wire(module, "signal", &scalar).unwrap();
+        let error = file
+            .add_wire(module, "signal", &scalar)
+            .expect_err("duplicate wire names are rejected");
+        assert_eq!(
+            error.to_string(),
+            "FAILED_PRECONDITION: Attempted to declare wire with name 'signal' multiple times \
+             in the same module. Already defined: [signal]"
+        );
     }
 
-    /// Matches C++ VAST, where parameter names are outside declaration
-    /// tracking.
+    /// Rejects duplicate parameters before emitting an invalid declaration.
     #[test]
-    fn duplicate_parameters_remain_permitted() {
+    fn duplicate_parameters_return_an_error() {
         let mut file = VastFile::new(VastFileType::Verilog);
         let module = file.add_module("parameters");
         let value = file.make_unsized_decimal_literal(1);
-        file.add_parameter(module, "P", &value);
-        file.add_parameter(module, "P", &value);
-
+        file.add_parameter(module, "P", &value).unwrap();
+        let error = file.add_parameter(module, "P", &value).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "FAILED_PRECONDITION: Attempted to declare parameter with name 'P' multiple times in the same module. Already defined: [P]"
+        );
         assert_eq!(
             file.emit(),
-            "module parameters;\n  parameter P = 1;\n  parameter P = 1;\nendmodule\n"
+            "module parameters;\n  parameter P = 1;\nendmodule\n"
         );
     }
 
@@ -1053,7 +1278,7 @@ mod tests {
         let mut file = VastFile::new(VastFileType::Verilog);
         let module = file.add_module("tristate");
         let scalar = file.make_scalar_type();
-        file.add_inout(module, "bus", &scalar);
+        file.add_inout(module, "bus", &scalar).unwrap();
 
         let ports = file.module_ports(module);
         assert_eq!(ports.len(), 1);
@@ -1082,9 +1307,9 @@ mod tests {
         let mut file = VastFile::new(VastFileType::Verilog);
         let module = file.add_module("precedence");
         let scalar = file.make_scalar_type();
-        let a = file.add_input(module, "a", &scalar).to_expr();
-        let b = file.add_input(module, "b", &scalar).to_expr();
-        let c = file.add_input(module, "c", &scalar).to_expr();
+        let a = file.add_input(module, "a", &scalar).unwrap().to_expr();
+        let b = file.add_input(module, "b", &scalar).unwrap().to_expr();
+        let c = file.add_input(module, "c", &scalar).unwrap().to_expr();
 
         let sum = file.make_add(&a, &b);
         let product = file.make_mul(&sum, &c);
@@ -1114,10 +1339,10 @@ mod tests {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("exponentiation");
         let scalar = file.make_scalar_type();
-        let a = file.add_input(module, "a", &scalar).to_expr();
-        let b = file.add_input(module, "b", &scalar).to_expr();
-        let c = file.add_input(module, "c", &scalar).to_expr();
-        let d = file.add_input(module, "d", &scalar).to_expr();
+        let a = file.add_input(module, "a", &scalar).unwrap().to_expr();
+        let b = file.add_input(module, "b", &scalar).unwrap().to_expr();
+        let c = file.add_input(module, "c", &scalar).unwrap().to_expr();
+        let d = file.add_input(module, "d", &scalar).unwrap().to_expr();
 
         let a_to_b = file.make_power(&a, &b);
         let left_nested = file.make_power(&a_to_b, &c);
@@ -1153,7 +1378,7 @@ mod tests {
         let mut file = VastFile::new(VastFileType::Verilog);
         let module = file.add_module("scalar");
         let scalar = file.make_scalar_type();
-        let signal = file.add_input(module, "signal", &scalar);
+        let signal = file.add_input(module, "signal", &scalar).unwrap();
 
         let index = file.make_index(&signal.to_indexable_expr(), 0);
         let slice = file.make_slice(&signal.to_indexable_expr(), 0, 0);
@@ -1166,8 +1391,8 @@ mod tests {
     fn signed_single_bit_vectors_remain_signed_scalars() {
         let mut file = VastFile::new(VastFileType::Verilog);
         let module = file.add_module("signed_scalar");
-        let scalar = file.make_bit_vector_type(1, true);
-        file.add_input(module, "value", &scalar);
+        let scalar = file.make_bit_vector_type(1, true).unwrap();
+        file.add_input(module, "value", &scalar).unwrap();
 
         assert!(file.type_is_signed(scalar));
         assert_eq!(
@@ -1178,22 +1403,30 @@ mod tests {
 
     /// Rejects constant zero widths before they can emit an invalid range.
     #[test]
-    #[should_panic(expected = "bit-vector width must be greater than zero")]
     fn zero_expression_vector_widths_are_rejected() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let zero = file.make_unsized_decimal_literal(0);
 
-        file.make_bit_vector_type_expr(&zero, false);
+        assert_eq!(
+            file.make_bit_vector_type_expr(&zero, false)
+                .unwrap_err()
+                .to_string(),
+            "bit-vector width must be greater than zero"
+        );
     }
 
     /// Rejects negative expression widths with the direct-width error text.
     #[test]
-    #[should_panic(expected = "bit-vector width must be greater than zero")]
     fn negative_expression_vector_widths_are_rejected() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let negative = file.make_unsized_decimal_literal(-1);
 
-        file.make_bit_vector_type_expr(&negative, true);
+        assert_eq!(
+            file.make_bit_vector_type_expr(&negative, true)
+                .unwrap_err()
+                .to_string(),
+            "bit-vector width must be greater than zero"
+        );
     }
 
     /// Keeps explicit one-bit expression vectors distinct from scalar types.
@@ -1202,8 +1435,8 @@ mod tests {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("one_bit_vector");
         let one = file.make_unsized_decimal_literal(1);
-        let vector = file.make_bit_vector_type_expr(&one, false);
-        file.add_wire(module, "value", &vector);
+        let vector = file.make_bit_vector_type_expr(&one, false).unwrap();
+        file.add_wire(module, "value", &vector).unwrap();
 
         assert_eq!(
             file.emit(),
@@ -1217,14 +1450,14 @@ mod tests {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("typed_parameters");
         let scalar = file.make_scalar_type();
-        let signed_vector = file.make_bit_vector_type(8, true);
+        let signed_vector = file.make_bit_vector_type(8, true).unwrap();
         let signed_integer = file.make_integer_type(true);
         let unsigned_integer = file.make_integer_type(false);
         let signed_int = file.make_int_type(true);
         let unsigned_int = file.make_int_type(false);
         let external = file.make_extern_type("payload_t");
         let packaged = file.make_extern_package_type("bus_pkg", "word_t");
-        let packed_external = file.make_packed_array_type(packaged, &[2]);
+        let packed_external = file.make_packed_array_type(packaged, &[2]).unwrap();
         let value = file.make_unsized_decimal_literal(7);
 
         for (name, data_type) in [
@@ -1237,7 +1470,8 @@ mod tests {
             ("External", external),
             ("PackedExternal", packed_external),
         ] {
-            file.add_typed_parameter_port(module, name, &data_type, &value);
+            file.add_typed_parameter_port(module, name, &data_type, &value)
+                .unwrap();
         }
 
         assert_eq!(
@@ -1258,16 +1492,64 @@ endmodule
         );
     }
 
+    /// Preserves required, local, value, and type declarations in header order.
+    #[test]
+    fn parameter_ports_support_required_local_and_type_declarations() {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let module = file.add_module("Params");
+        let integer = file.make_int_type(true);
+        let byte = file.make_bit_vector_type(8, false).unwrap();
+        let four = file.make_unsized_decimal_literal(4);
+        let width = file
+            .add_value_parameter_port(module, "W", ParameterKind::Parameter, Some(&integer), None)
+            .unwrap();
+        let offset = file.make_add(&width.to_expr(), &four);
+        file.add_value_parameter_port(
+            module,
+            "OFFSET",
+            ParameterKind::Localparam,
+            None,
+            Some(&offset),
+        )
+        .unwrap();
+        file.add_type_parameter_port(module, "Required", ParameterKind::Parameter, None)
+            .unwrap();
+        let word = file
+            .add_type_parameter_port(module, "Word", ParameterKind::Parameter, Some(&byte))
+            .unwrap();
+        file.add_type_parameter_port(module, "Alias", ParameterKind::Localparam, Some(&word))
+            .unwrap();
+        file.add_type_parameter(module, "Body", ParameterKind::Parameter, &integer)
+            .unwrap();
+        file.add_type_parameter(module, "LocalBody", ParameterKind::Localparam, &word)
+            .unwrap();
+
+        assert_eq!(
+            file.emit(),
+            r#"module Params #(
+  parameter int W,
+  localparam OFFSET = W + 4,
+  parameter type Required,
+  parameter type Word = logic [7:0],
+  localparam type Alias = Word
+);
+  parameter type Body = int;
+  localparam type LocalBody = Word;
+endmodule
+"#
+        );
+    }
+
     /// Uses legal signing and width casts for every built-in scalar type.
     #[test]
     fn built_in_type_casts_preserve_width_and_signedness() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("casts");
-        let byte = file.make_bit_vector_type(8, false);
-        let value = file.add_input(module, "value", &byte).to_expr();
+        let byte = file.make_bit_vector_type(8, false).unwrap();
+        let value = file.add_input(module, "value", &byte).unwrap().to_expr();
         let scalar = file.make_scalar_type();
-        let signed_scalar = file.make_bit_vector_type(1, true);
-        let signed_byte = file.make_bit_vector_type(8, true);
+        let signed_scalar = file.make_bit_vector_type(1, true).unwrap();
+        let signed_byte = file.make_bit_vector_type(8, true).unwrap();
         let integer = file.make_integer_type(true);
         let unsigned_integer = file.make_integer_type(false);
         let int = file.make_int_type(true);
@@ -1277,33 +1559,39 @@ endmodule
         for (data_type, expected) in [
             (scalar, "logic'(value)"),
             (signed_scalar, "signed'(logic'(value))"),
-            (byte, "unsigned'(8'(value))"),
-            (signed_byte, "signed'(8'(value))"),
+            (byte, "unsigned'(type(logic [7:0])'(value))"),
+            (signed_byte, "signed'(type(logic signed [7:0])'(value))"),
             (integer, "integer'(value)"),
             (unsigned_integer, "unsigned'(integer'(value))"),
             (int, "int'(value)"),
             (unsigned_int, "unsigned'(int'(value))"),
             (external, "bus_pkg::payload_t'(value)"),
         ] {
-            let cast = file.make_type_cast(&data_type, &value);
+            let cast = file.make_type_cast(&data_type, &value).unwrap();
             assert_eq!(file.emit_expression(&cast), expected);
         }
 
         let default_width = file.make_unsized_decimal_literal(8);
         let width = file
             .add_parameter_port(module, "WIDTH", &default_width)
+            .unwrap()
             .to_expr();
-        let symbolic = file.make_bit_vector_type_expr(&width, true);
-        let cast = file.make_type_cast(&symbolic, &value);
-        assert_eq!(file.emit_expression(&cast), "signed'(WIDTH'(value))");
+        let symbolic = file.make_bit_vector_type_expr(&width, true).unwrap();
+        let cast = file.make_type_cast(&symbolic, &value).unwrap();
+        assert_eq!(
+            file.emit_expression(&cast),
+            "signed'(type(logic signed [WIDTH - 1:0])'(value))"
+        );
 
         let one = file.make_unsized_decimal_literal(1);
         let incremented_width = file.make_add(&width, &one);
-        let compound = file.make_bit_vector_type_expr(&incremented_width, false);
-        let compound_cast = file.make_type_cast(&compound, &value);
+        let compound = file
+            .make_bit_vector_type_expr(&incremented_width, false)
+            .unwrap();
+        let compound_cast = file.make_type_cast(&compound, &value).unwrap();
         assert_eq!(
             file.emit_expression(&compound_cast),
-            "unsigned'((WIDTH + 1)'(value))"
+            "unsigned'(type(logic [WIDTH + 1 - 1:0])'(value))"
         );
     }
 
@@ -1344,9 +1632,13 @@ endmodule
     fn unpacked_array_dimensions_follow_the_selected_language() {
         let mut verilog = VastFile::new(VastFileType::Verilog);
         let verilog_module = verilog.add_module("arrays");
-        let verilog_element = verilog.make_bit_vector_type(8, false);
-        let verilog_array = verilog.make_unpacked_array_type(verilog_element, &[2, 3]);
-        verilog.add_wire(verilog_module, "values", &verilog_array);
+        let verilog_element = verilog.make_bit_vector_type(8, false).unwrap();
+        let verilog_array = verilog
+            .make_unpacked_array_type(verilog_element, &[2, 3])
+            .unwrap();
+        verilog
+            .add_wire(verilog_module, "values", &verilog_array)
+            .unwrap();
         assert_eq!(
             verilog.emit(),
             "module arrays;\n  wire [7:0] values[0:1][0:2];\nendmodule\n"
@@ -1354,10 +1646,13 @@ endmodule
 
         let mut system_verilog = VastFile::new(VastFileType::SystemVerilog);
         let system_verilog_module = system_verilog.add_module("arrays");
-        let system_verilog_element = system_verilog.make_bit_vector_type(8, false);
-        let system_verilog_array =
-            system_verilog.make_unpacked_array_type(system_verilog_element, &[2, 3]);
-        system_verilog.add_wire(system_verilog_module, "values", &system_verilog_array);
+        let system_verilog_element = system_verilog.make_bit_vector_type(8, false).unwrap();
+        let system_verilog_array = system_verilog
+            .make_unpacked_array_type(system_verilog_element, &[2, 3])
+            .unwrap();
+        system_verilog
+            .add_wire(system_verilog_module, "values", &system_verilog_array)
+            .unwrap();
         assert_eq!(
             system_verilog.emit(),
             "module arrays;\n  wire [7:0] values[2][3];\nendmodule\n"
@@ -1373,11 +1668,11 @@ endmodule
         ] {
             let mut file = VastFile::new(file_type);
             let module = file.add_module("nested_unpacked");
-            let byte = file.make_bit_vector_type(8, false);
-            let innermost = file.make_unpacked_array_type(byte, &[2, 3]);
-            let middle = file.make_unpacked_array_type(innermost, &[4]);
-            let outermost = file.make_unpacked_array_type(middle, &[5, 6]);
-            file.add_wire(module, "values", &outermost);
+            let byte = file.make_bit_vector_type(8, false).unwrap();
+            let innermost = file.make_unpacked_array_type(byte, &[2, 3]).unwrap();
+            let middle = file.make_unpacked_array_type(innermost, &[4]).unwrap();
+            let outermost = file.make_unpacked_array_type(middle, &[5, 6]).unwrap();
+            file.add_wire(module, "values", &outermost).unwrap();
 
             assert_eq!(
                 file.emit(),
@@ -1392,24 +1687,32 @@ endmodule
         for file_type in [VastFileType::Verilog, VastFileType::SystemVerilog] {
             let mut file = VastFile::new(file_type);
             let module = file.add_module("nested_packed");
-            let unsigned_byte = file.make_bit_vector_type(8, false);
-            let signed_byte = file.make_bit_vector_type(8, true);
+            let unsigned_byte = file.make_bit_vector_type(8, false).unwrap();
+            let signed_byte = file.make_bit_vector_type(8, true).unwrap();
             let unsigned_scalar = file.make_scalar_type();
-            let signed_scalar = file.make_bit_vector_type(1, true);
+            let signed_scalar = file.make_bit_vector_type(1, true).unwrap();
 
-            let inner_unsigned = file.make_packed_array_type(unsigned_byte, &[3, 4]);
-            let outer_unsigned = file.make_packed_array_type(inner_unsigned, &[2, 5]);
-            let inner_signed = file.make_packed_array_type(signed_byte, &[3, 4]);
-            let outer_signed = file.make_packed_array_type(inner_signed, &[2, 5]);
-            let inner_scalar = file.make_packed_array_type(unsigned_scalar, &[3]);
-            let outer_scalar = file.make_packed_array_type(inner_scalar, &[2]);
-            let inner_signed_scalar = file.make_packed_array_type(signed_scalar, &[3]);
-            let outer_signed_scalar = file.make_packed_array_type(inner_signed_scalar, &[2]);
+            let inner_unsigned = file.make_packed_array_type(unsigned_byte, &[3, 4]).unwrap();
+            let outer_unsigned = file
+                .make_packed_array_type(inner_unsigned, &[2, 5])
+                .unwrap();
+            let inner_signed = file.make_packed_array_type(signed_byte, &[3, 4]).unwrap();
+            let outer_signed = file.make_packed_array_type(inner_signed, &[2, 5]).unwrap();
+            let inner_scalar = file.make_packed_array_type(unsigned_scalar, &[3]).unwrap();
+            let outer_scalar = file.make_packed_array_type(inner_scalar, &[2]).unwrap();
+            let inner_signed_scalar = file.make_packed_array_type(signed_scalar, &[3]).unwrap();
+            let outer_signed_scalar = file
+                .make_packed_array_type(inner_signed_scalar, &[2])
+                .unwrap();
 
-            file.add_wire(module, "unsigned_values", &outer_unsigned);
-            file.add_wire(module, "signed_values", &outer_signed);
-            file.add_wire(module, "scalar_values", &outer_scalar);
-            file.add_wire(module, "signed_scalar_values", &outer_signed_scalar);
+            file.add_wire(module, "unsigned_values", &outer_unsigned)
+                .unwrap();
+            file.add_wire(module, "signed_values", &outer_signed)
+                .unwrap();
+            file.add_wire(module, "scalar_values", &outer_scalar)
+                .unwrap();
+            file.add_wire(module, "signed_scalar_values", &outer_signed_scalar)
+                .unwrap();
 
             assert_eq!(
                 file.emit(),
@@ -1430,13 +1733,14 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("nested_external");
         let external = file.make_extern_package_type("pkg", "payload_t");
-        let inner = file.make_packed_array_type(external, &[3]);
-        let outer = file.make_packed_array_type(inner, &[2]);
+        let inner = file.make_packed_array_type(external, &[3]).unwrap();
+        let outer = file.make_packed_array_type(inner, &[2]).unwrap();
         let zero = file.make_unsized_decimal_literal(0);
 
-        file.add_typed_parameter_port(module, "Payload", &outer, &zero);
-        file.add_input(module, "request", &outer);
-        file.add_wire(module, "internal", &outer);
+        file.add_typed_parameter_port(module, "Payload", &outer, &zero)
+            .unwrap();
+        file.add_input(module, "request", &outer).unwrap();
+        file.add_wire(module, "internal", &outer).unwrap();
 
         assert_eq!(
             file.emit(),
@@ -1460,12 +1764,14 @@ endmodule
         ] {
             let mut file = VastFile::new(file_type);
             let module = file.add_module("mixed_arrays");
-            let signed_byte = file.make_bit_vector_type(8, true);
-            let inner_packed = file.make_packed_array_type(signed_byte, &[3]);
-            let outer_packed = file.make_packed_array_type(inner_packed, &[2]);
-            let inner_unpacked = file.make_unpacked_array_type(outer_packed, &[4, 5]);
-            let outer_unpacked = file.make_unpacked_array_type(inner_unpacked, &[6]);
-            file.add_wire(module, "values", &outer_unpacked);
+            let signed_byte = file.make_bit_vector_type(8, true).unwrap();
+            let inner_packed = file.make_packed_array_type(signed_byte, &[3]).unwrap();
+            let outer_packed = file.make_packed_array_type(inner_packed, &[2]).unwrap();
+            let inner_unpacked = file
+                .make_unpacked_array_type(outer_packed, &[4, 5])
+                .unwrap();
+            let outer_unpacked = file.make_unpacked_array_type(inner_unpacked, &[6]).unwrap();
+            file.add_wire(module, "values", &outer_unpacked).unwrap();
 
             assert_eq!(
                 file.emit(),
@@ -1483,8 +1789,8 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("external");
         let external = file.make_extern_package_type("pkg", "payload_t");
-        let packed = file.make_packed_array_type(external, &[2, 4]);
-        file.add_input(module, "payload", &packed);
+        let packed = file.make_packed_array_type(external, &[2, 4]).unwrap();
+        file.add_input(module, "payload", &packed).unwrap();
 
         assert_eq!(
             file.emit(),
@@ -1498,8 +1804,8 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("cast");
         let scalar = file.make_scalar_type();
-        let a = file.add_input(module, "a", &scalar).to_expr();
-        let b = file.add_input(module, "b", &scalar).to_expr();
+        let a = file.add_input(module, "a", &scalar).unwrap().to_expr();
+        let b = file.add_input(module, "b", &scalar).unwrap().to_expr();
         let width = file.make_add(&a, &b);
         let cast = file.make_width_cast(&width, &a);
 

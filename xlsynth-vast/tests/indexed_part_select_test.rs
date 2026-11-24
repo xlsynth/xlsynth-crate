@@ -6,11 +6,11 @@ use xlsynth_vast::{VastFile, VastFileType};
 fn indexed_part_select_preserves_start_expression_and_result_precedence() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("slices");
-    let byte = file.make_bit_vector_type(8, false);
-    let index_type = file.make_bit_vector_type(3, false);
-    let data = file.add_input(module, "data", &byte);
-    let index = file.add_input(module, "index", &index_type);
-    let output = file.add_output(module, "out", &index_type);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let index_type = file.make_bit_vector_type(3, false).unwrap();
+    let data = file.add_input(module, "data", &byte).unwrap();
+    let index = file.add_input(module, "index", &index_type).unwrap();
+    let output = file.add_output(module, "out", &index_type).unwrap();
     let one = file.make_unsized_decimal_literal(1);
     let start = file.make_add(&index.to_expr(), &one);
     let subject = file.make_indexable_expression(&data.to_expr());
@@ -38,8 +38,8 @@ endmodule
 fn indexed_part_select_rejects_zero_width() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("slices");
-    let byte = file.make_bit_vector_type(8, false);
-    let data = file.add_input(module, "data", &byte);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let data = file.add_input(module, "data", &byte).unwrap();
     let subject = file.make_indexable_expression(&data.to_expr());
     let start = file.make_unsized_decimal_literal(0);
     file.make_indexed_part_select(&subject, &start, 0);
@@ -51,8 +51,8 @@ fn indexed_part_select_rejects_foreign_start() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut other = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("slices");
-    let byte = file.make_bit_vector_type(8, false);
-    let data = file.add_input(module, "data", &byte);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let data = file.add_input(module, "data", &byte).unwrap();
     let subject = file.make_indexable_expression(&data.to_expr());
     let start = other.make_unsized_decimal_literal(0);
     file.make_indexed_part_select(&subject, &start, 3);
@@ -64,8 +64,8 @@ fn indexed_part_select_rejects_foreign_subject() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut other = VastFile::new(VastFileType::SystemVerilog);
     let module = other.add_module("slices");
-    let byte = other.make_bit_vector_type(8, false);
-    let data = other.add_input(module, "data", &byte);
+    let byte = other.make_bit_vector_type(8, false).unwrap();
+    let data = other.add_input(module, "data", &byte).unwrap();
     let subject = other.make_indexable_expression(&data.to_expr());
     let start = file.make_unsized_decimal_literal(0);
     file.make_indexed_part_select(&subject, &start, 3);

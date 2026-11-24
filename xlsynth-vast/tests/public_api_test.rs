@@ -11,9 +11,9 @@ use xlsynth_vast::{
 fn standalone_file_emits_verilog_without_an_xls_dependency() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("passthrough");
-    let data_type = file.make_bit_vector_type(8, false);
-    let input = file.add_input(module, "input_data", &data_type);
-    let output = file.add_output(module, "output_data", &data_type);
+    let data_type = file.make_bit_vector_type(8, false).unwrap();
+    let input = file.add_input(module, "input_data", &data_type).unwrap();
+    let output = file.add_output(module, "output_data", &data_type).unwrap();
     let assignment = file.make_continuous_assignment(&output.to_expr(), &input.to_expr());
     file.add_member_continuous_assignment(module, assignment);
 
@@ -32,11 +32,12 @@ fn previously_obtained_port_handles_survive_later_port_insertions() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("stable_ports");
     let scalar = file.make_scalar_type();
-    let first_logic = file.add_input(module, "first", &scalar);
+    let first_logic = file.add_input(module, "first", &scalar).unwrap();
     let first_port = file.module_ports(module)[0];
 
     for index in 0..128 {
-        file.add_output(module, &format!("output_{index}"), &scalar);
+        file.add_output(module, &format!("output_{index}"), &scalar)
+            .unwrap();
     }
 
     assert_eq!(file.port_name(first_port), "first");
@@ -85,8 +86,8 @@ fn signed_decimal_literals_place_negative_signs_before_the_sized_number() {
 fn large_constant_indices_match_the_existing_sized_hex_spelling() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("large_indices");
-    let data_type = file.make_bit_vector_type(8, false);
-    let signal = file.add_input(module, "signal", &data_type);
+    let data_type = file.make_bit_vector_type(8, false).unwrap();
+    let signal = file.add_input(module, "signal", &data_type).unwrap();
     let index = file.make_index(&signal.to_indexable_expr(), 2_147_483_648);
 
     assert_eq!(
@@ -100,8 +101,8 @@ fn large_constant_indices_match_the_existing_sized_hex_spelling() {
 fn negative_constant_indices_are_rejected() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("negative_indices");
-    let data_type = file.make_bit_vector_type(8, false);
-    let signal = file.add_input(module, "signal", &data_type);
+    let data_type = file.make_bit_vector_type(8, false).unwrap();
+    let signal = file.add_input(module, "signal", &data_type).unwrap();
 
     file.make_index(&signal.to_indexable_expr(), -1);
 }
@@ -114,7 +115,9 @@ fn handles_cannot_be_used_with_another_file() {
     let mut destination_file = VastFile::new(VastFileType::SystemVerilog);
     let module = destination_file.add_module("destination");
 
-    destination_file.add_input(module, "invalid", &foreign_type);
+    destination_file
+        .add_input(module, "invalid", &foreign_type)
+        .unwrap();
 }
 
 #[test]

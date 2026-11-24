@@ -12,6 +12,7 @@ pub mod helpers;
 mod literal;
 mod model;
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -19,16 +20,17 @@ use literal::Literal;
 use model::{
     AlwaysData, Artifact, AssignmentData, Ast, BinaryOp, BlockData, CaseData, ConditionalData,
     DefData, ExprData, FileItem, FunctionData, FunctionInputData, FunctionLocalData, GenerateData,
-    Id, InstantiationData, IntegerTypeKind, MemberData, ModuleData, ParameterPortData, PortData,
-    StatementData, TypeData, UnaryOp,
+    Id, InstantiationData, IntegerTypeKind, LogicState, MemberData, ModuleData, PackageImport,
+    ParameterPortData, ParameterPortDeclaration, PortData, StatementData, TypeData, UnaryOp,
 };
 
 pub use model::{
     AlwaysKind, BlankLine, CaseStatement, Comment, Conditional, ContinuousAssignment, DataKind,
     Def, Expr, GenerateLoop, Index, IndexableExpr, InlineVerilogStatement, Instantiation,
     LocalparamRef, LogicRef, MacroRef, MacroStatement, ModulePort, ModulePortDirection,
-    ParameterRef, Slice, VastAlwaysBase, VastDataType, VastFileType, VastFunction, VastModule,
-    VastStatement, VastStatementBlock,
+    ParameterKind, ParameterRef, Slice, SvArgument, TimeScaleMagnitude, TimeScaleValue, TimeUnit,
+    VastAlwaysBase, VastDataType, VastFileType, VastFunction, VastModule, VastStatement,
+    VastStatementBlock,
 };
 
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
@@ -300,6 +302,20 @@ pub fn is_system_verilog_keyword(identifier: &str) -> bool {
     )
 }
 
+/// Builds a package import from identifier tokens or a wildcard item.
+fn package_import(package: &str, item: &str) -> Result<PackageImport, VastError> {
+    if !is_system_verilog_simple_identifier(package) {
+        return Err(VastError(format!("invalid package identifier: {package}")));
+    }
+    if item != "*" && !is_system_verilog_simple_identifier(item) {
+        return Err(VastError(format!("invalid import item: {item}")));
+    }
+    Ok(PackageImport {
+        package: package.to_owned(),
+        item: item.to_owned(),
+    })
+}
+
 /// Controls how an arbitrary-width integer appears in generated Verilog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LiteralFormat {
@@ -319,7 +335,7 @@ pub enum LiteralFormat {
     UnsizedHex,
 }
 
-/// Describes an invalid literal, unavailable width, or unsupported declaration.
+/// Describes invalid builder input or an unsupported VAST operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VastError(pub String);
 
@@ -338,6 +354,16 @@ pub struct VastFile {
     pub(crate) file_type: VastFileType,
     pub(crate) ast: Ast,
     pub(crate) file_id: u64,
+}
+
+/// Returns the declaration kind used in duplicate-name diagnostics.
+fn parameter_kind_name(kind: ParameterKind, is_type: bool) -> &'static str {
+    match (kind, is_type) {
+        (ParameterKind::Parameter, false) => "parameter",
+        (ParameterKind::Localparam, false) => "localparam",
+        (ParameterKind::Parameter, true) => "type parameter",
+        (ParameterKind::Localparam, true) => "local type parameter",
+    }
 }
 
 impl VastFile {
@@ -407,7 +433,8 @@ impl VastFile {
         )
     }
 
-    /// Adds a declaration-ordered module port and its corresponding reference.
+    /// Validates and appends a module port without changing the file on
+    /// failure.
     fn add_port(
         &mut self,
         module: VastModule,
@@ -415,16 +442,20 @@ impl VastFile {
         data_type: &VastDataType,
         direction: ModulePortDirection,
         kind: DataKind,
-    ) -> LogicRef {
+    ) -> Result<LogicRef, VastError> {
         let module_index = self.check(module.0);
         let direction_name = match direction {
             ModulePortDirection::Input => "input",
             ModulePortDirection::Output => "output",
             ModulePortDirection::InOut => "inout",
         };
-        self.check_unique_module_name(module, name, direction_name)
-            .expect("module ports must have unique names");
+        self.check_unique_module_name(module, name, direction_name)?;
         self.check(data_type.0);
+        if direction == ModulePortDirection::InOut && self.is_non_net_builtin(*data_type) {
+            return Err(VastError(
+                "this built-in type cannot be used as an inout net".into(),
+            ));
+        }
         let logic_ref = self.make_named_ref(name, Some(*data_type));
         let port = ModulePort(self.id(self.ast.ports.len()));
         self.ast.ports.push(PortData {
@@ -438,13 +469,39 @@ impl VastFile {
         self.ast.modules[module_index]
             .defined_names
             .insert(name.to_owned());
-        logic_ref
+        Ok(logic_ref)
     }
 
     /// Appends an ordered module member.
     fn push_member(&mut self, module: VastModule, member: MemberData) {
         let module_index = self.check(module.0);
         self.ast.modules[module_index].members.push(member);
+    }
+
+    /// Reports whether a built-in type cannot be declared as a net.
+    fn is_non_net_builtin(&self, data_type: VastDataType) -> bool {
+        match &self.ast.data_types[self.check(data_type.0)] {
+            TypeData::Scalar {
+                state: LogicState::TwoState,
+                ..
+            }
+            | TypeData::BitVector {
+                state: LogicState::TwoState,
+                ..
+            }
+            | TypeData::String => true,
+            TypeData::Integer { kind, .. } => matches!(
+                kind,
+                IntegerTypeKind::Byte
+                    | IntegerTypeKind::Shortint
+                    | IntegerTypeKind::Int
+                    | IntegerTypeKind::Longint
+            ),
+            TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
+                self.is_non_net_builtin(*element)
+            }
+            _ => false,
+        }
     }
 
     /// Enforces the common namespace shared by module ports and declarations.
@@ -500,11 +557,20 @@ impl VastFile {
         self.ast.file_items.push(FileItem::Comment(text.to_owned()));
     }
 
+    /// Adds an ordered compilation-unit package import. Use `"*"` for all
+    /// items. Returns an error for invalid package or item identifiers.
+    pub fn add_file_import(&mut self, package: &str, item: &str) -> Result<(), VastError> {
+        let import = package_import(package, item)?;
+        self.ast.file_items.push(FileItem::Import(import));
+        Ok(())
+    }
+
     /// Adds a module at the current position in the output file.
     pub fn add_module(&mut self, name: &str) -> VastModule {
         let handle = VastModule(self.id(self.ast.modules.len()));
         self.ast.modules.push(ModuleData {
             name: name.to_owned(),
+            imports: Vec::new(),
             parameter_ports: Vec::new(),
             ports: Vec::new(),
             members: Vec::new(),
@@ -512,6 +578,67 @@ impl VastFile {
         });
         self.ast.file_items.push(FileItem::Module(handle));
         handle
+    }
+
+    /// Adds a package import to a module's header scope. Use `"*"` to import
+    /// all items. Invalid identifiers or explicit-import name conflicts return
+    /// an error; importing the same package item more than once is allowed.
+    pub fn add_module_import(
+        &mut self,
+        module: VastModule,
+        package: &str,
+        item: &str,
+    ) -> Result<(), VastError> {
+        let index = self.check(module.0);
+        let import = package_import(package, item)?;
+        self.register_module_import(module, &import)?;
+        self.ast.modules[index].imports.push(import);
+        Ok(())
+    }
+
+    /// Adds a package import in the module body at the current member position.
+    /// Use `"*"` for a wildcard import. Invalid identifiers or explicit-import
+    /// name conflicts return an error; repeat imports of one item are allowed.
+    pub fn add_member_import(
+        &mut self,
+        module: VastModule,
+        package: &str,
+        item: &str,
+    ) -> Result<(), VastError> {
+        self.check(module.0);
+        let import = package_import(package, item)?;
+        self.register_module_import(module, &import)?;
+        self.push_member(module, MemberData::Import(import));
+        Ok(())
+    }
+
+    /// Registers an explicit import in the module namespace, permitting an
+    /// identical package import already present in either module scope.
+    fn register_module_import(
+        &mut self,
+        module: VastModule,
+        import: &PackageImport,
+    ) -> Result<(), VastError> {
+        if import.item == "*" {
+            return Ok(());
+        }
+        let index = self.check(module.0);
+        let module_data = &self.ast.modules[index];
+        let same_import = module_data
+            .imports
+            .iter()
+            .any(|existing| existing.package == import.package && existing.item == import.item)
+            || module_data.members.iter().any(|member| {
+                matches!(member, MemberData::Import(existing)
+                if existing.package == import.package && existing.item == import.item)
+            });
+        if !same_import {
+            self.check_unique_module_name(module, &import.item, "import")?;
+        }
+        self.ast.modules[index]
+            .defined_names
+            .insert(import.item.clone());
+        Ok(())
     }
 
     /// Returns the name of a module belonging to this file.
@@ -526,11 +653,25 @@ impl VastFile {
 
     /// Moves signal declarations ahead of statements in the suffix starting at
     /// `start`, preserving order within both groups and leaving nested scopes
-    /// and earlier members untouched.
+    /// and earlier members untouched. Declarations stay on their original side
+    /// of imports, parameter declarations, timescales, inline statements, and
+    /// macros, preserving dependencies that those members may introduce.
     pub fn hoist_module_declarations(&mut self, module: VastModule, start: usize) {
         let module_index = self.check(module.0);
-        self.ast.modules[module_index].members[start..]
-            .sort_by_key(|member| !matches!(member, MemberData::Declaration { .. }));
+        for section in self.ast.modules[module_index].members[start..].split_mut(|member| {
+            matches!(
+                member,
+                MemberData::Import(_)
+                    | MemberData::Parameter { .. }
+                    | MemberData::TypeParameter { .. }
+                    | MemberData::TimeUnit(_)
+                    | MemberData::TimePrecision(_)
+                    | MemberData::Inline(_)
+                    | MemberData::Macro { .. }
+            )
+        }) {
+            section.sort_by_key(|member| !matches!(member, MemberData::Declaration { .. }));
+        }
     }
 
     /// Adds an automatic, typed function at the current module-member position.
@@ -764,7 +905,10 @@ impl VastFile {
             TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
                 self.type_width_expr(*element)
             }
-            TypeData::Scalar { .. } | TypeData::Extern { .. } | TypeData::Integer { .. } => None,
+            TypeData::Scalar { .. }
+            | TypeData::Extern { .. }
+            | TypeData::Integer { .. }
+            | TypeData::String => None,
         }
     }
 
@@ -775,8 +919,8 @@ impl VastFile {
             TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
                 self.type_is_signed(*element)
             }
-            TypeData::Scalar { signed } => *signed,
-            TypeData::Extern { .. } => false,
+            TypeData::Scalar { signed, .. } => *signed,
+            TypeData::Extern { .. } | TypeData::String => false,
         }
     }
 
@@ -795,9 +939,9 @@ impl VastFile {
             TypeData::PackedArray { element, .. } | TypeData::UnpackedArray { element, .. } => {
                 self.type_width_as_int64(*element)
             }
-            TypeData::Extern { .. } | TypeData::Integer { .. } => Err(VastError(
-                "data type does not have a declared bit-vector width".into(),
-            )),
+            TypeData::Extern { .. } | TypeData::Integer { .. } | TypeData::String => Err(
+                VastError("data type does not have a declared bit-vector width".into()),
+            ),
         }
     }
 
@@ -806,7 +950,8 @@ impl VastFile {
         match &self.ast.data_types[self.check(data_type.0)] {
             TypeData::Scalar { .. } => Ok(1),
             TypeData::BitVector { .. } => self.type_width_as_int64(data_type),
-            TypeData::Integer { .. } => Ok(32),
+            TypeData::Integer { kind, .. } => Ok(kind.bit_width()),
+            TypeData::String => Err(VastError("string type has a dynamic bit width".into())),
             TypeData::PackedArray {
                 element,
                 dimensions,
@@ -832,49 +977,120 @@ impl VastFile {
         }
     }
 
-    /// Adds an untyped parameter to a module's parameter-port list.
-    pub fn add_parameter_port(&mut self, module: VastModule, name: &str, value: &Expr) -> LogicRef {
-        let module_index = self.check(module.0);
-        self.check(value.0);
-        let logic_ref = self.make_named_ref(name, None);
-        self.ast.modules[module_index]
-            .parameter_ports
-            .push(ParameterPortData {
-                name: name.to_owned(),
-                data_type: None,
-                value: *value,
-            });
-        logic_ref
+    /// Adds an untyped parameter with a default to a module's parameter-port
+    /// list, rejecting duplicate names.
+    pub fn add_parameter_port(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        value: &Expr,
+    ) -> Result<LogicRef, VastError> {
+        self.add_value_parameter_port(module, name, ParameterKind::Parameter, None, Some(value))
     }
 
-    /// Adds a typed parameter to a module's parameter-port list.
+    /// Adds a typed parameter with a default to a module's parameter-port list,
+    /// rejecting duplicate names.
     pub fn add_typed_parameter_port(
         &mut self,
         module: VastModule,
         name: &str,
         data_type: &VastDataType,
         value: &Expr,
-    ) -> LogicRef {
+    ) -> Result<LogicRef, VastError> {
+        self.add_value_parameter_port(
+            module,
+            name,
+            ParameterKind::Parameter,
+            Some(data_type),
+            Some(value),
+        )
+    }
+
+    /// Appends a value parameter or local parameter to the parameter-port list.
+    ///
+    /// Omitting the default makes an overridable parameter required. Local
+    /// parameters must have defaults. Duplicate names return an error. All
+    /// supplied handles must belong to this file.
+    pub fn add_value_parameter_port(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        kind: ParameterKind,
+        data_type: Option<&VastDataType>,
+        default: Option<&Expr>,
+    ) -> Result<LogicRef, VastError> {
         let module_index = self.check(module.0);
-        self.check(value.0);
-        let logic_ref = self.make_named_ref(name, Some(*data_type));
+        if kind == ParameterKind::Localparam && default.is_none() {
+            return Err(VastError("local parameters require a default".into()));
+        }
+        if let Some(data_type) = data_type {
+            self.check(data_type.0);
+        }
+        if let Some(default) = default {
+            self.check(default.0);
+        }
+        self.check_unique_module_name(module, name, parameter_kind_name(kind, false))?;
+        let reference = self.make_named_ref(name, data_type.copied());
         self.ast.modules[module_index]
             .parameter_ports
             .push(ParameterPortData {
                 name: name.to_owned(),
-                data_type: Some(*data_type),
-                value: *value,
+                kind,
+                declaration: ParameterPortDeclaration::Value {
+                    data_type: data_type.copied(),
+                    default: default.copied(),
+                },
             });
-        logic_ref
+        self.ast.modules[module_index]
+            .defined_names
+            .insert(name.to_owned());
+        Ok(reference)
     }
 
-    /// Adds an input port to the indicated module.
+    /// Appends a type parameter and returns a reference to its declared type.
+    ///
+    /// An overridable type parameter can omit its default. A local type
+    /// parameter cannot. Returns an error for a missing local default or an
+    /// anonymous unpacked array default, which requires a named typedef, or a
+    /// duplicate name.
+    pub fn add_type_parameter_port(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        kind: ParameterKind,
+        default: Option<&VastDataType>,
+    ) -> Result<VastDataType, VastError> {
+        let module_index = self.check(module.0);
+        if kind == ParameterKind::Localparam && default.is_none() {
+            return Err(VastError("local parameters require a default".into()));
+        }
+        if let Some(default) = default {
+            self.check_standalone_type(*default)?;
+        }
+        self.check_unique_module_name(module, name, parameter_kind_name(kind, true))?;
+        let reference = self.make_extern_type(name);
+        self.ast.modules[module_index]
+            .parameter_ports
+            .push(ParameterPortData {
+                name: name.to_owned(),
+                kind,
+                declaration: ParameterPortDeclaration::Type {
+                    default: default.copied(),
+                },
+            });
+        self.ast.modules[module_index]
+            .defined_names
+            .insert(name.to_owned());
+        Ok(reference)
+    }
+
+    /// Adds an input port to the module, rejecting duplicate names.
     pub fn add_input(
         &mut self,
         module: VastModule,
         name: &str,
         data_type: &VastDataType,
-    ) -> LogicRef {
+    ) -> Result<LogicRef, VastError> {
         self.add_port(
             module,
             name,
@@ -884,13 +1100,13 @@ impl VastFile {
         )
     }
 
-    /// Adds an output port to the indicated module.
+    /// Adds an output port to the module, rejecting duplicate names.
     pub fn add_output(
         &mut self,
         module: VastModule,
         name: &str,
         data_type: &VastDataType,
-    ) -> LogicRef {
+    ) -> Result<LogicRef, VastError> {
         self.add_port(
             module,
             name,
@@ -900,13 +1116,14 @@ impl VastFile {
         )
     }
 
-    /// Adds a bidirectional port to the indicated module.
+    /// Adds a bidirectional port, returning an error for an invalid net type or
+    /// duplicate name.
     pub fn add_inout(
         &mut self,
         module: VastModule,
         name: &str,
         data_type: &VastDataType,
-    ) -> LogicRef {
+    ) -> Result<LogicRef, VastError> {
         self.add_port(
             module,
             name,
@@ -916,13 +1133,13 @@ impl VastFile {
         )
     }
 
-    /// Adds an input port explicitly declared with the `logic` keyword.
+    /// Adds a `logic` input port, rejecting duplicate names.
     pub fn add_logic_input(
         &mut self,
         module: VastModule,
         name: &str,
         data_type: &VastDataType,
-    ) -> LogicRef {
+    ) -> Result<LogicRef, VastError> {
         self.add_port(
             module,
             name,
@@ -932,13 +1149,13 @@ impl VastFile {
         )
     }
 
-    /// Adds an output port explicitly declared with the `logic` keyword.
+    /// Adds a `logic` output port, rejecting duplicate names.
     pub fn add_logic_output(
         &mut self,
         module: VastModule,
         name: &str,
         data_type: &VastDataType,
-    ) -> LogicRef {
+    ) -> Result<LogicRef, VastError> {
         self.add_port(
             module,
             name,
@@ -972,16 +1189,21 @@ impl VastFile {
         logic_ref
     }
 
-    /// Appends a wire declaration to a module.
+    /// Adds a wire, returning an error for an invalid net type or duplicate
+    /// name.
     pub fn add_wire(
         &mut self,
         module: VastModule,
         name: &str,
         data_type: &VastDataType,
-    ) -> LogicRef {
-        self.check_unique_module_name(module, name, "wire")
-            .expect("module wires must have unique names");
-        self.add_declaration(module, name, data_type, DataKind::Wire)
+    ) -> Result<LogicRef, VastError> {
+        if self.is_non_net_builtin(*data_type) {
+            return Err(VastError(
+                "this built-in type cannot be used as a wire net".into(),
+            ));
+        }
+        self.check_unique_module_name(module, name, "wire")?;
+        Ok(self.add_declaration(module, name, data_type, DataKind::Wire))
     }
 
     /// Ties corresponding bits of two nets with bidirectional Verilog
@@ -1056,19 +1278,45 @@ impl VastFile {
 
     /// Creates a sized binary pattern from MSB-first `0`, `1`, and `?` digits.
     pub fn make_binary_pattern(&mut self, bits_msb: &str) -> Result<Expr, VastError> {
+        self.make_checked_binary_literal(
+            bits_msb,
+            b"01?",
+            "binary patterns require 1 to 1048576 MSB-first 0, 1, or ? digits",
+        )
+    }
+
+    /// Creates a sized four-state binary literal from MSB-first `0`, `1`, `x`,
+    /// and `z` digits. Letter case and all unknown or high-impedance bits
+    /// are preserved.
+    pub fn make_four_state_binary_literal(&mut self, bits_msb: &str) -> Result<Expr, VastError> {
+        self.make_checked_binary_literal(
+            bits_msb,
+            b"01xXzZ",
+            "four-state binary literals require 1 to 1048576 MSB-first 0, 1, x, or z digits",
+        )
+    }
+
+    /// Checks a bounded binary digit sequence and creates its sized literal
+    /// expression.
+    fn make_checked_binary_literal(
+        &mut self,
+        bits_msb: &str,
+        allowed: &[u8],
+        error: &str,
+    ) -> Result<Expr, VastError> {
         if bits_msb.is_empty()
             || bits_msb.len() > (1 << 20)
-            || !bits_msb
-                .bytes()
-                .all(|bit| matches!(bit, b'0' | b'1' | b'?'))
+            || !bits_msb.bytes().all(|bit| allowed.contains(&bit))
         {
-            return Err(VastError(
-                "binary patterns require 1 to 1048576 MSB-first 0, 1, or ? digits".to_owned(),
-            ));
+            return Err(VastError(error.to_owned()));
         }
+        let value = bits_msb.bytes().try_fold(0_i64, |value, bit| match bit {
+            b'0' | b'1' => value.checked_mul(2)?.checked_add(i64::from(bit - b'0')),
+            _ => None,
+        });
         Ok(self.add_expression(ExprData::Literal {
             text: format!("{}'b{bits_msb}", bits_msb.len()),
-            value: None,
+            value,
         }))
     }
 
@@ -1093,6 +1341,35 @@ impl VastFile {
         })
     }
 
+    /// Creates a time literal from a decimal magnitude such as `1`, `1.5`, or
+    /// `1_000`.
+    pub fn make_time_literal(
+        &mut self,
+        magnitude: &str,
+        unit: TimeUnit,
+    ) -> Result<Expr, VastError> {
+        let mut parts = magnitude.split('.');
+        let integer = parts.next().unwrap_or_default();
+        let fraction = parts.next();
+        let valid = |part: &str| {
+            let bytes = part.as_bytes();
+            !bytes.is_empty()
+                && bytes.first().is_some_and(u8::is_ascii_digit)
+                && bytes
+                    .iter()
+                    .all(|digit| digit.is_ascii_digit() || *digit == b'_')
+        };
+        if !valid(integer) || fraction.is_some_and(|part| !valid(part)) || parts.next().is_some() {
+            return Err(VastError(
+                "time literal magnitude must be an unsigned decimal or fixed-point number".into(),
+            ));
+        }
+        Ok(self.add_expression(ExprData::TimeLiteral {
+            magnitude: magnitude.to_owned(),
+            unit,
+        }))
+    }
+
     /// Creates an expression from complete Verilog source text.
     ///
     /// Supply any required Verilog quotes and escapes as part of the text.
@@ -1104,43 +1381,161 @@ impl VastFile {
         })
     }
 
-    /// Creates an unsigned one-bit scalar type.
-    pub fn make_scalar_type(&mut self) -> VastDataType {
-        self.add_data_type(TypeData::Scalar { signed: false })
+    /// Refers to an external value, returning an error for an invalid simple
+    /// identifier.
+    pub fn make_extern_value_ref(&mut self, name: &str) -> Result<Expr, VastError> {
+        if !is_system_verilog_simple_identifier(name) {
+            return Err(VastError(format!(
+                "invalid external value identifier: {name}"
+            )));
+        }
+        Ok(self.add_expression(ExprData::ExternalValue {
+            package: None,
+            name: name.to_owned(),
+        }))
     }
 
-    /// Creates a bit-vector type, collapsing one-bit vectors to scalars.
-    pub fn make_bit_vector_type(&mut self, bit_count: i64, signed: bool) -> VastDataType {
-        assert!(bit_count > 0, "bit-vector width must be greater than zero");
+    /// Refers to an external value using separate simple package and value
+    /// identifiers. Invalid package or value identifiers return an error.
+    pub fn make_extern_package_value_ref(
+        &mut self,
+        package: &str,
+        name: &str,
+    ) -> Result<Expr, VastError> {
+        if !is_system_verilog_simple_identifier(package) {
+            return Err(VastError(format!("invalid package identifier: {package}")));
+        }
+        if !is_system_verilog_simple_identifier(name) {
+            return Err(VastError(format!(
+                "invalid external value identifier: {name}"
+            )));
+        }
+        Ok(self.add_expression(ExprData::ExternalValue {
+            package: Some(package.to_owned()),
+            name: name.to_owned(),
+        }))
+    }
+
+    /// Checks that a type can be emitted without a declarator separating its
+    /// array dimensions.
+    fn check_standalone_type(&self, data_type: VastDataType) -> Result<(), VastError> {
+        let index = self.check(data_type.0);
+        if matches!(self.ast.data_types[index], TypeData::UnpackedArray { .. }) {
+            return Err(VastError(
+                "anonymous unpacked array types require a named typedef".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Creates an unsigned, four-state one-bit logic scalar type.
+    pub fn make_scalar_type(&mut self) -> VastDataType {
+        self.add_data_type(TypeData::Scalar {
+            signed: false,
+            state: LogicState::FourState,
+        })
+    }
+
+    /// Creates an unsigned, two-state SystemVerilog `bit` scalar type.
+    pub fn make_bit_type(&mut self) -> VastDataType {
+        self.add_data_type(TypeData::Scalar {
+            signed: false,
+            state: LogicState::TwoState,
+        })
+    }
+
+    /// Creates a two-state SystemVerilog `bit` vector, collapsing width one to
+    /// a scalar. Returns an error if the width is not positive.
+    pub fn make_two_state_bit_vector_type(
+        &mut self,
+        bit_count: i64,
+        signed: bool,
+    ) -> Result<VastDataType, VastError> {
+        self.make_integral_vector_type(bit_count, signed, LogicState::TwoState)
+    }
+
+    /// Creates a two-state SystemVerilog `bit` vector with an expression-valued
+    /// width. Returns an error if a known width is not positive.
+    pub fn make_two_state_bit_vector_type_expr(
+        &mut self,
+        width: &Expr,
+        signed: bool,
+    ) -> Result<VastDataType, VastError> {
+        self.make_integral_vector_type_expr(width, signed, LogicState::TwoState)
+    }
+
+    /// Creates a four-state logic vector, collapsing width one to a scalar.
+    /// Despite its legacy name, this does not create a SystemVerilog two-state
+    /// `bit` vector. Returns an error if the width is not positive.
+    pub fn make_bit_vector_type(
+        &mut self,
+        bit_count: i64,
+        signed: bool,
+    ) -> Result<VastDataType, VastError> {
+        self.make_integral_vector_type(bit_count, signed, LogicState::FourState)
+    }
+
+    /// Creates a four-state logic vector whose width is determined by an
+    /// expression. Returns an error if a known width is not positive.
+    pub fn make_bit_vector_type_expr(
+        &mut self,
+        width: &Expr,
+        signed: bool,
+    ) -> Result<VastDataType, VastError> {
+        self.make_integral_vector_type_expr(width, signed, LogicState::FourState)
+    }
+
+    /// Creates an integral vector of the requested state and constant width.
+    fn make_integral_vector_type(
+        &mut self,
+        bit_count: i64,
+        signed: bool,
+        state: LogicState,
+    ) -> Result<VastDataType, VastError> {
+        if bit_count <= 0 {
+            return Err(VastError(
+                "bit-vector width must be greater than zero".into(),
+            ));
+        }
         if bit_count == 1 {
-            return self.add_data_type(TypeData::Scalar { signed });
+            return Ok(self.add_data_type(TypeData::Scalar { signed, state }));
         }
         let width = self.add_expression(ExprData::Literal {
             text: bit_count.to_string(),
             value: Some(bit_count),
         });
-        self.add_data_type(TypeData::BitVector {
+        Ok(self.add_data_type(TypeData::BitVector {
             width,
             width_value: Some(bit_count),
             signed,
-        })
+            state,
+        }))
     }
 
-    /// Creates a bit-vector type whose width is determined by an expression.
-    pub fn make_bit_vector_type_expr(&mut self, width: &Expr, signed: bool) -> VastDataType {
+    /// Creates an integral vector of the requested state and expression-valued
+    /// width.
+    fn make_integral_vector_type_expr(
+        &mut self,
+        width: &Expr,
+        signed: bool,
+        state: LogicState,
+    ) -> Result<VastDataType, VastError> {
         let expression_index = self.check(width.0);
         let width_value = match &self.ast.expressions[expression_index] {
             ExprData::Literal { value, .. } => *value,
             _ => None,
         };
-        if let Some(width) = width_value {
-            assert!(width > 0, "bit-vector width must be greater than zero");
+        if width_value.is_some_and(|width| width <= 0) {
+            return Err(VastError(
+                "bit-vector width must be greater than zero".into(),
+            ));
         }
-        self.add_data_type(TypeData::BitVector {
+        Ok(self.add_data_type(TypeData::BitVector {
             width: *width,
             width_value,
             signed,
-        })
+            state,
+        }))
     }
 
     /// Creates a user-defined type in the current namespace.
@@ -1175,75 +1570,110 @@ impl VastFile {
         })
     }
 
+    /// Creates a dynamically sized SystemVerilog `string` type.
+    pub fn make_string_type(&mut self) -> VastDataType {
+        self.add_data_type(TypeData::String)
+    }
+
+    /// Creates a signed or unsigned, 64-bit, four-state SystemVerilog `time`
+    /// type.
+    pub fn make_time_type(&mut self, signed: bool) -> VastDataType {
+        self.add_data_type(TypeData::Integer {
+            signed,
+            kind: IntegerTypeKind::Time,
+        })
+    }
+
+    /// Creates a signed or unsigned 8-bit SystemVerilog `byte` type.
+    pub fn make_byte_type(&mut self, signed: bool) -> VastDataType {
+        self.add_data_type(TypeData::Integer {
+            signed,
+            kind: IntegerTypeKind::Byte,
+        })
+    }
+
+    /// Creates a signed or unsigned 16-bit SystemVerilog `shortint` type.
+    pub fn make_shortint_type(&mut self, signed: bool) -> VastDataType {
+        self.add_data_type(TypeData::Integer {
+            signed,
+            kind: IntegerTypeKind::Shortint,
+        })
+    }
+
+    /// Creates a signed or unsigned 64-bit SystemVerilog `longint` type.
+    pub fn make_longint_type(&mut self, signed: bool) -> VastDataType {
+        self.add_data_type(TypeData::Integer {
+            signed,
+            kind: IntegerTypeKind::Longint,
+        })
+    }
+
     /// Creates a packed multidimensional array around its element type.
     ///
     /// Dimensions are ordered from outermost to innermost. Nesting packed
     /// array types adds the new dimensions before the element's dimensions.
-    ///
-    /// # Panics
-    ///
-    /// Panics with `packed arrays cannot contain unpacked array elements` when
-    /// the element contains any unpacked array dimensions, or with
-    /// `packed arrays cannot contain integer or int elements` when the element
-    /// is an integer atom type. Also panics when dimensions are empty or
-    /// contain a nonpositive size.
+    /// Returns an error for invalid element types or empty or nonpositive
+    /// dimensions.
     pub fn make_packed_array_type(
         &mut self,
         element: VastDataType,
         dimensions: &[i64],
-    ) -> VastDataType {
+    ) -> Result<VastDataType, VastError> {
         let element_index = self.check(element.0);
-        assert!(
-            !matches!(
-                &self.ast.data_types[element_index],
-                TypeData::UnpackedArray { .. }
-            ),
-            "packed arrays cannot contain unpacked array elements"
-        );
-        assert!(
-            !matches!(
-                &self.ast.data_types[element_index],
-                TypeData::Integer { .. }
-            ),
-            "packed arrays cannot contain integer or int elements"
-        );
-
-        assert!(
-            !dimensions.is_empty(),
-            "packed array requires at least one dimension"
-        );
-        assert!(
-            dimensions.iter().all(|dimension| *dimension > 0),
-            "packed-array dimensions must be greater than zero"
-        );
-        self.add_data_type(TypeData::PackedArray {
+        let invalid_element = match &self.ast.data_types[element_index] {
+            TypeData::UnpackedArray { .. } => {
+                Some("packed arrays cannot contain unpacked array elements")
+            }
+            TypeData::Integer { .. } => {
+                Some("packed arrays cannot contain integer or int elements")
+            }
+            TypeData::String => Some("packed arrays cannot contain string elements"),
+            _ => None,
+        };
+        if let Some(message) = invalid_element {
+            return Err(VastError(message.into()));
+        }
+        if dimensions.is_empty() {
+            return Err(VastError(
+                "packed array requires at least one dimension".into(),
+            ));
+        }
+        if dimensions.iter().any(|dimension| *dimension <= 0) {
+            return Err(VastError(
+                "packed-array dimensions must be greater than zero".into(),
+            ));
+        }
+        Ok(self.add_data_type(TypeData::PackedArray {
             element,
             dimensions: dimensions.to_vec(),
-        })
+        }))
     }
 
     /// Creates an unpacked multidimensional array around its element type.
     ///
     /// Dimensions are ordered from outermost to innermost. Nesting unpacked
     /// array types adds the new dimensions before the element's dimensions.
+    /// Returns an error for empty or nonpositive dimensions.
     pub fn make_unpacked_array_type(
         &mut self,
         element: VastDataType,
         dimensions: &[i64],
-    ) -> VastDataType {
+    ) -> Result<VastDataType, VastError> {
         self.check(element.0);
-        assert!(
-            !dimensions.is_empty(),
-            "unpacked array requires at least one dimension"
-        );
-        assert!(
-            dimensions.iter().all(|dimension| *dimension > 0),
-            "unpacked-array dimensions must be greater than zero"
-        );
-        self.add_data_type(TypeData::UnpackedArray {
+        if dimensions.is_empty() {
+            return Err(VastError(
+                "unpacked array requires at least one dimension".into(),
+            ));
+        }
+        if dimensions.iter().any(|dimension| *dimension <= 0) {
+            return Err(VastError(
+                "unpacked-array dimensions must be greater than zero".into(),
+            ));
+        }
+        Ok(self.add_data_type(TypeData::UnpackedArray {
             element,
             dimensions: dimensions.to_vec(),
-        })
+        }))
     }
 
     /// Builds a nonnegative index, matching XLS's sized spelling above i32.
@@ -1350,14 +1780,79 @@ impl VastFile {
             .collect()
     }
 
-    /// Calls an ordinary or system function with ordered, owned arguments.
-    pub fn make_function_call(&mut self, name: &str, arguments: &[&Expr]) -> Expr {
-        assert!(!name.is_empty(), "function call name must not be empty");
-        let arguments = self.checked_expressions(arguments);
-        self.add_expression(ExprData::FunctionCall {
+    /// Calls an ordinary or system function with value expressions, rejecting
+    /// an empty name.
+    pub fn make_function_call(
+        &mut self,
+        name: &str,
+        arguments: &[&Expr],
+    ) -> Result<Expr, VastError> {
+        self.make_function_call_from_arguments(
+            name,
+            arguments
+                .iter()
+                .map(|argument| SvArgument::Value(**argument)),
+        )
+    }
+
+    /// Calls a function with value or type arguments, such as `$bits(T)`.
+    ///
+    /// Type arguments are accepted only for system functions. The caller is
+    /// responsible for choosing a system function and argument position that
+    /// accept a type. Invalid names or type arguments return an error.
+    pub fn make_function_call_with_arguments(
+        &mut self,
+        name: &str,
+        arguments: &[SvArgument],
+    ) -> Result<Expr, VastError> {
+        self.make_function_call_from_arguments(name, arguments.iter().copied())
+    }
+
+    /// Creates a call while collecting its checked arguments exactly once.
+    fn make_function_call_from_arguments(
+        &mut self,
+        name: &str,
+        arguments: impl IntoIterator<Item = SvArgument>,
+    ) -> Result<Expr, VastError> {
+        if name.is_empty() {
+            return Err(VastError("function call name must not be empty".into()));
+        }
+        let args = self.checked_arguments(arguments)?;
+        if !name.starts_with('$')
+            && args
+                .iter()
+                .any(|argument| matches!(argument, SvArgument::Type(_)))
+        {
+            return Err(VastError(
+                "ordinary function calls do not accept type arguments".into(),
+            ));
+        }
+        Ok(self.add_expression(ExprData::FunctionCall {
             name: name.to_owned(),
-            args: arguments,
-        })
+            args,
+        }))
+    }
+
+    /// Checks and collects ordered arguments into their AST-owned storage.
+    fn checked_arguments(
+        &self,
+        arguments: impl IntoIterator<Item = SvArgument>,
+    ) -> Result<Vec<SvArgument>, VastError> {
+        arguments
+            .into_iter()
+            .map(|argument| self.check_argument(argument).map(|()| argument))
+            .collect()
+    }
+
+    /// Checks an argument's owning file and standalone type spelling.
+    fn check_argument(&self, argument: SvArgument) -> Result<(), VastError> {
+        match argument {
+            SvArgument::Value(value) => {
+                self.check(value.0);
+                Ok(())
+            }
+            SvArgument::Type(data_type) => self.check_standalone_type(data_type),
+        }
     }
 
     /// Creates an ordinary concatenation expression.
@@ -1392,6 +1887,39 @@ impl VastFile {
     pub fn make_array_assignment_pattern(&mut self, elements: &[&Expr]) -> Expr {
         let elements = self.checked_expressions(elements);
         self.add_expression(ExprData::ArrayAssignmentPattern(elements))
+    }
+
+    /// Creates an ordered SystemVerilog struct assignment pattern with named
+    /// members.
+    ///
+    /// Keys must be simple identifiers or the `default` key. Returns an error
+    /// for an empty pattern or invalid or duplicate keys.
+    pub fn make_struct_assignment_pattern(
+        &mut self,
+        members: &[(&str, &Expr)],
+    ) -> Result<Expr, VastError> {
+        if members.is_empty() {
+            return Err(VastError(
+                "struct assignment pattern must not be empty".into(),
+            ));
+        }
+        let mut names = HashSet::with_capacity(members.len());
+        let members = members
+            .iter()
+            .map(|(name, value)| {
+                if *name != "default" && !is_system_verilog_simple_identifier(name) {
+                    return Err(VastError(format!(
+                        "invalid struct assignment member identifier: {name}"
+                    )));
+                }
+                if !names.insert(*name) {
+                    return Err(VastError(format!("duplicate struct member {name}")));
+                }
+                self.check(value.0);
+                Ok(((*name).to_owned(), **value))
+            })
+            .collect::<Result<Vec<_>, VastError>>()?;
+        Ok(self.add_expression(ExprData::StructAssignmentPattern(members)))
     }
 
     /// Adds a unary expression to the file-owned arena.
@@ -1591,33 +2119,34 @@ impl VastFile {
         })
     }
 
-    /// Creates a SystemVerilog data-type cast.
-    ///
-    /// # Panics
-    ///
-    /// Panics with `unpacked array types cannot be used in type casts` when
-    /// the target is unpacked, or with
-    /// `packed array types cannot be used in type casts; use a named typedef
-    /// instead` when the target is an anonymous packed array. Use a named
-    /// external type to cast to an existing SystemVerilog typedef.
-    pub fn make_type_cast(&mut self, data_type: &VastDataType, value: &Expr) -> Expr {
+    /// Creates a SystemVerilog data-type cast, returning an error for anonymous
+    /// array targets. Cast to an existing typedef through a named external
+    /// type.
+    pub fn make_type_cast(
+        &mut self,
+        data_type: &VastDataType,
+        value: &Expr,
+    ) -> Result<Expr, VastError> {
         let type_index = self.check(data_type.0);
         self.check(value.0);
-
-        let target_type = &self.ast.data_types[type_index];
-        assert!(
-            !matches!(target_type, TypeData::UnpackedArray { .. }),
-            "unpacked array types cannot be used in type casts"
-        );
-        assert!(
-            !matches!(target_type, TypeData::PackedArray { .. }),
-            "packed array types cannot be used in type casts; use a named typedef instead"
-        );
-
-        self.add_expression(ExprData::TypeCast {
+        match &self.ast.data_types[type_index] {
+            TypeData::UnpackedArray { .. } => {
+                return Err(VastError(
+                    "unpacked array types cannot be used in type casts".into(),
+                ));
+            }
+            TypeData::PackedArray { .. } => {
+                return Err(VastError(
+                    "packed array types cannot be used in type casts; use a named typedef instead"
+                        .into(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(self.add_expression(ExprData::TypeCast {
             data_type: *data_type,
             value: *value,
-        })
+        }))
     }
 
     /// Creates a positive-edge sensitivity expression.
@@ -1708,16 +2237,41 @@ impl VastFile {
         )
     }
 
-    /// Creates a preprocessor macro reference with explicit arguments.
+    /// Creates a preprocessor macro reference with explicit value arguments.
     pub fn make_macro_ref_with_args(&mut self, name: &str, arguments: &[&Expr]) -> MacroRef {
-        let arguments = self.checked_expressions(arguments);
-        MacroRef(
+        self.make_macro_ref_from_arguments(
+            name,
+            arguments
+                .iter()
+                .map(|argument| SvArgument::Value(**argument)),
+        )
+        .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Creates a preprocessor macro reference, returning an error for
+    /// unsupported type arguments.
+    pub fn make_macro_ref_with_arguments(
+        &mut self,
+        name: &str,
+        arguments: &[SvArgument],
+    ) -> Result<MacroRef, VastError> {
+        self.make_macro_ref_from_arguments(name, arguments.iter().copied())
+    }
+
+    /// Creates a macro reference while collecting checked arguments once.
+    fn make_macro_ref_from_arguments(
+        &mut self,
+        name: &str,
+        arguments: impl IntoIterator<Item = SvArgument>,
+    ) -> Result<MacroRef, VastError> {
+        let args = self.checked_arguments(arguments)?;
+        Ok(MacroRef(
             self.add_expression(ExprData::Macro {
                 name: name.to_owned(),
-                args: Some(arguments),
+                args: Some(args),
             })
             .0,
-        )
+        ))
     }
 
     /// Wraps a preprocessor macro reference as a module or generate statement.
@@ -1771,8 +2325,8 @@ impl VastFile {
         handle
     }
 
-    /// Constructs a named module instantiation with ordered parameters and
-    /// ports.
+    /// Constructs a named module instantiation with value parameters and ports,
+    /// returning an error for mismatched argument lists or duplicate names.
     pub fn make_instantiation(
         &mut self,
         module_name: &str,
@@ -1781,25 +2335,78 @@ impl VastFile {
         parameter_expressions: &[&Expr],
         connection_names: &[&str],
         connection_expressions: &[Option<&Expr>],
-    ) -> Instantiation {
-        assert_eq!(
-            parameter_names.len(),
-            parameter_expressions.len(),
-            "module-instantiation parameter names and values must have equal lengths"
-        );
-        assert_eq!(
-            connection_names.len(),
-            connection_expressions.len(),
-            "module-instantiation port names and values must have equal lengths"
-        );
+    ) -> Result<Instantiation, VastError> {
+        self.make_instantiation_from_arguments(
+            module_name,
+            instance_name,
+            parameter_names,
+            parameter_expressions
+                .iter()
+                .map(|value| SvArgument::Value(**value)),
+            connection_names,
+            connection_expressions,
+        )
+    }
+
+    /// Constructs a module instantiation, returning an error for mismatched
+    /// argument lists, duplicate names, or unsupported types.
+    pub fn make_instantiation_with_arguments(
+        &mut self,
+        module_name: &str,
+        instance_name: &str,
+        parameter_names: &[&str],
+        parameter_arguments: &[SvArgument],
+        connection_names: &[&str],
+        connection_expressions: &[Option<&Expr>],
+    ) -> Result<Instantiation, VastError> {
+        self.make_instantiation_from_arguments(
+            module_name,
+            instance_name,
+            parameter_names,
+            parameter_arguments.iter().copied(),
+            connection_names,
+            connection_expressions,
+        )
+    }
+
+    /// Creates an instantiation while checking and storing each parameter once.
+    fn make_instantiation_from_arguments(
+        &mut self,
+        module_name: &str,
+        instance_name: &str,
+        parameter_names: &[&str],
+        parameter_arguments: impl ExactSizeIterator<Item = SvArgument>,
+        connection_names: &[&str],
+        connection_expressions: &[Option<&Expr>],
+    ) -> Result<Instantiation, VastError> {
+        if parameter_names.len() != parameter_arguments.len() {
+            return Err(VastError(
+                "module-instantiation parameter names and values must have equal lengths".into(),
+            ));
+        }
+        if connection_names.len() != connection_expressions.len() {
+            return Err(VastError(
+                "module-instantiation port names and values must have equal lengths".into(),
+            ));
+        }
+        for (kind, names) in [("parameter", parameter_names), ("port", connection_names)] {
+            let mut seen = HashSet::with_capacity(names.len());
+            for name in names {
+                if !seen.insert(*name) {
+                    return Err(VastError(format!(
+                        "duplicate module-instantiation {kind} name: {name}"
+                    )));
+                }
+            }
+        }
         let parameters = parameter_names
             .iter()
-            .zip(parameter_expressions)
-            .map(|(name, expression)| {
-                self.check(expression.0);
-                ((*name).to_owned(), **expression)
+            .zip(parameter_arguments)
+            .map(|(name, argument)| {
+                self.check_argument(argument)?;
+                Ok(((*name).to_owned(), argument))
             })
-            .collect();
+            .collect::<Result<Vec<_>, VastError>>()?;
         let ports = connection_names
             .iter()
             .zip(connection_expressions)
@@ -1818,13 +2425,23 @@ impl VastFile {
             parameters,
             ports,
         });
-        handle
+        Ok(handle)
     }
 
-    /// Adds an existing instantiation to a module.
-    pub fn add_member_instantiation(&mut self, module: VastModule, instantiation: Instantiation) {
-        self.check(instantiation.0);
+    /// Adds an existing instantiation to a module, rejecting duplicate names.
+    pub fn add_member_instantiation(
+        &mut self,
+        module: VastModule,
+        instantiation: Instantiation,
+    ) -> Result<(), VastError> {
+        let name = self.ast.instantiations[self.check(instantiation.0)]
+            .instance_name
+            .clone();
+        let module_index = self.check(module.0);
+        self.check_unique_module_name(module, &name, "instance")?;
         self.push_member(module, MemberData::Instantiation(instantiation));
+        self.ast.modules[module_index].defined_names.insert(name);
+        Ok(())
     }
 
     /// Adds an existing continuous assignment to a module.
@@ -1898,7 +2515,7 @@ impl VastFile {
         &mut self,
         name: &str,
         rhs: &Expr,
-        local: bool,
+        kind: ParameterKind,
         definition: Option<Def>,
         int_kind: bool,
     ) -> (LogicRef, MemberData) {
@@ -1909,7 +2526,7 @@ impl VastFile {
         (
             reference,
             MemberData::Parameter {
-                local,
+                local: kind == ParameterKind::Localparam,
                 def: definition,
                 name: name.to_owned(),
                 rhs: *rhs,
@@ -1918,57 +2535,196 @@ impl VastFile {
         )
     }
 
-    /// Adds an untyped module parameter declaration.
-    pub fn add_parameter(&mut self, module: VastModule, name: &str, rhs: &Expr) -> ParameterRef {
-        let (reference, member) = self.parameter_member(name, rhs, false, None, false);
-        self.push_member(module, member);
-        ParameterRef(reference.0)
+    /// Appends a module-body type parameter and returns a reference to its
+    /// type.
+    ///
+    /// SystemVerilog treats body parameters as local when the module has a
+    /// parameter-port list, regardless of the declaration keyword.
+    /// The returned type is available to later body declarations, not to the
+    /// module's preceding port list; use [`Self::add_type_parameter_port`] for
+    /// a port type. Anonymous unpacked array defaults return an error and
+    /// require a named typedef. Duplicate names also return an error.
+    pub fn add_type_parameter(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        kind: ParameterKind,
+        default: &VastDataType,
+    ) -> Result<VastDataType, VastError> {
+        let module_index = self.check(module.0);
+        self.check_standalone_type(*default)?;
+        self.check_unique_module_name(module, name, parameter_kind_name(kind, true))?;
+        let reference = self.make_extern_type(name);
+        self.push_member(
+            module,
+            MemberData::TypeParameter {
+                kind,
+                name: name.to_owned(),
+                default: *default,
+            },
+        );
+        self.ast.modules[module_index]
+            .defined_names
+            .insert(name.to_owned());
+        Ok(reference)
     }
 
-    /// Adds a typed module parameter declaration.
+    /// Appends a legal `timeunit` declaration to the module body.
+    /// The first declaration must precede other scope items; an identical
+    /// declaration may be repeated later. Conflicting local time scales return
+    /// an error.
+    pub fn add_timeunit(
+        &mut self,
+        module: VastModule,
+        value: TimeScaleValue,
+    ) -> Result<(), VastError> {
+        self.add_timescale_declaration(module, MemberData::TimeUnit(value))
+    }
+
+    /// Appends a legal `timeprecision` declaration to the module body.
+    /// The first declaration must precede other scope items; an identical
+    /// declaration may be repeated later. A precision coarser than the local
+    /// time unit returns an error.
+    pub fn add_timeprecision(
+        &mut self,
+        module: VastModule,
+        value: TimeScaleValue,
+    ) -> Result<(), VastError> {
+        self.add_timescale_declaration(module, MemberData::TimePrecision(value))
+    }
+
+    /// Validates local time-scale declarations before appending them in source
+    /// order.
+    fn add_timescale_declaration(
+        &mut self,
+        module: VastModule,
+        declaration: MemberData,
+    ) -> Result<(), VastError> {
+        let module_index = self.check(module.0);
+        let members = &self.ast.modules[module_index].members;
+        let mut repeated = false;
+        let mut follows_scope_item = false;
+        for member in members {
+            match (member, &declaration) {
+                (MemberData::TimeUnit(existing), MemberData::TimeUnit(value))
+                | (MemberData::TimePrecision(existing), MemberData::TimePrecision(value)) => {
+                    if existing != value {
+                        return Err(VastError("conflicting time-scale declarations".into()));
+                    }
+                    repeated = true;
+                }
+                (MemberData::TimeUnit(unit), MemberData::TimePrecision(precision))
+                | (MemberData::TimePrecision(precision), MemberData::TimeUnit(unit)) => {
+                    if precision.femtosecond_exponent() > unit.femtosecond_exponent() {
+                        return Err(VastError(
+                            "time precision cannot be coarser than time unit".into(),
+                        ));
+                    }
+                }
+                (MemberData::Comment(_) | MemberData::BlankLine, _) => {
+                    // Comments and whitespace do not declare scope items.
+                }
+                _ => follows_scope_item = true,
+            }
+        }
+        if follows_scope_item && !repeated {
+            return Err(VastError(
+                "time-scale declarations must precede other module members".into(),
+            ));
+        }
+        self.push_member(module, declaration);
+        Ok(())
+    }
+
+    /// Validates and appends a module-body value parameter declaration.
+    fn add_module_parameter(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        rhs: &Expr,
+        kind: ParameterKind,
+        definition: Option<Def>,
+        int_kind: bool,
+    ) -> Result<LogicRef, VastError> {
+        let module_index = self.check(module.0);
+        self.check_unique_module_name(module, name, parameter_kind_name(kind, false))?;
+        let (reference, member) = self.parameter_member(name, rhs, kind, definition, int_kind);
+        self.push_member(module, member);
+        self.ast.modules[module_index]
+            .defined_names
+            .insert(name.to_owned());
+        Ok(reference)
+    }
+
+    /// Adds an untyped module parameter declaration, rejecting duplicate names.
+    pub fn add_parameter(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        rhs: &Expr,
+    ) -> Result<ParameterRef, VastError> {
+        self.add_module_parameter(module, name, rhs, ParameterKind::Parameter, None, false)
+            .map(|reference| ParameterRef(reference.0))
+    }
+
+    /// Adds a typed module parameter declaration, rejecting duplicate names.
     pub fn add_parameter_with_def(
         &mut self,
         module: VastModule,
         definition: &Def,
         rhs: &Expr,
-    ) -> ParameterRef {
+    ) -> Result<ParameterRef, VastError> {
         let name = self.ast.defs[self.check(definition.0)].name.clone();
-        let (reference, member) =
-            self.parameter_member(&name, rhs, false, Some(*definition), false);
-        self.push_member(module, member);
-        ParameterRef(reference.0)
+        self.add_module_parameter(
+            module,
+            &name,
+            rhs,
+            ParameterKind::Parameter,
+            Some(*definition),
+            false,
+        )
+        .map(|reference| ParameterRef(reference.0))
     }
 
-    /// Adds an untyped module-local parameter declaration.
-    pub fn add_localparam(&mut self, module: VastModule, name: &str, rhs: &Expr) -> LocalparamRef {
-        let (reference, member) = self.parameter_member(name, rhs, true, None, false);
-        self.push_member(module, member);
-        LocalparamRef(reference.0)
+    /// Adds an untyped module-local parameter, rejecting duplicate names.
+    pub fn add_localparam(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        rhs: &Expr,
+    ) -> Result<LocalparamRef, VastError> {
+        self.add_module_parameter(module, name, rhs, ParameterKind::Localparam, None, false)
+            .map(|reference| LocalparamRef(reference.0))
     }
 
-    /// Adds a typed module-local parameter declaration.
+    /// Adds a typed module-local parameter, rejecting duplicate names.
     pub fn add_typed_localparam(
         &mut self,
         module: VastModule,
         definition: &Def,
         rhs: &Expr,
-    ) -> LocalparamRef {
+    ) -> Result<LocalparamRef, VastError> {
         let name = self.ast.defs[self.check(definition.0)].name.clone();
-        let (reference, member) = self.parameter_member(&name, rhs, true, Some(*definition), false);
-        self.push_member(module, member);
-        LocalparamRef(reference.0)
+        self.add_module_parameter(
+            module,
+            &name,
+            rhs,
+            ParameterKind::Localparam,
+            Some(*definition),
+            false,
+        )
+        .map(|reference| LocalparamRef(reference.0))
     }
 
-    /// Adds a SystemVerilog `int`-typed local parameter declaration.
+    /// Adds an `int`-typed module-local parameter, rejecting duplicate names.
     pub fn add_int_localparam(
         &mut self,
         module: VastModule,
         name: &str,
         rhs: &Expr,
-    ) -> LocalparamRef {
-        let (reference, member) = self.parameter_member(name, rhs, true, None, true);
-        self.push_member(module, member);
-        LocalparamRef(reference.0)
+    ) -> Result<LocalparamRef, VastError> {
+        self.add_module_parameter(module, name, rhs, ParameterKind::Localparam, None, true)
+            .map(|reference| LocalparamRef(reference.0))
     }
 
     /// Allocates an always block and its initially empty procedural block.
@@ -2277,7 +3033,7 @@ impl VastFile {
         handle
     }
 
-    /// Adds a labeled or unlabeled generate loop to a module.
+    /// Adds a generate loop to a module, rejecting a duplicate block label.
     pub fn add_generate_loop(
         &mut self,
         module: VastModule,
@@ -2285,10 +3041,21 @@ impl VastFile {
         start: &Expr,
         end: &Expr,
         label: Option<&str>,
-    ) -> GenerateLoop {
+    ) -> Result<GenerateLoop, VastError> {
+        let module_index = self.check(module.0);
+        self.check(start.0);
+        self.check(end.0);
+        if let Some(label) = label {
+            self.check_unique_module_name(module, label, "generate block")?;
+        }
         let generate = self.make_generate_loop(name, start, end, label);
         self.push_member(module, MemberData::Generate(generate));
-        generate
+        if let Some(label) = label {
+            self.ast.modules[module_index]
+                .defined_names
+                .insert(label.to_owned());
+        }
+        Ok(generate)
     }
 
     /// Adds a nested generate loop inside an existing generate loop.
@@ -2351,7 +3118,8 @@ impl VastFile {
         name: &str,
         rhs: &Expr,
     ) -> LocalparamRef {
-        let (reference, member) = self.parameter_member(name, rhs, true, None, false);
+        let (reference, member) =
+            self.parameter_member(name, rhs, ParameterKind::Localparam, None, false);
         self.push_generate_member(generate, member);
         LocalparamRef(reference.0)
     }
@@ -2364,7 +3132,13 @@ impl VastFile {
         rhs: &Expr,
     ) -> LocalparamRef {
         let name = self.ast.defs[self.check(definition.0)].name.clone();
-        let (reference, member) = self.parameter_member(&name, rhs, true, Some(*definition), false);
+        let (reference, member) = self.parameter_member(
+            &name,
+            rhs,
+            ParameterKind::Localparam,
+            Some(*definition),
+            false,
+        );
         self.push_generate_member(generate, member);
         LocalparamRef(reference.0)
     }

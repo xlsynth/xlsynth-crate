@@ -161,7 +161,7 @@ fn register_banks(
     layer: usize,
     boundary: &PipelineBoundary,
     source: LogicRef,
-) -> LogicRef {
+) -> Result<LogicRef, xlsynth::XlsynthError> {
     let mut parts = Vec::new();
     let mut writes = Vec::new();
     for segment in boundary.bank_segments().into_iter().rev() {
@@ -172,7 +172,7 @@ fn register_banks(
             );
             continue;
         }
-        let ty = file.make_bit_vector_type(segment.bits.len() as i64, false);
+        let ty = file.make_bit_vector_type(segment.bits.len() as i64, false)?;
         let reg = file
             .add_reg(module, &bank_reg_name(layer, segment.bits.start), &ty)
             .unwrap();
@@ -204,12 +204,12 @@ fn register_banks(
             file.block_add_nonblocking_assignment(block, &reg.to_expr(), &rhs);
         }
     }
-    let ty = file.make_bit_vector_type(boundary.width() as i64, false);
-    let result = file.add_wire(module, &bank_result_name(layer), &ty);
+    let ty = file.make_bit_vector_type(boundary.width() as i64, false)?;
+    let result = file.add_wire(module, &bank_result_name(layer), &ty)?;
     let packed = file.make_concat(&parts.iter().collect::<Vec<_>>());
     let assign = file.make_continuous_assignment(&result.to_expr(), &packed);
     file.add_member_continuous_assignment(module, assign);
-    result
+    Ok(result)
 }
 
 /// Creates I/O ports on the outer (encapsulating) module.
@@ -217,38 +217,38 @@ fn create_outer_io_ports(
     file: &mut VastFile,
     outer_module: VastModule,
     config: &PipelineConfig,
-) -> (NetBundle, LogicRef) {
+) -> Result<(NetBundle, LogicRef), xlsynth::XlsynthError> {
     log::debug!("Creating outer I/O ports");
 
     let mut name_to_ref = HashMap::new();
     for port in &config.layout.stage_inputs[0].ports {
-        let vast_type = file.make_bit_vector_type(port.bits.len() as i64, false);
-        let outer_module_input = file.add_input(outer_module, &port.name, &vast_type);
+        let vast_type = file.make_bit_vector_type(port.bits.len() as i64, false)?;
+        let outer_module_input = file.add_input(outer_module, &port.name, &vast_type)?;
         name_to_ref.insert(port.name.clone(), (outer_module_input, vast_type));
     }
 
     // A LogicRef that represents the input valid signal coming combinationally
     // into the outer module.
-    let bit_type = file.make_bit_vector_type(1, false);
+    let bit_type = file.make_bit_vector_type(1, false)?;
     let outer_module_input_valid_signal: Option<LogicRef> =
         if let Some(ref input_valid_signal_name) = config.input_valid_signal {
             let outer_module_input_valid_signal =
-                file.add_input(outer_module, input_valid_signal_name, &bit_type);
+                file.add_input(outer_module, input_valid_signal_name, &bit_type)?;
             Some(outer_module_input_valid_signal)
         } else {
             None
         };
 
     let output = &config.layout.output.ports[0];
-    let vast_type = file.make_bit_vector_type(output.bits.len() as i64, false);
-    let output_port = file.add_output(outer_module, &output.name, &vast_type);
-    (
+    let vast_type = file.make_bit_vector_type(output.bits.len() as i64, false)?;
+    let output_port = file.add_output(outer_module, &output.name, &vast_type)?;
+    Ok((
         NetBundle {
             name_to_ref,
             valid_signal: outer_module_input_valid_signal,
         },
         output_port,
-    )
+    ))
 }
 
 /// Emits the pipeline wrapper and its stage instances from the resolved layout.
@@ -264,17 +264,17 @@ pub fn build_pipeline(
 
     let outer_module: VastModule = file.add_module(&config.top_module_name);
 
-    let bit_type = file.make_bit_vector_type(1, false);
-    let clk_port = file.add_input(outer_module, &config.clk_port_name, &bit_type);
+    let bit_type = file.make_bit_vector_type(1, false)?;
+    let clk_port = file.add_input(outer_module, &config.clk_port_name, &bit_type)?;
     // Optional synchronous reset input comes immediately after clk.
     let reset_port = if let Some(ref rst_name) = config.reset_signal {
-        Some(file.add_input(outer_module, rst_name, &bit_type))
+        Some(file.add_input(outer_module, rst_name, &bit_type)?)
     } else {
         None
     };
     let posedge_clk = file.make_pos_edge(&clk_port.to_expr());
 
-    let (mut current_inputs, output_port) = create_outer_io_ports(file, outer_module, config);
+    let (mut current_inputs, output_port) = create_outer_io_ports(file, outer_module, config)?;
     log::debug!("starting with current_inputs: {:?}", current_inputs);
 
     if let Some(layer) = config.layout.stage_inputs[0].register_layer {
@@ -300,8 +300,9 @@ pub fn build_pipeline(
 
         let destination = config.layout.after_stage(i);
         let stage_output_name = stage_output_wire_name(i);
-        let stage_output_type = file.make_bit_vector_type(destination.width() as i64, false);
-        let stage_output_wire = file.add_wire(outer_module, &stage_output_name, &stage_output_type);
+        let stage_output_type = file.make_bit_vector_type(destination.width() as i64, false)?;
+        let stage_output_wire =
+            file.add_wire(outer_module, &stage_output_name, &stage_output_type)?;
 
         // Instantiate the stage module with the current inputs.
         let mut stage_port_names = Vec::new();
@@ -323,8 +324,8 @@ pub fn build_pipeline(
             &[],
             &stage_port_names,
             &stage_expression_refs,
-        );
-        file.add_member_instantiation(outer_module, instantiation);
+        )?;
+        file.add_member_instantiation(outer_module, instantiation)?;
 
         let stage_output_wire = if destination.banks.is_empty() {
             stage_output_wire
@@ -340,7 +341,7 @@ pub fn build_pipeline(
                 layer,
                 destination,
                 stage_output_wire,
-            );
+            )?;
             current_inputs.name_to_ref.clear();
             current_inputs = make_flop_layer(
                 file,
@@ -363,9 +364,9 @@ pub fn build_pipeline(
                 .expect("interstage register layer");
             let mut name_to_ref = HashMap::new();
             for port in &destination.ports {
-                let vast_type = file.make_bit_vector_type(port.bits.len() as i64, false);
+                let vast_type = file.make_bit_vector_type(port.bits.len() as i64, false)?;
                 let wire_name = slice_wire_name(layer, &port.name);
-                let wire = file.add_wire(outer_module, &wire_name, &vast_type);
+                let wire = file.add_wire(outer_module, &wire_name, &vast_type)?;
                 let slice_expr = file
                     .make_slice(
                         &stage_output_wire.to_indexable_expr(),
@@ -414,7 +415,7 @@ pub fn build_pipeline(
             .expect("flop layers must have a valid signal when module has an output-valid signal");
 
         // Get the output port LogicRef so we can assign to it.
-        let output_port = file.add_output(outer_module, output_valid_signal_name, &bit_type);
+        let output_port = file.add_output(outer_module, output_valid_signal_name, &bit_type)?;
         let assignment = file.make_continuous_assignment(&output_port.to_expr(), &value.to_expr());
         file.add_member_continuous_assignment(outer_module, assignment);
     }
@@ -439,10 +440,10 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut file = VastFile::new(VastFileType::Verilog);
         let module = file.add_module("add32");
-        let u32 = file.make_bit_vector_type(32, false);
-        let a = file.add_input(module, "a", &u32);
-        let b = file.add_input(module, "b", &u32);
-        let c = file.add_output(module, "c", &u32);
+        let u32 = file.make_bit_vector_type(32, false).unwrap();
+        let a = file.add_input(module, "a", &u32).unwrap();
+        let b = file.add_input(module, "b", &u32).unwrap();
+        let c = file.add_output(module, "c", &u32).unwrap();
         let add = file.make_add(&a.to_expr(), &b.to_expr());
         let assignment = file.make_continuous_assignment(&c.to_expr(), &add);
         file.add_member_continuous_assignment(module, assignment);

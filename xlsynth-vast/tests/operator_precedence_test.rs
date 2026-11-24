@@ -17,20 +17,20 @@ struct Operands {
 /// Creates a module containing four identically typed named inputs.
 fn named_operands(file: &mut VastFile) -> Operands {
     let module = file.add_module("precedence");
-    let byte = file.make_bit_vector_type(8, false);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
     Operands {
         module,
-        a: file.add_input(module, "a", &byte).to_expr(),
-        b: file.add_input(module, "b", &byte).to_expr(),
-        c: file.add_input(module, "c", &byte).to_expr(),
-        d: file.add_input(module, "d", &byte).to_expr(),
+        a: file.add_input(module, "a", &byte).unwrap().to_expr(),
+        b: file.add_input(module, "b", &byte).unwrap().to_expr(),
+        c: file.add_input(module, "c", &byte).unwrap().to_expr(),
+        d: file.add_input(module, "d", &byte).unwrap().to_expr(),
     }
 }
 
 /// Appends a named eight-bit output and its complete continuous assignment.
 fn add_output_assignment(file: &mut VastFile, module: VastModule, name: &str, value: &Expr) {
-    let byte = file.make_bit_vector_type(8, false);
-    let output = file.add_output(module, name, &byte);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let output = file.add_output(module, name, &byte).unwrap();
     let assignment = file.make_continuous_assignment(&output.to_expr(), value);
     file.add_member_continuous_assignment(module, assignment);
 }

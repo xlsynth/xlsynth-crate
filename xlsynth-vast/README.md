@@ -20,9 +20,9 @@ use xlsynth_vast::{VastFile, VastFileType};
 
 let mut file = VastFile::new(VastFileType::SystemVerilog);
 let module = file.add_module("passthrough");
-let data_type = file.make_bit_vector_type(8, false);
-let input = file.add_input(module, "input_data", &data_type);
-let output = file.add_output(module, "output_data", &data_type);
+let data_type = file.make_bit_vector_type(8, false).unwrap();
+let input = file.add_input(module, "input_data", &data_type).unwrap();
+let output = file.add_output(module, "output_data", &data_type).unwrap();
 let assignment = file.make_continuous_assignment(&output.to_expr(), &input.to_expr());
 file.add_member_continuous_assignment(module, assignment);
 
@@ -35,6 +35,22 @@ assert_eq!(
 Reusable register-building and expression-reduction utilities are available
 through `xlsynth_vast::helpers`. Configuration-specific register templates are
 provided separately by `xlsynth::vast_helpers`.
+
+Module headers support package imports, value and type parameters, required
+parameters, and `localparam` declarations. Use `add_value_parameter_port` and
+`add_type_parameter_port` for structured declarations. `SvArgument` keeps value
+expressions and data types distinct at instance parameter, system-function, and
+preprocessor-macro boundaries. Use the corresponding `_with_arguments` builders
+for mixed arguments; the existing expression-only builders remain available.
+Builders report invalid widths, dimensions, duplicate declarations, and argument
+lists as `Result<_, VastError>`.
+Imports can be added at file, module-header, or module-body scope. External
+value references, four-state literals, and named struct assignment patterns can
+be used in defaults. Native types include `bit`, `string`, `byte`, `shortint`,
+`longint`, and `time`; time literals and module timescales are also supported.
+The legacy `make_bit_vector_type` creates four-state logic; use
+`make_two_state_bit_vector_type` for a SystemVerilog `bit` vector.
+Set `SLANG_PATH` when running tests to elaborate representative emitted SV.
 
 Use `VastFile::add_inout` for a public bidirectional net and
 `VastFile::add_tran` to connect two nets in both directions. A width of one
@@ -62,7 +78,7 @@ use xlsynth_vast::{VastFile, VastFileType};
 
 let mut file = VastFile::new(VastFileType::SystemVerilog);
 let module = file.add_module("arithmetic");
-let byte = file.make_bit_vector_type(8, false);
+let byte = file.make_bit_vector_type(8, false).unwrap();
 let helper = file.add_function(module, "add_bytes", &byte).unwrap();
 let lhs = file.function_add_input(helper, "lhs", &byte).unwrap();
 let rhs = file.function_add_input(helper, "rhs", &byte).unwrap();
@@ -73,7 +89,7 @@ file.block_add_blocking_assignment(
     &sum,
 );
 
-let call = file.make_function_call("add_bytes", &[&lhs.to_expr(), &rhs.to_expr()]);
+let call = file.make_function_call("add_bytes", &[&lhs.to_expr(), &rhs.to_expr()]).unwrap();
 assert_eq!(file.emit_expression(&call), "add_bytes(lhs, rhs)");
 ```
 
@@ -94,3 +110,4 @@ These bounds apply to the represented value, not the declared source width.
 
 Use `VastFile::make_unsized_decimal_literal` for signed decimal values across
 the complete `i32` range, including negative values.
+`make_four_state_binary_literal` preserves each `x` and `z` bit of a sized value.

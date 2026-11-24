@@ -62,7 +62,9 @@ impl BlockEmitter<'_, '_> {
             .arithmetic_helpers
             .get(&helper)
             .expect("arithmetic helper was predeclared");
-        Ok(self.file.make_function_call(name, &[&lhs.expr, &rhs.expr]))
+        Ok(self
+            .file
+            .make_function_call(name, &[&lhs.expr, &rhs.expr])?)
     }
 
     /// Uses explicit signed temporaries and result widths to contain SV sizing.
@@ -73,12 +75,12 @@ impl BlockEmitter<'_, '_> {
     ) -> Result<(), BlockCodegenError> {
         let width = helper.width;
         let partial = matches!(helper.kind, ArithmeticKind::Multiply { partial: true, .. });
-        let result_type = self.bits_type(if partial { 2 * width } else { width });
+        let result_type = self.bits_type(if partial { 2 * width } else { width })?;
         let handle = self.file.add_function(self.module, name, &result_type)?;
         // Zero-width numeric operands are represented by a constant scalar
         // zero.
-        let lhs_type = self.bits_type(helper.lhs_width.max(1));
-        let rhs_type = self.bits_type(helper.rhs_width.max(1));
+        let lhs_type = self.bits_type(helper.lhs_width.max(1))?;
+        let rhs_type = self.bits_type(helper.rhs_width.max(1))?;
         let lhs = self
             .file
             .function_add_logic_input(handle, "lhs", &lhs_type)?;
@@ -108,11 +110,11 @@ impl BlockEmitter<'_, '_> {
                 let product = if signed {
                     let signed_lhs_type = self
                         .file
-                        .make_bit_vector_type(helper.lhs_width.max(1) as i64, true);
+                        .make_bit_vector_type(helper.lhs_width.max(1) as i64, true)?;
                     let signed_rhs_type = self
                         .file
-                        .make_bit_vector_type(helper.rhs_width.max(1) as i64, true);
-                    let signed_result_type = self.file.make_bit_vector_type(width as i64, true);
+                        .make_bit_vector_type(helper.rhs_width.max(1) as i64, true)?;
+                    let signed_result_type = self.file.make_bit_vector_type(width as i64, true)?;
                     let signed_lhs =
                         self.file
                             .function_add_logic(handle, "signed_lhs", &signed_lhs_type)?;
@@ -124,8 +126,8 @@ impl BlockEmitter<'_, '_> {
                         "signed_result",
                         &signed_result_type,
                     )?;
-                    let left = self.file.make_function_call("$signed", &[&lhs.to_expr()]);
-                    let right = self.file.make_function_call("$signed", &[&rhs.to_expr()]);
+                    let left = self.file.make_function_call("$signed", &[&lhs.to_expr()])?;
+                    let right = self.file.make_function_call("$signed", &[&rhs.to_expr()])?;
                     self.file
                         .block_add_blocking_assignment(body, &signed_lhs.to_expr(), &left);
                     self.file
@@ -139,12 +141,12 @@ impl BlockEmitter<'_, '_> {
                         &multiplied,
                     );
                     self.file
-                        .make_function_call("$unsigned", &[&signed_result.to_expr()])
+                        .make_function_call("$unsigned", &[&signed_result.to_expr()])?
                 } else {
                     self.file.make_mul(&lhs.to_expr(), &rhs.to_expr())
                 };
                 if partial {
-                    let part_type = self.bits_type(width);
+                    let part_type = self.bits_type(width)?;
                     let product_name = if signed { "unsigned_result" } else { "result" };
                     let product_ref =
                         self.file

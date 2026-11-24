@@ -40,7 +40,7 @@ fn includes_multiline_comments_and_blank_lines_preserve_file_order() {
     file.add_blank_line(separator);
     let module = file.add_module("first");
     let scalar = file.make_scalar_type();
-    file.add_wire(module, "ready", &scalar);
+    file.add_wire(module, "ready", &scalar).unwrap();
     file.add_include("defs/trailer.svh");
     file.add_module("second");
 
@@ -65,14 +65,14 @@ fn mixed_port_directions_data_kinds_and_external_types_keep_declaration_order() 
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("interfaces");
     let scalar = file.make_scalar_type();
-    let signed_byte = file.make_bit_vector_type(8, true);
+    let signed_byte = file.make_bit_vector_type(8, true).unwrap();
     let external = file.make_extern_package_type("bus_pkg", "payload_t");
 
-    file.add_logic_input(module, "clk", &scalar);
-    file.add_output(module, "sample", &signed_byte);
-    file.add_inout(module, "pad", &scalar);
-    file.add_input(module, "payload", &external);
-    file.add_logic_output(module, "valid", &scalar);
+    file.add_logic_input(module, "clk", &scalar).unwrap();
+    file.add_output(module, "sample", &signed_byte).unwrap();
+    file.add_inout(module, "pad", &scalar).unwrap();
+    file.add_input(module, "payload", &external).unwrap();
+    file.add_logic_output(module, "valid", &scalar).unwrap();
 
     let directions: Vec<_> = file
         .module_ports(module)
@@ -107,11 +107,13 @@ endmodule
 fn typed_and_untyped_parameter_ports_emit_without_io_ports() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("parameters_only");
-    let byte = file.make_bit_vector_type(8, false);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
     let five = plain(&mut file, 5);
     let seven = plain(&mut file, 7);
-    file.add_typed_parameter_port(module, "TypedParam", &byte, &five);
-    file.add_parameter_port(module, "UntypedParam", &seven);
+    file.add_typed_parameter_port(module, "TypedParam", &byte, &five)
+        .unwrap();
+    file.add_parameter_port(module, "UntypedParam", &seven)
+        .unwrap();
 
     let expected = r#"module parameters_only #(
   parameter logic [7:0] TypedParam = 5,
@@ -128,13 +130,18 @@ fn parameter_ports_and_symbolic_io_widths_share_one_module_header() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("parameterized");
     let width_default = plain(&mut file, 12);
-    let width = file.add_parameter_port(module, "Width", &width_default);
-    let signed_word = file.make_bit_vector_type(16, true);
+    let width = file
+        .add_parameter_port(module, "Width", &width_default)
+        .unwrap();
+    let signed_word = file.make_bit_vector_type(16, true).unwrap();
     let limit_default = plain(&mut file, 5);
-    file.add_typed_parameter_port(module, "Limit", &signed_word, &limit_default);
-    let dynamic = file.make_bit_vector_type_expr(&width.to_expr(), false);
-    file.add_logic_input(module, "payload", &dynamic);
-    file.add_logic_output(module, "result", &dynamic);
+    file.add_typed_parameter_port(module, "Limit", &signed_word, &limit_default)
+        .unwrap();
+    let dynamic = file
+        .make_bit_vector_type_expr(&width.to_expr(), false)
+        .unwrap();
+    file.add_logic_input(module, "payload", &dynamic).unwrap();
+    file.add_logic_output(module, "result", &dynamic).unwrap();
 
     let expected = r#"module parameterized #(
   parameter Width = 12,
@@ -154,17 +161,17 @@ fn mixed_declarations_keep_insertion_order_signedness_and_packed_dimensions() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("definitions");
     let scalar = file.make_scalar_type();
-    let signed_byte = file.make_bit_vector_type(8, true);
-    let packed = file.make_packed_array_type(signed_byte, &[2, 3]);
+    let signed_byte = file.make_bit_vector_type(8, true).unwrap();
+    let packed = file.make_packed_array_type(signed_byte, &[2, 3]).unwrap();
     let external = file.make_extern_package_type("types", "state_t");
 
-    file.add_wire(module, "first", &scalar);
+    file.add_wire(module, "first", &scalar).unwrap();
     file.add_reg(module, "counter", &signed_byte)
         .expect("unique register");
     file.add_logic(module, "state", &signed_byte)
         .expect("unique logic variable");
-    file.add_wire(module, "matrix", &packed);
-    file.add_wire(module, "external", &external);
+    file.add_wire(module, "matrix", &packed).unwrap();
+    file.add_wire(module, "external", &external).unwrap();
 
     let expected = r#"module definitions;
   wire first;
@@ -181,9 +188,9 @@ endmodule
 fn verilog_unpacked_register_arrays_retain_packed_dimensions_and_ranges() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("verilog_arrays");
-    let nibble = file.make_bit_vector_type(4, false);
-    let packed = file.make_packed_array_type(nibble, &[3, 2]);
-    let array = file.make_unpacked_array_type(packed, &[4, 5]);
+    let nibble = file.make_bit_vector_type(4, false).unwrap();
+    let packed = file.make_packed_array_type(nibble, &[3, 2]).unwrap();
+    let array = file.make_unpacked_array_type(packed, &[4, 5]).unwrap();
     file.add_reg(module, "values", &array)
         .expect("unique array register");
 
@@ -198,9 +205,9 @@ endmodule
 fn systemverilog_unpacked_register_arrays_retain_packed_dimensions_and_sizes() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("systemverilog_arrays");
-    let nibble = file.make_bit_vector_type(4, false);
-    let packed = file.make_packed_array_type(nibble, &[3, 2]);
-    let array = file.make_unpacked_array_type(packed, &[4, 5]);
+    let nibble = file.make_bit_vector_type(4, false).unwrap();
+    let packed = file.make_packed_array_type(nibble, &[3, 2]).unwrap();
+    let array = file.make_unpacked_array_type(packed, &[4, 5]).unwrap();
     file.add_reg(module, "values", &array)
         .expect("unique array register");
 
@@ -219,22 +226,25 @@ fn parameters_and_localparams_preserve_integer_signedness_and_declared_types() {
     let unsigned_integer = file.make_integer_type(false);
     let integer_definition = file.make_def("UnsignedInteger", DataKind::Integer, &unsigned_integer);
     let seven = plain(&mut file, 7);
-    file.add_parameter_with_def(module, &integer_definition, &seven);
+    file.add_parameter_with_def(module, &integer_definition, &seven)
+        .unwrap();
 
     let signed_int = file.make_int_type(true);
     let int_definition = file.make_def("SignedInt", DataKind::Int, &signed_int);
     let nine = plain(&mut file, 9);
-    file.add_typed_localparam(module, &int_definition, &nine);
+    file.add_typed_localparam(module, &int_definition, &nine)
+        .unwrap();
 
-    let byte = file.make_bit_vector_type(8, false);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
     let byte_definition = file.make_def("Mask", DataKind::Logic, &byte);
     let mask = hex(&mut file, "bits[8]:0xA5");
-    file.add_typed_localparam(module, &byte_definition, &mask);
+    file.add_typed_localparam(module, &byte_definition, &mask)
+        .unwrap();
 
     let eleven = plain(&mut file, 11);
-    file.add_int_localparam(module, "AutoInt", &eleven);
+    file.add_int_localparam(module, "AutoInt", &eleven).unwrap();
     let all_ones = file.make_unsized_one_literal();
-    file.add_localparam(module, "AllOnes", &all_ones);
+    file.add_localparam(module, "AllOnes", &all_ones).unwrap();
 
     let expected = r#"module constants;
   parameter integer unsigned UnsignedInteger = 7;
@@ -252,10 +262,10 @@ fn always_ff_supports_positive_clock_negative_reset_and_nested_reset_logic() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("async_reset");
     let scalar = file.make_scalar_type();
-    let byte = file.make_bit_vector_type(8, false);
-    let clock = file.add_input(module, "clock", &scalar);
-    let reset_n = file.add_input(module, "reset_n", &scalar);
-    let data = file.add_input(module, "data", &byte);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let clock = file.add_input(module, "clock", &scalar).unwrap();
+    let reset_n = file.add_input(module, "reset_n", &scalar).unwrap();
+    let data = file.add_input(module, "data", &byte).unwrap();
     let register = file
         .add_reg(module, "state", &byte)
         .expect("unique state register");
@@ -296,9 +306,9 @@ endmodule
 fn always_at_joins_multiple_level_sensitive_logic_references() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("level_sensitive");
-    let word = file.make_bit_vector_type(32, false);
-    let first = file.add_input(module, "first", &word);
-    let second = file.add_input(module, "second", &word);
+    let word = file.make_bit_vector_type(32, false).unwrap();
+    let first = file.add_input(module, "first", &word).unwrap();
+    let second = file.add_input(module, "second", &word).unwrap();
     let result = file
         .add_reg(module, "result", &word)
         .expect("unique result register");
@@ -329,7 +339,7 @@ fn always_comb_interleaves_comments_blank_lines_inline_and_both_assignment_kinds
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("mixed_block");
     let scalar = file.make_scalar_type();
-    let input = file.add_input(module, "input_bit", &scalar);
+    let input = file.add_input(module, "input_bit", &scalar).unwrap();
     let first = file
         .add_reg(module, "first", &scalar)
         .expect("unique first register");
@@ -368,8 +378,8 @@ fn reusable_assignment_handles_remain_distinct_and_stable_during_block_construct
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("assignment_handles");
     let scalar = file.make_scalar_type();
-    let clock = file.add_input(module, "clock", &scalar);
-    let data = file.add_input(module, "data", &scalar);
+    let clock = file.add_input(module, "clock", &scalar).unwrap();
+    let data = file.add_input(module, "data", &scalar).unwrap();
     let combinational = file
         .add_reg(module, "comb", &scalar)
         .expect("unique combinational register");
@@ -420,9 +430,9 @@ fn combinational_conditionals_emit_multiple_else_if_arms_and_ordered_else_statem
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("priority");
     let scalar = file.make_scalar_type();
-    let first = file.add_input(module, "first", &scalar);
-    let second = file.add_input(module, "second", &scalar);
-    let third = file.add_input(module, "third", &scalar);
+    let first = file.add_input(module, "first", &scalar).unwrap();
+    let second = file.add_input(module, "second", &scalar).unwrap();
+    let third = file.add_input(module, "third", &scalar).unwrap();
     let primary = file
         .add_reg(module, "primary", &scalar)
         .expect("unique primary register");
@@ -478,8 +488,8 @@ fn conditional_blocks_can_nest_inside_unconditional_else_arms() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("nested_conditionals");
     let scalar = file.make_scalar_type();
-    let first = file.add_input(module, "first", &scalar);
-    let second = file.add_input(module, "second", &scalar);
+    let first = file.add_input(module, "first", &scalar).unwrap();
+    let second = file.add_input(module, "second", &scalar).unwrap();
     let output = file
         .add_reg(module, "output_bit", &scalar)
         .expect("unique output register");
@@ -523,10 +533,10 @@ endmodule
 fn case_statements_emit_multiple_arms_default_comments_and_blocking_assignments() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("state_case");
-    let state_type = file.make_bit_vector_type(2, false);
+    let state_type = file.make_bit_vector_type(2, false).unwrap();
     let scalar = file.make_scalar_type();
-    let selector = file.add_input(module, "state", &state_type);
-    let value = file.add_input(module, "value", &scalar);
+    let selector = file.add_input(module, "state", &state_type).unwrap();
+    let value = file.add_input(module, "value", &scalar).unwrap();
     let output = file
         .add_reg(module, "next", &scalar)
         .expect("unique next register");
@@ -576,10 +586,10 @@ fn module_scope_conditionals_can_drive_continuous_assignments() {
     let module = file.add_module("parameter_branch");
     let one = plain(&mut file, 1);
     let two = plain(&mut file, 2);
-    let first = file.add_parameter(module, "A", &one);
-    let second = file.add_parameter(module, "B", &two);
+    let first = file.add_parameter(module, "A", &one).unwrap();
+    let second = file.add_parameter(module, "B", &two).unwrap();
     let scalar = file.make_scalar_type();
-    let output = file.add_wire(module, "out", &scalar);
+    let output = file.add_wire(module, "out", &scalar).unwrap();
     let equal = file.make_eq(&first.to_expr(), &second.to_expr());
     let conditional = file.add_conditional(module, &equal);
     let consequent = file.conditional_then_block(conditional);
@@ -627,12 +637,14 @@ endmodule
 fn generate_loops_emit_indexed_assignments_comments_blank_lines_and_inline_text() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("lane_copy");
-    let byte = file.make_bit_vector_type(8, false);
-    let source = file.add_input(module, "source", &byte);
-    let target = file.add_output(module, "target", &byte);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let source = file.add_input(module, "source", &byte).unwrap();
+    let target = file.add_output(module, "target", &byte).unwrap();
     let zero = plain(&mut file, 0);
     let eight = plain(&mut file, 8);
-    let generate = file.add_generate_loop(module, "i", &zero, &eight, Some("lanes"));
+    let generate = file
+        .add_generate_loop(module, "i", &zero, &eight, Some("lanes"))
+        .unwrap();
     let index = file.generate_genvar(generate).to_expr();
     let lhs = file.make_index_expr(&target.to_indexable_expr(), &index);
     let rhs = file.make_index_expr(&source.to_indexable_expr(), &index);
@@ -666,14 +678,18 @@ fn nested_generate_loops_support_unlabeled_inner_blocks_and_multidimensional_sel
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("nested_generate");
     let one = plain(&mut file, 1);
-    let vector_element = file.make_bit_vector_type_expr(&one, false);
-    let matrix = file.make_packed_array_type(vector_element, &[4, 3]);
-    let source = file.add_wire(module, "source", &matrix);
-    let target = file.add_wire(module, "target", &matrix);
+    let vector_element = file.make_bit_vector_type_expr(&one, false).unwrap();
+    let matrix = file
+        .make_packed_array_type(vector_element, &[4, 3])
+        .unwrap();
+    let source = file.add_wire(module, "source", &matrix).unwrap();
+    let target = file.add_wire(module, "target", &matrix).unwrap();
     let zero = plain(&mut file, 0);
     let four = plain(&mut file, 4);
     let three = plain(&mut file, 3);
-    let outer = file.add_generate_loop(module, "i", &zero, &four, Some("rows"));
+    let outer = file
+        .add_generate_loop(module, "i", &zero, &four, Some("rows"))
+        .unwrap();
     let outer_index = file.generate_genvar(outer).to_expr();
     let inner = file.generate_add_generate_loop(outer, "j", &zero, &three, None);
     let inner_index = file.generate_genvar(inner).to_expr();
@@ -701,18 +717,20 @@ fn generate_loops_can_contain_typed_localparams_and_all_procedural_block_kinds()
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("generated_state");
     let scalar = file.make_scalar_type();
-    let clock = file.add_input(module, "clock", &scalar);
-    let data = file.add_input(module, "data", &scalar);
+    let clock = file.add_input(module, "clock", &scalar).unwrap();
+    let data = file.add_input(module, "data", &scalar).unwrap();
     let state = file
         .add_reg(module, "state", &scalar)
         .expect("unique state register");
     let zero = plain(&mut file, 0);
     let two = plain(&mut file, 2);
-    let generate = file.add_generate_loop(module, "i", &zero, &two, Some("g"));
+    let generate = file
+        .add_generate_loop(module, "i", &zero, &two, Some("g"))
+        .unwrap();
 
     let three = plain(&mut file, 3);
     file.generate_add_localparam(generate, "Depth", &three);
-    let nibble = file.make_bit_vector_type(4, false);
+    let nibble = file.make_bit_vector_type(4, false).unwrap();
     let limit_definition = file.make_def("Limit", DataKind::Logic, &nibble);
     let five = hex(&mut file, "bits[4]:5");
     file.generate_add_typed_localparam(generate, &limit_definition, &five);
@@ -758,25 +776,29 @@ fn generated_instantiations_keep_parameters_open_ports_and_macro_statements() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("generated_instances");
     let scalar = file.make_scalar_type();
-    let clock = file.add_input(module, "clock", &scalar);
-    let output = file.add_output(module, "out", &scalar);
+    let clock = file.add_input(module, "clock", &scalar).unwrap();
+    let output = file.add_output(module, "out", &scalar).unwrap();
     let zero = plain(&mut file, 0);
     let one = plain(&mut file, 1);
-    let generate = file.add_generate_loop(module, "i", &zero, &one, Some("instances"));
+    let generate = file
+        .add_generate_loop(module, "i", &zero, &one, Some("instances"))
+        .unwrap();
 
     let comment = file.make_comment("instantiate one lane");
     file.generate_add_comment(generate, &comment);
     let four = plain(&mut file, 4);
     let clock_expression = clock.to_expr();
     let output_expression = output.to_expr();
-    let instantiation = file.make_instantiation(
-        "lane",
-        "lane_instance",
-        &["Width"],
-        &[&four],
-        &["clock", "out", "unused"],
-        &[Some(&clock_expression), Some(&output_expression), None],
-    );
+    let instantiation = file
+        .make_instantiation(
+            "lane",
+            "lane_instance",
+            &["Width"],
+            &[&four],
+            &["clock", "out", "unused"],
+            &[Some(&clock_expression), Some(&output_expression), None],
+        )
+        .unwrap();
     file.generate_add_instantiation(generate, &instantiation);
     file.generate_add_blank_line(generate);
     let macro_ref = file.make_macro_ref_with_args("TRACE_LANE", &[&one]);
@@ -809,10 +831,10 @@ fn instantiations_preserve_macro_parameters_multiple_named_ports_and_open_connec
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("uart_wrapper");
     let scalar = file.make_scalar_type();
-    let byte = file.make_bit_vector_type(8, false);
-    let clock = file.add_input(module, "my_clk", &scalar);
-    let payload = file.add_input(module, "my_tx_byte", &byte);
-    let ready = file.add_output(module, "ready", &scalar);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let clock = file.add_input(module, "my_clk", &scalar).unwrap();
+    let payload = file.add_input(module, "my_tx_byte", &byte).unwrap();
+    let ready = file.add_output(module, "ready", &scalar).unwrap();
 
     let default_baud = file.make_macro_ref("DEFAULT_CLOCKS_PER_BAUD");
     let eight = plain(&mut file, 8);
@@ -820,20 +842,22 @@ fn instantiations_preserve_macro_parameters_multiple_named_ports_and_open_connec
     let clock_expression = clock.to_expr();
     let payload_expression = payload.to_expr();
     let ready_expression = ready.to_expr();
-    let instance = file.make_instantiation(
-        "uart_transmitter",
-        "tx",
-        &["ClocksPerBaud", "Width"],
-        &[&baud_expression, &eight],
-        &["clk", "tx_byte", "ready", "unused"],
-        &[
-            Some(&clock_expression),
-            Some(&payload_expression),
-            Some(&ready_expression),
-            None,
-        ],
-    );
-    file.add_member_instantiation(module, instance);
+    let instance = file
+        .make_instantiation(
+            "uart_transmitter",
+            "tx",
+            &["ClocksPerBaud", "Width"],
+            &[&baud_expression, &eight],
+            &["clk", "tx_byte", "ready", "unused"],
+            &[
+                Some(&clock_expression),
+                Some(&payload_expression),
+                Some(&ready_expression),
+                None,
+            ],
+        )
+        .unwrap();
+    file.add_member_instantiation(module, instance).unwrap();
 
     let expected = r#"module uart_wrapper(
   input wire my_clk,
@@ -858,8 +882,10 @@ endmodule
 fn unparameterized_instantiations_preserve_an_explicitly_unconnected_port() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("open_connection");
-    let instance = file.make_instantiation("uart_transmitter", "tx", &[], &[], &["clk"], &[None]);
-    file.add_member_instantiation(module, instance);
+    let instance = file
+        .make_instantiation("uart_transmitter", "tx", &[], &[], &["clk"], &[None])
+        .unwrap();
+    file.add_member_instantiation(module, instance).unwrap();
 
     let expected = r#"module open_connection;
   uart_transmitter tx (
@@ -874,9 +900,9 @@ endmodule
 fn macro_statements_distinguish_absent_arguments_empty_arguments_and_semicolons() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("macros");
-    let byte = file.make_bit_vector_type(8, false);
-    let first = file.add_input(module, "a", &byte);
-    let second = file.add_input(module, "b", &byte);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let first = file.add_input(module, "a", &byte).unwrap();
+    let second = file.add_input(module, "b", &byte).unwrap();
 
     let no_arguments = file.make_macro_ref("MY_MACRO1");
     let no_arguments_statement = file.make_macro_statement(&no_arguments, true);

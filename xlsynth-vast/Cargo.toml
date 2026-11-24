@@ -13,3 +13,6 @@ workspace = true
 
 [dependencies]
 num-bigint = "0.4.6"
+
+[dev-dependencies]
+tempfile = "3.20"
