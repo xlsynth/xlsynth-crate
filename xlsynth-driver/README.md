@@ -1814,14 +1814,19 @@ Use `--clock-gating=false` to generate an ungated baseline.
   Native never invokes ABC. Both `--abc-path` and raw `--liberty` files are
   rejected unless you explicitly select `--mapper=abc`.
 - `--strategy <delay|area>` – native covering objective (default: delay).
-- `--fanout-opt <BOOL>`, `--area-recovery <BOOL>` – optimize fanout and recover
-  area on the native combinational cover before attaching flops. Each defaults
-  to true for delay and false for area. Explicitly specifying any of these three
-  native-only flags with ABC is an error, even when specifying false.
+- `--fanout-opt <BOOL>` – before attaching flops, optimize fanout on internal
+  combinational gates. After attaching flops, try buffer trees on overloaded
+  register data outputs using the actual launch and capture cells. Defaults
+  to true for native delay mapping and false for native area mapping.
+  See [Buffering register outputs](../xlsynth-g8r/docs/registered_fanout.md) for the strategy.
+- `--area-recovery <BOOL>` – recover area on the combinational cover after
+  internal fanout optimization, before attaching flops. Defaults to true for
+  native delay mapping and false for native area mapping. The ABC mapper
+  rejects explicit `--strategy`, `--fanout-opt`, and `--area-recovery` options.
 - `--g8r-resize <BOOL>` – resize the complete mapped netlist. Defaults to
   true for native delay and ABC, false for native area. An explicit value overrides the default.
-  Disabling this stage does not disable sizing/buffering inside an ABC script,
-  or the native cover's fanout optimization/area recovery.
+  This setting controls the final resizing pass independently of native fanout
+  optimization, native cover area recovery, and sizing within an ABC script.
 - `--primary-input-transition <SLEW>` – input slew in library time units for
   native delay mapping and electrical optimization (default: 0.01).
 - `--liberty-proto <PATH>` – required normalized library for cell selection.
