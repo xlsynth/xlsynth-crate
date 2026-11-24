@@ -34,7 +34,6 @@ syn = { version = "2", features = ["full", "parsing"] }
 [dev-dependencies]
 env_logger = "0.11"
 pretty_assertions = "1.4.1"
-xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }
 lazy_static = "1.4"
 criterion.workspace = true
 tempfile = "3"
