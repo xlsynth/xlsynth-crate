@@ -12858,7 +12858,6 @@ fn test_prover_first_with_timeout_and_success() {
 }
 
 #[test]
-#[cfg(feature = "unstable-dslx-specialize")]
 fn test_dslx_specialize_basic() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -13578,7 +13577,6 @@ fn test_aig2ir_ir_equiv_roundtrip_from_ir2g8r_interesting_signatures_aiger_out()
 }
 
 #[test]
-#[cfg(feature = "unstable-dslx-specialize")]
 fn test_dslx_specialize_parametric_top_binding() {
     let _ = env_logger::builder().is_test(true).try_init();
 
