@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::block_cycles::BlockHierarchy;
 use super::{BValue, Builder, BuilderError, check_name, check_package_name, checked_flat_width};
 use crate::IrValue;
 use crate::ir::{
@@ -13,8 +14,8 @@ use crate::ir::{
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_block_ids_in_place};
 use crate::ir_utils::is_valid_identifier_name;
 use crate::ir_verify::{
-    validate_opaque_extern_ports, verify_block_structure_in_package, verify_function_signature,
-    verify_package,
+    CalleeLookup, ExternModelBindings, validate_block_with_targets, validate_opaque_extern_ports,
+    verify_function_signature, verify_package,
 };
 
 /// A register belonging to exactly one block builder.
@@ -966,7 +967,12 @@ impl Builder<BlockState> {
     }
 
     /// Resolves wire ordering and verifies the completed block in its package.
-    fn finish_block(self, package: &Package) -> Result<Block, BuilderError> {
+    fn finish_block<'p>(
+        self,
+        get_block: &dyn Fn(&str) -> Option<&'p Block>,
+        get_fn: &dyn Fn(&str) -> Option<&'p ir::Fn>,
+        hierarchy: &mut BlockHierarchy,
+    ) -> Result<Block, BuilderError> {
         for &index in &self.state.wires {
             if matches!(self.graph.nodes[index].payload, NodePayload::Param) {
                 return Err(invalid(format!("wire {index} has no driver")));
@@ -976,13 +982,13 @@ impl Builder<BlockState> {
         let mut block = self.into_block();
         if has_wires {
             // Preserve a cycle witness before reordering explicit operands.
-            super::block_cycles::verify_block_combinational_cycles(&block, package)?;
+            hierarchy.check(&block, get_block)?;
             block.compact_and_toposort().map_err(invalid)?;
         }
-        verify_block_structure_in_package(&block, package, package.members.len())
+        validate_block_with_targets(&block, get_block, CalleeLookup::Verified(get_fn))
             .map_err(|error| invalid(error.to_string()))?;
         if !has_wires && (!block.instantiations.is_empty() || !block.inout_nets.is_empty()) {
-            super::block_cycles::verify_block_combinational_cycles(&block, package)?;
+            hierarchy.check(&block, get_block)?;
         }
         Ok(block)
     }
@@ -1001,7 +1007,7 @@ impl Builder<BlockState> {
                 "blocks containing calls or instances require package-aware finalization",
             ));
         }
-        self.finish_block(&empty_package("builder_context"))
+        self.finish_block(&|_| None, &|_| None, &mut BlockHierarchy::default())
     }
 
     /// Builds a one-block package with the block selected as top.
@@ -1030,12 +1036,40 @@ impl Builder<BlockState> {
             return Err(BuilderError::DuplicateName(self.graph.name.clone()));
         }
         verify_package(package).map_err(|error| invalid(error.to_string()))?;
-        self.check_callees(|name| package.get_fn(name))?;
+        let block = self.finish_for_verified_package(
+            &|name| package.get_block(name),
+            &|name| package.get_fn(name),
+            package_max_emitted_node_id(package),
+            &mut BlockHierarchy::default(),
+        )?;
+        if block.instantiations.iter().any(|instance| {
+            matches!(
+                instance.kind,
+                InstantiationKind::BehavioralExternBlock { .. }
+            )
+        }) {
+            ExternModelBindings::from_package(package)
+                .and_then(|mut bindings| bindings.try_insert_block(&block))
+                .map_err(|error| invalid(error.to_string()))?;
+        }
+        Ok(block)
+    }
+
+    /// Verifies this block and allocates IDs above those in its verified
+    /// destination.
+    pub(super) fn finish_for_verified_package<'p>(
+        self,
+        get_block: &dyn Fn(&str) -> Option<&'p Block>,
+        get_fn: &dyn Fn(&str) -> Option<&'p ir::Fn>,
+        max_node_id: usize,
+        hierarchy: &mut BlockHierarchy,
+    ) -> Result<Block, BuilderError> {
+        self.check_callees(get_fn)?;
         for instance in &self.state.instances {
             let target = &instance.definition.block;
             let actual = match &instance.signature {
                 InstanceSignature::Block(_) => {
-                    let block = package.get_block(target).ok_or_else(|| {
+                    let block = get_block(target).ok_or_else(|| {
                         invalid(format!(
                             "instance target block '{target}' is missing from package"
                         ))
@@ -1054,7 +1088,7 @@ impl Builder<BlockState> {
                     InstanceSignature::Block(block_signature(block)?)
                 }
                 InstanceSignature::Extern(_) => {
-                    let function = package.get_fn(target).ok_or_else(|| {
+                    let function = get_fn(target).ok_or_else(|| {
                         invalid(format!(
                             "external function '{target}' is missing from package"
                         ))
@@ -1073,8 +1107,8 @@ impl Builder<BlockState> {
                 )));
             }
         }
-        let mut block = self.finish_block(package)?;
-        rebase_block_ids_in_place(&mut block, package_max_emitted_node_id(package))
+        let mut block = self.finish_block(get_block, get_fn, hierarchy)?;
+        rebase_block_ids_in_place(&mut block, max_node_id)
             .map_err(|error| invalid(error.to_string()))?;
         Ok(block)
     }

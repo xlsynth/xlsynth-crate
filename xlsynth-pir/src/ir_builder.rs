@@ -1141,11 +1141,14 @@ impl InvokeSignature {
     }
 }
 
-/// Appends functions in callee-before-caller order, checking the destination
-/// once and maintaining its name and node-ID indices across insertions.
+/// Appends functions and blocks in dependency order. The exclusive borrow keeps
+/// member indices and child combinational dependencies valid across insertions.
 pub struct FunctionBatch<'p> {
     package: &'p mut ir::Package,
-    members: HashMap<String, usize>,
+    functions: HashMap<String, usize>,
+    blocks: HashMap<String, usize>,
+    hierarchy: block_cycles::BlockHierarchy,
+    extern_models: crate::ir_verify::ExternModelBindings,
     max_node_id: usize,
 }
 
@@ -1155,24 +1158,25 @@ impl<'p> FunctionBatch<'p> {
         check_package_name(&package.name)?;
         verify_package(package)
             .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
-        let mut members = HashMap::new();
+        // A pre-existing function and block may share a name. An instance's
+        // kind determines which definition it resolves to.
+        let mut functions = HashMap::new();
+        let mut blocks = HashMap::new();
         for (index, member) in package.members.iter().enumerate() {
-            // An input package may use the same name for a function and a
-            // block. Calls resolve to the function, while either occupies the
-            // name for purposes of inserting a new function.
             match member {
-                ir::PackageMember::Function(f) => {
-                    members.insert(f.name.clone(), index);
-                }
-                ir::PackageMember::Block(b) => {
-                    members.entry(b.name.clone()).or_insert(index);
-                }
-            }
+                ir::PackageMember::Function(f) => functions.insert(f.name.clone(), index),
+                ir::PackageMember::Block(b) => blocks.insert(b.name.clone(), index),
+            };
         }
         let max_node_id = package_max_emitted_node_id(package);
+        let extern_models = crate::ir_verify::ExternModelBindings::from_package(package)
+            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
         Ok(Self {
             package,
-            members,
+            functions,
+            blocks,
+            hierarchy: Default::default(),
+            extern_models,
             max_node_id,
         })
     }
@@ -1185,11 +1189,27 @@ impl<'p> FunctionBatch<'p> {
     /// Append a block that uses the batch's functions, preserving the name
     /// and ID indices for further generated functions and blocks.
     pub fn append_block(&mut self, builder: BlockBuilder) -> Result<(), BuilderError> {
-        let block = builder.build_in_package(self.package)?;
+        check_name(&builder.graph.name)?;
+        self.check_available_name(&builder.graph.name)?;
+        let block = builder.finish_for_verified_package(
+            &|name| match &self.package.members[*self.blocks.get(name)?] {
+                ir::PackageMember::Block(block) => Some(block),
+                _ => unreachable!("block index refers to a function"),
+            },
+            &|name| match &self.package.members[*self.functions.get(name)?] {
+                ir::PackageMember::Function(f) => Some(f),
+                _ => unreachable!("function index refers to a block"),
+            },
+            self.max_node_id,
+            &mut self.hierarchy,
+        )?;
+        self.extern_models
+            .try_insert_block(&block)
+            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
         for node in &block.nodes {
             self.max_node_id = self.max_node_id.max(node.text_id);
         }
-        self.members
+        self.blocks
             .insert(block.name.clone(), self.package.members.len());
         self.package.members.push(ir::PackageMember::Block(block));
         Ok(())
@@ -1198,12 +1218,10 @@ impl<'p> FunctionBatch<'p> {
     /// Append a verified function and return its package member index. A
     /// failure preserves the package and its insertion state.
     pub fn append(&mut self, builder: FnBuilder, result: BValue) -> Result<usize, BuilderError> {
-        if self.members.contains_key(&builder.graph.name) {
-            return Err(BuilderError::DuplicateName(builder.graph.name.clone()));
-        }
+        self.check_available_name(&builder.graph.name)?;
         let body = builder.finish_for_package(
             result,
-            |name| match &self.package.members[*self.members.get(name)?] {
+            |name| match &self.package.members[*self.functions.get(name)?] {
                 ir::PackageMember::Function(f) => Some(f),
                 ir::PackageMember::Block(_) => None,
             },
@@ -1217,9 +1235,17 @@ impl<'p> FunctionBatch<'p> {
             .expect("verified function has a return node")
             .text_id;
         let index = self.package.members.len();
-        self.members.insert(body.name.clone(), index);
+        self.functions.insert(body.name.clone(), index);
         self.package.members.push(ir::PackageMember::Function(body));
         Ok(index)
+    }
+
+    /// New members must have a name unused by either kind of definition.
+    fn check_available_name(&self, name: &str) -> Result<(), BuilderError> {
+        if self.functions.contains_key(name) || self.blocks.contains_key(name) {
+            return Err(BuilderError::DuplicateName(name.to_owned()));
+        }
+        Ok(())
     }
 }
 
@@ -1228,6 +1254,27 @@ mod tests {
     use super::*;
     use crate::ir_eval::{FnEvalResult, eval_fn, eval_fn_in_package};
     use crate::ir_parser::Parser;
+
+    /// Guards against accidentally rechecking the package prefix per block.
+    #[test]
+    fn block_batch_verifies_the_package_only_once() {
+        let mut package = ir::Package {
+            name: "batch_scaling".into(),
+            file_table: ir::FileTable::new(),
+            members: Vec::new(),
+            top: None,
+        };
+        crate::ir_verify::reset_package_verify_count();
+        let mut batch = FunctionBatch::new(&mut package).unwrap();
+        assert_eq!(crate::ir_verify::package_verify_count(), 1);
+        for index in 0..32 {
+            let mut block = BlockBuilder::new(&format!("block_{index}"));
+            let input = block.input_port("x", ir::Type::Bits(1)).unwrap();
+            block.output_port("y", input).unwrap();
+            batch.append_block(block).unwrap();
+        }
+        assert_eq!(crate::ir_verify::package_verify_count(), 1);
+    }
 
     fn bits(width: usize, value: u64) -> IrValue {
         IrValue::make_ubits(width, value).unwrap()
