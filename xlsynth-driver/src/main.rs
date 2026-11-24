@@ -61,7 +61,6 @@ mod dslx_fn_prove_assertions;
 mod dslx_g8r_stats;
 mod dslx_list_fns;
 mod dslx_show;
-#[cfg(feature = "unstable-dslx-specialize")]
 mod dslx_specialize;
 mod dslx_stitch_g8r_pipeline;
 mod dslx_stitch_pipeline;
@@ -1027,6 +1026,13 @@ fn main() {
                         .default_value("jsonl")
                         .action(ArgAction::Set),
                 ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-specialize")
+                .about(
+                    "Specialize parametric DSLX functions reachable from a top function within the current module",
+                )
+                .add_dslx_input_args(true),
         )
         .subcommand(
             clap::Command::new("dslx2sv-types")
@@ -4080,17 +4086,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .required(true)
                         .action(clap::ArgAction::Set),
                 )
-        )
-        ;
-
-    #[cfg(feature = "unstable-dslx-specialize")]
-    let cmd = cmd.subcommand(
-        clap::Command::new("dslx-specialize")
-            .about(
-                "Specialize parametric DSLX functions reachable from a top function within the current module",
-            )
-            .add_dslx_input_args(true),
-    );
+        );
 
     let matches = cmd.get_matches();
 
@@ -4200,7 +4196,6 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                 );
             }
         }
-        #[cfg(feature = "unstable-dslx-specialize")]
         Some(("dslx-specialize", subm)) => {
             dslx_specialize::handle_dslx_specialize(subm, &config);
         }

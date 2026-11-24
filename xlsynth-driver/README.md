@@ -2437,8 +2437,6 @@ xlsynth-driver dslx-list-fns --dslx_input_file sample-usage/src/sample.x --forma
 
 Creates a new DSLX module in which every parametric function reachable from a given top function (within the same source file) is specialized for the concrete instantiations observed in the type information. Imported functions are never specialized; invocations targeting them are left untouched.
 
-This subcommand is currently **experimental** and is only available when the `xlsynth-driver` crate is built with the Cargo feature `unstable-dslx-specialize` (disabled by default).
-
 - Required flags:
   - `--dslx_input_file <FILE>` – DSLX source containing the top.
   - `--dslx_top <NAME>` – entry function used as the root for reachability. Parameterized
@@ -2454,8 +2452,8 @@ The specialized module is printed to **stdout**. Diagnostics (parse/type errors,
 Example:
 
 ```shell
-cargo run -p xlsynth-driver --features unstable-dslx-specialize -- dslx-specialize \
-  --dslx_input_file sample-usage/src/parametric.x \
+xlsynth-driver dslx-specialize \
+  --dslx_input_file path/to/parametric.x \
   --dslx_top call
 ```
 
