@@ -62,15 +62,17 @@ fn instance_parameter_overrides_accept_quoted_string_values() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("wrapper");
     let label = file.make_string_literal("ExampleValue");
-    let instance = file.make_instantiation(
-        "example_module",
-        "example_instance",
-        &["label"],
-        &[&label],
-        &["clk"],
-        &[None],
-    );
-    file.add_member_instantiation(module, instance);
+    let instance = file
+        .make_instantiation(
+            "example_module",
+            "example_instance",
+            &["label"],
+            &[&label],
+            &["clk"],
+            &[None],
+        )
+        .unwrap();
+    file.add_member_instantiation(module, instance).unwrap();
 
     let expected = r#"module wrapper;
   example_module #(
@@ -88,19 +90,21 @@ fn mixed_string_and_numeric_instance_parameters_preserve_insertion_order() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("wrapper");
     let scalar = file.make_scalar_type();
-    let clock = file.add_input(module, "clock", &scalar).to_expr();
+    let clock = file.add_input(module, "clock", &scalar).unwrap().to_expr();
     let label = file.make_string_literal("example");
     let width = file.make_unsized_decimal_literal(64);
     let path = file.make_string_literal(r"nested\value");
-    let instance = file.make_instantiation(
-        "example_module",
-        "example_instance",
-        &["label", "Width", "path"],
-        &[&label, &width, &path],
-        &["clk", "unused"],
-        &[Some(&clock), None],
-    );
-    file.add_member_instantiation(module, instance);
+    let instance = file
+        .make_instantiation(
+            "example_module",
+            "example_instance",
+            &["label", "Width", "path"],
+            &[&label, &width, &path],
+            &["clk", "unused"],
+            &[Some(&clock), None],
+        )
+        .unwrap();
+    file.add_member_instantiation(module, instance).unwrap();
 
     let expected = r#"module wrapper(
   input wire clock
@@ -125,9 +129,9 @@ fn untyped_module_ports_body_parameters_and_localparams_accept_strings() {
     let label = file.make_string_literal("example");
     let mode = file.make_string_literal("standard");
     let setting = file.make_string_literal("default");
-    file.add_parameter_port(module, "label", &label);
-    file.add_parameter(module, "mode", &mode);
-    file.add_localparam(module, "setting", &setting);
+    file.add_parameter_port(module, "label", &label).unwrap();
+    file.add_parameter(module, "mode", &mode).unwrap();
+    file.add_localparam(module, "setting", &setting).unwrap();
 
     let expected = r#"module configured #(
   parameter label = "example"
@@ -147,11 +151,14 @@ fn typed_string_parameters_use_the_existing_external_type_representation() {
     let label = file.make_string_literal("example");
     let mode = file.make_string_literal("standard");
     let setting = file.make_string_literal("default");
-    file.add_typed_parameter_port(module, "label", &string_type, &label);
+    file.add_typed_parameter_port(module, "label", &string_type, &label)
+        .unwrap();
     let mode_definition = file.make_def("mode", DataKind::User, &string_type);
-    file.add_parameter_with_def(module, &mode_definition, &mode);
+    file.add_parameter_with_def(module, &mode_definition, &mode)
+        .unwrap();
     let setting_definition = file.make_def("setting", DataKind::User, &string_type);
-    file.add_typed_localparam(module, &setting_definition, &setting);
+    file.add_typed_localparam(module, &setting_definition, &setting)
+        .unwrap();
 
     let expected = r#"module configured #(
   parameter string label = "example"
@@ -177,5 +184,6 @@ fn instance_parameter_overrides_reject_string_handles_from_another_file() {
         &[&foreign_label],
         &[],
         &[],
-    );
+    )
+    .unwrap();
 }

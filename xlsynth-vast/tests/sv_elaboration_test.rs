@@ -72,7 +72,7 @@ fn diagnostics(output: &Output) -> String {
 fn representative_design() -> String {
     let mut f = VastFile::new(VastFileType::SystemVerilog);
     let leaf = f.add_module("Leaf");
-    f.add_module_import(leaf, "p", "*");
+    f.add_module_import(leaf, "p", "*").unwrap();
     let int = f.make_int_type(true);
     let logic = f.make_scalar_type();
     let bit = f.make_bit_type();
@@ -84,38 +84,49 @@ fn representative_design() -> String {
     let one = f.make_unsized_decimal_literal(1);
     let five = f.make_unsized_decimal_literal(5);
     let x = f.make_unsized_x_literal();
-    let width = f.add_value_parameter_port(
-        leaf,
-        "WIDTH",
-        ParameterKind::Parameter,
-        Some(&int),
-        Some(&eight),
-    );
+    let width = f
+        .add_value_parameter_port(
+            leaf,
+            "WIDTH",
+            ParameterKind::Parameter,
+            Some(&int),
+            Some(&eight),
+        )
+        .unwrap();
     f.add_value_parameter_port(
         leaf,
         "MODE",
         ParameterKind::Parameter,
         Some(&int),
         Some(&zero),
-    );
-    f.add_value_parameter_port(leaf, "REQUIRED", ParameterKind::Parameter, Some(&int), None);
-    let cfg = f.add_type_parameter_port(leaf, "Cfg", ParameterKind::Parameter, Some(&cfg_t));
-    let reset = f.make_struct_assignment_pattern(&[("valid", &one), ("tag", &five)]);
+    )
+    .unwrap();
+    f.add_value_parameter_port(leaf, "REQUIRED", ParameterKind::Parameter, Some(&int), None)
+        .unwrap();
+    let cfg = f
+        .add_type_parameter_port(leaf, "Cfg", ParameterKind::Parameter, Some(&cfg_t))
+        .unwrap();
+    let reset = f
+        .make_struct_assignment_pattern(&[("valid", &one), ("tag", &five)])
+        .unwrap();
     f.add_value_parameter_port(
         leaf,
         "RESET",
         ParameterKind::Parameter,
         Some(&cfg),
         Some(&reset),
-    );
-    f.add_value_parameter_port(leaf, "TWO", ParameterKind::Parameter, Some(&bit), Some(&x));
+    )
+    .unwrap();
+    f.add_value_parameter_port(leaf, "TWO", ParameterKind::Parameter, Some(&bit), Some(&x))
+        .unwrap();
     f.add_value_parameter_port(
         leaf,
         "FOUR",
         ParameterKind::Parameter,
         Some(&logic),
         Some(&x),
-    );
+    )
+    .unwrap();
     let period = f.make_time_literal("1.5", TimeUnit::Nanoseconds).unwrap();
     f.add_value_parameter_port(
         leaf,
@@ -123,7 +134,8 @@ fn representative_design() -> String {
         ParameterKind::Parameter,
         Some(&time),
         Some(&period),
-    );
+    )
+    .unwrap();
     let text = f.make_string_literal("a\rb");
     f.add_value_parameter_port(
         leaf,
@@ -131,78 +143,94 @@ fn representative_design() -> String {
         ParameterKind::Parameter,
         Some(&string),
         Some(&text),
-    );
-    let bits_ty = f.make_two_state_bit_vector_type(4, false);
+    )
+    .unwrap();
+    let bits_ty = f.make_two_state_bit_vector_type(4, false).unwrap();
     let raw = f.make_four_state_binary_literal("10xz").unwrap();
-    let bits = f.add_value_parameter_port(
-        leaf,
-        "BITS",
-        ParameterKind::Parameter,
-        Some(&bits_ty),
-        Some(&raw),
-    );
-    let port_type = f.make_bit_vector_type_expr(&width.to_expr(), false);
-    f.add_output(leaf, "q", &port_type);
+    let bits = f
+        .add_value_parameter_port(
+            leaf,
+            "BITS",
+            ParameterKind::Parameter,
+            Some(&bits_ty),
+            Some(&raw),
+        )
+        .unwrap();
+    let port_type = f
+        .make_bit_vector_type_expr(&width.to_expr(), false)
+        .unwrap();
+    f.add_output(leaf, "q", &port_type).unwrap();
     f.add_timeunit(
         leaf,
         TimeScaleValue {
             magnitude: TimeScaleMagnitude::One,
             unit: TimeUnit::Picoseconds,
         },
-    );
+    )
+    .unwrap();
     f.add_timeprecision(
         leaf,
         TimeScaleValue {
             magnitude: TimeScaleMagnitude::Hundred,
             unit: TimeUnit::Femtoseconds,
         },
-    );
-    let cfg_bits = f.make_function_call_with_arguments("$bits", &[SvArgument::Type(cfg)]);
-    f.add_localparam(leaf, "CFG_BITS", &cfg_bits);
-    let macro_bits = f.make_macro_ref_with_arguments(
-        "BITS_PLUS",
-        &[SvArgument::Type(cfg), SvArgument::Value(one)],
-    );
-    f.add_localparam(leaf, "MACRO_BITS", &macro_bits.to_expr());
-    let logic_vec = f.make_bit_vector_type(4, false);
-    let cast = f.make_type_cast(&logic_vec, &bits.to_expr());
-    let type_name = f.make_function_call("$typename", &[&cast]);
-    f.add_localparam(leaf, "CAST_TYPE", &type_name);
-    let cast_raw = f.make_type_cast(&logic_vec, &raw);
-    let has_x = f.make_function_call("$isunknown", &[&cast_raw]);
-    f.add_localparam(leaf, "CAST_HAS_X", &has_x);
+    )
+    .unwrap();
+    let cfg_bits = f
+        .make_function_call_with_arguments("$bits", &[SvArgument::Type(cfg)])
+        .unwrap();
+    f.add_localparam(leaf, "CFG_BITS", &cfg_bits).unwrap();
+    let macro_bits = f
+        .make_macro_ref_with_arguments(
+            "BITS_PLUS",
+            &[SvArgument::Type(cfg), SvArgument::Value(one)],
+        )
+        .unwrap();
+    f.add_localparam(leaf, "MACRO_BITS", &macro_bits.to_expr())
+        .unwrap();
+    let logic_vec = f.make_bit_vector_type(4, false).unwrap();
+    let cast = f.make_type_cast(&logic_vec, &bits.to_expr()).unwrap();
+    let type_name = f.make_function_call("$typename", &[&cast]).unwrap();
+    f.add_localparam(leaf, "CAST_TYPE", &type_name).unwrap();
+    let cast_raw = f.make_type_cast(&logic_vec, &raw).unwrap();
+    let has_x = f.make_function_call("$isunknown", &[&cast_raw]).unwrap();
+    f.add_localparam(leaf, "CAST_HAS_X", &has_x).unwrap();
 
     let top = f.add_module("Top");
-    let q8 = f.make_bit_vector_type(8, false);
-    let q12 = f.make_bit_vector_type(12, false);
-    let qa = f.add_wire(top, "qa", &q8);
-    let qb = f.add_wire(top, "qb", &q12);
+    let q8 = f.make_bit_vector_type(8, false).unwrap();
+    let q12 = f.make_bit_vector_type(12, false).unwrap();
+    let qa = f.add_wire(top, "qa", &q8).unwrap();
+    let qb = f.add_wire(top, "qb", &q12).unwrap();
     let required = f.make_unsized_decimal_literal(42);
     let twelve = f.make_unsized_decimal_literal(12);
     let qualified_cfg = f.make_extern_package_type("p", "wide_cfg_t");
-    let a = f.make_instantiation(
-        "Leaf",
-        "a",
-        &["REQUIRED"],
-        &[&required],
-        &["q"],
-        &[Some(&qa.to_expr())],
-    );
-    f.add_member_instantiation(top, a);
-    let b = f.make_instantiation_with_arguments(
-        "Leaf",
-        "b",
-        &["MODE", "WIDTH", "REQUIRED", "Cfg"],
-        &[
-            SvArgument::Value(one),
-            SvArgument::Value(twelve),
-            SvArgument::Value(required),
-            SvArgument::Type(qualified_cfg),
-        ],
-        &["q"],
-        &[Some(&qb.to_expr())],
-    );
-    f.add_member_instantiation(top, b);
+    let a = f
+        .make_instantiation(
+            "Leaf",
+            "a",
+            &["REQUIRED"],
+            &[&required],
+            &["q"],
+            &[Some(&qa.to_expr())],
+        )
+        .unwrap();
+    f.add_member_instantiation(top, a).unwrap();
+    let b = f
+        .make_instantiation_with_arguments(
+            "Leaf",
+            "b",
+            &["MODE", "WIDTH", "REQUIRED", "Cfg"],
+            &[
+                SvArgument::Value(one),
+                SvArgument::Value(twelve),
+                SvArgument::Value(required),
+                SvArgument::Type(qualified_cfg),
+            ],
+            &["q"],
+            &[Some(&qb.to_expr())],
+        )
+        .unwrap();
+    f.add_member_instantiation(top, b).unwrap();
     format!("{}\n{}\n{}", PACKAGE, f.emit(), CHECKS)
 }
 

@@ -277,10 +277,10 @@ mod tests {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("delegated_register");
         let scalar = file.make_scalar_type();
-        let clock = file.add_input(module, "clock", &scalar);
-        let reset = file.add_input(module, "reset", &scalar);
-        let enable = file.add_input(module, "enable", &scalar);
-        let data = file.add_input(module, "data", &scalar);
+        let clock = file.add_input(module, "clock", &scalar).unwrap();
+        let reset = file.add_input(module, "reset", &scalar).unwrap();
+        let enable = file.add_input(module, "enable", &scalar).unwrap();
+        let data = file.add_input(module, "data", &scalar).unwrap();
         let register = file
             .add_logic(module, "state", &scalar)
             .expect("register name is unique");
@@ -330,10 +330,10 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("templated_registers");
         let scalar = file.make_scalar_type();
-        let clock = file.add_input(module, "clock", &scalar);
-        let reset = file.add_input(module, "reset", &scalar);
-        let enable = file.add_input(module, "enable", &scalar);
-        let data = file.add_input(module, "data", &scalar);
+        let clock = file.add_input(module, "clock", &scalar).unwrap();
+        let reset = file.add_input(module, "reset", &scalar).unwrap();
+        let enable = file.add_input(module, "enable", &scalar).unwrap();
+        let data = file.add_input(module, "data", &scalar).unwrap();
         let plain = file.add_logic(module, "plain", &scalar).unwrap();
         let enabled = file.add_logic(module, "enabled", &scalar).unwrap();
         let resetting = file.add_logic(module, "resetting", &scalar).unwrap();
@@ -417,12 +417,14 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("templated_generate");
         let scalar = file.make_scalar_type();
-        let clock = file.add_input(module, "clock", &scalar);
-        let data = file.add_input(module, "data", &scalar);
+        let clock = file.add_input(module, "clock", &scalar).unwrap();
+        let data = file.add_input(module, "data", &scalar).unwrap();
         let register = file.add_logic(module, "state", &scalar).unwrap();
         let zero = file.make_unsized_decimal_literal(0);
         let one = file.make_unsized_decimal_literal(1);
-        let generate = file.add_generate_loop(module, "index", &zero, &one, Some("lanes"));
+        let generate = file
+            .add_generate_loop(module, "index", &zero, &one, Some("lanes"))
+            .unwrap();
         let options = CodegenOptions {
             reg_template: Some("REGISTER({{clock}}, {{reg}}, {{next}})".into()),
             ..CodegenOptions::default()
@@ -461,9 +463,9 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("partial_templates");
         let scalar = file.make_scalar_type();
-        let clock = file.add_input(module, "clock", &scalar);
-        let enable = file.add_input(module, "enable", &scalar);
-        let data = file.add_input(module, "data", &scalar);
+        let clock = file.add_input(module, "clock", &scalar).unwrap();
+        let enable = file.add_input(module, "enable", &scalar).unwrap();
+        let data = file.add_input(module, "data", &scalar).unwrap();
         let plain = file.add_logic(module, "plain", &scalar).unwrap();
         let enabled = file.add_logic(module, "enabled", &scalar).unwrap();
         let options = CodegenOptions {
@@ -508,8 +510,8 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("malformed_templates");
         let scalar = file.make_scalar_type();
-        let clock = file.add_input(module, "clock", &scalar);
-        let data = file.add_input(module, "data", &scalar);
+        let clock = file.add_input(module, "clock", &scalar).unwrap();
+        let data = file.add_input(module, "data", &scalar).unwrap();
         let register = file.add_logic(module, "state", &scalar).unwrap();
         let definition = RegisterDefinition {
             reg: register.to_expr(),
@@ -564,8 +566,8 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("normalized_template");
         let scalar = file.make_scalar_type();
-        let clock = file.add_input(module, "clock", &scalar);
-        let data = file.add_input(module, "data", &scalar);
+        let clock = file.add_input(module, "clock", &scalar).unwrap();
+        let data = file.add_input(module, "data", &scalar).unwrap();
         let register = file.add_logic(module, "state", &scalar).unwrap();
         let options = CodegenOptions {
             reg_template: Some("REGISTER({{ clock }}, {{ reg }}, {{ next }})".into()),
@@ -603,8 +605,8 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("missing_reset");
         let scalar = file.make_scalar_type();
-        let clock = file.add_input(module, "clock", &scalar);
-        let data = file.add_input(module, "data", &scalar);
+        let clock = file.add_input(module, "clock", &scalar).unwrap();
+        let data = file.add_input(module, "data", &scalar).unwrap();
         let register = file.add_logic(module, "state", &scalar).unwrap();
         let reset_value = file.make_literal("bits[1]:0", &LiteralFormat::Hex).unwrap();
         let definition = RegisterDefinition {
@@ -647,8 +649,8 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("foreign_template");
         let scalar = file.make_scalar_type();
-        let clock = file.add_input(module, "clock", &scalar);
-        let data = file.add_input(module, "data", &scalar);
+        let clock = file.add_input(module, "clock", &scalar).unwrap();
+        let data = file.add_input(module, "data", &scalar).unwrap();
         let first = file.add_logic(module, "first", &scalar).unwrap();
         let second = file.add_logic(module, "second", &scalar).unwrap();
         let options = CodegenOptions {

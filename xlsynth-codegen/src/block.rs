@@ -580,12 +580,14 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 continue;
             }
             validate_external_identifier(name, "port")?;
-            let data_type = self.declared_data_type(ir_type, sv_type);
+            let data_type = self.declared_data_type(ir_type, sv_type)?;
             let signal = match port {
-                BlockPort::Inout(_) => self.file.add_inout(self.module, name, &data_type),
-                BlockPort::Output(_) => self.file.add_logic_output(self.module, name, &data_type),
+                BlockPort::Inout(_) => self.file.add_inout(self.module, name, &data_type)?,
+                BlockPort::Output(_) => {
+                    self.file.add_logic_output(self.module, name, &data_type)?
+                }
                 BlockPort::Input(_) | BlockPort::Clock(_) => {
-                    self.file.add_logic_input(self.module, name, &data_type)
+                    self.file.add_logic_input(self.module, name, &data_type)?
                 }
             };
             self.ports.insert(name.to_owned(), signal);
@@ -655,8 +657,8 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 }
             } else {
                 let name = self.unique_name(&net.name);
-                let ty = self.value_type(&net.ty);
-                Value::signal(self.file.add_wire(self.module, &name, &ty)).with_type(&net.ty)
+                let ty = self.value_type(&net.ty)?;
+                Value::signal(self.file.add_wire(self.module, &name, &ty)?).with_type(&net.ty)
             };
             self.inout_nets.insert(&net.name, value);
         }
@@ -665,11 +667,15 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Chooses a declared SystemVerilog type, including optional external
     /// types.
-    fn declared_data_type(&mut self, ty: &Type, sv_type: Option<&str>) -> VastDataType {
+    fn declared_data_type(
+        &mut self,
+        ty: &Type,
+        sv_type: Option<&str>,
+    ) -> Result<VastDataType, BlockCodegenError> {
         if self.options.emit_sv_types
             && let Some(sv_type) = sv_type
         {
-            self.external_data_type(sv_type)
+            Ok(self.external_data_type(sv_type))
         } else {
             self.value_type(ty)
         }
@@ -794,7 +800,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         if register.ty.bit_count() == 0 || self.register_refs.contains_key(&register.name) {
             return Ok(());
         }
-        let data_type = self.value_type(&register.ty);
+        let data_type = self.value_type(&register.ty)?;
         let name = self.unique_name(&register.name);
         let signal = self.file.add_logic(self.module, &name, &data_type)?;
         self.register_refs.insert(register.name.clone(), signal);
@@ -1094,7 +1100,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                         validate_external_identifier(component, "input cast type")?;
                     }
                     let data_type = self.external_data_type(sv_type);
-                    *expr = self.file.make_type_cast(&data_type, expr);
+                    *expr = self.file.make_type_cast(&data_type, expr)?;
                 }
             }
             let names = connections
@@ -1123,8 +1129,8 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 &parameter_expression_refs,
                 &names,
                 &expressions,
-            );
-            self.file.add_member_instantiation(self.module, handle);
+            )?;
+            self.file.add_member_instantiation(self.module, handle)?;
         }
         Ok(())
     }
@@ -1169,22 +1175,27 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     }
 
     /// Builds the packed scalar or vector type used for one IR value.
-    pub(crate) fn bits_type(&mut self, width: usize) -> VastDataType {
-        self.file.make_bit_vector_type(width as i64, false)
+    pub(crate) fn bits_type(&mut self, width: usize) -> Result<VastDataType, BlockCodegenError> {
+        let width = i64::try_from(width).map_err(|_| {
+            BlockCodegenError::Unsupported("bit-vector width exceeds i64".to_owned())
+        })?;
+        Ok(self.file.make_bit_vector_type(width, false)?)
     }
 
     /// Preserves outer array dimensions while packing tuple leaves into bits.
-    pub(crate) fn value_type(&mut self, mut ty: &Type) -> VastDataType {
+    pub(crate) fn value_type(&mut self, mut ty: &Type) -> Result<VastDataType, BlockCodegenError> {
         let mut dimensions = Vec::new();
         while let Type::Array(array) = ty {
-            dimensions.push(array.element_count as i64);
+            dimensions.push(i64::try_from(array.element_count).map_err(|_| {
+                BlockCodegenError::Unsupported("array dimension exceeds i64".to_owned())
+            })?);
             ty = &array.element_type;
         }
-        let element = self.bits_type(ty.bit_count());
+        let element = self.bits_type(ty.bit_count())?;
         if dimensions.is_empty() {
-            element
+            Ok(element)
         } else {
-            self.file.make_packed_array_type(element, &dimensions)
+            Ok(self.file.make_packed_array_type(element, &dimensions)?)
         }
     }
 
@@ -1303,7 +1314,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     ) -> Result<LogicRef, BlockCodegenError> {
         let name = self.node_name(node_ref);
         let unique = self.unique_name(&name);
-        let ty = self.value_type(self.block.get_node_ty(node_ref));
+        let ty = self.value_type(self.block.get_node_ty(node_ref))?;
         Ok(self.file.add_logic(self.module, &unique, &ty)?)
     }
 

@@ -303,15 +303,15 @@ mod tests {
 
         // Inputs: scalar logic signals
         let scalar = file.make_scalar_type();
-        let a = file.add_input(module, "a", &scalar);
-        let b = file.add_input(module, "b", &scalar);
-        let c = file.add_input(module, "c", &scalar);
+        let a = file.add_input(module, "a", &scalar).unwrap();
+        let b = file.add_input(module, "b", &scalar).unwrap();
+        let c = file.add_input(module, "c", &scalar).unwrap();
 
         // Outputs
-        let o0 = file.add_output(module, "o0", &scalar);
-        let o1 = file.add_output(module, "o1", &scalar);
-        let o2 = file.add_output(module, "o2", &scalar);
-        let o3 = file.add_output(module, "o3", &scalar);
+        let o0 = file.add_output(module, "o0", &scalar).unwrap();
+        let o1 = file.add_output(module, "o1", &scalar).unwrap();
+        let o2 = file.add_output(module, "o2", &scalar).unwrap();
+        let o3 = file.add_output(module, "o3", &scalar).unwrap();
 
         // 0 inputs -> 0
         let e0 = logical_or_reduce(&[], false, &mut file).unwrap();
@@ -358,13 +358,13 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("regs_rst_en");
 
-        let bit1 = file.make_bit_vector_type(1, false);
-        let u8 = file.make_bit_vector_type(8, false);
+        let bit1 = file.make_bit_vector_type(1, false).unwrap();
+        let u8 = file.make_bit_vector_type(8, false).unwrap();
 
-        let clk = file.add_input(module, "clk", &bit1);
+        let clk = file.add_input(module, "clk", &bit1).unwrap();
         let clk_expr = clk.to_expr();
-        let rst = file.add_input(module, "rst", &bit1);
-        let en = file.add_input(module, "en", &bit1);
+        let rst = file.add_input(module, "rst", &bit1).unwrap();
+        let en = file.add_input(module, "en", &bit1).unwrap();
         let r = file.add_logic(module, "r", &u8).expect("add_logic r");
         let r_next = file
             .add_logic(module, "r_next", &u8)
@@ -437,12 +437,12 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("regs_no_rst");
 
-        let bit1 = file.make_bit_vector_type(1, false);
-        let u8 = file.make_bit_vector_type(8, false);
+        let bit1 = file.make_bit_vector_type(1, false).unwrap();
+        let u8 = file.make_bit_vector_type(8, false).unwrap();
 
-        let clk = file.add_input(module, "clk", &bit1);
+        let clk = file.add_input(module, "clk", &bit1).unwrap();
         let clk_expr = clk.to_expr();
-        let en = file.add_input(module, "en", &bit1);
+        let en = file.add_input(module, "en", &bit1).unwrap();
         let r = file.add_logic(module, "r", &u8).expect("add_logic r");
         let r_next = file
             .add_logic(module, "r_next", &u8)
@@ -500,13 +500,13 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("regs_mixed");
 
-        let bit1 = file.make_bit_vector_type(1, false);
-        let u8 = file.make_bit_vector_type(8, false);
+        let bit1 = file.make_bit_vector_type(1, false).unwrap();
+        let u8 = file.make_bit_vector_type(8, false).unwrap();
 
-        let clk = file.add_input(module, "clk", &bit1);
+        let clk = file.add_input(module, "clk", &bit1).unwrap();
         let clk_expr = clk.to_expr();
-        let rst = file.add_input(module, "rst", &bit1);
-        let en = file.add_input(module, "en", &bit1);
+        let rst = file.add_input(module, "rst", &bit1).unwrap();
+        let en = file.add_input(module, "en", &bit1).unwrap();
         let r1 = file.add_logic(module, "r1", &u8).expect("r1");
         let n1 = file.add_logic(module, "n1", &u8).expect("n1");
         let r2 = file.add_logic(module, "r2", &u8).expect("r2");
@@ -571,10 +571,10 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("regs_missing_rst");
 
-        let bit1 = file.make_bit_vector_type(1, false);
-        let u8 = file.make_bit_vector_type(8, false);
+        let bit1 = file.make_bit_vector_type(1, false).unwrap();
+        let u8 = file.make_bit_vector_type(8, false).unwrap();
 
-        let clk = file.add_input(module, "clk", &bit1);
+        let clk = file.add_input(module, "clk", &bit1).unwrap();
         let clk_expr = clk.to_expr();
         let r = file.add_logic(module, "r", &u8).expect("r");
         let n = file.add_logic(module, "n", &u8).expect("n");
@@ -612,15 +612,15 @@ endmodule
 
         // Inputs: scalar logic signals
         let scalar = file.make_scalar_type();
-        let a = file.add_input(module, "a", &scalar);
-        let b = file.add_input(module, "b", &scalar);
-        let c = file.add_input(module, "c", &scalar);
+        let a = file.add_input(module, "a", &scalar).unwrap();
+        let b = file.add_input(module, "b", &scalar).unwrap();
+        let c = file.add_input(module, "c", &scalar).unwrap();
 
         // Outputs
-        let o0 = file.add_output(module, "o0", &scalar);
-        let o1 = file.add_output(module, "o1", &scalar);
-        let o2 = file.add_output(module, "o2", &scalar);
-        let o3 = file.add_output(module, "o3", &scalar);
+        let o0 = file.add_output(module, "o0", &scalar).unwrap();
+        let o1 = file.add_output(module, "o1", &scalar).unwrap();
+        let o2 = file.add_output(module, "o2", &scalar).unwrap();
+        let o3 = file.add_output(module, "o3", &scalar).unwrap();
 
         // 0 inputs -> 1
         let e0 = logical_or_reduce(&[], true, &mut file).unwrap();
@@ -668,16 +668,16 @@ endmodule
         let module = file.add_module("bor");
 
         // Inputs: 8-bit vectors
-        let u8 = file.make_bit_vector_type(8, false);
-        let a = file.add_input(module, "a", &u8);
-        let b = file.add_input(module, "b", &u8);
-        let c = file.add_input(module, "c", &u8);
+        let u8 = file.make_bit_vector_type(8, false).unwrap();
+        let a = file.add_input(module, "a", &u8).unwrap();
+        let b = file.add_input(module, "b", &u8).unwrap();
+        let c = file.add_input(module, "c", &u8).unwrap();
 
         // Outputs
-        let o0 = file.add_output(module, "o0", &u8);
-        let o1 = file.add_output(module, "o1", &u8);
-        let o2 = file.add_output(module, "o2", &u8);
-        let o3 = file.add_output(module, "o3", &u8);
+        let o0 = file.add_output(module, "o0", &u8).unwrap();
+        let o1 = file.add_output(module, "o1", &u8).unwrap();
+        let o2 = file.add_output(module, "o2", &u8).unwrap();
+        let o3 = file.add_output(module, "o3", &u8).unwrap();
 
         // 0 inputs -> '0
         let e0 = bitwise_or_reduce(&[], &mut file).unwrap();
@@ -723,9 +723,9 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("logical_and_reductions");
         let scalar = file.make_scalar_type();
-        let a = file.add_input(module, "a", &scalar).to_expr();
-        let b = file.add_input(module, "b", &scalar).to_expr();
-        let c = file.add_input(module, "c", &scalar).to_expr();
+        let a = file.add_input(module, "a", &scalar).unwrap().to_expr();
+        let b = file.add_input(module, "b", &scalar).unwrap().to_expr();
+        let c = file.add_input(module, "c", &scalar).unwrap().to_expr();
 
         let cases = [
             ("empty", vec![], false),
@@ -736,7 +736,7 @@ endmodule
             ("inverted_multiple", vec![a, b, c], true),
         ];
         for (name, inputs, inverted) in cases {
-            let output = file.add_output(module, name, &scalar);
+            let output = file.add_output(module, name, &scalar).unwrap();
             let reduced = logical_and_reduce(&inputs, inverted, &mut file)
                 .expect("logical-and reduction is representable");
             let assignment = file.make_continuous_assignment(&output.to_expr(), &reduced);
@@ -769,10 +769,10 @@ endmodule
     fn bitwise_or_reduces_multidimensional_packed_array_elements_in_order() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("array_reduction");
-        let element = file.make_bit_vector_type(4, false);
-        let array = file.make_packed_array_type(element, &[2, 3]);
-        let input = file.add_input(module, "elements", &array);
-        let output = file.add_output(module, "reduced", &element);
+        let element = file.make_bit_vector_type(4, false).unwrap();
+        let array = file.make_packed_array_type(element, &[2, 3]).unwrap();
+        let input = file.add_input(module, "elements", &array).unwrap();
+        let output = file.add_output(module, "reduced", &element).unwrap();
 
         let reduced =
             bitwise_or_reduce_array_elements(&input.to_indexable_expr(), &[2, 3], &mut file)
@@ -795,14 +795,16 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("generated_register");
         let scalar = file.make_scalar_type();
-        let clock = file.add_input(module, "clock", &scalar);
-        let data = file.add_input(module, "data", &scalar);
+        let clock = file.add_input(module, "clock", &scalar).unwrap();
+        let data = file.add_input(module, "data", &scalar).unwrap();
         let state = file
             .add_logic(module, "state", &scalar)
             .expect("register name is unique");
         let zero = file.make_unsized_decimal_literal(0);
         let one = file.make_unsized_decimal_literal(1);
-        let generate = file.add_generate_loop(module, "index", &zero, &one, Some("lanes"));
+        let generate = file
+            .add_generate_loop(module, "index", &zero, &one, Some("lanes"))
+            .unwrap();
 
         add_registers(
             &clock.to_expr(),
@@ -869,7 +871,7 @@ endmodule
         let mut original = VastFile::new(VastFileType::SystemVerilog);
         let module = original.add_module("foreign_array");
         let scalar = original.make_scalar_type();
-        let foreign = original.add_input(module, "foreign", &scalar);
+        let foreign = original.add_input(module, "foreign", &scalar).unwrap();
         let mut destination = VastFile::new(VastFileType::SystemVerilog);
 
         let _ =
@@ -880,9 +882,9 @@ endmodule
     fn array_reductions_reject_empty_nonpositive_and_mismatched_dimensions() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("checked_array");
-        let element = file.make_bit_vector_type(4, false);
-        let array = file.make_packed_array_type(element, &[2, 3]);
-        let input = file.add_input(module, "elements", &array);
+        let element = file.make_bit_vector_type(4, false).unwrap();
+        let array = file.make_packed_array_type(element, &[2, 3]).unwrap();
+        let input = file.add_input(module, "elements", &array).unwrap();
         let before = file.emit();
 
         let cases: &[(&[i64], &str)] = &[
@@ -919,9 +921,9 @@ endmodule
     fn array_reductions_account_for_previously_indexed_dimensions() {
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("array_row");
-        let element = file.make_bit_vector_type(4, false);
-        let array = file.make_packed_array_type(element, &[2, 3]);
-        let input = file.add_input(module, "elements", &array);
+        let element = file.make_bit_vector_type(4, false).unwrap();
+        let array = file.make_packed_array_type(element, &[2, 3]).unwrap();
+        let input = file.add_input(module, "elements", &array).unwrap();
         let row = file.make_index(&input.to_indexable_expr(), 1);
 
         let reduced = bitwise_or_reduce_array_elements(&row.to_indexable_expr(), &[3], &mut file)
@@ -938,8 +940,10 @@ endmodule
         let mut file = VastFile::new(VastFileType::SystemVerilog);
         let module = file.add_module("large_array");
         let element = file.make_scalar_type();
-        let array = file.make_packed_array_type(element, &[i64::MAX, 3]);
-        let input = file.add_input(module, "elements", &array);
+        let array = file
+            .make_packed_array_type(element, &[i64::MAX, 3])
+            .unwrap();
+        let input = file.add_input(module, "elements", &array).unwrap();
 
         let error =
             bitwise_or_reduce_array_elements(&input.to_indexable_expr(), &[i64::MAX, 3], &mut file)

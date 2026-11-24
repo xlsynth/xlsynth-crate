@@ -35,7 +35,8 @@ fn all_seven_formats_preserve_sized_and_unsized_spellings_at_common_widths() {
             let expression = file
                 .make_literal(source, &format)
                 .expect("common-width literal should fit");
-            file.add_localparam(module, &format!("{prefix}{suffix}"), &expression);
+            file.add_localparam(module, &format!("{prefix}{suffix}"), &expression)
+                .unwrap();
         }
     }
 
@@ -152,7 +153,7 @@ fn dedicated_unsized_decimal_constructor_preserves_the_full_signed_i32_range() {
         ("Maximum", i32::MAX),
     ] {
         let expression = file.make_unsized_decimal_literal(value);
-        file.add_localparam(module, name, &expression);
+        file.add_localparam(module, name, &expression).unwrap();
     }
 
     let expected = r#"module signed_unsized_decimals;

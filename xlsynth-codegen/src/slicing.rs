@@ -82,7 +82,7 @@ impl BlockEmitter<'_, '_> {
         let name = self.slice_helpers.get(&helper).expect("predeclared helper");
         Ok(self
             .file
-            .make_function_call(name, &arguments.iter().collect::<Vec<_>>()))
+            .make_function_call(name, &arguments.iter().collect::<Vec<_>>())?)
     }
 
     /// Pads partial overlaps with zero and guards completely out-of-range
@@ -94,17 +94,17 @@ impl BlockEmitter<'_, '_> {
         start_width: usize,
         width: usize,
     ) -> Result<(), BlockCodegenError> {
-        let result_type = self.bits_type(width);
+        let result_type = self.bits_type(width)?;
         let handle = self.file.add_function(self.module, name, &result_type)?;
-        let operand_type = self.bits_type(operand_width);
+        let operand_type = self.bits_type(operand_width)?;
         let operand = self
             .file
             .function_add_logic_input(handle, "operand", &operand_type)?;
-        let start_type = self.bits_type(start_width.max(1));
+        let start_type = self.bits_type(start_width.max(1))?;
         let start = self
             .file
             .function_add_logic_input(handle, "start", &start_type)?;
-        let extended_type = self.bits_type(operand_width + width);
+        let extended_type = self.bits_type(operand_width + width)?;
         let extended = self
             .file
             .function_add_logic(handle, "extended_operand", &extended_type)?;
@@ -139,16 +139,16 @@ impl BlockEmitter<'_, '_> {
         start_width: usize,
         update_width: usize,
     ) -> Result<(), BlockCodegenError> {
-        let result_type = self.bits_type(width);
+        let result_type = self.bits_type(width)?;
         let handle = self.file.add_function(self.module, name, &result_type)?;
         let original = self
             .file
             .function_add_logic_input(handle, "to_update", &result_type)?;
-        let start_type = self.bits_type(start_width.max(1));
+        let start_type = self.bits_type(start_width.max(1))?;
         let start = self
             .file
             .function_add_logic_input(handle, "start", &start_type)?;
-        let update_type = self.bits_type(update_width);
+        let update_type = self.bits_type(update_width)?;
         let update = self
             .file
             .function_add_logic_input(handle, "update_value", &update_type)?;

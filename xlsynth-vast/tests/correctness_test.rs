@@ -12,15 +12,17 @@ use xlsynth_vast::{Expr, IndexableExpr, LiteralFormat, VastFile, VastFileType};
 fn named_scalar(file: &mut VastFile, name: &str) -> Expr {
     let module = file.add_module("source");
     let scalar = file.make_scalar_type();
-    file.add_input(module, name, &scalar).to_expr()
+    file.add_input(module, name, &scalar).unwrap().to_expr()
 }
 
 /// Adds a two-dimensional packed-array input with dimensions `[2][3]`.
 fn packed_array_input(file: &mut VastFile) -> IndexableExpr {
     let module = file.add_module("array_source");
-    let element = file.make_bit_vector_type(8, false);
-    let array = file.make_packed_array_type(element, &[2, 3]);
-    file.add_input(module, "array", &array).to_indexable_expr()
+    let element = file.make_bit_vector_type(8, false).unwrap();
+    let array = file.make_packed_array_type(element, &[2, 3]).unwrap();
+    file.add_input(module, "array", &array)
+        .unwrap()
+        .to_indexable_expr()
 }
 
 #[test]
@@ -63,21 +65,29 @@ fn maximum_width_zero_and_small_positive_literals_remain_compact() {
 }
 
 #[test]
-#[should_panic(expected = "bit-vector width must be greater than zero")]
 fn expression_based_vector_types_reject_zero_literal_widths() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let zero = file.make_unsized_decimal_literal(0);
 
-    file.make_bit_vector_type_expr(&zero, false);
+    let error = file.make_bit_vector_type_expr(&zero, false).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "bit-vector width must be greater than zero"
+    );
 }
 
 #[test]
-#[should_panic(expected = "bit-vector width must be greater than zero")]
 fn expression_based_vector_types_reject_negative_literal_widths() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let negative = file.make_unsized_decimal_literal(-1);
 
-    file.make_bit_vector_type_expr(&negative, false);
+    let error = file
+        .make_bit_vector_type_expr(&negative, false)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "bit-vector width must be greater than zero"
+    );
 }
 
 #[test]
@@ -85,8 +95,8 @@ fn expression_based_single_bit_vectors_preserve_explicit_ranges() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("explicit_one_bit");
     let one = file.make_unsized_decimal_literal(1);
-    let vector = file.make_bit_vector_type_expr(&one, false);
-    file.add_input(module, "data", &vector);
+    let vector = file.make_bit_vector_type_expr(&one, false).unwrap();
+    file.add_input(module, "data", &vector).unwrap();
 
     let expected = r#"module explicit_one_bit(
   input wire [0:0] data
@@ -102,7 +112,7 @@ fn typed_parameter_ports_preserve_builtin_and_user_defined_type_identity() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("typed_parameters");
     let scalar = file.make_scalar_type();
-    let signed_vector = file.make_bit_vector_type(8, true);
+    let signed_vector = file.make_bit_vector_type(8, true).unwrap();
     let signed_integer = file.make_integer_type(true);
     let unsigned_integer = file.make_integer_type(false);
     let signed_int = file.make_int_type(true);
@@ -121,7 +131,8 @@ fn typed_parameter_ports_preserve_builtin_and_user_defined_type_identity() {
         ("LocalPayload", local_type),
         ("PackagePayload", package_type),
     ] {
-        file.add_typed_parameter_port(module, name, &data_type, &one);
+        file.add_typed_parameter_port(module, name, &data_type, &one)
+            .unwrap();
     }
 
     let expected = r#"module typed_parameters #(
@@ -145,9 +156,9 @@ fn builtin_and_external_type_casts_preserve_type_and_signedness() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let value = named_scalar(&mut file, "value");
     let scalar = file.make_scalar_type();
-    let signed_scalar = file.make_bit_vector_type(1, true);
-    let unsigned_vector = file.make_bit_vector_type(8, false);
-    let signed_vector = file.make_bit_vector_type(8, true);
+    let signed_scalar = file.make_bit_vector_type(1, true).unwrap();
+    let unsigned_vector = file.make_bit_vector_type(8, false).unwrap();
+    let signed_vector = file.make_bit_vector_type(8, true).unwrap();
     let signed_integer = file.make_integer_type(true);
     let unsigned_integer = file.make_integer_type(false);
     let signed_int = file.make_int_type(true);
@@ -169,7 +180,7 @@ fn builtin_and_external_type_casts_preserve_type_and_signedness() {
     ];
 
     for (data_type, expected) in cases {
-        let cast = file.make_type_cast(&data_type, &value);
+        let cast = file.make_type_cast(&data_type, &value).unwrap();
         assert_eq!(file.emit_expression(&cast), expected);
     }
 }
@@ -179,15 +190,25 @@ fn vector_type_casts_preserve_symbolic_width_expressions() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("symbolic_cast");
     let default_width = file.make_unsized_decimal_literal(8);
-    let width = file.add_parameter_port(module, "WIDTH", &default_width);
+    let width = file
+        .add_parameter_port(module, "WIDTH", &default_width)
+        .unwrap();
     let one = file.make_unsized_decimal_literal(1);
     let width_plus_one = file.make_add(&width.to_expr(), &one);
-    let signed_width = file.make_bit_vector_type_expr(&width.to_expr(), true);
-    let unsigned_width_plus_one = file.make_bit_vector_type_expr(&width_plus_one, false);
-    let value = file.add_input(module, "value", &signed_width);
+    let signed_width = file
+        .make_bit_vector_type_expr(&width.to_expr(), true)
+        .unwrap();
+    let unsigned_width_plus_one = file
+        .make_bit_vector_type_expr(&width_plus_one, false)
+        .unwrap();
+    let value = file.add_input(module, "value", &signed_width).unwrap();
 
-    let signed_cast = file.make_type_cast(&signed_width, &value.to_expr());
-    let unsigned_cast = file.make_type_cast(&unsigned_width_plus_one, &value.to_expr());
+    let signed_cast = file
+        .make_type_cast(&signed_width, &value.to_expr())
+        .unwrap();
+    let unsigned_cast = file
+        .make_type_cast(&unsigned_width_plus_one, &value.to_expr())
+        .unwrap();
 
     assert_eq!(
         file.emit_expression(&signed_cast),
@@ -204,8 +225,8 @@ fn register_groups_without_required_resets_return_errors_without_mutation() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("missing_reset");
     let scalar = file.make_scalar_type();
-    let clock = file.add_input(module, "clock", &scalar);
-    let data = file.add_input(module, "data", &scalar);
+    let clock = file.add_input(module, "clock", &scalar).unwrap();
+    let data = file.add_input(module, "data", &scalar).unwrap();
     let register = file.add_logic(module, "state", &scalar).unwrap();
     let reset_value = file.make_literal("bits[1]:0", &LiteralFormat::Hex).unwrap();
     let before = file.emit();

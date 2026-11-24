@@ -74,7 +74,7 @@ impl BlockEmitter<'_, '_> {
                     .clone()
                     .unwrap_or_else(|| format!("{instantiation}_{port_name}"));
                 let name = self.unique_name(&requested);
-                let ty = self.value_type(&node.ty);
+                let ty = self.value_type(&node.ty)?;
                 let signal = self.file.add_logic(self.module, &name, &ty)?;
                 let value = Value::signal(signal).with_type(&node.ty);
                 self.connect_instance_port(instantiation, port_name, value);
@@ -498,7 +498,9 @@ impl BlockEmitter<'_, '_> {
 
     /// Returns a signed interpretation preserving the original packed width.
     fn signed(&mut self, expression: Expr) -> Expr {
-        self.file.make_function_call("$signed", &[&expression])
+        self.file
+            .make_function_call("$signed", &[&expression])
+            .expect("system function name is nonempty")
     }
 
     /// Lowers ordinary arithmetic, comparison, shift, division, and gate nodes.
@@ -522,7 +524,7 @@ impl BlockEmitter<'_, '_> {
             Binop::Shra => {
                 let signed_lhs = self.signed(lhs.expr);
                 let shifted = self.file.make_shra(&signed_lhs, &rhs.expr);
-                self.file.make_function_call("$unsigned", &[&shifted])
+                self.file.make_function_call("$unsigned", &[&shifted])?
             }
             Binop::Eq => self.file.make_eq(&lhs.expr, &rhs.expr),
             Binop::Ne => self.file.make_ne(&lhs.expr, &rhs.expr),
@@ -589,7 +591,7 @@ impl BlockEmitter<'_, '_> {
             self.file.make_div(&left, &right)
         };
         if matches!(op, Binop::Sdiv | Binop::Smod) {
-            arithmetic = self.file.make_function_call("$unsigned", &[&arithmetic]);
+            arithmetic = self.file.make_function_call("$unsigned", &[&arithmetic])?;
         }
         if op == Binop::Sdiv {
             let minimum = self
@@ -745,7 +747,7 @@ impl BlockEmitter<'_, '_> {
                 // chained dynamic indices.
                 let name = self.node_name(node_ref);
                 let name = self.unique_name(&format!("{name}__dim{dimension}"));
-                let data_type = self.value_type(ty);
+                let data_type = self.value_type(ty)?;
                 let signal = self.file.add_logic(self.module, &name, &data_type)?;
                 let assignment = self
                     .file
@@ -955,7 +957,7 @@ impl BlockEmitter<'_, '_> {
                 .generate_add_generate_loop(parent, &variable, &zero, &limit, Some(&label))
         } else {
             self.file
-                .add_generate_loop(self.module, &variable, &zero, &limit, Some(&label))
+                .add_generate_loop(self.module, &variable, &zero, &limit, Some(&label))?
         })
     }
 

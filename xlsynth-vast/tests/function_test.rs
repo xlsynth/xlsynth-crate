@@ -8,7 +8,7 @@ use xlsynth_vast::{VastFile, VastFileType};
 fn casez_function_patterns_and_default_have_explicit_assignments() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("encoder");
-    let ty = file.make_bit_vector_type(2, false);
+    let ty = file.make_bit_vector_type(2, false).unwrap();
     let function = file.add_function(module, "leading", &ty).unwrap();
     let input = file
         .function_add_logic_input(function, "value", &ty)
@@ -99,11 +99,11 @@ endmodule
 fn automatic_function_matches_compact_systemverilog_helper_layout() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("multiply");
-    let unsigned = file.make_bit_vector_type(32, false);
-    let signed = file.make_bit_vector_type(32, true);
-    let left = file.add_input(module, "left", &unsigned);
-    let right = file.add_input(module, "right", &unsigned);
-    let output = file.add_output(module, "output_value", &unsigned);
+    let unsigned = file.make_bit_vector_type(32, false).unwrap();
+    let signed = file.make_bit_vector_type(32, true).unwrap();
+    let left = file.add_input(module, "left", &unsigned).unwrap();
+    let right = file.add_input(module, "right", &unsigned).unwrap();
+    let output = file.add_output(module, "output_value", &unsigned).unwrap();
 
     let helper = file
         .add_function(module, "multiply_signed", &unsigned)
@@ -124,16 +124,24 @@ fn automatic_function_matches_compact_systemverilog_helper_layout() {
         .function_add_reg(helper, "signed_result", &signed)
         .expect("result local should succeed");
     let body = file.function_body(helper);
-    let lhs_cast = file.make_function_call("$signed", &[&lhs.to_expr()]);
+    let lhs_cast = file
+        .make_function_call("$signed", &[&lhs.to_expr()])
+        .unwrap();
     file.block_add_blocking_assignment(body, &signed_lhs.to_expr(), &lhs_cast);
-    let rhs_cast = file.make_function_call("$signed", &[&rhs.to_expr()]);
+    let rhs_cast = file
+        .make_function_call("$signed", &[&rhs.to_expr()])
+        .unwrap();
     file.block_add_blocking_assignment(body, &signed_rhs.to_expr(), &rhs_cast);
     let product = file.make_mul(&signed_lhs.to_expr(), &signed_rhs.to_expr());
     file.block_add_blocking_assignment(body, &signed_result.to_expr(), &product);
-    let result = file.make_function_call("$unsigned", &[&signed_result.to_expr()]);
+    let result = file
+        .make_function_call("$unsigned", &[&signed_result.to_expr()])
+        .unwrap();
     file.block_add_blocking_assignment(body, &file.function_result(helper).to_expr(), &result);
 
-    let call = file.make_function_call("multiply_signed", &[&left.to_expr(), &right.to_expr()]);
+    let call = file
+        .make_function_call("multiply_signed", &[&left.to_expr(), &right.to_expr()])
+        .unwrap();
     let assignment = file.make_continuous_assignment(&output.to_expr(), &call);
     file.add_member_continuous_assignment(module, assignment);
 
@@ -166,8 +174,8 @@ fn scalar_functions_use_systemverilog_logic_return_types() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("predicates");
     let scalar = file.make_scalar_type();
-    let unsigned = file.make_bit_vector_type(8, false);
-    let output = file.add_output(module, "enabled", &scalar);
+    let unsigned = file.make_bit_vector_type(8, false).unwrap();
+    let output = file.add_output(module, "enabled", &scalar).unwrap();
 
     let helper = file
         .add_function(module, "constant_predicate", &scalar)
@@ -179,7 +187,7 @@ fn scalar_functions_use_systemverilog_logic_return_types() {
         &one,
     );
 
-    let signed = file.make_bit_vector_type(1, true);
+    let signed = file.make_bit_vector_type(1, true).unwrap();
     let signed_helper = file
         .add_function(module, "signed_predicate", &signed)
         .expect("signed scalar function should be supported");
@@ -193,7 +201,7 @@ fn scalar_functions_use_systemverilog_logic_return_types() {
         &selected.to_expr(),
     );
 
-    let call = file.make_function_call("constant_predicate", &[]);
+    let call = file.make_function_call("constant_predicate", &[]).unwrap();
     let assignment = file.make_continuous_assignment(&output.to_expr(), &call);
     file.add_member_continuous_assignment(module, assignment);
 
@@ -223,8 +231,8 @@ fn function_inputs_and_locals_preserve_types_and_insertion_order() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("ordered_helpers");
     let scalar = file.make_scalar_type();
-    let signed = file.make_bit_vector_type(5, true);
-    let vector = file.make_bit_vector_type(12, false);
+    let signed = file.make_bit_vector_type(5, true).unwrap();
+    let vector = file.make_bit_vector_type(12, false).unwrap();
     let external = file.make_extern_package_type("types", "word_t");
 
     let helper = file
@@ -266,7 +274,7 @@ fn functions_preserve_module_member_order_and_separate_local_namespaces() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("ordered");
     let scalar = file.make_scalar_type();
-    let input = file.add_input(module, "value", &scalar);
+    let input = file.add_input(module, "value", &scalar).unwrap();
     let comment = file.make_comment("before helper");
     file.add_member_comment(module, comment);
 
@@ -284,8 +292,10 @@ fn functions_preserve_module_member_order_and_separate_local_namespaces() {
         );
     }
 
-    let call = file.make_function_call("first", &[&input.to_expr()]);
-    let output = file.add_output(module, "result", &scalar);
+    let call = file
+        .make_function_call("first", &[&input.to_expr()])
+        .unwrap();
+    let output = file.add_output(module, "result", &scalar).unwrap();
     let assignment = file.make_continuous_assignment(&output.to_expr(), &call);
     file.add_member_continuous_assignment(module, assignment);
 
@@ -316,11 +326,11 @@ endmodule
 fn function_return_types_preserve_packed_shapes_and_external_typedefs() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("result_types");
-    let byte = file.make_bit_vector_type(8, false);
-    let signed_byte = file.make_bit_vector_type(8, true);
-    let packed = file.make_packed_array_type(signed_byte, &[2, 3]);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let signed_byte = file.make_bit_vector_type(8, true).unwrap();
+    let packed = file.make_packed_array_type(signed_byte, &[2, 3]).unwrap();
     let external = file.make_extern_package_type("types", "word_t");
-    let packed_external = file.make_packed_array_type(external, &[2]);
+    let packed_external = file.make_packed_array_type(external, &[2]).unwrap();
     for (name, ty) in [
         ("unsigned_result", byte),
         ("signed_result", signed_byte),
@@ -373,7 +383,7 @@ endmodule
 fn verilog_function_return_types_do_not_introduce_systemverilog_keywords() {
     let mut file = VastFile::new(VastFileType::Verilog);
     let module = file.add_module("result_types");
-    let byte = file.make_bit_vector_type(8, true);
+    let byte = file.make_bit_vector_type(8, true).unwrap();
     let function = file.add_function(module, "signed_result", &byte).unwrap();
     let zero = file.make_unsized_decimal_literal(0);
     file.block_add_blocking_assignment(
@@ -399,7 +409,7 @@ fn rejected_function_and_local_names_preserve_existing_output() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("duplicates");
     let scalar = file.make_scalar_type();
-    file.add_input(module, "existing", &scalar);
+    file.add_input(module, "existing", &scalar).unwrap();
 
     let before = file.emit();
     let error = file
@@ -441,7 +451,7 @@ fn anonymous_unpacked_function_results_are_rejected() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("helpers");
     let integer = file.make_integer_type(false);
-    let unpacked = file.make_unpacked_array_type(integer, &[2]);
+    let unpacked = file.make_unpacked_array_type(integer, &[2]).unwrap();
     let before = file.emit();
 
     let error = file
@@ -458,9 +468,9 @@ fn anonymous_unpacked_function_results_are_rejected() {
 fn indexing_compound_expressions_inserts_required_parentheses() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("indexing");
-    let byte = file.make_bit_vector_type(8, false);
-    let left = file.add_input(module, "left", &byte);
-    let right = file.add_input(module, "right", &byte);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let left = file.add_input(module, "left", &byte).unwrap();
+    let right = file.add_input(module, "right", &byte).unwrap();
     let sum = file.make_add(&left.to_expr(), &right.to_expr());
     let indexable = file.make_indexable_expression(&sum);
     let bit = file.make_index(&indexable, 3);
@@ -472,7 +482,9 @@ fn indexing_compound_expressions_inserts_required_parentheses() {
         "(left + right)[5:2]"
     );
 
-    let call = file.make_function_call("transform", &[&left.to_expr(), &right.to_expr()]);
+    let call = file
+        .make_function_call("transform", &[&left.to_expr(), &right.to_expr()])
+        .unwrap();
     let indexed_call = file.make_slice(&file.make_indexable_expression(&call), 3, 0);
     assert_eq!(
         file.emit_expression(&indexed_call.to_expr()),
@@ -484,12 +496,18 @@ fn indexing_compound_expressions_inserts_required_parentheses() {
 fn function_calls_are_atomic_with_nested_and_system_function_arguments() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let module = file.add_module("calls");
-    let byte = file.make_bit_vector_type(8, false);
-    let left = file.add_input(module, "left", &byte);
-    let right = file.add_input(module, "right", &byte);
-    let signed_left = file.make_function_call("$signed", &[&left.to_expr()]);
-    let signed_right = file.make_function_call("$signed", &[&right.to_expr()]);
-    let nested = file.make_function_call("helper", &[&signed_left, &signed_right]);
+    let byte = file.make_bit_vector_type(8, false).unwrap();
+    let left = file.add_input(module, "left", &byte).unwrap();
+    let right = file.add_input(module, "right", &byte).unwrap();
+    let signed_left = file
+        .make_function_call("$signed", &[&left.to_expr()])
+        .unwrap();
+    let signed_right = file
+        .make_function_call("$signed", &[&right.to_expr()])
+        .unwrap();
+    let nested = file
+        .make_function_call("helper", &[&signed_left, &signed_right])
+        .unwrap();
     let sum = file.make_add(&nested, &left.to_expr());
 
     assert_eq!(
@@ -520,13 +538,13 @@ fn function_calls_reject_foreign_arguments() {
     let foreign = original.make_unsized_one_literal();
     let mut file = VastFile::new(VastFileType::SystemVerilog);
 
-    let _ = file.make_function_call("helper", &[&foreign]);
+    let _ = file.make_function_call("helper", &[&foreign]).unwrap();
 }
 
 #[test]
-#[should_panic(expected = "function call name must not be empty")]
 fn function_calls_reject_empty_names() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
 
-    let _ = file.make_function_call("", &[]);
+    let error = file.make_function_call("", &[]).unwrap_err();
+    assert_eq!(error.to_string(), "function call name must not be empty");
 }

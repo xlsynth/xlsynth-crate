@@ -12,7 +12,7 @@ fn timed_and_string_parameters_keep_native_types_and_module_time_scale() {
     let time = file.make_time_type(false);
     let longint = file.make_longint_type(true);
     let initial_text = file.make_string_literal("abc");
-    let text = file.make_type_cast(&string, &initial_text);
+    let text = file.make_type_cast(&string, &initial_text).unwrap();
     let period = file
         .make_time_literal("1.5", TimeUnit::Nanoseconds)
         .unwrap();
@@ -23,37 +23,42 @@ fn timed_and_string_parameters_keep_native_types_and_module_time_scale() {
         ParameterKind::Parameter,
         Some(&string),
         Some(&text),
-    );
+    )
+    .unwrap();
     file.add_value_parameter_port(
         leaf,
         "PERIOD",
         ParameterKind::Parameter,
         Some(&time),
         Some(&period),
-    );
+    )
+    .unwrap();
     file.add_value_parameter_port(
         leaf,
         "MaxCount",
         ParameterKind::Parameter,
         Some(&longint),
         Some(&count),
-    );
-    file.add_input(leaf, "message", &string);
-    file.add_output(leaf, "period", &time);
+    )
+    .unwrap();
+    file.add_input(leaf, "message", &string).unwrap();
+    file.add_output(leaf, "period", &time).unwrap();
     file.add_timeunit(
         leaf,
         TimeScaleValue {
             magnitude: TimeScaleMagnitude::One,
             unit: TimeUnit::Picoseconds,
         },
-    );
+    )
+    .unwrap();
     file.add_timeprecision(
         leaf,
         TimeScaleValue {
             magnitude: TimeScaleMagnitude::Hundred,
             unit: TimeUnit::Femtoseconds,
         },
-    );
+    )
+    .unwrap();
     assert_eq!(
         file.emit(),
         r#"module Leaf #(
@@ -97,9 +102,11 @@ fn native_integer_atoms_report_width_and_signedness() {
             .contains("dynamic")
     );
     let zero = file.make_unsized_decimal_literal(0);
-    let cast = file.make_type_cast(&signed_time, &zero);
+    let cast = file.make_type_cast(&signed_time, &zero).unwrap();
     assert_eq!(file.emit_expression(&cast), "signed'(time'(0))");
-    let bits = file.make_function_call_with_arguments("$bits", &[SvArgument::Type(signed_time)]);
+    let bits = file
+        .make_function_call_with_arguments("$bits", &[SvArgument::Type(signed_time)])
+        .unwrap();
     assert_eq!(file.emit_expression(&bits), "$bits(time signed)");
 }
 
@@ -129,16 +136,15 @@ fn time_literal_magnitudes_are_validated_without_reformatting() {
 }
 
 #[test]
-#[should_panic(expected = "cannot be used as an inout net")]
 fn string_cannot_be_an_inout_net() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let leaf = file.add_module("Leaf");
     let string = file.make_string_type();
-    file.add_inout(leaf, "invalid", &string);
+    let error = file.add_inout(leaf, "invalid", &string).unwrap_err();
+    assert!(error.to_string().contains("cannot be used as an inout net"));
 }
 
 #[test]
-#[should_panic(expected = "time precision cannot be coarser than time unit")]
 fn precision_cannot_be_coarser_than_the_local_unit() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let leaf = file.add_module("Leaf");
@@ -148,30 +154,54 @@ fn precision_cannot_be_coarser_than_the_local_unit() {
             magnitude: TimeScaleMagnitude::One,
             unit: TimeUnit::Nanoseconds,
         },
+    )
+    .unwrap();
+    let before = file.emit();
+    let error = file
+        .add_timeprecision(
+            leaf,
+            TimeScaleValue {
+                magnitude: TimeScaleMagnitude::Ten,
+                unit: TimeUnit::Nanoseconds,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "time precision cannot be coarser than time unit"
     );
+    assert_eq!(file.emit(), before);
     file.add_timeprecision(
         leaf,
         TimeScaleValue {
-            magnitude: TimeScaleMagnitude::Ten,
-            unit: TimeUnit::Nanoseconds,
+            magnitude: TimeScaleMagnitude::One,
+            unit: TimeUnit::Picoseconds,
         },
-    );
+    )
+    .unwrap();
 }
 
 #[test]
-#[should_panic(expected = "time-scale declarations must precede other module members")]
 fn time_scale_cannot_follow_a_body_declaration() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let leaf = file.add_module("Leaf");
     let one = file.make_unsized_decimal_literal(1);
-    file.add_parameter(leaf, "N", &one);
-    file.add_timeunit(
-        leaf,
-        TimeScaleValue {
-            magnitude: TimeScaleMagnitude::One,
-            unit: TimeUnit::Nanoseconds,
-        },
+    file.add_parameter(leaf, "N", &one).unwrap();
+    let before = file.emit();
+    let error = file
+        .add_timeunit(
+            leaf,
+            TimeScaleValue {
+                magnitude: TimeScaleMagnitude::One,
+                unit: TimeUnit::Nanoseconds,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "time-scale declarations must precede other module members"
     );
+    assert_eq!(file.emit(), before);
 }
 
 #[test]
@@ -184,9 +214,10 @@ fn hoisting_signal_declarations_keeps_time_scale_first() {
             magnitude: TimeScaleMagnitude::One,
             unit: TimeUnit::Nanoseconds,
         },
-    );
+    )
+    .unwrap();
     let scalar = file.make_scalar_type();
-    file.add_wire(leaf, "w", &scalar);
+    file.add_wire(leaf, "w", &scalar).unwrap();
     file.hoist_module_declarations(leaf, 0);
     assert_eq!(
         file.emit(),
@@ -202,11 +233,12 @@ fn int_and_integer_ports_preserve_atom_types() {
     let int = file.make_int_type(true);
     let integer = file.make_integer_type(true);
     let unsigned_integer = file.make_integer_type(false);
-    file.add_input(module, "input_int", &int);
-    file.add_output(module, "output_int", &int);
-    file.add_input(module, "input_integer", &integer);
-    file.add_inout(module, "inout_integer", &unsigned_integer);
-    file.add_wire(module, "wire_integer", &integer);
+    file.add_input(module, "input_int", &int).unwrap();
+    file.add_output(module, "output_int", &int).unwrap();
+    file.add_input(module, "input_integer", &integer).unwrap();
+    file.add_inout(module, "inout_integer", &unsigned_integer)
+        .unwrap();
+    file.add_wire(module, "wire_integer", &integer).unwrap();
     file.add_logic(module, "logic_int", &int).unwrap();
     assert_eq!(
         file.emit(),
