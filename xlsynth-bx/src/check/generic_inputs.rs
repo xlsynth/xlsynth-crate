@@ -3,23 +3,23 @@
 //! Infer a template's type arguments across all of its data inputs.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
 use crate::ast::{Expr, Param, Type};
-use crate::typed::{TypedExpr, TypedExprKind as K};
+use crate::typed::{BoundParametricValue, TypedExpr, TypedExprKind as K};
 
-use super::generic_blocks::Bindings;
+use super::generic_blocks::{Bindings, BlockPortTypes};
 use super::struct_parametrics::StructWitness;
 use super::{
-    BlockTemplate, BodyChecker, BoundCallback, BranchSelector, MAX_ELABORATION_DEPTH,
+    BlockParametricArguments, BlockTemplate, BodyChecker, BranchSelector, MAX_ELABORATION_DEPTH,
     MAX_TYPE_SIZE, MatchSelector, has_aggregate_literal,
 };
 
-/// Concrete types, callbacks, and checked port values for one structural call.
+/// Parametric bindings, dimension-resolved ports, and checked inputs of one
+/// block call.
 pub(super) struct BlockArguments<'m> {
-    pub(super) bindings: Bindings,
-    pub(super) callbacks: Vec<Rc<BoundCallback<'m>>>,
-    pub(super) values: Vec<TypedExpr>,
+    pub(super) parametrics: BlockParametricArguments<'m>,
+    pub(super) concrete_ports: Option<BlockPortTypes>,
+    pub(super) inputs: Vec<TypedExpr>,
 }
 
 /// A call argument after its explicitly typed operands have supplied bindings.
@@ -45,8 +45,8 @@ pub(super) enum Input<'e> {
     },
 }
 
-/// A function may have already checked this operand to infer a dimension.
-/// Blocks enter inference with their nominal types and dimensions resolved.
+/// A resolved port can check its concrete shape during inference. A source
+/// annotation may still need dimensions, with a checked operand as a witness.
 pub(super) enum InputPattern {
     Block,
     Function(Option<TypedExpr>),
@@ -167,9 +167,10 @@ impl<'m> BodyChecker<'_, 'm> {
         template: &BlockTemplate<'m>,
         args: &[Expr],
         callbacks: &[String],
+        supplied: Vec<BoundParametricValue>,
     ) -> Result<BlockArguments<'m>, String> {
         let target = &template.block.name;
-        let formals = &template.params;
+        let formals = &template.ports.params;
         if formals.len() != args.len() {
             return Err(format!(
                 "block '{target}' expects {} data arguments, got {}",
@@ -193,6 +194,7 @@ impl<'m> BodyChecker<'_, 'm> {
                 template,
                 prepared.iter().map(|arg| arg.as_ref()),
                 callbacks,
+                supplied,
             )
         });
         self.checking_callback_inputs = previous;
@@ -206,17 +208,33 @@ impl<'m> BodyChecker<'_, 'm> {
         template: &BlockTemplate<'m>,
         args: impl Iterator<Item = &'e Expr>,
         actuals: &[String],
+        supplied: Vec<BoundParametricValue>,
     ) -> Result<BlockArguments<'m>, String> {
         let target = template.block.name.as_str();
-        let formals = &template.params;
+        // Source patterns retain the distinction between a type formal and
+        // a nominal type introduced by expanding a module alias.
+        let dependent = template.port_binding_work != 0;
+        let formals = if dependent {
+            &template.block.params
+        } else {
+            &template.ports.params
+        };
         let type_params = &template.block.type_params;
         let input_error =
             |p: &Param, e: String| format!("input '{}', call to block '{target}': {e}", p.name);
         let mut bindings = Bindings::new(type_params);
         let mut inputs = Vec::with_capacity(formals.len());
+        self.charge_expansion("block port dimensions", template.port_binding_work)?;
         for (p, arg) in formals.iter().zip(args) {
+            // An argument of type T[N] can supply T before a default computes N
+            // from that type. The concrete port below checks the array length.
+            let pattern = if dependent {
+                InputPattern::Function(None)
+            } else {
+                InputPattern::Block
+            };
             inputs.push(
-                self.infer_input(&p.ty, arg, &mut bindings, InputPattern::Block)
+                self.infer_input(&p.ty, arg, &mut bindings, pattern)
                     .map_err(|e| input_error(p, e))?,
             );
         }
@@ -246,20 +264,33 @@ impl<'m> BodyChecker<'_, 'm> {
                 ));
             }
         }
-        let values = inputs
+        let values = template.apply_value_defaults(self, supplied, &bindings)?;
+        let concrete_ports = template.specialize_dependent_ports(self, &bindings, &values)?;
+        let inputs = inputs
             .into_iter()
-            .zip(formals)
+            .zip(
+                concrete_ports
+                    .as_ref()
+                    .map_or(formals, |ports| &ports.params),
+            )
             .map(|(input, p)| {
-                let ty = self
-                    .bound_block_type(target, &p.ty, &bindings)
-                    .map_err(|e| input_error(p, e))?;
-                self.finish_input(input, &ty).map_err(|e| input_error(p, e))
+                let checked = if concrete_ports.is_some() {
+                    self.finish_input(input, &p.ty)
+                } else {
+                    self.bound_block_type(target, &p.ty, &bindings)
+                        .and_then(|ty| self.finish_input(input, &ty))
+                };
+                checked.map_err(|e| input_error(p, e))
             })
             .collect::<Result<_, _>>()?;
         Ok(BlockArguments {
-            bindings,
-            callbacks,
-            values,
+            parametrics: BlockParametricArguments {
+                bindings,
+                callbacks,
+                values,
+            },
+            concrete_ports,
+            inputs,
         })
     }
 
