@@ -4,18 +4,56 @@
 //!
 //! Annotated blocks are checked child-first. For fixed-stage annotations, the
 //! checker indexes inputs, assignments, and child calls, then follows each
-//! output backwards to infer its stage. For `q + r`, it follows `q` to its
-//! register write, looks up input `r`, and checks that they meet at the same
-//! stage.
+//! output backwards to infer its stage. A case-dependent output runs that same
+//! walk once per control case, also tracking values known at each stage.
+//! For `q + r`, it follows `q` to its register write, looks up input `r`,
+//! and checks that they meet at the same stage.
+//!
+//! The stage judgment is structural: `At(s)` assigns an expression to stage
+//! `s`, `Independent` fits any stage (for example a literal), and `Unknown`
+//! cannot satisfy an output annotation. A held register retains the stage of
+//! its write even though its current contents may come from an older input.
+//! Thus `At(s)` alone does not establish freshness or transaction identity.
+//!
+//! Case checking also tracks exact values. Fix a reference clock `t` and
+//! assume each case input has its enumerated value at `t + input_stage`.
+//! The intended invariant for `TimedValue { stage: At(s), known: Some(v) }`
+//! is that the expression equals `v` at `t + s` for every hardware trace
+//! satisfying those assumptions. An independent known value is constant at
+//! every clock. An unknown stage supplies no clock at which to use a known
+//! value. The inference rules preserve this interpretation as follows:
+//!
+//! - Inputs supply their declared stage and, in a case, the assumed value.
+//! - Ordinary combinational operators align operand stages and fold exact
+//!   values when available. A known true OR input or false AND input instead
+//!   determines the result at its own stage, regardless of the other input.
+//! - A mux aligns its selector with the selected data. Case facts may exclude
+//!   an arm; identical data on all arms makes the selector irrelevant.
+//! - A register aligns data and write guards, then adds one stage. Exact bits
+//!   survive only when the write is guaranteed and reset cannot override it; a
+//!   hold or possible reset discards the exact value.
+//! - A verified fixed-stage child translates its interface by one offset shared
+//!   by all its connected inputs and outputs. Its interface supplies stages,
+//!   not exact values.
+//!
+//! An output `@stage(op)` checks the resulting stage for each hardware
+//! encoding of the controls. This is not a proof that an invocation completes
+//! at that stage, that a valid signal is asserted, or that overlapping issues
+//! cannot collide on a shared resource. Those require separate protocol or
+//! scheduling properties.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use xlsynth_pir::IrValue;
 
 use super::StructTable;
 use crate::ast::{BinaryOp, OutputCycles, Param, Type};
 use crate::typed::{
-    CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K, is_constexpr_only_name,
+    AvailableFunctions, CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K, TypedMatchArm,
+    is_constexpr_only_name,
 };
+
+mod cases;
 
 const BLOCK_SCOPE: usize = 0;
 
@@ -25,6 +63,7 @@ pub(super) fn check_blocks(
     blocks: &mut [CheckedBlock],
     structs: &StructTable<'_>,
     invariant_harnesses: &BTreeSet<&str>,
+    functions: &AvailableFunctions,
 ) -> Result<(), String> {
     // In BX, `#[invariant] ... -> bool @0` promises stage 0 for the
     // returned Boolean. The harness exposes it as tuple field 0, followed
@@ -47,7 +86,23 @@ pub(super) fn check_blocks(
         } else {
             &block.output_ports
         };
-        if let Err(error) = check_outputs(block, expected, ports, structs, &children) {
+        let result = match expected {
+            OutputCycles::CaseCall { function, inputs } => {
+                cases::enumerate(block, function, inputs, functions, &structs.enums).and_then(
+                    |cases| {
+                        for case in cases {
+                            let stage = OutputCycles::Uniform(case.stage);
+                            let label = case.label.clone();
+                            check_outputs(block, &stage, ports, structs, &children, Some(case))
+                                .map_err(|error| format!("case ({label}): {error}"))?;
+                        }
+                        Ok(())
+                    },
+                )
+            }
+            _ => check_outputs(block, expected, ports, structs, &children, None),
+        };
+        if let Err(error) = result {
             report_timing_error(block, error, invariant, &children)?;
         }
         // Keep deferred errors visible so callers can defer in turn. Only
@@ -92,6 +147,7 @@ fn check_outputs(
     ports: &[Param],
     structs: &StructTable<'_>,
     children: &BTreeMap<&str, &CheckedBlock>,
+    case: Option<cases::Case<'_>>,
 ) -> Result<(), String> {
     if let OutputCycles::ByPort(expected) = expected {
         // If Ports has `saved` and `live`, `@(saved: 1)` is incomplete
@@ -108,7 +164,7 @@ fn check_outputs(
         }
     }
 
-    let checker = StageChecker::new(block, structs, children);
+    let checker = StageChecker::new(block, structs, children, case);
     // `[]` checks the whole output; `[i]` checks just field i.
     let check = |fields: &[usize], expected| checker.infer(&block.output, fields)?.check(expected);
     let has_field_ports = matches!(block.result, Type::Named(_) | Type::Tuple(_));
@@ -123,7 +179,9 @@ fn check_outputs(
     for (index, port) in ports.iter().enumerate() {
         // Match the annotation by port name, then infer the corresponding
         // output field by index. Annotation and field order may differ.
-        let cycle = expected.stage_for_port(&port.name);
+        let cycle = expected
+            .stage_for_port(&port.name)
+            .expect("fixed output stage");
         let field = has_field_ports.then_some(index);
         check(field.as_slice(), cycle).map_err(|err| format!("output '{}': {err}", port.name))?;
     }
@@ -132,16 +190,17 @@ fn check_outputs(
 
 impl OutputCycles {
     /// Look up a local stage after validating the declared port names.
-    fn stage_for_port(&self, port: &str) -> u64 {
+    fn stage_for_port(&self, port: &str) -> Option<u64> {
         match self {
-            Self::Uniform(stage) => *stage,
-            Self::ByPort(stages) => stages[port],
+            Self::Uniform(stage) => Some(*stage),
+            Self::ByPort(stages) => stages.get(port).copied(),
+            Self::CaseCall { .. } => None,
         }
     }
 }
 
 /// What the checker knows about the stage of an expression.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
     /// A known stage in the block whose expression is being checked.
     At(u64),
@@ -149,6 +208,24 @@ enum Stage {
     Independent,
     /// The checker has no stage to compare against the output annotation.
     Unknown,
+}
+
+/// A structural stage and, during case checking, a value known at that stage.
+/// A held register keeps its stage but loses its known value on the hold path.
+#[derive(Clone)]
+struct TimedValue {
+    stage: Stage,
+    known: Option<IrValue>,
+}
+
+impl TimedValue {
+    fn new(stage: Stage) -> Self {
+        Self { stage, known: None }
+    }
+
+    fn boolean(&self) -> Option<bool> {
+        self.known.as_ref()?.to_bool().ok()
+    }
 }
 
 impl Stage {
@@ -204,7 +281,7 @@ struct Assignment<'a> {
     rhs: &'a TypedExpr,
     scope: usize,
     /// Each field is inferred separately. A missing key is unseen.
-    reads: RefCell<BTreeMap<Vec<usize>, Inference<Stage>>>,
+    reads: RefCell<BTreeMap<Vec<usize>, Inference<TimedValue>>>,
 }
 
 /// The condition that creates an if-body scope, evaluated in its parent.
@@ -218,7 +295,7 @@ struct EnclosingIf<'a> {
 #[derive(Default)]
 struct Scope<'a> {
     enclosing_if: Option<EnclosingIf<'a>>,
-    guard_stage: Cell<Option<Stage>>,
+    guard_stage: RefCell<Option<TimedValue>>,
     names: BTreeMap<&'a str, ValueSource<'a>>,
 }
 
@@ -334,7 +411,7 @@ impl<'a> Instance<'a> {
             .child
             .output_cycles
             .as_ref()
-            .map(|outputs| outputs.stage_for_port(port));
+            .and_then(|outputs| outputs.stage_for_port(port));
         let (StageOffset::Known(offset), Some(local)) = (offset, local) else {
             return Ok(Stage::Unknown);
         };
@@ -357,6 +434,7 @@ struct StageChecker<'a> {
     scopes: Vec<Scope<'a>>,
     structs: &'a StructTable<'a>,
     instances: BTreeMap<&'a str, Instance<'a>>,
+    case: Option<cases::Case<'a>>,
 }
 
 impl<'a> StageChecker<'a> {
@@ -364,6 +442,7 @@ impl<'a> StageChecker<'a> {
         block: &'a CheckedBlock,
         structs: &'a StructTable<'a>,
         children: &BTreeMap<&str, &'a CheckedBlock>,
+        case: Option<cases::Case<'a>>,
     ) -> Self {
         let mut root = Scope::default();
         for param in &block.params {
@@ -374,6 +453,7 @@ impl<'a> StageChecker<'a> {
             scopes: vec![root],
             structs,
             instances: Instance::collect(block, children),
+            case,
         };
         checker.collect_assignments(&block.statements, BLOCK_SCOPE);
         checker
@@ -446,6 +526,78 @@ impl<'a> StageChecker<'a> {
         })
     }
 
+    /// Choose only a statically known arm. The selector still meets the
+    /// selected data at the mux, so a stage-0 opcode cannot select stage-1
+    /// data.
+    fn choose<'s>(
+        &'s self,
+        walk: &mut Walk<'s>,
+        expr: &'s TypedExpr,
+        scope: usize,
+        fields: Vec<usize>,
+    ) -> Result<(), String> {
+        let subject = walk.values.last().expect("selector evaluated");
+        match &expr.kind {
+            K::If {
+                then_value,
+                else_value,
+                ..
+            } => {
+                if same_value(then_value, else_value) {
+                    // `if en { q } else { q }` is just q.
+                    walk.values.pop();
+                    walk.pending.push(Step::Expr(then_value, scope, fields));
+                } else if let Some(bit) = subject.boolean() {
+                    let value = if bit { then_value } else { else_value };
+                    walk.schedule([
+                        Step::Expr(value, scope, fields),
+                        Step::Join(Join::Selected("if")),
+                    ]);
+                } else {
+                    walk.schedule([
+                        Step::Expr(then_value, scope, fields.clone()),
+                        Step::Expr(else_value, scope, fields),
+                        Step::Join(Join::Branches("if")),
+                        Step::Join(Join::Select("if")),
+                    ]);
+                }
+            }
+            K::Match {
+                subject: source,
+                arms,
+            } => {
+                let selected = subject
+                    .known
+                    .as_ref()
+                    .map(|value| selected_match_arm(arms, value, &source.ty))
+                    .transpose()?;
+                if let Some(first) = arms.first()
+                    && arms.iter().all(|arm| same_value(&first.value, &arm.value))
+                {
+                    // `match en { true => q, false => q }` is just q.
+                    walk.values.pop();
+                    walk.pending.push(Step::Expr(&first.value, scope, fields));
+                } else if let Some(value) = selected {
+                    walk.schedule([
+                        Step::Expr(value, scope, fields),
+                        Step::Join(Join::Selected("match")),
+                    ]);
+                } else {
+                    walk.pending.push(Step::Join(Join::Select("match")));
+                    for (index, arm) in arms.iter().enumerate().rev() {
+                        if index != 0 {
+                            walk.pending.push(Step::Join(Join::Branches("match")));
+                        }
+                        walk.pending
+                            .push(Step::Expr(&arm.value, scope, fields.clone()));
+                    }
+                }
+            }
+            _ => unreachable!("choose follows an if or match selector"),
+        }
+        Ok(())
+    }
+
     /// Walk backwards from one output. Each step either schedules its inputs
     /// or uses stages those inputs have already left on the value stack.
     fn infer(&self, output: &'a TypedExpr, fields: &[usize]) -> Result<Stage, String> {
@@ -464,10 +616,30 @@ impl<'a> StageChecker<'a> {
                 Step::ComputeCallOutputStage(instance, port) => {
                     walk.compute_call_output_stage(instance, port)?
                 }
+                Step::Choose(expr, scope, fields) => self.choose(&mut walk, expr, scope, fields)?,
+                Step::Unary(expr) => {
+                    let value = walk.values.pop().expect("unary operand evaluated");
+                    let known = self
+                        .case
+                        .as_ref()
+                        .expect("case unary step")
+                        .fold_operation(expr, &[&value])?;
+                    walk.values.push(TimedValue {
+                        stage: value.stage,
+                        known,
+                    });
+                }
+                Step::Binary(expr) => {
+                    let right = walk.values.pop().expect("right operand evaluated");
+                    let left = walk.values.pop().expect("left operand evaluated");
+                    let case = self.case.as_ref().expect("case binary step");
+                    walk.values.push(case.binary(expr, left, right)?);
+                }
+                Step::Aggregate(count) => walk.finish_aggregate(count, self.case.is_some())?,
                 Step::Guard(scope) => {
                     let body = &self.scopes[scope];
-                    if let Some(stage) = body.guard_stage.get() {
-                        walk.values.push(stage);
+                    if let Some(value) = body.guard_stage.borrow().clone() {
+                        walk.values.push(value);
                     } else if let Some(enclosing) = &body.enclosing_if {
                         // `if a { if b { ... } }` enables a write with a && b.
                         walk.schedule([
@@ -477,29 +649,36 @@ impl<'a> StageChecker<'a> {
                             Step::SaveGuard(scope),
                         ]);
                     } else {
-                        walk.values.push(Stage::Independent);
+                        walk.values.push(TimedValue {
+                            stage: Stage::Independent,
+                            known: self.case.as_ref().map(|_| IrValue::bool(true)),
+                        });
                     }
                 }
                 Step::Join(rule) => {
                     let right = walk.values.pop().expect("right operand evaluated");
-                    let left = walk.values.last_mut().expect("left operand evaluated");
-                    *left = rule.apply(*left, right)?;
+                    let left = walk.values.pop().expect("left operand evaluated");
+                    let value = match &self.case {
+                        Some(case) => case.join(rule, left, right)?,
+                        None => TimedValue::new(rule.apply(left.stage, right.stage)?),
+                    };
+                    walk.values.push(value);
                 }
                 Step::SaveRead(assignment, fields) => {
-                    let stage = *walk.values.last().expect("assignment evaluated");
+                    let stage = walk.values.last().expect("assignment evaluated").clone();
                     assignment
                         .reads
                         .borrow_mut()
                         .insert(fields, Inference::Done(stage));
                 }
                 Step::SaveGuard(scope) => {
-                    let stage = *walk.values.last().expect("enable evaluated");
-                    self.scopes[scope].guard_stage.set(Some(stage));
+                    let stage = walk.values.last().expect("enable evaluated").clone();
+                    *self.scopes[scope].guard_stage.borrow_mut() = Some(stage);
                 }
             }
         }
         debug_assert_eq!(walk.values.len(), 1);
-        Ok(walk.values.pop().expect("output evaluated"))
+        Ok(walk.values.pop().expect("output evaluated").stage)
     }
 
     /// Follow the assignment in its defining scope. Cache each field separately
@@ -513,7 +692,14 @@ impl<'a> StageChecker<'a> {
     ) -> Result<(), String> {
         let assignment = match source {
             ValueSource::Input(stage) => {
-                walk.values.push(Stage::At(*stage));
+                walk.values.push(TimedValue {
+                    stage: Stage::At(*stage),
+                    known: self
+                        .case
+                        .as_ref()
+                        .and_then(|case| case.inputs.get(name))
+                        .cloned(),
+                });
                 return Ok(());
             }
             ValueSource::Let(assignment) | ValueSource::Register(assignment) => assignment,
@@ -524,7 +710,7 @@ impl<'a> StageChecker<'a> {
             .reads
             .borrow()
             .get(&fields)
-            .copied()
+            .cloned()
             .unwrap_or(Inference::Unseen);
         match inference {
             Inference::Visiting => {
@@ -578,7 +764,7 @@ impl<'a> StageChecker<'a> {
         let operand = |value| Step::Expr(value, scope, vec![]);
         let mut read = |name: &'s str, fields| match self.value_source(scope, name) {
             Some(source) => walk.pending.push(Step::Read(name, source, fields)),
-            None => walk.values.push(Stage::Unknown),
+            None => walk.values.push(TimedValue::new(Stage::Unknown)),
         };
         match &expr.kind {
             K::Name(name) => read(name, fields),
@@ -586,14 +772,20 @@ impl<'a> StageChecker<'a> {
                 Some(child) => walk.read_instance_output(child, port)?,
                 // Externs and children without a verified output annotation
                 // have no timing interface to use here.
-                None => walk.values.push(Stage::Unknown),
+                None => walk.values.push(TimedValue::new(Stage::Unknown)),
             },
             K::BindingTupleIndex { name, index } => {
                 // `let (head, _) = pair;` reads the same field as `pair.0`.
                 fields.push(*index);
                 read(name, fields);
             }
-            K::Literal(_) => walk.values.push(Stage::Independent),
+            K::Literal(value) => walk.values.push(TimedValue {
+                stage: Stage::Independent,
+                known: self.case.as_ref().map(|_| value.clone()),
+            }),
+            K::Unary { value, .. } | K::Cast { value } if self.case.is_some() => {
+                walk.schedule([Step::Expr(value, scope, fields), Step::Unary(expr)]);
+            }
             K::Unary { value, .. } | K::Cast { value } | K::Sequence { result: value, .. } => {
                 walk.pending.push(Step::Expr(value, scope, fields));
             }
@@ -612,11 +804,12 @@ impl<'a> StageChecker<'a> {
                 }
             }
             K::Binary { op, left, right } => {
-                walk.schedule([
-                    operand(left),
-                    operand(right),
-                    Step::Join(Join::Operator(*op)),
-                ]);
+                let combine = if self.case.is_some() {
+                    Step::Binary(expr)
+                } else {
+                    Step::Join(Join::Operator(*op))
+                };
+                walk.schedule([operand(left), operand(right), combine]);
             }
             K::If {
                 condition,
@@ -625,17 +818,63 @@ impl<'a> StageChecker<'a> {
             } => {
                 // `if sel { x } else { y }` is a mux. Check its data arms
                 // together, then check that their stage agrees with sel.
-                walk.schedule([
-                    operand(condition),
-                    Step::Expr(then_value, scope, fields.clone()),
-                    Step::Expr(else_value, scope, fields),
-                    Step::Join(Join::Branches),
-                    Step::Join(Join::Select),
-                ]);
+                if self.case.is_some() {
+                    walk.schedule([operand(condition), Step::Choose(expr, scope, fields)]);
+                } else {
+                    walk.schedule([
+                        operand(condition),
+                        Step::Expr(then_value, scope, fields.clone()),
+                        Step::Expr(else_value, scope, fields),
+                        Step::Join(Join::Branches("if")),
+                        Step::Join(Join::Select("if")),
+                    ]);
+                }
             }
-            _ => walk.values.push(Stage::Unknown),
+            K::Match { subject, .. } => {
+                walk.schedule([operand(subject), Step::Choose(expr, scope, fields)]);
+            }
+            _ => walk.values.push(TimedValue::new(Stage::Unknown)),
         }
         Ok(())
+    }
+}
+
+/// Find the first source-ordered match arm for this concrete case.
+fn selected_match_arm<'a>(
+    arms: &'a [TypedMatchArm],
+    value: &IrValue,
+    ty: &Type,
+) -> Result<&'a TypedExpr, String> {
+    for arm in arms {
+        for pattern in &arm.patterns {
+            if pattern.matches_value(value, ty)? {
+                return Ok(&arm.value);
+            }
+        }
+    }
+    Err("stage case has no matching arm".into())
+}
+
+/// Recognize identical leaves without proving arbitrary expressions equivalent.
+fn same_value(a: &TypedExpr, b: &TypedExpr) -> bool {
+    match (&a.kind, &b.kind) {
+        (K::Name(a), K::Name(b)) => a == b,
+        (K::Literal(a), K::Literal(b)) => a == b,
+        (
+            K::InstanceOutput {
+                instance: a,
+                port: ap,
+            },
+            K::InstanceOutput {
+                instance: b,
+                port: bp,
+            },
+        ) => a == b && ap == bp,
+        (
+            K::BindingTupleIndex { name: a, index: ai },
+            K::BindingTupleIndex { name: b, index: bi },
+        ) => a == b && ai == bi,
+        _ => false,
     }
 }
 
@@ -643,7 +882,7 @@ impl<'a> StageChecker<'a> {
 /// `values` holds the stages those instructions have calculated.
 struct Walk<'a> {
     pending: Vec<Step<'a>>,
-    values: Vec<Stage>,
+    values: Vec<TimedValue>,
 }
 
 impl<'a> Walk<'a> {
@@ -673,7 +912,9 @@ impl<'a> Walk<'a> {
                     instance.name
                 ));
             }
-            Inference::Done(offset) => self.values.push(instance.output_stage(port, offset)?),
+            Inference::Done(offset) => self
+                .values
+                .push(TimedValue::new(instance.output_stage(port, offset)?)),
         }
         Ok(())
     }
@@ -688,9 +929,10 @@ impl<'a> Walk<'a> {
         // In `a + lane.out`, a's stage is already on the stack. Consume only
         // lane's argument stages so the pending addition can still use a.
         let input_start = self.values.len() - instance.inputs.len();
-        let offset = instance.infer_offset(self.values.drain(input_start..))?;
+        let offset = instance.infer_offset(self.values.drain(input_start..).map(|v| v.stage))?;
         instance.offset.set(Inference::Done(offset));
-        self.values.push(instance.output_stage(port, offset)?);
+        self.values
+            .push(TimedValue::new(instance.output_stage(port, offset)?));
         Ok(())
     }
 
@@ -700,13 +942,36 @@ impl<'a> Walk<'a> {
         self.pending.extend(steps.into_iter().rev());
     }
 
-    /// An empty aggregate is stage-independent. Each member joins the running
-    /// stage.
-    fn aggregate(&mut self, members: impl DoubleEndedIterator<Item = Step<'a>>) {
-        self.values.push(Stage::Independent);
-        for member in members.rev() {
-            self.schedule([member, Step::Join(Join::Fields)]);
+    /// Evaluate the members in order, then combine them into one tuple.
+    fn aggregate(
+        &mut self,
+        members: impl DoubleEndedIterator<Item = Step<'a>> + ExactSizeIterator,
+    ) {
+        self.pending.push(Step::Aggregate(members.len()));
+        self.pending.extend(members.rev());
+    }
+
+    /// Join the field stages and build the immutable tuple once, rather than
+    /// copying its accumulated fields after each member.
+    fn finish_aggregate(&mut self, count: usize, case: bool) -> Result<(), String> {
+        let start = self.values.len() - count;
+        let mut stage = Stage::Independent;
+        let mut known = case.then(|| Vec::with_capacity(count));
+        for field in self.values.drain(start..) {
+            stage = Join::Fields.apply(stage, field.stage)?;
+            if let Some(fields) = &mut known {
+                if let Some(value) = field.known {
+                    fields.push(value);
+                } else {
+                    known = None;
+                }
+            }
         }
+        self.values.push(TimedValue {
+            stage,
+            known: known.map(|fields| IrValue::Tuple(fields.into())),
+        });
+        Ok(())
     }
 }
 
@@ -719,6 +984,14 @@ enum Step<'a> {
     /// to look up names. An empty field path means the whole expression;
     /// for nested fields, the last index is the next field to follow.
     Expr(&'a TypedExpr, usize, Vec<usize>),
+    /// Pick a case's matching arm, then check its selector against the arm.
+    Choose(&'a TypedExpr, usize, Vec<usize>),
+    /// Fold a known unary operand without changing its structural stage.
+    Unary(&'a TypedExpr),
+    /// Combine the stages and, if possible, the known values of two operands.
+    Binary(&'a TypedExpr),
+    /// Combine the evaluated tuple fields and their stages.
+    Aggregate(usize),
     /// Calculate a block call's output stage after evaluating its arguments.
     /// If `delay` declares input `x @0` and output `saved @1`, calling it
     /// with an argument at stage 4 establishes offset +4, so `saved` is at
@@ -743,15 +1016,18 @@ enum Step<'a> {
 }
 
 /// The hardware operation where two operand stages meet.
+#[derive(Clone, Copy)]
 enum Join<'a> {
     /// The two inputs of a combinational operator such as `q + r`.
     Operator(BinaryOp),
     /// Members of a struct or tuple read as one value.
     Fields,
     /// The two data arms of an `if` expression.
-    Branches,
+    Branches(&'static str),
     /// The condition and the data stage established by `Branches`.
-    Select,
+    Select(&'static str),
+    /// A known selector and its one selected data arm.
+    Selected(&'static str),
     /// An enclosing write guard and the next nested `if` condition.
     Guards,
     /// A register's data and load enable meet before the edge advances the
@@ -779,9 +1055,9 @@ impl Join<'_> {
         match self {
             Self::Operator(op) => format!("operator '{op}' combines cycle {a} with cycle {b}"),
             Self::Fields => format!("aggregate combines cycle {a} with cycle {b}"),
-            Self::Branches => format!("if branches combine cycle {a} with cycle {b}"),
-            Self::Select => {
-                format!("if expression has condition at cycle {a} and data at cycle {b}")
+            Self::Branches(kind) => format!("{kind} branches combine cycle {a} with cycle {b}"),
+            Self::Select(kind) | Self::Selected(kind) => {
+                format!("{kind} expression has condition at cycle {a} and data at cycle {b}")
             }
             Self::Guards => format!("nested write guards combine cycle {a} with cycle {b}"),
             Self::Register(name) => {
