@@ -217,46 +217,10 @@ pub fn package_with_reachable_callees(
     pkg: &Package,
     entry: &crate::ir::Fn,
 ) -> Result<Package, String> {
-    package_with_entry_from_member(pkg, entry, MemberType::Function)
-}
-
-/// Retains calls in their original function namespace as the entry becomes
-/// the top function of a standalone package.
-pub(crate) fn package_with_entry_from_member(
-    pkg: &Package,
-    entry: &crate::ir::Fn,
-    origin: MemberType,
-) -> Result<Package, String> {
-    let mut functions = HashMap::new();
-    for member in &pkg.members {
-        if let PackageMember::Function(f) = member {
-            if functions.insert(f.name.as_str(), f).is_some() {
-                return Err(format!("ambiguous function name {:?} in package", f.name));
-            }
-        }
-    }
-    let mut reachable = BTreeSet::new();
-    let mut worklist: Vec<_> = direct_callee_names(entry).into_iter().collect();
-    while let Some(name) = worklist.pop() {
-        if origin == MemberType::Function && name == entry.name {
-            return Err(format!(
-                "entry function {name:?} is also reachable as a callee"
-            ));
-        }
-        if !reachable.insert(name.clone()) {
-            continue;
-        }
-        let f = functions
-            .get(name.as_str())
-            .ok_or_else(|| format!("reachable function '{name}' is missing from package"))?;
-        for callee in direct_callee_names(f) {
-            if !reachable.contains(&callee) {
-                worklist.push(callee);
-            }
-        }
-    }
-
-    let mut members = pkg
+    let ordered = ordered_functions(pkg, &[&entry.name], Some(entry))?;
+    let callees: HashSet<_> = ordered.iter().map(|f| f.name.as_str()).collect();
+    // Preserve package order for this API and place the supplied entry last.
+    let mut members: Vec<_> = pkg
         .members
         .iter()
         .filter_map(|m| match m {
@@ -267,16 +231,42 @@ pub(crate) fn package_with_entry_from_member(
             }
             _ => None,
         })
-        .collect::<Vec<_>>();
+        .collect();
+    members.push(PackageMember::Function(entry.clone()));
+    Ok(Package {
+        name: pkg.name.clone(),
+        file_table: pkg.file_table.clone(),
+        members,
+        top: Some((entry.name.clone(), MemberType::Function)),
+    })
+}
 
+/// Builds a standalone package for a function projected from a block. Original
+/// function references keep their namespace even if a callee shares the block
+/// name.
+pub(crate) fn package_with_projected_block_entry(
+    pkg: &Package,
+    entry: &crate::ir::Fn,
+) -> Result<Package, String> {
+    let roots: Vec<_> = direct_function_references(entry).into_iter().collect();
+    let ordered = reachable_functions_in_dependency_order(pkg, &roots)?;
+    let reachable: HashSet<_> = ordered.iter().map(|f| f.name.as_str()).collect();
+    let mut members: Vec<_> = pkg
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            PackageMember::Function(f) if reachable.contains(f.name.as_str()) => {
+                Some(member.clone())
+            }
+            _ => None,
+        })
+        .collect();
     let mut top = entry.clone();
-    if reachable.contains(&entry.name) {
-        // A block and a function can share a name in the source. Only the
-        // projected block owns that entry point in the output package.
+    if reachable.contains(entry.name.as_str()) {
         let base = format!("{}__callee", entry.name);
         let mut fresh = base.clone();
         for suffix in 1.. {
-            if !reachable.contains(&fresh) {
+            if !reachable.contains(fresh.as_str()) {
                 break;
             }
             fresh = format!("{base}_{suffix}");
@@ -291,7 +281,6 @@ pub(crate) fn package_with_entry_from_member(
         rename_callee_references(&mut top, &entry.name, &fresh);
     }
     members.push(PackageMember::Function(top));
-
     Ok(Package {
         name: pkg.name.clone(),
         file_table: pkg.file_table.clone(),
@@ -300,8 +289,8 @@ pub(crate) fn package_with_entry_from_member(
     })
 }
 
-/// Redirects all function references, including those in higher-order
-/// operations.
+/// Redirects calls and higher-order function references after a namespace
+/// collision.
 fn rename_callee_references(graph: &mut crate::ir::NodeGraph, old: &str, new: &str) {
     for node in &mut graph.nodes {
         let callee = match &mut node.payload {
@@ -313,6 +302,75 @@ fn rename_callee_references(graph: &mut crate::ir::NodeGraph, old: &str, new: &s
             new.clone_into(callee);
         }
     }
+}
+
+/// Collects each root and its transitive callees once, callees before callers.
+/// Visits roots in the supplied order and sibling callees in name order.
+/// Includes loop bodies and reports missing functions or recursive calls.
+pub fn reachable_functions_in_dependency_order<'a>(
+    pkg: &'a Package,
+    roots: &[&str],
+) -> Result<Vec<&'a crate::ir::Fn>, String> {
+    ordered_functions(pkg, roots, None)
+}
+
+/// A standalone entry can override its package definition or be absent from it.
+fn ordered_functions<'a>(
+    pkg: &'a Package,
+    roots: &[&str],
+    entry: Option<&'a crate::ir::Fn>,
+) -> Result<Vec<&'a crate::ir::Fn>, String> {
+    let mut functions = HashMap::new();
+    for member in &pkg.members {
+        if let PackageMember::Function(f) = member
+            && functions.insert(f.name.as_str(), f).is_some()
+        {
+            return Err(format!("ambiguous function name {:?} in package", f.name));
+        }
+    }
+    if let Some(entry) = entry {
+        functions.insert(&entry.name, entry);
+    }
+    let lookup = |name: &str| {
+        functions
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("reachable function '{name}' is missing from package"))
+    };
+
+    enum Visit<'a> {
+        Enter(&'a crate::ir::Fn),
+        Emit(&'a crate::ir::Fn),
+    }
+    let mut work = Vec::new();
+    for root in roots.iter().rev() {
+        work.push(Visit::Enter(lookup(root)?));
+    }
+    let mut active = HashSet::new();
+    let mut finished = HashSet::new();
+    let mut ordered = Vec::new();
+    while let Some(visit) = work.pop() {
+        match visit {
+            Visit::Enter(f) => {
+                if finished.contains(f.name.as_str()) {
+                    continue;
+                }
+                if !active.insert(f.name.as_str()) {
+                    return Err(format!("recursive function reference to '{}'", f.name));
+                }
+                work.push(Visit::Emit(f));
+                for callee in direct_function_references(f).into_iter().rev() {
+                    work.push(Visit::Enter(lookup(callee)?));
+                }
+            }
+            Visit::Emit(f) => {
+                active.remove(f.name.as_str());
+                finished.insert(f.name.as_str());
+                ordered.push(f);
+            }
+        }
+    }
+    Ok(ordered)
 }
 
 #[cfg(test)]

@@ -5,11 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::uniquify_node_name;
-use crate::block_feedback::projection::is_empty_data;
+use super::{fixed_names, uniquify_name};
 use crate::ir::{Block, BlockReset, Instantiation, Node, NodePayload, NodeRef, Register, Unop};
 use crate::ir_utils::remap_payload_with;
-use crate::ir_value_utils::zero_ir_value_for_type;
 
 /// Parent driver for each formal input and all uses of each child output.
 #[derive(Default)]
@@ -73,11 +71,7 @@ impl<'a> Wiring<'a> {
                 .iter()
                 .filter_map(|n| n.name.clone().map(|name| (name, 1)))
                 .collect(),
-            register_names: parent
-                .registers
-                .iter()
-                .map(|r| (r.name.clone(), 1))
-                .collect(),
+            register_names: fixed_names(parent),
         })
     }
 
@@ -150,8 +144,7 @@ impl<'a> Wiring<'a> {
         }
         let mut registers = HashMap::new();
         for reg in &child.registers {
-            let scoped =
-                uniquify_node_name(&format!("{name}__{}", reg.name), &mut self.register_names);
+            let scoped = uniquify_name(&format!("{name}__{}", reg.name), &mut self.register_names);
             registers.insert(reg.name.as_str(), scoped.clone());
             parent.registers.push(Register {
                 name: scoped,
@@ -190,9 +183,21 @@ impl<'a> Wiring<'a> {
                             })?
                             .clone();
                     }
-                    let local_name = node
-                        .assigned_name()
-                        .map(|n| uniquify_node_name(&format!("{name}__{n}"), &mut self.node_names));
+                    if let NodePayload::Assert { label, .. } | NodePayload::Cover { label, .. } =
+                        &mut mapped
+                        && !label.is_empty()
+                    {
+                        if self.register_names.contains_key(label) {
+                            *label = uniquify_name(
+                                &format!("{name}__{label}"),
+                                &mut self.register_names,
+                            );
+                        } else {
+                            self.register_names.insert(label.clone(), 1);
+                        }
+                    }
+                    let local_name = assigned_name(node)
+                        .map(|n| uniquify_name(&format!("{name}__{n}"), &mut self.node_names));
                     (mapped, local_name)
                 }
             };
@@ -218,7 +223,7 @@ impl<'a> Wiring<'a> {
                 "block_inline: connections reference unknown instance '{name}'"
             ));
         }
-        self.collapse_aliases(parent);
+        self.collapse_aliases(parent)?;
         let driver = |arg: NodeRef| {
             self.aliases
                 .get(arg.index)
@@ -232,7 +237,7 @@ impl<'a> Wiring<'a> {
             } else if matches!(node.payload, NodePayload::InstantiationInput { .. }) {
                 // An ordinary user of a connection sink still sees its unit
                 // value.
-                node.replace_payload(NodePayload::Tuple(vec![]));
+                replace_payload(node, NodePayload::Tuple(vec![]));
             } else {
                 node.payload = remap_payload_with(&node.payload, |(_, arg)| driver(arg));
             }
@@ -267,7 +272,7 @@ impl<'a> Wiring<'a> {
 
     /// Path-compresses whole-port aliases. A closed chain of empty data has
     /// one possible value. Other loops keep a self-edge for cycle diagnosis.
-    fn collapse_aliases(&mut self, parent: &mut Block) {
+    fn collapse_aliases(&mut self, parent: &mut Block) -> Result<(), String> {
         let mut state = vec![0u8; self.aliases.len()];
         let mut path = Vec::new();
         for start in 0..self.aliases.len() {
@@ -284,12 +289,16 @@ impl<'a> Wiring<'a> {
                     }
                     1 => {
                         let root = parent.get_node_mut(node);
-                        let payload = if is_empty_data(&root.ty) {
-                            NodePayload::Literal(zero_ir_value_for_type(&root.ty))
+                        let payload = if root.ty.checked_bit_count() == Some(0)
+                            && !root.ty.contains_token()
+                        {
+                            NodePayload::Literal(
+                                crate::block_legalize::zero_value_for_legalization(&root.ty)?,
+                            )
                         } else {
                             NodePayload::Unop(Unop::Identity, node)
                         };
-                        root.replace_payload(payload);
+                        replace_payload(root, payload);
                         break;
                     }
                     _ => {
@@ -303,6 +312,7 @@ impl<'a> Wiring<'a> {
                 self.aliases[alias.index] = (alias != node).then_some(node);
             }
         }
+        Ok(())
     }
 }
 
@@ -332,4 +342,21 @@ fn destinations(
         mapping.push(dest);
     }
     Ok(mapping)
+}
+
+/// Returns a user-assigned name, excluding the canonical operator-ID spelling.
+fn assigned_name(node: &Node) -> Option<&str> {
+    node.name.as_deref().filter(|name| {
+        !name.rsplit_once('.').is_some_and(|(op, id)| {
+            op == node.payload.get_operator() && id.parse::<usize>() == Ok(node.text_id)
+        })
+    })
+}
+
+/// Replaces an operation while preserving only an explicitly assigned name.
+fn replace_payload(node: &mut Node, payload: NodePayload) {
+    if assigned_name(node).is_none() {
+        node.name = None;
+    }
+    node.payload = payload;
 }

@@ -1,0 +1,18 @@
+package shifts
+top block shift(d: bits[8], q: bits[8]) {
+  d: bits[8] = input_port(name=d, id=1)
+  amount: bits[2] = literal(value=1, id=2)
+  value: bits[8] = shll(d, amount, id=3)
+  q: () = output_port(value, name=q, id=4)
+}
+
+// EXPECT-SV: module shift(
+// EXPECT-SV:   input logic [7:0] d,
+// EXPECT-SV:   output logic [7:0] q
+// EXPECT-SV: );
+// EXPECT-SV:   logic [1:0] amount;
+// EXPECT-SV:   logic [7:0] value;
+// EXPECT-SV:   assign amount = 2'h1;
+// EXPECT-SV:   assign value = {d[6:0], 1'h0};
+// EXPECT-SV:   assign q = value;
+// EXPECT-SV: endmodule

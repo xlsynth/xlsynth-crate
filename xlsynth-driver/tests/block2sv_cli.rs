@@ -271,6 +271,7 @@ fn invalid_flags_fail_before_reading_the_input() {
         "--emit-asserts=not-a-boolean",
         "--max-inline-depth=-1",
         "--unknown-flag=true",
+        "--simplify",
     ] {
         let output = invoke(directory.path(), &["missing.ir".into(), flag.into()]);
         assert_eq!(output.status.code(), Some(2), "{flag}");

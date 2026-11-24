@@ -2,7 +2,9 @@
 
 `block::CompiledBlock::compile(&package, top)` accepts a parsed or built PIR
 package. It projects the block hierarchy and compiles the cycle function and
-its callees once. Each simulation can then advance independently.
+its callees once. Structural feedback is legalized in the projected cycle when
+needed, preserving hierarchical register names and diagnostic source sites. Each
+simulation can then advance independently.
 
 Use `initial_state(RegisterInit::AllZeros)`, seeded `Random`, or `Supplied`
 register values to start. Pass the state and one `IrValue` per data input to

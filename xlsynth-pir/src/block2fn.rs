@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::block_inline::inline_blocks_with_top_bindings;
+use crate::block_inline::inline_all_blocks_in_package;
+use crate::block_legalize::{
+    legalize_after_inline_failure, legalize_after_inline_failure_with_preprocess,
+};
 use crate::dce::remove_dead_nodes;
 use crate::ir::{self, Block, BlockPort, NodePayload, NodeRef, Type};
 use crate::ir_eval::eval_pure_if_supported;
@@ -23,15 +26,20 @@ pub struct Block2FnResult {
 }
 
 /// Projects the top block of a verified package, optionally tying inputs and
-/// dropping outputs. The function can retain calls to other package members.
-/// Use [`block_package_to_fn_package`] for a standalone result.
+/// dropping outputs. Valid structural feedback is legalized only when ordinary
+/// inlining cannot schedule it. The function can retain calls to other package
+/// members; use [`block_package_to_fn_package`] for a standalone result.
 pub fn block_package_to_fn(
     pkg: &ir::Package,
     options: &Block2FnOptions,
 ) -> Result<Block2FnResult, String> {
-    let mut pkg = pkg.clone();
-    // The tied values can determine which bits participate in feedback.
-    inline_blocks_with_top_bindings(&mut pkg, |top| tie_input_ports(top, options))?;
+    let pkg = inline_for_function(pkg, options).map_err(|error| {
+        if error.starts_with("block2fn: ") {
+            error
+        } else {
+            format!("block2fn: {error}")
+        }
+    })?;
     let package_name = pkg.name.clone();
     let top_block = pkg
         .get_top_block()
@@ -64,6 +72,39 @@ pub fn block_package_to_fn(
     })
 }
 
+/// Uses ordinary inlining unless a whole-node cycle requires structural
+/// legalization.
+fn inline_for_function(
+    package: &ir::Package,
+    options: &Block2FnOptions,
+) -> Result<ir::Package, String> {
+    let mut inlined = package.clone();
+    match inline_all_blocks_in_package(&mut inlined) {
+        Ok(()) => {
+            let top = inlined
+                .get_top_block_mut()
+                .ok_or("block2fn: package has no block members")?;
+            tie_input_ports(top, options)?;
+            Ok(inlined)
+        }
+        Err(original) => match package.get_top_block() {
+            Some(top) if options.tie_input_ports.is_empty() => {
+                legalize_after_inline_failure(package, &top.name, original)
+            }
+            Some(top) => legalize_after_inline_failure_with_preprocess(
+                package,
+                &top.name,
+                original,
+                |block, last_id| {
+                    tie_input_ports(block, options)?;
+                    crate::block_simplify::simplify_unordered_block(block, last_id)
+                },
+            ),
+            None => Err(original),
+        },
+    }
+}
+
 /// Projects the top block of a verified package into a standalone function
 /// package containing its reachable callees. The top keeps its block name.
 /// A callee with the same name gets a fresh name in the output package.
@@ -72,11 +113,7 @@ pub fn block_package_to_fn_package(
     options: &Block2FnOptions,
 ) -> Result<ir::Package, String> {
     let projected = block_package_to_fn(package, options)?;
-    crate::ir_inline::package_with_entry_from_member(
-        package,
-        &projected.function,
-        ir::MemberType::Block,
-    )
+    crate::ir_inline::package_with_projected_block_entry(package, &projected.function)
 }
 
 /// Parses block IR and projects its top with [`block_package_to_fn`].

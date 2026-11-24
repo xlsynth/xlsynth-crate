@@ -125,14 +125,26 @@ pub(crate) fn emit_package(
     options: &BlockCodegenOptions,
     mut top_register_names: Option<&mut BTreeMap<String, String>>,
 ) -> Result<BlockCodegenOutput, BlockCodegenError> {
-    let top_block = select_top(package, options.top.as_deref())?;
-    let top = top_block.name.as_str();
-    let mut inliner = BlockInvokeInliner::new(package).map_err(BlockCodegenError::InvalidBlock)?;
-
-    let mut ordered = Vec::new();
-    let mut visited = BTreeSet::new();
-    let mut visiting = BTreeSet::new();
-    collect_dependencies(package, top, &mut ordered, &mut visited, &mut visiting)?;
+    let top = select_top(package, options.top.as_deref())?;
+    let ordered = blocks_in_dependency_order(package, top)?;
+    let blocks: BTreeMap<_, _> = ordered.iter().map(|&b| (b.name.as_str(), b)).collect();
+    let emitted = collect_emitted_blocks(&ordered, top);
+    let top_module_name = options.module_name.as_deref().unwrap_or(top);
+    if options.layout == Layout::Pipeline {
+        for &block in &ordered {
+            if emitted.contains(block.name.as_str())
+                && let Some(instance) = block
+                    .instantiations
+                    .iter()
+                    .find(|instance| instance.kind.is_external_block())
+            {
+                return Err(BlockCodegenError::NotPipeline(format!(
+                    "block `{}` cannot use layout=pipeline with external block instance `{}`; use layout=none",
+                    block.name, instance.name
+                )));
+            }
+        }
+    }
     for &block in &ordered {
         validate_supported_nodes(block, options.layout, emitted.contains(block.name.as_str()))?;
     }
@@ -155,34 +167,24 @@ pub(crate) fn emit_package(
             }
         }
     }
-    crate::hierarchy::verify_hierarchy(top_block, package)?;
-    if let Some(module_name) = options.module_name.as_deref()
-        && ordered
-            .iter()
-            .any(|block| block.name != top && block.name == module_name)
-    {
-        return Err(BlockCodegenError::InvalidBlock(format!(
-            "top module name `{module_name}` conflicts with an instantiated child block; \
-             choose a distinct module name"
-        )));
-    }
+    let source_top = package.get_block(top).expect("selected top block");
+    crate::hierarchy::verify_hierarchy(source_top, package, options.array_index_bounds_checking)?;
+    validate_module_names(&ordered, &emitted, top, top_module_name)?;
 
-    // Layout and emission both use the expanded function bodies.
-    let expanded = ordered
-        .into_iter()
-        .map(|block| {
-            inliner
-                .inline_block(&block.name)
-                .map_err(BlockCodegenError::Unsupported)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let blocks = expanded
-        .iter()
-        .map(|block| (block.name.as_str(), block.as_ref()))
-        .collect();
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut child_timings = ChildTimings::new();
-    for block in &expanded {
+    for block in ordered {
+        if !emitted.contains(block.name.as_str()) {
+            continue;
+        }
+        let stages = match options.layout {
+            Layout::None => None,
+            Layout::Pipeline => Some(reconstruct_stages(
+                block,
+                &mut child_timings,
+                block.name != top,
+            )?),
+        };
         let module_name = if block.name == top {
             top_module_name
         } else {
@@ -345,28 +347,38 @@ pub fn inline_invokes_for_codegen(
 fn select_top<'a>(
     package: &'a Package,
     explicit_top: Option<&str>,
-) -> Result<&'a Block, BlockCodegenError> {
-    if let Some(requested) = explicit_top {
-        return package.get_block(requested).ok_or_else(|| {
-            BlockCodegenError::TopSelection(format!(
-                "requested top block `{requested}` does not exist"
-            ))
-        });
-    }
-    if let Some((name, MemberType::Block)) = &package.top {
-        return package.get_block(name).ok_or_else(|| {
-            BlockCodegenError::TopSelection(format!("package top block `{name}` does not exist"))
-        });
-    }
-
-    let blocks: Vec<_> = package
+) -> Result<&'a str, BlockCodegenError> {
+    let blocks = package
         .members
         .iter()
         .filter_map(|member| match member {
-            PackageMember::Block(block) => Some(block),
+            PackageMember::Block(block) => Some(block.name.as_str()),
             PackageMember::Function(_) => None,
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    if let Some(requested) = explicit_top {
+        return blocks
+            .into_iter()
+            .find(|name| *name == requested)
+            .ok_or_else(|| {
+                BlockCodegenError::TopSelection(format!(
+                    "requested top block `{requested}` does not exist"
+                ))
+            });
+    }
+
+    if let Some((name, MemberType::Block)) = &package.top {
+        return blocks
+            .into_iter()
+            .find(|candidate| candidate == &name.as_str())
+            .ok_or_else(|| {
+                BlockCodegenError::TopSelection(format!(
+                    "package top block `{name}` does not exist"
+                ))
+            });
+    }
+
     match blocks.as_slice() {
         [only] => Ok(only),
         [] => Err(BlockCodegenError::TopSelection(
@@ -374,11 +386,7 @@ fn select_top<'a>(
         )),
         _ => Err(BlockCodegenError::TopSelection(format!(
             "package contains multiple blocks ({}) without a block top; specify --top",
-            blocks
-                .iter()
-                .map(|block| block.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            blocks.join(", ")
         ))),
     }
 }

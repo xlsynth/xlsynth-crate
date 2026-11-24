@@ -168,7 +168,21 @@ pub fn deep_or_ir_values_for_type(ty: &ir::Type, lhs: &IrValue, rhs: &IrValue) -
 /// the current host width, and returns `None` when any set bit lies above the
 /// host `usize` width.
 pub fn ir_bits_to_usize(bits: &IrBits) -> Option<usize> {
-    bits.to_u64().ok()?.try_into().ok()
+    let usize_width = usize::BITS as usize;
+    for i in usize_width..bits.get_bit_count() {
+        if bits.get_bit(i).expect("bit index is in bounds") {
+            return None;
+        }
+    }
+
+    let mut value = 0usize;
+    let low_width = std::cmp::min(bits.get_bit_count(), usize_width);
+    for i in 0..low_width {
+        if bits.get_bit(i).expect("bit index is in bounds") {
+            value |= 1usize << i;
+        }
+    }
+    Some(value)
 }
 
 /// Converts an `IrBits` value to `usize` when it is strictly less than the

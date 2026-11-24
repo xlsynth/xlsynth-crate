@@ -672,24 +672,44 @@ xlsynth-driver g8r2gv mul_inc.g8r --liberty-proto cells.proto -o mul_inc.gv
 
 ### `block2fn`: Block IR to PIR function package
 
-Inlines the block hierarchy and emits a PIR package containing the projected top function and any functions it still calls.
+Inlines blocks and converts Block IR into a PIR package with a top function and any reachable native function dependencies. If ordinary inlining cannot schedule a whole-node feedback dependency, `block2fn` works on a private flattened proof graph: it applies requested input ties, simplifies the constrained wiring when needed, and legalizes structurally acyclic feedback before function conversion. The source hierarchy is unchanged. The following steps are performed:
 
-- Uses constants from `--tie-input-ports` when resolving feedback and removes the tied ports from the function signature.
+- Applies `--tie-input-ports` constants to the private proof graph and removes those ports from the resulting function signature. Ties are available to feedback simplification and legalization.
 - Optionally removes output ports (`--drop-output-ports`).
-- Performs a trivial optimization pass handling the tied input ports. The motivation for this is to remove feedback loops caused by load-enable functionality. A common case is an `input_valid` signal muxing the register output with data to form the register input. Tying `input_valid` to 1 and optimizing cuts this cycle.
+- Simplifies tied inputs, such as an `input_valid` mux choosing between register output and new data; a constant select can remove the feedback dependency.
 - Collapses registers into wires. If a cycle is created after collapsing, an error is returned.
 - Removes clock port.
 - Converts the resulting combinational block into a function.
 
-Both `block2fn` and `block2sv` check feedback across instance connections. For example, on a three-bit port, wiring `q = q << 1` gives bit zero a constant driver and the other bits read successively lower lanes. Wiring `q = q << 0` creates a cycle. Runtime indices and shift amounts are treated conservatively when checking possible feedback.
-
-This is useful for converting a block generated from a netlist into a package-form function IR that can be consumed directly by package-oriented tooling such as `ir-equiv`.
+This is useful for converting a block generated from a netlist into package-form function IR for tools such as `ir-equiv`. Cycles that remain after the requested ties and simplification, and opaque external instances, are rejected. Legalization uses canonical XLS array bounds semantics and size limits; equivalence to unchecked SV indexing is not guaranteed for out-of-bounds indices. `block-simplify` remains available for separate hierarchy-preserving simplification.
 
 ```shell
 xlsynth-driver block2fn \
   --block_ir ~/my_netlist.block.ir \
   --tie-input-ports "A=bits[1]:0,B=bits[4]:0b1011" \
   --drop-output-ports "unused_out" > ~/my_netlist.fn.ir
+```
+
+### `block-simplify`: simplify Block IR
+
+Simplifies local constants, gates, muxes, and statically controlled shifts and slices in a Block IR package. The command prints the resulting package as Block IR; it does not generate SystemVerilog. Block definitions and instance hierarchy are preserved, and constants do not propagate across instance boundaries.
+
+By default, the package's marked block top and its reachable block definitions are simplified. A package containing only one block selects that block; if there is no selected top and multiple blocks, every block is simplified. `--top <BLOCK>` selects and marks a different output top while leaving unrelated block definitions unchanged. Simplification uses canonical XLS array-index semantics; unchecked out-of-range SV indexing need not produce the same behavior.
+
+```shell
+xlsynth-driver block-simplify input.block.ir > simplified.block.ir
+xlsynth-driver block2sv simplified.block.ir > output.sv
+```
+
+### `block-legalize`: lower Block IR for whole-node consumers
+
+Flattens the selected block hierarchy and rewrites acyclic structural feedback into a whole-node dependency graph. This standalone command exposes the feedback lowering that `block2fn` invokes automatically when ordinary inlining cannot schedule the wiring. It does not apply `block2fn` input ties; `block2fn` applies those to its private proof graph before legalization. Use it to inspect the resulting Block IR or provide it to other whole-node consumers. It changes the hierarchy, unlike `block-simplify`; SystemVerilog emission does not require it. Actual combinational cycles and opaque external instances are rejected. Array operations use canonical XLS bounds semantics; proofs of legalized IR do not cover unchecked SV array indexing for out-of-bounds indices. The pass rejects lowerings that exceed its explicit array-expansion or proof-graph size limits to avoid runaway evaluation and proof costs.
+
+The marked block top is used by default, or the only block if the package has no marked block top. Use `--top <BLOCK>` to select a different top, or when an unmarked package contains multiple blocks.
+
+```shell
+xlsynth-driver block-legalize input.block.ir > legalized.block.ir
+xlsynth-driver block2fn --block_ir input.block.ir > output.fn.ir
 ```
 
 ### `block2sv`: Block IR to SystemVerilog
@@ -3329,10 +3349,13 @@ port order, and a block with no outputs prints `()`.
   Omit all register state flags for combinational blocks.
 
 Trace messages and runtime failures go to stderr with the one-based cycle
-number. The evaluator supports synchronous register resets and child block
-instances. Asynchronous resets and external instances produce an error.
-The block interface supplies the element type for empty arrays written as
-`[]` in input tuples and register checkpoints.
+number. The evaluator supports synchronous register resets, child blocks, and
+external instances backed by behavioral models. Asynchronous resets, inouts,
+and opaque external instances produce an error. Structurally acyclic feedback
+is legalized in the projected cycle function when whole-node scheduling needs
+it; register paths, checkpoint order, and diagnostic source sites retain their
+original hierarchy. The block interface supplies the element type for empty
+arrays written as `[]` in input tuples and register checkpoints.
 
 A declared register reset value takes effect when the reset input is driven
 active during a cycle. For a register `r` with reset value 7 whose Q drives the

@@ -4,13 +4,20 @@
 
 use xlsynth_pir::BuilderError;
 use xlsynth_pir::ir::{Block, NodeRef, Package, node_textual_id};
-use xlsynth_pir::ir_builder::verify_block_combinational_cycles;
+use xlsynth_pir::ir_builder::{BlockWiringCycleOptions, verify_block_wiring_cycles_with_options};
 
 use crate::BlockCodegenError;
 
 /// Reports a PIR cycle witness using the emitted block's node names.
-pub(crate) fn verify_hierarchy(top: &Block, package: &Package) -> Result<(), BlockCodegenError> {
-    verify_block_combinational_cycles(top, package).map_err(|error| {
+pub(crate) fn verify_hierarchy(
+    top: &Block,
+    package: &Package,
+    array_index_bounds_checking: bool,
+) -> Result<(), BlockCodegenError> {
+    let options = BlockWiringCycleOptions {
+        array_index_bounds_checking,
+    };
+    verify_block_wiring_cycles_with_options(top, package, &options).map_err(|error| {
         if let BuilderError::CombinationalCycle { block, steps } = &error
             && let Some(source) = package.get_block(block)
             && let Some(first) = steps.first()
@@ -40,89 +47,7 @@ mod tests {
     }
 
     fn verify_hierarchy(package: &Package) -> Result<(), BlockCodegenError> {
-        super::verify_hierarchy(package.get_top_block().unwrap(), package)
-    }
-
-    #[test]
-    fn helper_name_preserves_feedback_verdict_and_sv_emission() {
-        for helper in ["amount", "wrapper"] {
-            for shift in [0, 1] {
-                // The first node in each graph holds a different literal. The
-                // shifter must read the helper's return, even for equal names.
-                let source = format!(
-                    r#"package control
-fn {helper}() -> bits[2] {{
-  ret offset: bits[2] = literal(value={shift}, id=1)
-}}
-block shifter(data: bits[3], amount: bits[2], result: bits[3]) {{
-  data: bits[3] = input_port(name=data, id=2)
-  amount: bits[2] = input_port(name=amount, id=3)
-  y: bits[3] = shll(data, amount, id=4)
-  result: () = output_port(y, name=result, id=5)
-}}
-top block wrapper(result: bits[3]) {{
-  instantiation u(block=shifter, kind=block)
-  marker: bits[2] = literal(value={marker}, id=6)
-  amount: bits[2] = invoke(to_apply={helper}, id=7)
-  q: bits[3] = instantiation_output(instantiation=u, port_name=result, id=8)
-  d: () = instantiation_input(q, instantiation=u, port_name=data, id=9)
-  n: () = instantiation_input(amount, instantiation=u, port_name=amount, id=10)
-  result: () = output_port(q, name=result, id=11)
-}}"#,
-                    marker = 1 - shift
-                );
-                let package = parse_package(&source);
-                let checked = verify_hierarchy(&package);
-                let sv = crate::emit_system_verilog(&package, &Default::default());
-                if shift == 0 {
-                    for error in [checked.unwrap_err(), sv.unwrap_err()] {
-                        assert!(matches!(error, BlockCodegenError::InvalidBlock(message)
-                            if message.contains("combinational cycle")));
-                    }
-                } else {
-                    checked.unwrap();
-                    sv.unwrap();
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn rejects_child_feedback_before_expanding_a_downstream_call() {
-        let package = parse_package(
-            r#"package public_direct_cycle
-
-#[ffi_proto("""code_template: "external_cell {fn} (.x({x}), .out({return}));"
-""")]
-fn external_cell(x: bits[8] id=6) -> bits[8] {
-  ret x: bits[8] = param(name=x, id=6)
-}
-
-block passthrough(value: bits[8], result: bits[8]) {
-  value: bits[8] = input_port(name=value, id=1)
-  result: () = output_port(value, name=result, id=2)
-}
-
-top block feedback(result: bits[8]) {
-  instantiation component(block=passthrough, kind=block)
-  fed: bits[8] = instantiation_output(instantiation=component, port_name=result, id=3)
-  connected: () = instantiation_input(fed, instantiation=component, port_name=value, id=4)
-  called: bits[8] = invoke(fed, to_apply=external_cell, id=7)
-  result: () = output_port(called, name=result, id=5)
-}
-"#;
-        let external = source.replace(
-            "kind=block",
-            "module_name=external_rtl, kind=behavioral_extern_block",
-        );
-
-        // Reaching expansion would report the non-inlineable foreign call.
-        let result = crate::emit_system_verilog(&package, &Default::default());
-        assert!(matches!(
-            result,
-            Err(BlockCodegenError::InvalidBlock(message))
-                if message.contains("block `feedback` contains a combinational cycle")
-        ));
+        super::verify_hierarchy(package.get_top_block().unwrap(), package, true)
     }
 
     #[test]
@@ -304,23 +229,6 @@ top block feedback(clk: clock, rst: bits[1], empty: bits[0], empty_result: bits[
         );
 
         assert_eq!(verify_hierarchy(&package), Ok(()));
-    }
-
-    #[test]
-    fn opaque_external_block_is_a_cycle_check_boundary() {
-        let package = parse_blocks(
-            r#"package opaque_feedback
-
-top block feedback(result: bits[8]) {
-  instantiation u(module_name=external_cell, ports={data:input bits[8], out:output bits[8]}, kind=opaque_extern_block)
-  received: bits[8] = instantiation_output(instantiation=u, port_name=out, id=1)
-  connected: () = instantiation_input(received, instantiation=u, port_name=data, id=2)
-  result: () = output_port(received, name=result, id=3)
-}
-"#,
-        );
-
-        assert_eq!(verify_hierarchy(&ordered_blocks(&package)), Ok(()));
     }
 
     #[test]

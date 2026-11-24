@@ -47,6 +47,8 @@ mod aig_toggle_hotspots;
 mod blif2g8r;
 mod block2fn;
 mod block2sv;
+mod block_legalize;
+mod block_simplify;
 mod bx;
 mod common;
 mod dslx2ir;
@@ -2107,6 +2109,42 @@ fn main() {
                         .long("output")
                         .value_name("FILE")
                         .help("Write to a file instead of stdout"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("block-legalize")
+                .about("Flattens and legalizes a Block IR hierarchy for whole-node consumers")
+                .arg(
+                    Arg::new("input_file")
+                        .value_name("INPUT_FILE")
+                        .help("Input package-form block IR file")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_name("BLOCK")
+                        .help("Top block; overrides the package top")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("block-simplify")
+                .about("Simplifies a Block IR package while preserving its block hierarchy")
+                .arg(
+                    Arg::new("input_file")
+                        .value_name("INPUT_FILE")
+                        .help("Input package-form block IR file")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_name("BLOCK")
+                        .help("Select a block hierarchy and mark the output package top")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -4289,6 +4327,18 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("block2fn", subm)) => {
             block2fn::handle_block2fn(subm, &config);
+        }
+        Some(("block-legalize", subm)) => {
+            if let Err(error) = block_legalize::handle_block_legalize(subm) {
+                eprintln!("error: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        Some(("block-simplify", subm)) => {
+            if let Err(error) = block_simplify::handle_block_simplify(subm) {
+                eprintln!("error: {error:#}");
+                std::process::exit(1);
+            }
         }
         Some(("block2sv", subm)) => {
             if let Err(error) = block2sv::handle_block2sv(subm) {

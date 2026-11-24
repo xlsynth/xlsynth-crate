@@ -138,14 +138,6 @@ pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
     None
 }
 
-/// Reads an unsigned literal index, saturating at `usize::MAX`.
-pub fn literal_offset(graph: &NodeGraph, node: NodeRef) -> Option<usize> {
-    let NodePayload::Literal(IrValue::Bits(bits)) = &graph.get_node(node).payload else {
-        return None;
-    };
-    Some(crate::ir_value_utils::ir_bits_to_usize(bits).unwrap_or(usize::MAX))
-}
-
 /// Counts stored node slots, excluding the reserved `Nil` slot.
 ///
 /// Includes parameters, unreachable nodes, and any other `Nil` slots.

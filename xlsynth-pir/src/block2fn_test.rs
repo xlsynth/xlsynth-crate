@@ -2,11 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::block2fn::{
-    Block2FnOptions, block_ir_to_fn, block_ir_to_fn_package, block_package_to_fn_package,
-};
+use crate::block2fn::{Block2FnOptions, block_ir_to_fn};
 use crate::ir::NodePayload;
-use crate::ir_parser::Parser;
 use crate::ir_query::{matches_node, parse_query};
 use crate::{IrBits, IrValue};
 
@@ -46,58 +43,6 @@ fn assert_return_matches(f: &crate::ir::Fn, query_text: &str) {
 }
 
 #[test]
-fn projected_top_preserves_calls_to_an_eponymous_function() {
-    for name in ["flip", "step"] {
-        let source = format!(
-            r#"package helpers
-fn flip(x: bits[1] id=1) -> bits[1] {{
-  ret n: bits[1] = not(x, id=2)
-}}
-fn step(i: bits[2] id=3, x: bits[1] id=4) -> bits[1] {{
-  ret n: bits[1] = invoke(x, to_apply=flip, id=5)
-}}
-fn {name}__callee(x: bits[1] id=6) -> bits[1] {{
-  ret x: bits[1] = param(name=x, id=6)
-}}
-top block {name}(x: bits[1], y: bits[3]) {{
-  x: bits[1] = input_port(name=x, id=7)
-  n: bits[1] = invoke(x, to_apply=flip, id=8)
-  a: bits[1][1] = array(x, id=9)
-  mapped: bits[1][1] = map(a, to_apply=flip, id=10)
-  zero: bits[1] = literal(value=0, id=11)
-  first: bits[1] = array_index(mapped, indices=[zero], id=12)
-  loop: bits[1] = counted_for(n, trip_count=1, stride=1, body=step, id=13)
-  carried: bits[1] = invoke(loop, to_apply={name}__callee, id=14)
-  word: bits[3] = concat(first, carried, n, id=15)
-  y: () = output_port(word, name=y, id=16)
-}}"#
-        );
-        let input = Parser::new(&source).parse_and_verify_package().unwrap();
-        let original = input.to_string();
-        let options = Block2FnOptions::default();
-        let output = block_package_to_fn_package(&input, &options)
-            .unwrap()
-            .to_string();
-        assert_eq!(input.to_string(), original);
-        assert_eq!(
-            block_ir_to_fn_package(&source, &options)
-                .unwrap()
-                .to_string(),
-            output
-        );
-
-        let package = Parser::new(&output).parse_and_verify_package().unwrap();
-        let entry = package.get_top_fn().unwrap();
-        assert_eq!(entry.name, name);
-        for (input, expected) in [(0, 0b101), (1, 0b010)] {
-            let input = IrValue::make_ubits(1, input).unwrap();
-            let value = crate::ir_eval::eval_fn_in_package_value(&package, entry, &[input]);
-            assert_eq!(value, IrValue::make_ubits(3, expected).unwrap());
-        }
-    }
-}
-
-#[test]
 fn e2e_trivial_passthrough_no_registers() {
     let block_ir = r#"package test
 
@@ -110,38 +55,6 @@ top block top(a: bits[8], out: bits[8]) {
     assert_eq!(f.params.len(), 1, "expected a single input param");
     assert_eq!(f.get_param(0).param_name(), "a");
     assert_return_matches(&f, "param(name=\"a\")");
-}
-
-#[test]
-fn empty_array_alias_chain_forwards_its_input_and_resolves_a_closed_loop() {
-    let source = r#"package empty_ports
-block leaf(d: bits[0][2], q: bits[0][2]) {
-  d: bits[0][2] = input_port(name=d, id=1)
-  q: () = output_port(d, name=q, id=2)
-}
-top block wrapper(data: bits[0][2], result: bits[0][2]) {
-  instantiation a(block=leaf, kind=block)
-  instantiation b(block=leaf, kind=block)
-  data: bits[0][2] = input_port(name=data, id=3)
-  qa: bits[0][2] = instantiation_output(instantiation=a, port_name=q, id=4)
-  qb: bits[0][2] = instantiation_output(instantiation=b, port_name=q, id=5)
-  da: () = instantiation_input(data, instantiation=a, port_name=d, id=6)
-  db: () = instantiation_input(qa, instantiation=b, port_name=d, id=7)
-  result: () = output_port(qb, name=result, id=8)
-}"#;
-    let direct = run_block2fn(source, &[], &[]);
-    assert_return_matches(&direct, "param(name=\"data\")");
-
-    let feedback = source.replace("instantiation_input(data,", "instantiation_input(qb,");
-    let cyclic = run_block2fn(&feedback, &[], &[]);
-    let zero = IrValue::make_ubits(0, 0).unwrap();
-    let pair = IrValue::make_array(&[zero.clone(), zero]).unwrap();
-    let crate::ir_eval::FnEvalResult::Success(result) =
-        crate::ir_eval::eval_fn(&cyclic, std::slice::from_ref(&pair))
-    else {
-        panic!("failed to evaluate the closed empty-data loop");
-    };
-    assert_eq!(result.value, pair);
 }
 
 #[test]
@@ -326,38 +239,4 @@ fn e2e_netlist_load_enable_feedback_cycle_errors() {
         err, "block2fn: cycle detected: u_and_hold__myand -> u_or__myor -> u_and_hold__myand",
         "unexpected error: {err}"
     );
-}
-
-#[test]
-fn tied_input_controls_feedback_during_function_projection() {
-    let source = r#"package tied
-block shift(d: bits[3], amount: bits[3], q: bits[3]) {
-  d: bits[3] = input_port(name=d, id=1)
-  amount: bits[3] = input_port(name=amount, id=2)
-  shifted: bits[3] = shll(d, amount, id=3)
-  q: () = output_port(shifted, name=q, id=4)
-}
-top block wrapper(amount: bits[3], result: bits[3]) {
-  instantiation u(block=shift, kind=block)
-  amount: bits[3] = input_port(name=amount, id=5)
-  q: bits[3] = instantiation_output(instantiation=u, port_name=q, id=6)
-  data: () = instantiation_input(q, instantiation=u, port_name=d, id=7)
-  control: () = instantiation_input(amount, instantiation=u, port_name=amount, id=8)
-  result: () = output_port(q, name=result, id=9)
-}"#;
-    for amount in [None, Some(0), Some(1)] {
-        let mut options = Block2FnOptions::default();
-        if let Some(amount) = amount {
-            options.tie_input_ports.insert(
-                "amount".into(),
-                IrValue::make_ubits(3, amount).unwrap().to_bits().unwrap(),
-            );
-        }
-        let projected = block_ir_to_fn(source, &options);
-        if amount == Some(1) {
-            assert_return_matches(&projected.unwrap().function, "literal(0)");
-        } else {
-            assert!(projected.unwrap_err().contains("cycle"));
-        }
-    }
 }
