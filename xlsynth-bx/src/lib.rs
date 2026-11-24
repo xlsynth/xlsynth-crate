@@ -13,6 +13,11 @@ mod import_link;
 mod import_structs;
 mod infer_literal;
 pub mod invariant_prover;
+// Keep the experimental IR checker out of compilation until it is ready.
+#[cfg(test)]
+mod ir_timing;
+#[cfg(test)]
+mod ir_timing_tests;
 mod layout;
 pub mod lower;
 pub mod parser;
