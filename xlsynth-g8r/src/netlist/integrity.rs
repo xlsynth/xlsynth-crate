@@ -13,6 +13,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use crate::liberty_model::{Library, PinDirection};
+use crate::netlist::bit_ref::{DeclaredBitNumber, select_bit_number, select_width_bits};
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, NetlistModule,
     NetlistPort, PortDirection,
@@ -81,7 +82,7 @@ impl BitCoverageTracker {
             .or_insert_with(|| vec![false; nets[idx.0].width_bits()])
     }
 
-    fn mark_bit(&mut self, idx: NetIndex, bit: u32, nets: &[Net]) {
+    fn mark_bit(&mut self, idx: NetIndex, bit: DeclaredBitNumber, nets: &[Net]) {
         let width = nets[idx.0].width_bits();
         let Some(offset) = nets[idx.0].bit_offset(bit) else {
             self.mark_whole(idx, nets);
@@ -126,7 +127,7 @@ impl BitCoverageTracker {
         }
     }
 
-    fn is_bit_marked(&self, idx: NetIndex, bit: u32, nets: &[Net]) -> bool {
+    fn is_bit_marked(&self, idx: NetIndex, bit: DeclaredBitNumber, nets: &[Net]) -> bool {
         let Some(offset) = nets[idx.0].bit_offset(bit) else {
             return false;
         };
@@ -242,7 +243,7 @@ impl BitDriverTracker {
     fn mark_bit(
         &mut self,
         idx: NetIndex,
-        bit: u32,
+        bit: DeclaredBitNumber,
         _span: crate::netlist::parse::Span,
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -328,7 +329,7 @@ impl BitDriverTracker {
     fn is_bit_driven(
         &self,
         idx: NetIndex,
-        bit: u32,
+        bit: DeclaredBitNumber,
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
     ) -> Result<bool, StructuralAssignValidationError> {
@@ -387,13 +388,13 @@ impl BitDriverTracker {
 #[derive(Debug, Clone, Copy)]
 struct NetBitTarget {
     idx: NetIndex,
-    bit_number: u32,
+    bit_number: DeclaredBitNumber,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReferencedNetBit {
     idx: NetIndex,
-    bit_number: u32,
+    bit_number: DeclaredBitNumber,
     rendered: String,
 }
 
@@ -402,22 +403,6 @@ struct PendingAssignBit {
     assign_index: usize,
     rhs_bit_index: usize,
     target: NetBitTarget,
-}
-
-fn select_width_bits(msb: u32, lsb: u32) -> usize {
-    (u32::abs_diff(msb, lsb) as usize) + 1
-}
-
-fn select_bit_number(msb: u32, lsb: u32, bit_offset: usize) -> Option<u32> {
-    if bit_offset >= select_width_bits(msb, lsb) {
-        return None;
-    }
-    let offset = bit_offset as u32;
-    if msb >= lsb {
-        Some(lsb + offset)
-    } else {
-        Some(lsb - offset)
-    }
 }
 
 fn net_name(
@@ -433,7 +418,7 @@ fn net_name(
 
 fn render_named_bit(
     idx: NetIndex,
-    bit_number: u32,
+    bit_number: DeclaredBitNumber,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> String {

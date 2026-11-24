@@ -97,7 +97,7 @@ pub enum OutlineShape {
 /// Parse declaration syntax while retaining expressions for DSLX to evaluate.
 /// Function bodies are skipped as balanced tokens in the same source snapshot.
 pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
-    parse_outline_with_functions(source, |_, _, _, _| {}, None, |_, _, _| {})
+    parse_outline_with_functions(source, |_, _, _, _| {}, None)
 }
 
 /// Declaration metadata used to resolve imported constructors and patterns.
@@ -111,17 +111,7 @@ pub(crate) fn outline_import(
     source: &str,
     declarations: &mut ImportedTypeDeclarations,
 ) -> Result<DslxOutline, String> {
-    parse_outline_with_functions(source, |_, _, _, _| {}, Some(declarations), |_, _, _| {})
-}
-
-/// Visit numeric enum names and the byte after each declaration's closing
-/// brace.
-pub(crate) fn visit_numeric_enums(
-    source: &str,
-    visit: impl FnMut(Token<'_>, usize, bool),
-) -> Result<(), String> {
-    parse_outline_with_functions(source, |_, _, _, _| {}, None, visit)?;
-    Ok(())
+    parse_outline_with_functions(source, |_, _, _, _| {}, Some(declarations))
 }
 
 /// Original declaration tokens for a checked DSLX function. Defaults and
@@ -150,7 +140,6 @@ pub(crate) fn dslx_function_tokens(
             ambiguous |= functions.insert(name.to_owned(), tokens).is_some();
         },
         None,
-        |_, _, _| {},
     )?;
     if ambiguous {
         return Err("multiple DSLX source declarations for one function name".into());
@@ -247,7 +236,6 @@ fn parse_outline_with_functions<'s>(
     source: &'s str,
     mut visit: impl FnMut(&str, &[Token<'s>], &[Token<'s>], &[Token<'s>]),
     mut imported: Option<&mut ImportedTypeDeclarations>,
-    mut visit_enum: impl FnMut(Token<'s>, usize, bool),
 ) -> Result<DslxOutline, String> {
     let mut parser = outline_parser(source)?;
     let mut module = DslxOutline::default();
@@ -293,7 +281,6 @@ fn parse_outline_with_functions<'s>(
                 let keyword = parser.peek(0);
                 parser.pos += 1;
                 let name = parser.outline_identifier()?;
-                let name_token = parser.tokens[parser.pos - 1];
                 let bindings_start = parser.pos;
                 let mut function_parametrics = Vec::new();
                 let bindings = parser.outline_bindings(
@@ -329,13 +316,10 @@ fn parse_outline_with_functions<'s>(
                     }
                     "enum" => {
                         let kind = parser.outline_enum(&bindings)?;
-                        if matches!(kind, OutlineKind::Opaque) {
-                            if let Some(imported) = &mut imported {
-                                imported.sums.insert(name.clone());
-                            }
-                        } else {
-                            let close = parser.tokens[parser.pos - 1];
-                            visit_enum(name_token, close.start + close.text.len(), public);
+                        if matches!(kind, OutlineKind::Opaque)
+                            && let Some(imported) = &mut imported
+                        {
+                            imported.sums.insert(name.clone());
                         }
                         kind
                     }

@@ -74,7 +74,7 @@ block edges() -> bool {{
         writeln!(dslx, "    let d = ROWS[u32:{tick}];").unwrap();
         writeln!(
             dslx,
-            r#"    if !d.reset && ({guard}) {{ assert!(predicate(q{tick}, d), "{label}"); }};"#,
+            r#"    if !d.reset && ({guard}) {{ assert!(predicate(q{tick}, d), "{label}_{tick}"); }};"#,
         )
         .unwrap();
         if tick + 1 < row_count {

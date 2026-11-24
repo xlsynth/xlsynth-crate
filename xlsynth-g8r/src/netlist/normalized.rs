@@ -17,12 +17,27 @@ use std::collections::HashMap;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
-pub type BitIndex = usize;
+/// Index into the flattened bit table of a normalized module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NormalizedBitIndex(usize);
 
-/// One normalized bit source used by pin bindings and assign leaves.
+impl NormalizedBitIndex {
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
+
+/// A wire bit, Boolean constant, or unknown value in a cell pin connection
+/// or on the right-hand side of a Verilog assignment.
+///
+/// `WireId` identifies the referenced wire in the caller's netlist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum BitSource {
-    Bit(BitIndex),
+pub enum BitSource<WireId = NormalizedBitIndex> {
+    Bit(WireId),
     Literal(bool),
     Unknown,
 }
@@ -39,7 +54,7 @@ pub enum BitExpr {
 
 impl BitExpr {
     /// Appends every normalized net bit referenced by this expression.
-    pub fn collect_source_bits(&self, out: &mut Vec<BitIndex>) {
+    pub fn collect_source_bits(&self, out: &mut Vec<NormalizedBitIndex>) {
         match self {
             Self::Source(BitSource::Bit(bit_idx)) => out.push(*bit_idx),
             Self::Source(BitSource::Literal(_) | BitSource::Unknown) => {}
@@ -55,7 +70,7 @@ impl BitExpr {
 /// One normalized continuous assign statement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NormalizedAssign {
-    pub lhs_bits: Vec<BitIndex>,
+    pub lhs_bits: Vec<NormalizedBitIndex>,
     pub rhs_bits: Vec<BitExpr>,
     pub rendered_lhs: String,
     pub span: Span,
@@ -85,16 +100,16 @@ pub struct NormalizedPort {
     pub direction: PortDirection,
     pub width: Option<(u32, u32)>,
     pub name: PortId,
-    pub bits: Vec<BitIndex>,
+    pub bits: Vec<NormalizedBitIndex>,
 }
 
 /// Canonical per-bit connectivity for one parsed module.
 pub struct NormalizedNetlistModule<'a> {
     pub raw: &'a NetlistModule,
     bits: Vec<bit_ref::NetBit>,
-    index_by_bit: HashMap<bit_ref::NetBit, BitIndex>,
-    bits_by_net: Vec<Vec<BitIndex>>,
-    canonical_bits: Vec<BitIndex>,
+    index_by_bit: HashMap<bit_ref::NetBit, NormalizedBitIndex>,
+    bits_by_net: Vec<Vec<NormalizedBitIndex>>,
+    canonical_bits: Vec<NormalizedBitIndex>,
     pub ports: Vec<NormalizedPort>,
     pub instances: Vec<NormalizedInstance>,
     pub assigns: Vec<NormalizedAssign>,
@@ -141,11 +156,11 @@ impl<'a> NormalizedNetlistModule<'a> {
         self.bits.len()
     }
 
-    pub fn bit(&self, bit_idx: BitIndex) -> bit_ref::NetBit {
-        self.bits[bit_idx]
+    pub fn bit(&self, bit_idx: NormalizedBitIndex) -> bit_ref::NetBit {
+        self.bits[bit_idx.index()]
     }
 
-    pub fn bit_index(&self, bit: bit_ref::NetBit) -> Result<BitIndex> {
+    pub fn bit_index(&self, bit: bit_ref::NetBit) -> Result<NormalizedBitIndex> {
         self.index_by_bit.get(&bit).copied().ok_or_else(|| {
             anyhow!(
                 "net bit NetIndex({})[{}] is not present in normalized bit index",
@@ -155,25 +170,25 @@ impl<'a> NormalizedNetlistModule<'a> {
         })
     }
 
-    pub fn net_bits(&self, net: NetIndex) -> &[BitIndex] {
+    pub fn net_bits(&self, net: NetIndex) -> &[NormalizedBitIndex] {
         &self.bits_by_net[net.0]
     }
 
-    pub fn canonical_bit(&self, bit_idx: BitIndex) -> BitIndex {
-        self.canonical_bits[bit_idx]
+    pub fn canonical_bit(&self, bit_idx: NormalizedBitIndex) -> NormalizedBitIndex {
+        self.canonical_bits[bit_idx.index()]
     }
 
-    pub fn canonical_bits(&self) -> &[BitIndex] {
+    pub fn canonical_bits(&self) -> &[NormalizedBitIndex] {
         self.canonical_bits.as_slice()
     }
 
     pub fn render_bit(
         &self,
-        bit_idx: BitIndex,
+        bit_idx: NormalizedBitIndex,
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
     ) -> String {
-        bit_ref::render_net_bit(self.bits[bit_idx], nets, interner)
+        bit_ref::render_net_bit(self.bits[bit_idx.index()], nets, interner)
     }
 
     pub fn render_source(
@@ -217,8 +232,8 @@ fn build_bit_index(
     nets: &[Net],
 ) -> Result<(
     Vec<bit_ref::NetBit>,
-    HashMap<bit_ref::NetBit, BitIndex>,
-    Vec<Vec<BitIndex>>,
+    HashMap<bit_ref::NetBit, NormalizedBitIndex>,
+    Vec<Vec<NormalizedBitIndex>>,
 )> {
     let mut bits = Vec::new();
     let mut index_by_bit = HashMap::new();
@@ -237,7 +252,7 @@ fn build_bit_index(
                 net: net_idx,
                 bit_number,
             };
-            let bit_idx = bits.len();
+            let bit_idx = NormalizedBitIndex::new(bits.len());
             bits.push(bit);
             index_by_bit.insert(bit, bit_idx);
             bits_by_net[net_raw_idx].push(bit_idx);
@@ -251,9 +266,10 @@ fn build_tran_aliases(
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     bits: &[bit_ref::NetBit],
-    index_by_bit: &HashMap<bit_ref::NetBit, BitIndex>,
-) -> Result<Vec<BitIndex>> {
-    let mut parents: Vec<BitIndex> = (0..bits.len()).collect();
+    index_by_bit: &HashMap<bit_ref::NetBit, NormalizedBitIndex>,
+) -> Result<Vec<NormalizedBitIndex>> {
+    let mut parents: Vec<NormalizedBitIndex> =
+        (0..bits.len()).map(NormalizedBitIndex::new).collect();
     for tran in module
         .assigns
         .iter()
@@ -280,14 +296,14 @@ fn build_tran_aliases(
         }
     }
     Ok((0..bits.len())
-        .map(|bit_idx| find_alias_root(parents.as_mut_slice(), bit_idx))
+        .map(|bit_idx| find_alias_root(parents.as_mut_slice(), NormalizedBitIndex::new(bit_idx)))
         .collect())
 }
 
 fn bit_index(
-    index_by_bit: &HashMap<bit_ref::NetBit, BitIndex>,
+    index_by_bit: &HashMap<bit_ref::NetBit, NormalizedBitIndex>,
     bit: bit_ref::NetBit,
-) -> Result<BitIndex> {
+) -> Result<NormalizedBitIndex> {
     index_by_bit.get(&bit).copied().ok_or_else(|| {
         anyhow!(
             "net bit NetIndex({})[{}] is not present in normalized bit index",
@@ -297,18 +313,23 @@ fn bit_index(
     })
 }
 
-fn find_alias_root(parents: &mut [BitIndex], bit_idx: BitIndex) -> BitIndex {
-    let parent = parents[bit_idx];
-    if parent == bit_idx {
-        bit_idx
-    } else {
-        let root = find_alias_root(parents, parent);
-        parents[bit_idx] = root;
-        root
+/// Iterative path halving avoids recursion on long chains of directed aliases.
+pub(super) fn find_alias_root(
+    parents: &mut [NormalizedBitIndex],
+    mut bit_idx: NormalizedBitIndex,
+) -> NormalizedBitIndex {
+    while parents[bit_idx.index()] != bit_idx {
+        parents[bit_idx.index()] = parents[parents[bit_idx.index()].index()];
+        bit_idx = parents[bit_idx.index()];
     }
+    bit_idx
 }
 
-fn union_aliases(parents: &mut [BitIndex], lhs_bit_idx: BitIndex, rhs_bit_idx: BitIndex) {
+fn union_aliases(
+    parents: &mut [NormalizedBitIndex],
+    lhs_bit_idx: NormalizedBitIndex,
+    rhs_bit_idx: NormalizedBitIndex,
+) {
     let lhs_root = find_alias_root(parents, lhs_bit_idx);
     let rhs_root = find_alias_root(parents, rhs_bit_idx);
     if lhs_root == rhs_root {
@@ -319,14 +340,14 @@ fn union_aliases(parents: &mut [BitIndex], lhs_bit_idx: BitIndex, rhs_bit_idx: B
     } else {
         (rhs_root, lhs_root)
     };
-    parents[child] = root;
+    parents[child.index()] = root;
 }
 
 fn normalize_ports(
     module: &NetlistModule,
     nets: &[Net],
-    bits_by_net: &[Vec<BitIndex>],
-    canonical_bits: &[BitIndex],
+    bits_by_net: &[Vec<NormalizedBitIndex>],
+    canonical_bits: &[NormalizedBitIndex],
 ) -> Result<Vec<NormalizedPort>> {
     let net_by_name = module.net_indices_by_name(nets);
     module
@@ -342,7 +363,7 @@ fn normalize_ports(
                 name: port.name,
                 bits: bits_by_net[net_idx.0]
                     .iter()
-                    .map(|bit_idx| canonical_bits[*bit_idx])
+                    .map(|bit_idx| canonical_bits[bit_idx.index()])
                     .collect(),
             })
         })
@@ -353,8 +374,8 @@ fn normalize_instances(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    index_by_bit: &HashMap<bit_ref::NetBit, BitIndex>,
-    canonical_bits: &[BitIndex],
+    index_by_bit: &HashMap<bit_ref::NetBit, NormalizedBitIndex>,
+    canonical_bits: &[NormalizedBitIndex],
 ) -> Result<Vec<NormalizedInstance>> {
     module
         .instances
@@ -393,8 +414,8 @@ fn normalize_assigns(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    index_by_bit: &HashMap<bit_ref::NetBit, BitIndex>,
-    canonical_bits: &[BitIndex],
+    index_by_bit: &HashMap<bit_ref::NetBit, NormalizedBitIndex>,
+    canonical_bits: &[NormalizedBitIndex],
 ) -> Result<Vec<NormalizedAssign>> {
     let mut assigns = Vec::new();
     for assign in module
@@ -402,10 +423,13 @@ fn normalize_assigns(
         .iter()
         .filter(|assign| assign.kind == NetlistAssignKind::Continuous)
     {
-        let lhs_bits: Vec<BitIndex> = bit_ref::net_ref_lsb_targets(&assign.lhs, nets, interner)?
-            .into_iter()
-            .map(|bit| bit_index(index_by_bit, bit).map(|bit_idx| canonical_bits[bit_idx]))
-            .collect::<Result<Vec<_>>>()?;
+        let lhs_bits: Vec<NormalizedBitIndex> =
+            bit_ref::net_ref_lsb_targets(&assign.lhs, nets, interner)?
+                .into_iter()
+                .map(|bit| {
+                    bit_index(index_by_bit, bit).map(|bit_idx| canonical_bits[bit_idx.index()])
+                })
+                .collect::<Result<Vec<_>>>()?;
         let rhs_width = bit_ref::assign_expr_width_bits(&assign.rhs, nets, interner)?;
         let allow_literal_zero_extend = is_bare_literal_assign_expr(&assign.rhs);
         if lhs_bits.len() != rhs_width && !allow_literal_zero_extend {
@@ -441,8 +465,8 @@ fn normalize_assign_expr_bits(
     allow_bare_literal_zero_extend: bool,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    index_by_bit: &HashMap<bit_ref::NetBit, BitIndex>,
-    canonical_bits: &[BitIndex],
+    index_by_bit: &HashMap<bit_ref::NetBit, NormalizedBitIndex>,
+    canonical_bits: &[NormalizedBitIndex],
 ) -> Result<Vec<BitExpr>> {
     match expr {
         AssignExpr::Leaf(net_ref) => {
@@ -514,15 +538,14 @@ fn normalize_net_ref_bits(
     net_ref: &NetRef,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    index_by_bit: &HashMap<bit_ref::NetBit, BitIndex>,
-    canonical_bits: &[BitIndex],
+    index_by_bit: &HashMap<bit_ref::NetBit, NormalizedBitIndex>,
+    canonical_bits: &[NormalizedBitIndex],
 ) -> Result<Vec<BitSource>> {
     bit_ref::net_ref_lsb_bit_refs(net_ref, nets, interner)?
         .into_iter()
         .map(|bit_ref| match bit_ref {
-            bit_ref::NetBitRef::Net(bit) => {
-                bit_index(index_by_bit, bit).map(|bit_idx| BitSource::Bit(canonical_bits[bit_idx]))
-            }
+            bit_ref::NetBitRef::Net(bit) => bit_index(index_by_bit, bit)
+                .map(|bit_idx| BitSource::Bit(canonical_bits[bit_idx.index()])),
             bit_ref::NetBitRef::Literal(value) => Ok(BitSource::Literal(value)),
             bit_ref::NetBitRef::Unknown => Ok(BitSource::Unknown),
         })

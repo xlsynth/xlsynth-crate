@@ -125,8 +125,8 @@ impl ObservationFixture {
                         SignalOwner::ModuleInput
                     },
                     load: EdgeLoadCapacitance::default(),
-                    edges: EdgeValue::default(),
-                    histogram: EdgeValue::default(),
+                    edges: RiseFall::default(),
+                    histogram: RiseFall::default(),
                 })
                 .collect(),
             instances: (0..2)
@@ -509,7 +509,7 @@ fn packed_activity_matches_scalar_across_word_and_batch_boundaries() {
             let clocks: Vec<_> = (0..len).map(|i| Some(i % 3 == 1)).collect();
             let kinds = vec![PowerTransitionKind::Combinational; len - 1];
             for signal in &mut fixture.topology.signals {
-                signal.edges = EdgeValue::default();
+                signal.edges = RiseFall::default();
             }
             let mut scalar_topology = PowerTopology {
                 signals: fixture.topology.signals.clone(),

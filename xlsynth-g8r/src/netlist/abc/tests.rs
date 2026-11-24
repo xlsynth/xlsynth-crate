@@ -247,7 +247,17 @@ fn assembly_is_flat_and_preserves_direct_packed_register_boundaries() {
     )
     .unwrap();
     validate_mapped_cells(&parsed, &library).unwrap();
-    prepared.assemble(&mut parsed, "ABC").unwrap();
+    let registers = prepared.assemble(&mut parsed, "ABC").unwrap();
+    assert_eq!(registers.instances().len(), prepared.registers.bits.len());
+    for instance in registers.instances() {
+        let mapping = registers.initial_mapping(instance).unwrap();
+        assert_eq!(
+            parsed
+                .interner
+                .resolve(parsed.modules[0].instances[instance].type_name),
+            Some(mapping.cell_name.as_str())
+        );
+    }
     let text =
         emit_module_as_netlist_text(&parsed.modules[0], &parsed.nets, &parsed.interner).unwrap();
     compare_golden_text(&text, "src/netlist/abc/assembly.golden.v");

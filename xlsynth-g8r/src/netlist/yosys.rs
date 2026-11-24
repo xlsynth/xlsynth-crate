@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::liberty::parser::{LibertyPayloadOptions, parse_liberty_files_with_payload_options};
-use crate::liberty_model::{Library, SequentialKind};
+use crate::liberty_model::Library;
 use crate::netlist::gv_eval::{
     GvEvalOptions, load_labeled_netlist_aig_with_liberty,
     load_labeled_sequential_netlist_aig_with_liberty,
@@ -233,13 +233,7 @@ impl YosysMappingContext {
     /// This does not impose any fuzzing error-handling or caching policy.
     pub fn preflight(&self, kind: YosysMappingKind) -> Result<(), ToolError> {
         let sequential = kind == YosysMappingKind::Sequential;
-        if sequential
-            && !self.liberty.cells.iter().any(|cell| {
-                cell.sequential
-                    .iter()
-                    .any(|state| state.kind == SequentialKind::Ff as i32)
-            })
-        {
+        if sequential && !self.liberty.cells.iter().any(|cell| cell.has_ff_group()) {
             return Err("XLSYNTH_LIBERTY_FILES has no flip-flop cells; include a sequential Liberty file for this target".into());
         }
         let source = if sequential {

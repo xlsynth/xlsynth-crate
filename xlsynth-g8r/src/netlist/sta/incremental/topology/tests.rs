@@ -97,10 +97,11 @@ fn cell(lib: &Library, name: &str) -> Result<usize> {
         .ok_or_else(|| anyhow!("missing test cell {name}"))
 }
 
-fn bit(p: &ParsedNetlist, name: &str) -> Result<usize> {
+fn bit(p: &ParsedNetlist, name: &str) -> Result<NormalizedBitIndex> {
     p.nets
         .iter()
         .position(|n| p.interner.resolve(n.name) == Some(name))
+        .map(NormalizedBitIndex::new)
         .ok_or_else(|| anyhow!("missing test bit {name}"))
 }
 
@@ -157,7 +158,7 @@ fn compare_options(
     }
 
     for (i, expected) in full.net_timing.iter().enumerate() {
-        let actual = sta.timing_for_bit(i);
+        let actual = sta.timing_for_bit(NormalizedBitIndex::new(i));
         match (actual, expected) {
             (Some(a), Some(b)) => {
                 for (x, y) in [
@@ -195,7 +196,12 @@ fn network(unrelated: usize) -> String {
     s
 }
 
-fn inserted(name: &str, lib: &Library, a: BitSource, y: usize) -> Result<TimingMutation> {
+fn inserted(
+    name: &str,
+    lib: &Library,
+    a: BitSource,
+    y: NormalizedBitIndex,
+) -> Result<TimingMutation> {
     Ok(TimingMutation::Insert(TimingInstance {
         name: name.into(),
         cell: cell(lib, "BUF")?,
@@ -216,7 +222,7 @@ fn generic_insert_rewire_preview_commit_and_following_resize_match_full_sta() ->
         options(),
     )?;
     let n = bit(&original, "n")?;
-    let added = sta.bit_count();
+    let added = NormalizedBitIndex::new(sta.bit_count());
     let edit = TimingEdit {
         new_bits: 1,
         mutations: vec![
@@ -492,7 +498,7 @@ fn replacement_can_rename_output_and_insert_replication_topology() -> Result<()>
         compare(s, &expected, &lib)?;
         Ok(true)
     })?;
-    let added = sta.bit_count();
+    let added = NormalizedBitIndex::new(sta.bit_count());
     let expected = read_gv_from_str(
         &text
             .replace("INV drive(.A(p),.Y(n))", "STRONG drive(.A(p),.Z(n))")
@@ -849,10 +855,16 @@ fn affine_wire_load_counts_pins_and_tracks_fanout_edits() -> Result<()> {
         let mut sta = IncrementalSta::new(&p.modules[0], &p.nets, &p.interner, &lib, opts)?;
         compare_options(&sta, &p, &lib, opts)?;
         // Two input pins on one cell and two aliased external output loads.
-        assert_eq!(sta.capacitances[n].rise, 1.5 + constant + 2.0 * per_sink);
-        assert_eq!(sta.capacitances[n].fall, 1.75 + constant + 2.0 * per_sink);
-        assert_eq!(sta.capacitances[bit(&p, "dead")?].rise, 0.0);
-        assert_eq!(sta.capacitances[bit(&p, "a")?].rise, 0.5);
+        assert_eq!(
+            sta.capacitances[n.index()].rise,
+            1.5 + constant + 2.0 * per_sink
+        );
+        assert_eq!(
+            sta.capacitances[n.index()].fall,
+            1.75 + constant + 2.0 * per_sink
+        );
+        assert_eq!(sta.capacitances[bit(&p, "dead")?.index()].rise, 0.0);
+        assert_eq!(sta.capacitances[bit(&p, "a")?.index()].rise, 0.5);
         let expected = read_gv_from_str(&text.replace(".B(n)", ".B(a)"))?;
         let edit = TimingEdit {
             new_bits: 0,
@@ -865,7 +877,7 @@ fn affine_wire_load_counts_pins_and_tracks_fanout_edits() -> Result<()> {
         for accept in [false, true] {
             sta.trial_edit(&edit, TrialOptions::default(), |s, _| {
                 compare_options(s, &expected, &lib, opts)?;
-                assert_eq!(s.capacitances[n].rise, 1.25 + constant + per_sink);
+                assert_eq!(s.capacitances[n.index()].rise, 1.25 + constant + per_sink);
                 Ok(accept)
             })?;
             compare_options(&sta, if accept { &expected } else { &p }, &lib, opts)?;

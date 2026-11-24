@@ -4,14 +4,25 @@
 
 use crate::netlist::parse::{AssignExpr, Net, NetIndex, NetRef};
 use anyhow::{Result, anyhow};
+use std::fmt;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
+
+/// The bit number as declared in Verilog, such as 7 in `bus[7]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DeclaredBitNumber(pub u32);
+
+impl fmt::Display for DeclaredBitNumber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
 
 /// One concrete bit of a parsed net, identified by declared bit number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NetBit {
     pub net: NetIndex,
-    pub bit_number: u32,
+    pub bit_number: DeclaredBitNumber,
 }
 
 /// One bit referenced by an expression that is restricted to wiring and
@@ -29,15 +40,15 @@ pub fn select_width_bits(msb: u32, lsb: u32) -> usize {
 }
 
 /// Returns the declared bit number at an lsb-based offset within a select.
-pub fn select_bit_number(msb: u32, lsb: u32, bit_offset: usize) -> Option<u32> {
+pub fn select_bit_number(msb: u32, lsb: u32, bit_offset: usize) -> Option<DeclaredBitNumber> {
     if bit_offset >= select_width_bits(msb, lsb) {
         return None;
     }
     let offset = bit_offset as u32;
     if msb >= lsb {
-        Some(lsb + offset)
+        Some(DeclaredBitNumber(lsb + offset))
     } else {
-        Some(lsb - offset)
+        Some(DeclaredBitNumber(lsb - offset))
     }
 }
 

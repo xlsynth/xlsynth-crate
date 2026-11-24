@@ -24,6 +24,7 @@ use crate::liberty_model::{
     Cell, Library, Pin, PinDirection, PowerTransition, StringId, TimingTable,
 };
 use crate::liberty_proto::TimingTableKind;
+use crate::netlist::electrical::RiseFall;
 use crate::netlist::gatefn_from_netlist::{
     LabeledNetlistAig, LabeledSequentialNetlistAig, PinConnection, SequentialAigSignal,
     SequentialClockEdge,
@@ -208,12 +209,6 @@ pub struct GvSequentialDynamicPowerReport {
     pub diagnostics: GvDynamicPowerDiagnostics,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct EdgeValue<T> {
-    rise: T,
-    fall: T,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct SignalId(usize);
 
@@ -247,8 +242,8 @@ struct Signal {
     source: PowerSignal,
     owner: SignalOwner,
     load: EdgeLoadCapacitance,
-    edges: EdgeValue<usize>,
-    histogram: EdgeValue<Vec<f64>>,
+    edges: RiseFall<usize>,
+    histogram: RiseFall<Vec<f64>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -306,7 +301,7 @@ struct PreparedPowerBinding {
     condition: Option<usize>,
     related_pins: Result<Vec<usize>, StringId>,
     rail: usize,
-    table_coverage: EdgeValue<bool>,
+    table_coverage: RiseFall<bool>,
 }
 
 impl PreparedPowerBinding {
@@ -1573,7 +1568,7 @@ fn prepare_instance_bindings(
                 .internal_power
                 .iter()
                 .map(|group| PreparedPowerBinding {
-                    table_coverage: EdgeValue {
+                    table_coverage: RiseFall {
                         rise: group.tables.iter().any(|table| {
                             matches!(
                                 table.transition,
@@ -1740,8 +1735,8 @@ fn add_signal(
         source,
         owner,
         load: EdgeLoadCapacitance::default(),
-        edges: EdgeValue::default(),
-        histogram: EdgeValue::default(),
+        edges: RiseFall::default(),
+        histogram: RiseFall::default(),
     });
     match source {
         PowerSignal::Operand(operand) => {
@@ -1827,19 +1822,8 @@ fn resolve_source(
     }
 }
 
-fn effective_input_capacitance(pin: &Pin, context: &str) -> Result<EdgeValue<f64>, String> {
-    let result = EdgeValue {
-        rise: pin
-            .rise_capacitance
-            .or(pin.capacitance)
-            .or(pin.fall_capacitance)
-            .unwrap_or(0.0),
-        fall: pin
-            .fall_capacitance
-            .or(pin.capacitance)
-            .or(pin.rise_capacitance)
-            .unwrap_or(0.0),
-    };
+fn effective_input_capacitance(pin: &Pin, context: &str) -> Result<RiseFall<f64>, String> {
+    let result = crate::netlist::electrical::input_capacitance(pin);
     for (name, value) in [("rise", result.rise), ("fall", result.fall)] {
         if !value.is_finite() || value < 0.0 {
             return Err(format!(

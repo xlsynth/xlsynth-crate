@@ -6,14 +6,14 @@ use std::collections::HashMap;
 
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{PinDirection, SequentialKind};
-use crate::netlist::normalized::{BitExpr, BitIndex, BitSource};
+use crate::netlist::normalized::{BitExpr, BitSource, NormalizedBitIndex};
 
 use super::{BitDriver, BoundaryExtractor};
 
 #[derive(Debug, PartialEq, Eq)]
 enum BoundTerm {
     OldQ,
-    Net(BitIndex),
+    Net(NormalizedBitIndex),
     Literal(bool),
     Not(Box<BoundTerm>),
     And(Box<BoundTerm>, Box<BoundTerm>),
@@ -69,7 +69,7 @@ impl BoundTerm {
         }
     }
 
-    fn signal(&self) -> Option<(BitIndex, bool)> {
+    fn signal(&self) -> Option<(NormalizedBitIndex, bool)> {
         match self {
             Self::Net(bit) => Some((*bit, false)),
             Self::Not(input) => input.signal().map(|(bit, inverted)| (bit, !inverted)),
@@ -81,7 +81,7 @@ impl BoundTerm {
 fn bind_term(
     term: &Term,
     inputs: &HashMap<&str, BitSource>,
-    output_bit: BitIndex,
+    output_bit: NormalizedBitIndex,
 ) -> Result<BoundTerm, String> {
     match term {
         Term::Input(name) => match inputs.get(name.as_str()) {
@@ -107,11 +107,14 @@ fn bind_term(
 }
 
 /// Returns the input of a directly connected inverter, if this bit has one.
-fn inverter_input(extractor: &BoundaryExtractor<'_>, bit: BitIndex) -> Option<BitIndex> {
-    if extractor.source_owners[bit].is_some() {
+fn inverter_input(
+    extractor: &BoundaryExtractor<'_>,
+    bit: NormalizedBitIndex,
+) -> Option<NormalizedBitIndex> {
+    if extractor.source_owners[bit.index()].is_some() {
         return None;
     }
-    match extractor.drivers[bit].as_slice() {
+    match extractor.drivers[bit.index()].as_slice() {
         [
             BitDriver::Assign {
                 assign_index,
@@ -215,7 +218,7 @@ pub(super) fn recognize_direct_hold_mux(
     connection_index: usize,
     formula: &Term,
     inputs: &[(String, BitSource)],
-) -> Result<Option<BitIndex>, String> {
+) -> Result<Option<NormalizedBitIndex>, String> {
     let instance = &extractor.normalized.instances[instance_index];
     let [BitSource::Bit(output_bit)] = instance.connections[connection_index].bits.as_slice()
     else {

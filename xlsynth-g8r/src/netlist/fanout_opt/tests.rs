@@ -247,7 +247,7 @@ fn buffer_and_two_level_trees_preserve_polarity_constants_and_shared_outputs() {
             after_g
                 .drivers
                 .iter()
-                .find(|x| x.instance == d.instance)
+                .find(|x| x.binding == d.binding)
                 .unwrap()
                 .output_ports,
             2
@@ -302,14 +302,15 @@ fn rejection_accounts_for_replication_loading_upstream() {
     )
     .unwrap();
     let (after, after_sta, _) = measure(&changed, &lib, &options()).unwrap();
-    let upstream = g.drivers.iter().find(|d| d.instance == 0).unwrap().net;
+    let upstream = g
+        .drivers
+        .iter()
+        .find(|d| d.binding.instance.0 == 0)
+        .unwrap()
+        .net;
     assert!(
-        after_sta
-            .timing_for_net(NetIndex(upstream))
-            .unwrap()
-            .rise
-            .arrival
-            > sta.timing_for_net(NetIndex(upstream)).unwrap().rise.arrival + 200.0
+        after_sta.timing_for_net(upstream).unwrap().rise.arrival
+            > sta.timing_for_net(upstream).unwrap().rise.arrival + 200.0
     );
     assert!(after.worst_delay > before.worst_delay);
     let mut repaired = original.clone();
@@ -375,11 +376,13 @@ fn asymmetric_function_matching_is_by_named_pin_truth_not_cell_name() {
     let cells = choices(&lib).unwrap();
     let old = cells.iter().find(|c| c.name == "DRIVE").unwrap();
     let d = Driver {
-        instance: 0,
-        output_connection: 2,
-        net: 0,
+        binding: PinConnection {
+            instance: InstIndex(0),
+            connection: 2,
+        },
+        net: NetIndex(0),
         sinks: vec![],
-        load: [2.0; 2],
+        load: RiseFall::both(2.0),
         output_ports: 1,
         fixed_output_load: 1.0,
         slew_bound: 1000.0,
@@ -560,7 +563,7 @@ fn check_incremental_candidates(original: &MappedNetlist, lib: &Library) {
     for d in &g.drivers {
         let name = resolve_symbol(
             &original.interner,
-            original.module.instances[d.instance].type_name,
+            original.module.instances[d.binding.instance.0].type_name,
             "cell",
         )
         .unwrap();
@@ -1034,7 +1037,7 @@ fn successive_replications_preserve_tied_metrics_and_remove_last_maximum() {
         let driver = graph
             .drivers
             .iter()
-            .find(|d| d.instance == instance)
+            .find(|d| d.binding.instance.0 == instance)
             .unwrap();
         let kind = FanoutEdit::Replicate { groups: 4 };
         let edit = edit::EditPlan::new(&changed, &graph, driver, &kind, &cells).unwrap();
@@ -1200,10 +1203,10 @@ fn affine_wire_load_is_shared_by_graph_full_and_incremental_timing() -> Result<(
     let (_, _, graph) = measure(&original, &lib, &opts)?;
     let driver = graph.drivers.iter().find(|d| d.sinks.len() == 16).unwrap();
     // Sixteen pin loads, two external loads, and one affine wire term.
-    assert_eq!(driver.load, [22.5, 22.5]);
+    assert_eq!(driver.load, RiseFall::both(22.5));
     assert_eq!(driver.fixed_output_load, 2.0);
     let output_only = graph.drivers.iter().find(|d| d.sinks.is_empty()).unwrap();
-    assert_eq!(output_only.load, [1.5, 1.5]);
+    assert_eq!(output_only.load, RiseFall::both(1.5));
 
     let mut incremental = original.clone();
     let incremental_report = optimize_fanout(&mut incremental, &lib, opts.clone())?;
@@ -1267,7 +1270,7 @@ fn partition_includes_wire_per_sink_without_charging_ports_as_sinks() -> Result<
     opts.wire_load.capacitance_per_sink = 10.0;
     let g = graph(&mapped, &lib, &opts)?;
     let driver = g.drivers.iter().find(|d| d.sinks.len() == 4).unwrap();
-    assert_eq!(driver.load, [46.0, 46.0]);
+    assert_eq!(driver.load, RiseFall::both(46.0));
     let groups = partition(&driver.sinks, 2, driver.fixed_output_load);
     assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), vec![2, 2]);
     assert_eq!(

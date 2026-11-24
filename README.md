@@ -51,6 +51,7 @@ The `xlsynth` crate builds on top of the shared library `libxls.{so,dylib}` rele
   - DSLX parsing/typechecking, conversion to XLS IR
   - IR building
   - JIT compilation and IR interpretation
+  - Stateful proc execution with `IrProcRuntime`, including channel I/O and trace messages
   - Configuration-driven register-generation templates for `xlsynth-vast`
   - Building Rust and SystemVerilog bridges for interacting with XLS/DSLX artifacts
 - `sample-usage`: demonstrates use of the APIs provided by the `xlsynth` crate

@@ -64,7 +64,8 @@ use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, StringId, TimingArc, TimingTable};
 use crate::liberty_proto::{TimingSense as WireTimingSense, TimingType as WireTimingType};
-use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
+use crate::netlist::bit_ref::NetBit;
+use crate::netlist::normalized::{BitExpr, BitSource, NormalizedBitIndex, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -588,7 +589,7 @@ impl<P: Borrow<HashMap<String, Vec<PinBitSource>>>> CoverageConstantPropagation<
                 else {
                     continue;
                 };
-                if bit_values[*bit_idx].is_some() {
+                if bit_values[bit_idx.index()].is_some() {
                     continue;
                 }
                 let Some(function) = self.lib.constant_function(cell_idx, *pin_idx) else {
@@ -597,8 +598,8 @@ impl<P: Borrow<HashMap<String, Vec<PinBitSource>>>> CoverageConstantPropagation<
                 let Some(value) = function.evaluate_partial(&known_values[inst_idx]) else {
                     continue;
                 };
-                bit_values[*bit_idx] = Some(value);
-                for load in &self.bit_loads[*bit_idx] {
+                bit_values[bit_idx.index()] = Some(value);
+                for load in &self.bit_loads[bit_idx.index()] {
                     known_values[load.inst_idx].insert(load.pin_name.clone(), value);
                     if !queued[load.inst_idx] {
                         queue.push_back(load.inst_idx);
@@ -811,7 +812,7 @@ fn validate_instance_functional_timing_coverage(
             coverage.retain(|input| {
                 matches!(
                     pin_sources.get(input.name).map(Vec::as_slice),
-                    Some([PinBitSource::Bit(bit_idx)]) if timing[*bit_idx].is_some()
+                    Some([PinBitSource::Bit(bit_idx)]) if timing[bit_idx.index()].is_some()
                 )
             });
         }
@@ -910,7 +911,7 @@ impl<'a> PreparedStaLibrary<'a> {
             .map(|(i, p)| {
                 (
                     self.library.resolve_string(&p.name).to_string(),
-                    vec![PinBitSource::Bit(i)],
+                    vec![PinBitSource::Bit(NormalizedBitIndex::new(i))],
                 )
             })
             .collect();
@@ -953,7 +954,7 @@ impl<'a> PreparedStaLibrary<'a> {
                 known_pin_values: &known,
                 output_pin_order: &order,
                 instance_name: "independent inputs",
-                render_bit: &|i| i.to_string(),
+                render_bit: &|bit| bit.index().to_string(),
                 register_boundaries: false,
                 is_sequential: false,
                 launch_register: false,
@@ -1019,11 +1020,11 @@ impl<'a> PreparedStaLibrary<'a> {
             .electrical_pin_order
             .get_or_init(|| {
                 let cell = &self.library.cells[cell_idx];
-                if cell.pins.iter().all(|p| {
-                    p.max_capacitance.is_none()
-                        && p.max_transition.is_none()
-                        && p.max_fanout.is_none()
-                }) {
+                if cell
+                    .pins
+                    .iter()
+                    .all(|p| crate::netlist::electrical::PinLimits::for_pin(p).is_unconstrained())
+                {
                     return Vec::new();
                 }
                 let mut order: Vec<_> = (0..cell.pins.len()).collect();
@@ -1176,11 +1177,7 @@ impl<'a> PreparedStaLibrary<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct EdgeLoadCapacitance {
-    pub(crate) rise: f64,
-    pub(crate) fall: f64,
-}
+pub(crate) type EdgeLoadCapacitance = crate::netlist::electrical::RiseFall<f64>;
 
 #[derive(Clone, Debug)]
 struct NetEndpoint {
@@ -1188,36 +1185,17 @@ struct NetEndpoint {
     pin_name: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BitAssignSource {
-    Literal(bool),
-    Unknown,
-    Alias(usize),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResolvedTimingSource {
-    Literal(bool),
-    Unknown,
-    Bit(usize),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TimingSourceVisitState {
-    Unvisited,
-    Visiting,
-    Resolved(ResolvedTimingSource),
-}
+use crate::netlist::connectivity::directed::resolve_dense;
 
 #[derive(Clone, Debug)]
 struct UnsupportedAssignSource {
-    lhs_bits: Vec<usize>,
+    lhs_bits: Vec<NormalizedBitIndex>,
     rendered_lhs: String,
 }
 
 #[derive(Clone, Debug)]
 struct AssignSourceAnalysis {
-    bit_sources: Vec<Option<BitAssignSource>>,
+    bit_sources: Vec<Option<BitSource>>,
     unsupported_sources: Vec<UnsupportedAssignSource>,
 }
 
@@ -1270,6 +1248,7 @@ impl PreparedStaLibrary<'_> {
             self,
             options,
             StaAnalysisMode::CombinationalOnly,
+            None,
         )
     }
 
@@ -1283,6 +1262,53 @@ impl PreparedStaLibrary<'_> {
         launch_primary_inputs: bool,
         launch_register_instances: &[usize],
     ) -> Result<StaReport> {
+        self.analyze_register_boundary(
+            module,
+            nets,
+            interner,
+            options,
+            launch_primary_inputs,
+            launch_register_instances,
+            None,
+        )
+    }
+
+    /// Measures the worst rise/fall transition on each requested bit in the
+    /// same analysis. An unlaunched bit has no slew; results follow input
+    /// order.
+    pub fn analyze_register_boundary_with_slews(
+        &self,
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        options: StaOptions,
+        launch_primary_inputs: bool,
+        launch_register_instances: &[usize],
+        observed: &[NetBit],
+    ) -> Result<(StaReport, Vec<Option<f64>>)> {
+        let mut slews = Vec::with_capacity(observed.len());
+        let report = self.analyze_register_boundary(
+            module,
+            nets,
+            interner,
+            options,
+            launch_primary_inputs,
+            launch_register_instances,
+            Some((observed, &mut slews)),
+        )?;
+        Ok((report, slews))
+    }
+
+    fn analyze_register_boundary(
+        &self,
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        options: StaOptions,
+        launch_primary_inputs: bool,
+        launch_register_instances: &[usize],
+        probes: Option<(&[NetBit], &mut Vec<Option<f64>>)>,
+    ) -> Result<StaReport> {
         let launch_register_instances: FxHashSet<usize> =
             launch_register_instances.iter().copied().collect();
         analyze_max_arrival_proto_with_mode(
@@ -1295,6 +1321,7 @@ impl PreparedStaLibrary<'_> {
                 launch_primary_inputs,
                 launch_register_instances: &launch_register_instances,
             },
+            probes,
         )
     }
 }
@@ -1313,6 +1340,92 @@ pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_model::Cell) -> 
                     )
                 })
         })
+}
+
+/// Requires both physical data transitions to have characterized timing on the
+/// actual active clock edge under the proven scalar ties of this instance.
+pub(crate) fn has_complete_register_pin_timing(
+    library: &Library,
+    cell: &crate::liberty_model::Cell,
+    pin: &Pin,
+    known_pin_values: &HashMap<String, bool>,
+) -> bool {
+    let Ok(Some(clock)) =
+        crate::netlist::sequential_liberty::get_sequential_ff_clock_spec(cell, library)
+    else {
+        return false;
+    };
+    let name = library.resolve_string(&pin.name);
+    if pin.is_clocking_pin
+        || name == clock.pin_name
+        || cell.sequential[0].clock_expr.is_empty()
+        || !cell.pins.iter().any(|p| {
+            p.direction == PinDirection::Input as i32
+                && library.resolve_string(&p.name) == clock.pin_name
+        })
+    {
+        return false;
+    }
+    let capture = pin.direction == PinDirection::Input as i32;
+    if !capture && pin.direction != PinDirection::Output as i32 {
+        return false;
+    }
+    let active = match (capture, clock.is_negated) {
+        (true, false) => StaTimingType::SetupRising,
+        (true, true) => StaTimingType::SetupFalling,
+        (false, false) => StaTimingType::RisingEdge,
+        (false, true) => StaTimingType::FallingEdge,
+    };
+    let query = if capture {
+        TimingTableQuery::ideal_clock_setup(0.0)
+    } else {
+        TimingTableQuery::ideal_clock_to_output(0.0)
+    };
+    let mut priced = [false; 2];
+    let mut evaluation = TimingEvaluationContext::new(library);
+    for arc in &pin.timing_arcs {
+        if StaTimingType::from_arc(arc, library) != active
+            || library.resolve_string(&arc.related_pin) != clock.pin_name
+        {
+            continue;
+        }
+        let guard = library.resolve_string(&arc.when);
+        if !guard.is_empty()
+            && !parse_formula(guard)
+                .is_ok_and(|t| t.evaluate_partial(known_pin_values) == Some(true))
+        {
+            continue;
+        }
+        for (edge, kinds) in [
+            [
+                StaTimingTableKind::RiseConstraint,
+                StaTimingTableKind::CellRise,
+                StaTimingTableKind::RiseTransition,
+            ],
+            [
+                StaTimingTableKind::FallConstraint,
+                StaTimingTableKind::CellFall,
+                StaTimingTableKind::FallTransition,
+            ],
+        ]
+        .iter()
+        .enumerate()
+        {
+            if priced[edge] {
+                continue;
+            }
+            let required = if capture { &kinds[..1] } else { &kinds[1..] };
+            priced[edge] = required.iter().all(|&kind| {
+                matches!(find_optional_unique_table(arc, kind, &name), Ok(Some(table))
+                    if validate_timing_table_structure(library, table, &name).is_ok()
+                    && evaluate_table_with_query_and_diagnostics(library, table, query, &mut evaluation, &name).is_ok_and(f64::is_finite))
+            });
+        }
+        if priced == [true, true] {
+            return true;
+        }
+    }
+    false
 }
 
 /// Launch-source policy for combinational or register-boundary timing.
@@ -1368,6 +1481,7 @@ fn analyze_max_arrival_proto_with_mode(
     lib: &PreparedStaLibrary<'_>,
     options: StaOptions,
     analysis_mode: StaAnalysisMode<'_>,
+    probes: Option<(&[NetBit], &mut Vec<Option<f64>>)>,
 ) -> Result<StaReport> {
     if !options.primary_input_transition.is_finite() {
         return Err(anyhow!(
@@ -1465,16 +1579,14 @@ fn analyze_max_arrival_proto_with_mode(
                     pin_name
                 )
             })?;
-            let pin_bit_sources = connection.bits.clone();
             let pin_bit_sources = if pin.direction == PinDirection::Input as i32 {
-                pin_bit_sources
-                    .into_iter()
-                    .map(|source| {
-                        canonicalize_pin_bit_source(source, resolved_timing_sources.as_slice())
-                    })
+                connection
+                    .bits
+                    .iter()
+                    .map(|&source| canonicalize_pin_bit_source(source, &resolved_timing_sources))
                     .collect()
             } else {
-                pin_bit_sources
+                connection.bits.clone()
             };
             if pin_bit_sources.len() > 1 {
                 return Err(anyhow!(
@@ -1501,12 +1613,12 @@ fn analyze_max_arrival_proto_with_mode(
                 match pin.direction {
                     d if d == PinDirection::Output as i32 => match source {
                         PinBitSource::Bit(bit_idx) => {
-                            bit_drivers[*bit_idx].push(NetEndpoint {
+                            bit_drivers[bit_idx.index()].push(NetEndpoint {
                                 inst_idx,
                                 pin_name: pin_name.clone(),
                             });
                             if pin.timing_arcs.is_empty() {
-                                bit_constant_values[*bit_idx] = lib.timing_constant(
+                                bit_constant_values[bit_idx.index()] = lib.timing_constant(
                                     cell_idx,
                                     lib.pin_index(cell_idx, &pin_name).expect("validated pin"),
                                 )?;
@@ -1515,10 +1627,12 @@ fn analyze_max_arrival_proto_with_mode(
                         PinBitSource::Literal(_) | PinBitSource::Unknown => unreachable!(),
                     },
                     d if d == PinDirection::Input as i32 => match source {
-                        PinBitSource::Bit(bit_idx) => bit_loads[*bit_idx].push(NetEndpoint {
-                            inst_idx,
-                            pin_name: pin_name.clone(),
-                        }),
+                        PinBitSource::Bit(bit_idx) => {
+                            bit_loads[bit_idx.index()].push(NetEndpoint {
+                                inst_idx,
+                                pin_name: pin_name.clone(),
+                            })
+                        }
                         PinBitSource::Literal(value) => {
                             known_pin_values.insert(pin_name.clone(), *value);
                         }
@@ -1575,13 +1689,13 @@ fn analyze_max_arrival_proto_with_mode(
             let [PinBitSource::Bit(bit_idx)] = sources.as_slice() else {
                 continue;
             };
-            if let Some(value) = bit_constant_values[*bit_idx] {
+            if let Some(value) = bit_constant_values[bit_idx.index()] {
                 known_pin_values.insert(pin_name.clone(), value);
             }
         }
     }
 
-    let mut module_output_bits: Vec<usize> = Vec::new();
+    let mut module_output_bits = Vec::new();
     let mut has_module_output = vec![false; bit_count];
     let mut is_module_input = vec![false; bit_count];
     for port in &normalized.ports {
@@ -1590,13 +1704,13 @@ fn analyze_max_arrival_proto_with_mode(
         match port.direction {
             PortDirection::Input => {
                 for bit_idx in &port.bits {
-                    is_module_input[*bit_idx] = true;
+                    is_module_input[bit_idx.index()] = true;
                 }
             }
             PortDirection::Output => {
                 for bit_idx in &port.bits {
-                    if !has_module_output[*bit_idx] {
-                        has_module_output[*bit_idx] = true;
+                    if !has_module_output[bit_idx.index()] {
+                        has_module_output[bit_idx.index()] = true;
                         module_output_bits.push(*bit_idx);
                     }
                 }
@@ -1612,8 +1726,8 @@ fn analyze_max_arrival_proto_with_mode(
     module_output_bits.sort_unstable();
     let mut has_resolved_module_output = vec![false; bit_count];
     for bit_idx in &module_output_bits {
-        if let ResolvedTimingSource::Bit(source_bit_idx) = resolved_timing_sources[*bit_idx] {
-            has_resolved_module_output[source_bit_idx] = true;
+        if let BitSource::Bit(source_bit_idx) = resolved_timing_sources[bit_idx.index()] {
+            has_resolved_module_output[source_bit_idx.index()] = true;
         }
     }
 
@@ -1635,14 +1749,14 @@ fn analyze_max_arrival_proto_with_mode(
     for (bit_idx, drivers) in bit_drivers.iter().enumerate() {
         let has_assign_source = assign_sources[bit_idx].is_some();
         if is_module_input[bit_idx] && (!drivers.is_empty() || has_assign_source) {
-            let bit_name = normalized.render_bit(bit_idx, nets, interner);
+            let bit_name = normalized.render_bit(NormalizedBitIndex::new(bit_idx), nets, interner);
             return Err(anyhow!(
                 "module input bit '{}' also has an internal driver; basic STA does not support multiply driven primary inputs",
                 bit_name
             ));
         }
         if drivers.len() > 1 || (!drivers.is_empty() && has_assign_source) {
-            let bit_name = normalized.render_bit(bit_idx, nets, interner);
+            let bit_name = normalized.render_bit(NormalizedBitIndex::new(bit_idx), nets, interner);
             return Err(anyhow!(
                 "net bit '{}' has {} drivers; wired multi-driver nets are unsupported in basic STA",
                 bit_name,
@@ -1706,12 +1820,11 @@ fn analyze_max_arrival_proto_with_mode(
         bit_load_capacitance[load_source_bit_idx].fall += cap.fall;
     }
     for bit_idx in &module_output_bits {
-        let ResolvedTimingSource::Bit(output_source_bit_idx) = resolved_timing_sources[*bit_idx]
-        else {
+        let BitSource::Bit(output_source_bit_idx) = resolved_timing_sources[bit_idx.index()] else {
             continue;
         };
-        bit_load_capacitance[output_source_bit_idx].rise += options.module_output_load;
-        bit_load_capacitance[output_source_bit_idx].fall += options.module_output_load;
+        bit_load_capacitance[output_source_bit_idx.index()].rise += options.module_output_load;
+        bit_load_capacitance[output_source_bit_idx.index()].fall += options.module_output_load;
     }
 
     for (bit, cap) in bit_load_capacitance.iter_mut().enumerate() {
@@ -1754,9 +1867,11 @@ fn analyze_max_arrival_proto_with_mode(
             continue;
         }
         match resolved_timing_sources[bit_idx] {
-            ResolvedTimingSource::Literal(_) | ResolvedTimingSource::Unknown => continue,
-            ResolvedTimingSource::Bit(source_bit_idx) if source_bit_idx != bit_idx => continue,
-            ResolvedTimingSource::Bit(_) => {}
+            BitSource::Literal(_) | BitSource::Unknown => continue,
+            BitSource::Bit(source_bit_idx) if source_bit_idx.index() != bit_idx => {
+                continue;
+            }
+            BitSource::Bit(_) => {}
         }
         if is_module_input[bit_idx] && analysis_mode.launches_primary_inputs() {
             bit_timing_sets[bit_idx] = Some(source_timing_set.clone());
@@ -1767,7 +1882,7 @@ fn analyze_max_arrival_proto_with_mode(
         {
             return Err(anyhow!(
                 "net bit '{}' is undriven and is not a module input; basic STA does not support floating source nets",
-                normalized.render_bit(bit_idx, nets, interner)
+                normalized.render_bit(NormalizedBitIndex::new(bit_idx), nets, interner)
             ));
         }
     }
@@ -1873,12 +1988,10 @@ fn analyze_max_arrival_proto_with_mode(
     let mut worst_output: Option<EdgeTimingCandidate> = None;
     let mut cell_levels = 0usize;
     for bit_idx in &module_output_bits {
-        let timing_source = resolved_timing_sources[*bit_idx];
+        let timing_source = resolved_timing_sources[bit_idx.index()];
         let timing_set = if analysis_mode.uses_register_boundaries()
-            && matches!(
-                timing_source,
-                ResolvedTimingSource::Literal(_) | ResolvedTimingSource::Unknown
-            ) {
+            && matches!(timing_source, BitSource::Literal(_) | BitSource::Unknown)
+        {
             None
         } else {
             timing_set_for_resolved_source(
@@ -1906,8 +2019,8 @@ fn analyze_max_arrival_proto_with_mode(
             Some(current) => choose_worse_edge_timing_candidate_by_arrival(current, output_timing),
             None => output_timing,
         });
-        if let ResolvedTimingSource::Bit(source_bit_idx) = timing_source {
-            if let Some(driver) = bit_drivers[source_bit_idx].first() {
+        if let BitSource::Bit(source_bit_idx) = timing_source {
+            if let Some(driver) = bit_drivers[source_bit_idx.index()].first() {
                 cell_levels = cell_levels.max(instance_levels[driver.inst_idx]);
             }
         }
@@ -1951,7 +2064,7 @@ fn analyze_max_arrival_proto_with_mode(
                     let PinBitSource::Bit(bit_idx) = source else {
                         continue;
                     };
-                    let Some(timing_set) = bit_timing_sets[*bit_idx].as_ref() else {
+                    let Some(timing_set) = bit_timing_sets[bit_idx.index()].as_ref() else {
                         continue;
                     };
                     let Some(capture_timing) = evaluate_register_setup_capture_arrival(
@@ -2006,7 +2119,26 @@ fn analyze_max_arrival_proto_with_mode(
         .map(|timing| timing.and_then(|timing| timing.register_path_breakdown))
         .collect();
 
-    Ok(StaReport {
+    if let Some((observed, slews)) = probes {
+        for &bit in observed {
+            let index = normalized.canonical_bit(normalized.bit_index(bit)?);
+            // Literals and unknowns have synthetic timings for reporting,
+            // but no launched transition for a probe to measure.
+            let BitSource::Bit(source) = resolved_timing_sources[index.index()] else {
+                slews.push(None);
+                continue;
+            };
+            let slew = bit_timing_sets[source.index()].as_ref().and_then(|set| {
+                set.rise
+                    .iter()
+                    .chain(set.fall.iter())
+                    .map(|edge| edge.timing.transition)
+                    .reduce(f64::max)
+            });
+            slews.push(slew);
+        }
+    }
+    let report = StaReport {
         net_timing,
         worst_output_arrival: worst_output
             .map(|timing| timing.timing.arrival)
@@ -2021,7 +2153,8 @@ fn analyze_max_arrival_proto_with_mode(
         register_input_breakdowns,
         timing_query_diagnostic_counts: evaluation.diagnostics,
         cell_levels,
-    })
+    };
+    Ok(report)
 }
 
 /// Immutable connectivity and cell metadata for the shared timing kernel.
@@ -2032,7 +2165,7 @@ struct InstanceTimingInputs<'a, 'lib> {
     known_pin_values: &'a HashMap<String, bool>,
     output_pin_order: &'a [usize],
     instance_name: &'a str,
-    render_bit: &'a dyn Fn(usize) -> String,
+    render_bit: &'a dyn Fn(NormalizedBitIndex) -> String,
     register_boundaries: bool,
     is_sequential: bool,
     launch_register: bool,
@@ -2075,19 +2208,20 @@ fn evaluate_instance_outputs(
                         unreachable!("connected sequential output pins have net bit sources")
                     }
                 };
-                let output_load = bit_load_capacitance[output_bit_idx];
-                bit_timing_sets[output_bit_idx] = Some(evaluate_register_launch_output_set(
-                    lib.library,
-                    cell_name,
-                    pin,
-                    known_pin_values,
-                    output_load,
-                    evaluation,
-                    &format_args!(
-                        "{}.{} (instance '{}') clock-to-output",
-                        cell_name, pin_name, instance_name
-                    ),
-                )?);
+                let output_load = bit_load_capacitance[output_bit_idx.index()];
+                bit_timing_sets[output_bit_idx.index()] =
+                    Some(evaluate_register_launch_output_set(
+                        lib.library,
+                        cell_name,
+                        pin,
+                        known_pin_values,
+                        output_load,
+                        evaluation,
+                        &format_args!(
+                            "{}.{} (instance '{}') clock-to-output",
+                            cell_name, pin_name, instance_name
+                        ),
+                    )?);
             }
             continue;
         }
@@ -2156,7 +2290,7 @@ fn evaluate_instance_outputs(
             evaluation,
         )?;
         let output_load = output_bit_idx
-            .map(|output_bit_idx| bit_load_capacitance[output_bit_idx])
+            .map(|output_bit_idx| bit_load_capacitance[output_bit_idx.index()])
             .unwrap_or_default();
         let mut accumulated: Option<SignalTimingSet> = None;
 
@@ -2236,7 +2370,8 @@ fn evaluate_instance_outputs(
                     for related_source in related_sources {
                         let input_timing_set = match related_source {
                             PinBitSource::Bit(related_bit_idx) => {
-                                let Some(timing) = bit_timing_sets[*related_bit_idx].as_ref()
+                                let Some(timing) =
+                                    bit_timing_sets[related_bit_idx.index()].as_ref()
                                 else {
                                     if register_boundaries {
                                         continue;
@@ -2360,18 +2495,7 @@ fn effective_input_capacitance_by_edge(
 ) -> Result<EdgeLoadCapacitance> {
     // max_capacitance is a design-rule limit, not nominal pin capacitance.
     // Prefer edge-specific capacitance when provided; fall back to nominal.
-    let capacitance = EdgeLoadCapacitance {
-        rise: pin
-            .rise_capacitance
-            .or(pin.capacitance)
-            .or(pin.fall_capacitance)
-            .unwrap_or(0.0),
-        fall: pin
-            .fall_capacitance
-            .or(pin.capacitance)
-            .or(pin.rise_capacitance)
-            .unwrap_or(0.0),
-    };
+    let capacitance = crate::netlist::electrical::input_capacitance(pin);
     validate_non_negative_finite(capacitance.rise, "rise capacitance", context)?;
     validate_non_negative_finite(capacitance.fall, "fall capacitance", context)?;
     Ok(capacitance)
@@ -2649,17 +2773,18 @@ fn store_output_timing_set<'a>(
     local_output_timing_sets: &mut Option<HashMap<&'a str, SignalTimingSet>>,
     bit_timing_sets: &mut [Option<SignalTimingSet>],
     pin_name: &'a str,
-    output_bit_idx: Option<usize>,
+    output_bit_idx: Option<NormalizedBitIndex>,
     out_timing_set: SignalTimingSet,
 ) {
     if let Some(outputs) = local_output_timing_sets {
         outputs.insert(pin_name, out_timing_set.clone());
     }
     if let Some(output_bit_idx) = output_bit_idx {
-        bit_timing_sets[output_bit_idx] = Some(match bit_timing_sets[output_bit_idx].as_ref() {
-            Some(prev) => prev.clone().merge(&out_timing_set),
-            None => out_timing_set,
-        });
+        bit_timing_sets[output_bit_idx.index()] =
+            Some(match bit_timing_sets[output_bit_idx.index()].as_ref() {
+                Some(prev) => prev.clone().merge(&out_timing_set),
+                None => out_timing_set,
+            });
     }
 }
 
@@ -2846,14 +2971,14 @@ fn analyze_assign_sources(
     for assign in &normalized.assigns {
         if let Some(rhs_sources) = supported_assign_bit_sources(assign.rhs_bits.as_slice()) {
             for (lhs_bit_idx, rhs_source) in assign.lhs_bits.iter().copied().zip(rhs_sources) {
-                if sources[lhs_bit_idx].is_some() {
+                if sources[lhs_bit_idx.index()].is_some() {
                     let bit_name = normalized.render_bit(lhs_bit_idx, nets, interner);
                     return Err(anyhow!(
                         "net bit '{}' has multiple continuous assign drivers; wired multi-driver nets are unsupported in basic STA",
                         bit_name
                     ));
                 }
-                sources[lhs_bit_idx] = Some(rhs_source);
+                sources[lhs_bit_idx.index()] = Some(rhs_source);
             }
         } else {
             unsupported_sources.push(UnsupportedAssignSource {
@@ -2870,13 +2995,11 @@ fn analyze_assign_sources(
 
 /// Returns supported zero-delay assign bit sources, or `None` for unsupported
 /// expression shapes.
-fn supported_assign_bit_sources(rhs_bits: &[BitExpr]) -> Option<Vec<BitAssignSource>> {
+fn supported_assign_bit_sources(rhs_bits: &[BitExpr]) -> Option<Vec<BitSource>> {
     rhs_bits
         .iter()
         .map(|bit| match bit {
-            BitExpr::Source(BitSource::Bit(bit_idx)) => Some(BitAssignSource::Alias(*bit_idx)),
-            BitExpr::Source(BitSource::Literal(value)) => Some(BitAssignSource::Literal(*value)),
-            BitExpr::Source(BitSource::Unknown) => Some(BitAssignSource::Unknown),
+            BitExpr::Source(source) => Some(*source),
             BitExpr::Not(_) | BitExpr::And(_, _) | BitExpr::Or(_, _) | BitExpr::Xor(_, _) => None,
         })
         .collect()
@@ -2886,7 +3009,7 @@ fn supported_assign_bit_sources(rhs_bits: &[BitExpr]) -> Option<Vec<BitAssignSou
 /// bits.
 fn reject_live_unsupported_assigns(
     unsupported_sources: &[UnsupportedAssignSource],
-    assign_sources: &[Option<BitAssignSource>],
+    assign_sources: &[Option<BitSource>],
     bit_loads: &[Vec<NetEndpoint>],
     has_module_output: &[bool],
     normalized: &NormalizedNetlistModule<'_>,
@@ -2907,21 +3030,25 @@ fn reject_live_unsupported_assigns(
             if !live[bit_idx] {
                 continue;
             }
-            let Some(BitAssignSource::Alias(source_bit_idx)) = source else {
+            let Some(BitSource::Bit(source_bit)) = source else {
                 continue;
             };
-            if !live[*source_bit_idx] {
-                live[*source_bit_idx] = true;
+            if !live[source_bit.index()] {
+                live[source_bit.index()] = true;
                 changed = true;
             }
         }
     }
     for unsupported in unsupported_sources {
-        if unsupported.lhs_bits.iter().any(|bit_idx| live[*bit_idx]) {
+        if unsupported
+            .lhs_bits
+            .iter()
+            .any(|bit_idx| live[bit_idx.index()])
+        {
             let live_names: Vec<String> = unsupported
                 .lhs_bits
                 .iter()
-                .filter(|bit_idx| live[**bit_idx])
+                .filter(|bit_idx| live[bit_idx.index()])
                 .map(|bit_idx| normalized.render_bit(*bit_idx, nets, interner))
                 .collect();
             return Err(anyhow!(
@@ -2936,86 +3063,43 @@ fn reject_live_unsupported_assigns(
 
 fn canonicalize_pin_bit_source(
     source: PinBitSource,
-    resolved_timing_sources: &[ResolvedTimingSource],
+    resolved_timing_sources: &[BitSource],
 ) -> PinBitSource {
     match source {
-        PinBitSource::Bit(bit_idx) => match resolved_timing_sources[bit_idx] {
-            ResolvedTimingSource::Literal(value) => PinBitSource::Literal(value),
-            ResolvedTimingSource::Unknown => PinBitSource::Unknown,
-            ResolvedTimingSource::Bit(source_bit_idx) => PinBitSource::Bit(source_bit_idx),
-        },
-        PinBitSource::Literal(_) | PinBitSource::Unknown => source,
+        BitSource::Bit(bit) => resolved_timing_sources[bit.index()],
+        BitSource::Literal(_) | BitSource::Unknown => source,
     }
 }
 
 /// Resolves zero-delay continuous-assign aliases once for all timing lookups.
 fn resolve_timing_sources(
-    assign_sources: &[Option<BitAssignSource>],
+    assign_sources: &[Option<BitSource>],
     normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> Result<Vec<ResolvedTimingSource>> {
-    let mut visit_states = vec![TimingSourceVisitState::Unvisited; assign_sources.len()];
-    for start in 0..assign_sources.len() {
-        if matches!(visit_states[start], TimingSourceVisitState::Resolved(_)) {
-            continue;
-        }
-        let mut current = start;
-        let mut path = Vec::new();
-        let resolved = loop {
-            match visit_states[current] {
-                TimingSourceVisitState::Resolved(source) => break source,
-                TimingSourceVisitState::Visiting => {
-                    return Err(anyhow!(
-                        "continuous assign aliases contain a cycle involving net bit '{}'",
-                        normalized.render_bit(current, nets, interner)
-                    ));
-                }
-                TimingSourceVisitState::Unvisited => {
-                    visit_states[current] = TimingSourceVisitState::Visiting;
-                    path.push(current);
-                    match assign_sources[current] {
-                        Some(BitAssignSource::Literal(value)) => {
-                            break ResolvedTimingSource::Literal(value);
-                        }
-                        Some(BitAssignSource::Unknown) => break ResolvedTimingSource::Unknown,
-                        Some(BitAssignSource::Alias(next)) => current = next,
-                        None => break ResolvedTimingSource::Bit(current),
-                    }
-                }
-            }
-        };
-        for bit_idx in path {
-            visit_states[bit_idx] = TimingSourceVisitState::Resolved(resolved);
-        }
-    }
-    Ok(visit_states
-        .into_iter()
-        .map(|state| match state {
-            TimingSourceVisitState::Resolved(source) => source,
-            TimingSourceVisitState::Unvisited | TimingSourceVisitState::Visiting => {
-                unreachable!("every timing source path should be resolved")
-            }
-        })
-        .collect())
+) -> Result<Vec<BitSource>> {
+    resolve_dense(assign_sources).map_err(|bit| {
+        anyhow!(
+            "continuous assign aliases contain a cycle involving net bit '{}'",
+            normalized.render_bit(bit, nets, interner)
+        )
+    })
 }
 
 fn timing_set_for_resolved_source<'a>(
-    source: ResolvedTimingSource,
+    source: BitSource,
     bit_timing_sets: &'a [Option<SignalTimingSet>],
     literal_source_timing_set: &'a SignalTimingSet,
 ) -> Option<&'a SignalTimingSet> {
     match source {
-        ResolvedTimingSource::Literal(_) | ResolvedTimingSource::Unknown => {
-            Some(literal_source_timing_set)
-        }
-        ResolvedTimingSource::Bit(bit_idx) => bit_timing_sets[bit_idx].as_ref(),
+        BitSource::Literal(_) | BitSource::Unknown => Some(literal_source_timing_set),
+        BitSource::Bit(bit_idx) => bit_timing_sets[bit_idx.index()].as_ref(),
     }
 }
 
 fn aggregate_bit_timing_by_net(
     bit_timing_sets: &[Option<SignalTimingSet>],
-    resolved_timing_sources: &[ResolvedTimingSource],
+    resolved_timing_sources: &[BitSource],
     literal_source_timing_set: &SignalTimingSet,
     normalized: &NormalizedNetlistModule<'_>,
     nets_len: usize,
@@ -3027,7 +3111,7 @@ fn aggregate_bit_timing_by_net(
         else {
             continue;
         };
-        let net_idx = normalized.bit(bit_idx).net.0;
+        let net_idx = normalized.bit(NormalizedBitIndex::new(bit_idx)).net.0;
         aggregate_sets[net_idx] = Some(match aggregate_sets[net_idx].take() {
             Some(prev) => prev.merge(timing_set),
             None => timing_set.clone(),
@@ -3631,18 +3715,14 @@ fn timing_table_layout<'a>(
         Some(tmpl)
     };
 
-    let table_axes = library.timing_table_axes(table);
+    let axes = crate::liberty::lut::effective_axes::<3>(
+        library,
+        library.timing_table_axes(table),
+        template,
+    );
     Ok(TimingTableLayout {
-        axes: [
-            effective_axis(table_axes[0], template.map(|t| t.index_1.as_slice())),
-            effective_axis(table_axes[1], template.map(|t| t.index_2.as_slice())),
-            effective_axis(table_axes[2], template.map(|t| t.index_3.as_slice())),
-        ],
-        variables: [
-            template.map(|t| t.variable_1_str(library)).unwrap_or(""),
-            template.map(|t| t.variable_2_str(library)).unwrap_or(""),
-            template.map(|t| t.variable_3_str(library)).unwrap_or(""),
-        ],
+        axes: axes.map(|(_, knots)| knots),
+        variables: axes.map(|(name, _)| name),
     })
 }
 
@@ -4239,14 +4319,6 @@ fn validate_effective_axes(
         }
     }
     Ok(())
-}
-
-fn effective_axis<'a>(table_axis: &'a [f64], template_axis: Option<&'a [f64]>) -> &'a [f64] {
-    if table_axis.is_empty() {
-        template_axis.unwrap_or(&[])
-    } else {
-        table_axis
-    }
 }
 
 #[cfg(test)]
@@ -6616,6 +6688,65 @@ endmodule
             },
         ];
         builder.finish()
+    }
+
+    #[test]
+    fn register_slew_probes_distinguish_packed_bits_and_follow_aliases() -> Result<()> {
+        let library = crate::netlist::resize::tests::library()?;
+        let prepared = PreparedStaLibrary::new(&library)?;
+        let (module, nets, interner) = parse_single_module(
+            r#"module top(input clk, input d, output [7:8] q, output a);
+                wire low, x, alias;
+                assign low = 1'b0;
+                assign x = 1'bx;
+                assign alias = low;
+                DFF1 weak(.CLK(clk), .D(d), .Q(q[7]));
+                DFF4 strong(.CLK(clk), .D(d), .Q(q[8]));
+                assign a = q[8];
+            endmodule"#,
+        );
+        let q = find_net_index(&nets, &interner, "q");
+        let a = find_net_index(&nets, &interner, "a");
+        let input = find_net_index(&nets, &interner, "d");
+        let bit = |net, bit_number| NetBit {
+            net,
+            bit_number: crate::netlist::bit_ref::DeclaredBitNumber(bit_number),
+        };
+        let scalar = |name| bit(find_net_index(&nets, &interner, name), 0);
+        let probes = [
+            bit(q, 7),
+            bit(q, 8),
+            bit(a, 0),
+            bit(input, 0),
+            scalar("low"),
+            scalar("x"),
+            scalar("alias"),
+        ];
+        let options = StaOptions::default();
+        let (observed, slews) = prepared.analyze_register_boundary_with_slews(
+            &module,
+            &nets,
+            &interner,
+            options,
+            false,
+            &[0, 1],
+            &probes,
+        )?;
+        let original = prepared.analyze_register_boundary_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            options,
+            false,
+            &[0, 1],
+        )?;
+        assert_eq!(observed, original);
+        assert!(slews[0].unwrap() > slews[1].unwrap());
+        assert_eq!(slews[1], slews[2]);
+        // Neither a primary input nor a constant/unknown starts a register
+        // path.
+        assert_eq!(slews[3..], [None; 4]);
+        Ok(())
     }
 
     #[test]

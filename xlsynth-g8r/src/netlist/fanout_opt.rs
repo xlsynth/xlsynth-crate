@@ -11,15 +11,17 @@
 
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty_model::{Library, Pin, PinDirection};
+use crate::netlist::connectivity::PinConnection;
+use crate::netlist::connectivity::directed::resolve_dense;
+use crate::netlist::electrical::{PinLimits, RiseFall, input_capacitance as pin_cap};
 use crate::netlist::io::resolve_symbol;
 use crate::netlist::mapped::MappedNetlist;
+use crate::netlist::normalized::{BitSource, NormalizedBitIndex};
 use crate::netlist::parse::{
-    AssignExpr, Net, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, PortDirection,
+    AssignExpr, InstIndex, Net, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, PortDirection,
 };
 use crate::netlist::report::build_area_report;
-use crate::netlist::sta::{
-    EdgeLoadCapacitance, StaOptions, StaReport, TimingQueryDiagnosticCounts, WireLoadModel,
-};
+use crate::netlist::sta::{StaOptions, StaReport, TimingQueryDiagnosticCounts, WireLoadModel};
 use anyhow::{Result, anyhow, ensure};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -73,19 +75,17 @@ struct CellChoice {
 /// One rewirable scalar input-pin load.
 #[derive(Clone, Debug)]
 struct Sink {
-    instance: usize,
-    connection: usize,
+    binding: PinConnection,
     capacitance: f64,
 }
 
 /// Electrical information for one uniquely driven scalar net.
 #[derive(Clone, Debug)]
 struct Driver {
-    instance: usize,
-    output_connection: usize,
-    net: usize,
+    binding: PinConnection,
+    net: NetIndex,
     sinks: Vec<Sink>,
-    load: [f64; 2],
+    load: RiseFall<f64>,
     output_ports: usize,
     fixed_output_load: f64,
     slew_bound: f64,
@@ -95,7 +95,7 @@ struct Driver {
 /// source.
 struct Graph {
     drivers: Vec<Driver>,
-    roots: Vec<Option<usize>>,
+    roots: Vec<Option<NetIndex>>,
     cells: Vec<usize>,
 }
 
@@ -170,6 +170,7 @@ pub struct FanoutDecision {
     pub input_timing: Vec<(String, [f64; 4])>,
     pub sink_count: usize,
     pub output_ports: usize,
+    /// Serialized as `[rise, fall]` for compatibility with existing reports.
     pub old_load: [f64; 2],
     pub before: FanoutMetrics,
     pub after: FanoutMetrics,
@@ -189,21 +190,6 @@ pub struct FanoutOptimizationReport {
     pub sta_evaluations: usize,
     pub sta_seconds: f64,
     pub optimization_seconds: f64,
-}
-
-/// Computes edge-specific input capacitance with the same fallback as
-/// repository STA.
-fn pin_cap(pin: &Pin) -> [f64; 2] {
-    [
-        pin.rise_capacitance
-            .or(pin.capacitance)
-            .or(pin.fall_capacitance)
-            .unwrap_or(0.0),
-        pin.fall_capacitance
-            .or(pin.capacitance)
-            .or(pin.rise_capacitance)
-            .unwrap_or(0.0),
-    ]
 }
 
 /// Compiles exact signatures without assuming that cell names imply
@@ -262,26 +248,9 @@ fn choices_prepared(
         {
             continue;
         }
-        let mut truth = 0u64;
-        let mut bound = true;
-        for assignment in 0..(1usize << inputs.len()) {
-            let bindings: HashMap<_, _> = inputs
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.clone(), assignment & (1 << i) != 0))
-                .collect();
-            match formula.evaluate_partial(&bindings) {
-                Some(true) => truth |= 1 << assignment,
-                Some(false) => {} // False assignments leave this truth-table bit clear.
-                None => {
-                    bound = false;
-                    break;
-                }
-            }
-        }
-        if !bound {
+        let Some(truth) = formula.truth_table(&inputs) else {
             continue;
-        }
+        };
         // Constant functions and cells without a complete timing interface are
         // not replacement/replication candidates; the existing netlist stays
         // intact.
@@ -311,22 +280,14 @@ fn choices_prepared(
     Ok(out)
 }
 
-/// Resolves an alias chain, rejecting cycles instead of silently losing loads.
-fn root(index: usize, aliases: &BTreeMap<usize, Option<usize>>) -> Result<Option<usize>> {
-    let mut current = index;
-    let mut seen = BTreeSet::new();
-    while let Some(next) = aliases.get(&current) {
-        ensure!(seen.insert(current), "cyclic scalar alias");
-        match next {
-            Some(n) => current = *n,
-            None => return Ok(None),
-        }
-    }
-    Ok(Some(current))
+/// Fanout optimization owns a module with one bit per net in declaration
+/// order. Appended scalar wires follow the same order.
+fn scalar_bit_index(net: NetIndex) -> NormalizedBitIndex {
+    NormalizedBitIndex::new(net.0)
 }
 
 /// Reads the scalar source of a connection; unsupported widths fail closed.
-fn source(reference: &NetRef, roots: &[Option<usize>]) -> Result<Option<usize>> {
+fn source(reference: &NetRef, roots: &[Option<NetIndex>]) -> Result<Option<NetIndex>> {
     match reference {
         NetRef::Simple(n) => Ok(roots[n.0]),
         NetRef::Literal(v) if v.get_bit_count() == 1 => Ok(None),
@@ -351,28 +312,15 @@ fn table_bound(library: &Library, pin: &Pin, related: Option<&str>, load_axis: b
             continue;
         }
         for table in &arc.tables {
-            let shape = library.timing_table_shape(table);
-            let template = shape
-                .template_id
-                .checked_sub(1)
-                .and_then(|i| library.lu_table_templates.get(i as usize));
-            let explicit = library.timing_table_axes(table);
-            for axis in 0..2 {
-                let (name, fallback) = match (template, axis) {
-                    (Some(t), 0) => (t.variable_1_str(library), t.index_1.as_slice()),
-                    (Some(t), _) => (t.variable_2_str(library), t.index_2.as_slice()),
-                    _ => ("", &[][..]),
-                };
+            for (axis, (name, values)) in crate::liberty::lut::timing_axes::<2>(library, table)
+                .into_iter()
+                .enumerate()
+            {
                 let is_load =
                     name == "total_output_net_capacitance" || (name.is_empty() && axis == 1);
                 let is_slew = matches!(name, "input_net_transition" | "input_transition_time")
                     || (name.is_empty() && axis == 0);
                 if (load_axis && is_load) || (!load_axis && is_slew) {
-                    let values = if explicit[axis].is_empty() {
-                        fallback
-                    } else {
-                        explicit[axis]
-                    };
                     if let Some(v) = values.last() {
                         bound = bound.min(*v);
                     }
@@ -405,35 +353,48 @@ fn graph(
         .map(|(i, c)| (c.name.as_str(), (i, c)))
         .collect();
     let mut cells = Vec::with_capacity(netlist.module.instances.len());
-    let mut aliases = BTreeMap::new();
-    for a in &netlist.module.assigns {
-        ensure!(
-            a.kind == NetlistAssignKind::Continuous,
-            "tran aliases are outside optimization scope"
-        );
-        let NetRef::Simple(lhs) = a.lhs else {
-            return Err(anyhow!("non-scalar alias lhs"));
-        };
-        let rhs = match &a.rhs {
-            AssignExpr::Leaf(NetRef::Simple(n)) => Some(n.0),
-            AssignExpr::Leaf(NetRef::Literal(v)) if v.get_bit_count() == 1 => None,
-            _ => {
-                return Err(anyhow!(
-                    "fanout optimization requires scalar wire/literal aliases"
-                ));
-            }
-        };
-        ensure!(
-            aliases.insert(lhs.0, rhs).is_none(),
-            "multiple alias drivers"
-        );
-    }
-    let roots = (0..netlist.nets.len())
-        .map(|i| root(i, &aliases))
-        .collect::<Result<Vec<_>>>()?;
-    let mut sinks: BTreeMap<usize, Vec<Sink>> = BTreeMap::new();
-    let mut loads: BTreeMap<usize, [f64; 2]> = BTreeMap::new();
-    let mut slew_bounds: BTreeMap<usize, f64> = BTreeMap::new();
+    let roots = if netlist.module.assigns.is_empty() {
+        (0..netlist.nets.len())
+            .map(|index| Some(NetIndex(index)))
+            .collect()
+    } else {
+        let mut aliases = vec![None; netlist.nets.len()];
+        for a in &netlist.module.assigns {
+            ensure!(
+                a.kind == NetlistAssignKind::Continuous,
+                "tran aliases are outside optimization scope"
+            );
+            let NetRef::Simple(lhs) = a.lhs else {
+                return Err(anyhow!("non-scalar alias lhs"));
+            };
+            let rhs = match &a.rhs {
+                AssignExpr::Leaf(NetRef::Simple(n)) => BitSource::Bit(*n),
+                AssignExpr::Leaf(NetRef::Literal(v)) if v.get_bit_count() == 1 => {
+                    BitSource::Unknown
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "fanout optimization requires scalar wire/literal aliases"
+                    ));
+                }
+            };
+            ensure!(
+                aliases[lhs.0].replace(rhs).is_none(),
+                "multiple alias drivers"
+            );
+        }
+        resolve_dense(&aliases)
+            .map_err(|_| anyhow!("cyclic scalar alias"))?
+            .into_iter()
+            .map(|source| match source {
+                BitSource::Bit(bit) => Some(bit),
+                BitSource::Literal(_) | BitSource::Unknown => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut sinks: BTreeMap<NetIndex, Vec<Sink>> = BTreeMap::new();
+    let mut loads: BTreeMap<NetIndex, RiseFall<f64>> = BTreeMap::new();
+    let mut slew_bounds: BTreeMap<NetIndex, f64> = BTreeMap::new();
     let mut drivers = Vec::new();
     let mut seen_drivers = BTreeSet::new();
     for (i, inst) in netlist.module.instances.iter().enumerate() {
@@ -461,15 +422,17 @@ fn graph(
             if p.direction == PinDirection::Input as i32 {
                 let cap = pin_cap(p);
                 sinks.entry(n).or_default().push(Sink {
-                    instance: i,
-                    connection: j,
+                    binding: PinConnection {
+                        instance: InstIndex(i),
+                        connection: j,
+                    },
                     // Each moved sink carries its affine wire contribution.
                     // The constant term is common to all used group outputs.
-                    capacitance: cap[0].max(cap[1]) + options.wire_load.capacitance_per_sink,
+                    capacitance: cap.rise.max(cap.fall) + options.wire_load.capacitance_per_sink,
                 });
-                let load = loads.entry(n).or_insert([0.0; 2]);
-                load[0] += cap[0];
-                load[1] += cap[1];
+                let load = loads.entry(n).or_default();
+                load.rise += cap.rise;
+                load.fall += cap.fall;
                 let bound = cell
                     .pins
                     .iter()
@@ -481,11 +444,13 @@ fn graph(
             } else if p.direction == PinDirection::Output as i32 {
                 ensure!(seen_drivers.insert(n), "multiple cell drivers");
                 drivers.push(Driver {
-                    instance: i,
-                    output_connection: j,
+                    binding: PinConnection {
+                        instance: InstIndex(i),
+                        connection: j,
+                    },
                     net: n,
                     sinks: vec![],
-                    load: [0.0; 2],
+                    load: RiseFall::default(),
                     output_ports: 0,
                     fixed_output_load: 0.0,
                     slew_bound: f64::INFINITY,
@@ -497,7 +462,7 @@ fn graph(
     for (i, n) in netlist.nets.iter().enumerate() {
         net_by_name.entry(n.name).or_insert(NetIndex(i));
     }
-    let mut ports = BTreeMap::<usize, usize>::new();
+    let mut ports = BTreeMap::<NetIndex, usize>::new();
     for p in &netlist.module.ports {
         ensure!(
             p.direction != PortDirection::Inout,
@@ -510,9 +475,9 @@ fn graph(
                 .ok_or_else(|| anyhow!("missing output net"))?;
             if let Some(n) = roots[n.0] {
                 *ports.entry(n).or_default() += 1;
-                let load = loads.entry(n).or_insert([0.0; 2]);
-                load[0] += options.module_output_load;
-                load[1] += options.module_output_load;
+                let load = loads.entry(n).or_default();
+                load.rise += options.module_output_load;
+                load.fall += options.module_output_load;
             }
         }
     }
@@ -521,14 +486,9 @@ fn graph(
         d.load = loads.get(&d.net).copied().unwrap_or_default();
         d.output_ports = ports.get(&d.net).copied().unwrap_or_default();
         d.fixed_output_load = d.output_ports as f64 * options.module_output_load;
-        let mut load = EdgeLoadCapacitance {
-            rise: d.load[0],
-            fall: d.load[1],
-        };
         options
             .wire_load
-            .add_to(&mut load, d.sinks.len(), d.output_ports != 0)?;
-        d.load = [load.rise, load.fall];
+            .add_to(&mut d.load, d.sinks.len(), d.output_ports != 0)?;
         d.slew_bound = slew_bounds.get(&d.net).copied().unwrap_or(f64::INFINITY);
     }
     Ok(Graph {
@@ -617,7 +577,7 @@ fn report_metrics(
         timing_queries: sta.timing_query_diagnostic_counts,
     };
     for d in &g.drivers {
-        let inst = &netlist.module.instances[d.instance];
+        let inst = &netlist.module.instances[d.binding.instance.0];
         let name = resolve_symbol(&netlist.interner, inst.type_name, "cell")?;
         let cell = library
             .cells
@@ -626,7 +586,7 @@ fn report_metrics(
             .ok_or_else(|| anyhow!("unknown cell"))?;
         let pname = resolve_symbol(
             &netlist.interner,
-            inst.connections[d.output_connection].0,
+            inst.connections[d.binding.connection].0,
             "pin",
         )?;
         let pin = cell
@@ -635,18 +595,21 @@ fn report_metrics(
             .find(|p| library.resolve_string(&p.name) == pname)
             .ok_or_else(|| anyhow!("unknown pin"))?;
         let timing = sta
-            .timing_for_net(NetIndex(d.net))
+            .timing_for_net(d.net)
             .ok_or_else(|| anyhow!("missing driver timing"))?;
         let slew = timing.rise.transition.max(timing.fall.transition);
-        let load = d.load[0].max(d.load[1]);
+        let load = d.load.rise.max(d.load.fall);
         m.max_slew = m.max_slew.max(slew);
         m.max_load = m.max_load.max(load);
         m.max_fanout = m.max_fanout.max(d.sinks.len());
         m.output_load_above_table_max += usize::from(load > table_bound(library, pin, None, true));
-        m.max_capacitance_violations += usize::from(pin.max_capacitance.is_some_and(|v| load > v));
-        m.max_transition_violations += usize::from(pin.max_transition.is_some_and(|v| slew > v));
+        let limits = PinLimits::for_pin(pin);
+        m.max_capacitance_violations +=
+            usize::from(crate::netlist::electrical::rule_excess(load, limits.capacitance) > 0.0);
+        m.max_transition_violations +=
+            usize::from(crate::netlist::electrical::rule_excess(slew, limits.transition) > 0.0);
         for sink in &d.sinks {
-            let si = &netlist.module.instances[sink.instance];
+            let si = &netlist.module.instances[sink.binding.instance.0];
             let sn = resolve_symbol(&netlist.interner, si.type_name, "sink cell")?;
             let sc = library
                 .cells
@@ -655,7 +618,7 @@ fn report_metrics(
                 .ok_or_else(|| anyhow!("unknown sink"))?;
             let sp = resolve_symbol(
                 &netlist.interner,
-                si.connections[sink.connection].0,
+                si.connections[sink.binding.connection].0,
                 "sink pin",
             )?;
             let bound = sc
@@ -677,8 +640,8 @@ fn partition(sinks: &[Sink], groups: usize, initial_load: f64) -> Vec<Vec<Sink>>
     ordered.sort_by(|a, b| {
         b.capacitance
             .total_cmp(&a.capacitance)
-            .then(a.instance.cmp(&b.instance))
-            .then(a.connection.cmp(&b.connection))
+            .then(a.binding.instance.0.cmp(&b.binding.instance.0))
+            .then(a.binding.connection.cmp(&b.binding.connection))
     });
     let mut result = vec![vec![]; groups];
     let mut load = vec![0.0; groups];
@@ -781,17 +744,17 @@ fn input_context(
     sta: &StaReport,
 ) -> Result<Vec<(String, [f64; 4])>> {
     let mut out = Vec::new();
-    for (j, (pin, r)) in netlist.module.instances[driver.instance]
+    for (j, (pin, r)) in netlist.module.instances[driver.binding.instance.0]
         .connections
         .iter()
         .enumerate()
     {
-        if j == driver.output_connection {
+        if j == driver.binding.connection {
             continue;
         }
         let name = resolve_symbol(&netlist.interner, *pin, "pin")?;
         if let Some(n) = source(r, &g.roots)? {
-            if let Some(t) = sta.timing_for_net(NetIndex(n)) {
+            if let Some(t) = sta.timing_for_net(n) {
                 out.push((
                     name,
                     [
@@ -873,28 +836,29 @@ pub fn optimize_fanout(
         for d in &g.drivers {
             let name = resolve_symbol(
                 &netlist.interner,
-                netlist.module.instances[d.instance].type_name,
+                netlist.module.instances[d.binding.instance.0].type_name,
                 "cell",
             )?;
             let Some(c) = cells.iter().find(|c| c.name == name) else {
                 continue;
             };
             let t = sta
-                .timing_for_net(NetIndex(d.net))
+                .timing_for_net(d.net)
                 .ok_or_else(|| anyhow!("missing driver timing"))?;
             let p = library.cells[c.index]
                 .pins
                 .iter()
                 .find(|p| library.resolve_string(&p.name) == c.output)
                 .ok_or_else(|| anyhow!("missing pin"))?;
-            let load = d.load[0].max(d.load[1]);
+            let load = d.load.rise.max(d.load.fall);
             let slew = t.rise.transition.max(t.fall.transition);
-            let overloaded = load > p.max_capacitance.unwrap_or(f64::INFINITY)
+            let limits = PinLimits::for_pin(p);
+            let overloaded = load > limits.capacitance.unwrap_or(f64::INFINITY)
                 || load > table_bound(library, p, None, true)
                 || slew > d.slew_bound
-                || slew > p.max_transition.unwrap_or(f64::INFINITY);
+                || slew > limits.transition.unwrap_or(f64::INFINITY);
             if d.sinks.len() >= options.fanout_trigger || overloaded {
-                targets.push((slew, d.instance, d.clone(), c.clone()));
+                targets.push((slew, d.binding.instance.0, d.clone(), c.clone()));
             }
         }
         targets.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -929,7 +893,7 @@ pub fn optimize_fanout(
             for kind in candidates(&driver, &old, &cells) {
                 let instance = resolve_symbol(
                     &netlist.interner,
-                    netlist.module.instances[driver.instance].instance_name,
+                    netlist.module.instances[driver.binding.instance.0].instance_name,
                     "instance",
                 )?;
                 let plan = edit::EditPlan::new(netlist, &g, &driver, &kind, &cells)?;
@@ -1119,7 +1083,7 @@ pub fn optimize_fanout(
             input_timing,
             sink_count: driver.sinks.len(),
             output_ports: driver.output_ports,
-            old_load: driver.load,
+            old_load: [driver.load.rise, driver.load.fall],
             before: current,
             after: accepted.clone(),
         });

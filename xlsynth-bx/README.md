@@ -1169,23 +1169,21 @@ also return a new instance by naming the public template or a concrete alias
 in its DSLX result type. BX recovers the instance's `u32` bindings from the
 checked value, including parameters that do not appear in any field.
 
-The pinned DSLX converter can emit invalid IR or dispatch to the wrong helper
-when a type-valued parameter such as `T: type` is bound to a struct. When a
-BX call passes or returns a concrete parametric struct, its imported DSLX
-functions can use bits and arrays of bits as type-valued arguments. BX
-diagnoses unsupported aggregate bindings, ambiguous
+When a BX call passes or returns a concrete parametric struct, its imported
+DSLX functions can bind a type parameter such as `T: type` to bits or an
+array of bits. BX diagnoses unsupported aggregate bindings, ambiguous
 native symbols, and method dispatches whose specialization the converter API
 cannot verify. DSLX `map` callbacks and indirect calls are outside this subset.
 Functions such as `apfloat::add` specialize on ordinary value parameters.
 
 For imports that enable DSLX generics, BX checks the native symbols of the
 selected specializations. Distinct numeric enums can specialize the same
-helper even when their source names match. The pinned mangler can give nested
-tuples such as `(E, (u8, u8), u8)` and `(E, (u8, u8, u8))` the same symbol.
-BX diagnoses that collision when both specializations occur in one conversion
-batch. When the batch can specialize a numeric enum, BX also reports an
-import error if the native call graph omits a method or indirect call target
-inside a specialized function and BX cannot verify its symbols.
+helper even when their source names match. Nested tuple types such as
+`(E, (u8, u8), u8)` and `(E, (u8, u8, u8))` produce separate specializations
+and can occur in the same conversion batch. When the batch can specialize a
+numeric enum, BX reports an import error if the native call graph omits a
+method or indirect call target inside a specialized function and BX cannot
+verify its symbols.
 
 If an imported function requires an implicit token, BX reports the DSLX call path and highlights the effectful operation when it can locate it in the original source. For example, a runtime `assert!(N >= u32:2, "min_width")` in a helper makes its caller effectful. When `N` is a width parametric, `const_assert!(N >= u32:2)` checks the invariant during DSLX typechecking and keeps the helper pure.
 
@@ -1267,10 +1265,28 @@ combinational operands must align, and a register adds one stage. Each write
 guard must align with the data at the write edge, including enclosing guards
 in nested `if` statements. In the example, `q` and `r` are both at stage 1.
 When `en` is low, `q` holds its previous value and the sum still responds to
-`r`. A stage annotation checks alignment in the datapath. The block's enable
-and valid signals determine which transactions actually advance.
+`r`.
 
-The checker follows names, unary and binary operators, casts, `if`
+The output annotation promises that BX can assign the declared stage to the
+output. It checks where data and control meet in the datapath; it does not
+promise that a new result arrives on that clock. For example, this passes:
+
+```text
+block held(clk, en: bool, x: u8) -> u8 @1 {
+    reg q: u8;
+    if en { q := x; }
+    q
+}
+```
+
+`q` is at stage 1 even when `en` is false and it holds an old value. Returning
+`q + x` instead fails because the adder would combine stages 1 and 0. In
+`add_held` above, `q + r` passes because both operands are at stage 1, but BX
+does not prove that they belong to the same transaction. A stage-1 output can
+also come from a stage-1 input rather than a register inside the block, and a
+constant can fit any stage.
+
+The checker follows names, unary and binary operators, casts, `if` and `match`
 expressions, and struct and tuple construction and field reads. A scalar
 literal such as `u8:7` can be used at any stage. With `const A = [u8:7];`,
 `A` can also be used at any stage because BX evaluates the constant before
@@ -1302,6 +1318,58 @@ arguments. A child without an output annotation supplies no stage to its
 caller, even if its inputs are annotated. An extern block also supplies no stage.
 Register feedback such as `q := q + x;` is legal BX. Following a timed
 output back through that feedback currently produces a diagnostic.
+
+#### Output stages by case
+
+An output can name a pure BX function that returns the expected stage for
+each combination of control inputs. The checker evaluates the function at
+compile time and checks each case separately:
+
+```text
+enum Op : u1 { Fast = 0, Slow = 1 }
+
+fn stage(op: Op) -> u32 {
+    match op {
+        Op::Fast => u32:1,
+        Op::Slow => u32:2,
+    }
+}
+
+block pulse(clk, op: Op) -> bool @stage(op) {
+    reg fast_q: bool;
+    reg slow_q: bool;
+    reg slow_qq: bool;
+    fast_q := op == Op::Fast;
+    slow_q := op == Op::Slow;
+    slow_qq := slow_q;
+    fast_q | slow_qq
+}
+```
+
+For Fast, `fast_q` is true at stage 1, so the OR is true at stage 1.
+For Slow, `slow_qq` is true at stage 2, so it is true at stage 2.
+This example allows pulses from different operations to overlap.
+The OR can also feed a fixed-stage child: a one-cycle tail would move those
+two stages to 2 and 3, respectively.
+
+Case checking does not prove that operations can safely share a resource. If
+Slow reaches a shared tail at stage 6 and Fast reaches it at stage 3, issuing
+Fast three clocks after Slow sends both to the tail on the same clock. Their
+individual stage annotations can still pass. Ruling out that collision needs
+a separate constraint or proof about when operations may issue.
+
+A `match` or `if` selecting data still requires its selector and selected
+data to align. A stage-0 opcode cannot select stage-1 data. A guarded register
+keeps its stage when disabled, but the checker cannot assume what bits it
+holds. Resettable registers likewise have no exact case value when reset
+could override the write. As with fixed stages, the annotation does not promise
+freshness, validity, or exclusive use of an output.
+
+Controls must be block input ports of Boolean, enum, or small unsigned bit
+type. The checker limits their combined domain to 64 hardware encodings,
+including unnamed enum encodings, since a port or runtime cast can supply
+those values. Case-dependent child outputs do not yet expose a timing
+interface to their callers.
 
 #### Related work
 
@@ -1410,7 +1478,24 @@ in its body. For a block declared as `route<SPLIT: bool = {false}>`,
 `route(data)` binds `SPLIT` to `false` and `route<true>(data)` binds it to
 `true`. Omitted trailing value arguments use their braced defaults, evaluated
 in the block's declaration scope with preceding value parameters in scope.
-BX infers type parameters from the data inputs.
+A `u32` parameter can supply the bit width or array length of an input port,
+result, or register. BX infers type parameters from the data inputs,
+including the element type of a port declared as `T[N]`.
+
+```text
+block storage<W: u32, N: u32>(clk, data: bits[W][N]) -> bits[W][N] {
+    reg q: bits[W][N];
+    q := data;
+    q
+}
+
+block samples(clk, data: u12[4]) -> u12[4] {
+    let previous = storage<12, 4>(data);
+    previous
+}
+```
+
+Here the input, output, and register each hold four 12-bit words.
 
 ```text
 block stage<T>(clk, data: T) -> T {

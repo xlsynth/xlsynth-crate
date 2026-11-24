@@ -222,7 +222,10 @@ fn decode_ref(reference: &pb::Ref, range: &Range<usize>) -> Result<NetRef> {
             let index = net_index(range, select.net)?;
             match select.right {
                 Some(right) => NetRef::PartSelect(index, select.left, right),
-                None => NetRef::BitSelect(index, select.left),
+                None => NetRef::BitSelect(
+                    index,
+                    crate::netlist::bit_ref::DeclaredBitNumber(select.left),
+                ),
             }
         }
         Kind::Literal(literal) => {

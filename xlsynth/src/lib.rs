@@ -26,6 +26,7 @@ pub use ir_analysis::{Interval, IntervalSet, IrAnalysis, IrAnalysisLevel, KnownB
 pub use ir_package::IrFunction;
 pub use ir_package::IrFunctionJit;
 pub use ir_package::IrPackage;
+pub use ir_package::IrProcRuntime;
 pub use ir_package::IrType;
 pub use ir_package::RunResult;
 pub use ir_package::TraceMessage;

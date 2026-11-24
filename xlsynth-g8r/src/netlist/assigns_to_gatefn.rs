@@ -7,6 +7,7 @@
 
 use crate::aig::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+use crate::netlist::bit_ref::{DeclaredBitNumber, select_bit_number, select_width_bits};
 use crate::netlist::integrity::validate_structural_assign_module;
 use crate::netlist::parse::{AssignExpr, Net, NetIndex, NetRef, NetlistModule, PortDirection};
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use string_interner::{StringInterner, backend::StringBackend};
 #[derive(Debug, Clone, Copy)]
 struct NetBitTarget {
     idx: NetIndex,
-    bit_number: u32,
+    bit_number: DeclaredBitNumber,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,7 +50,7 @@ impl ResolvedNetValues {
     fn resolve_bit(
         &self,
         idx: NetIndex,
-        bit_number: u32,
+        bit_number: DeclaredBitNumber,
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
     ) -> Result<Option<AigOperand>, String> {
@@ -75,7 +76,7 @@ impl ResolvedNetValues {
     fn write_bit(
         &mut self,
         idx: NetIndex,
-        bit_number: u32,
+        bit_number: DeclaredBitNumber,
         value: AigOperand,
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -212,7 +213,7 @@ fn net_name(
 
 fn render_named_bit(
     idx: NetIndex,
-    bit_number: u32,
+    bit_number: DeclaredBitNumber,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> String {
@@ -220,22 +221,6 @@ fn render_named_bit(
         net_name(idx, nets, interner)
     } else {
         format!("{}[{}]", net_name(idx, nets, interner), bit_number)
-    }
-}
-
-fn select_width_bits(msb: u32, lsb: u32) -> usize {
-    (u32::abs_diff(msb, lsb) as usize) + 1
-}
-
-fn select_bit_number(msb: u32, lsb: u32, bit_offset: usize) -> Option<u32> {
-    if bit_offset >= select_width_bits(msb, lsb) {
-        return None;
-    }
-    let offset = bit_offset as u32;
-    if msb >= lsb {
-        Some(lsb + offset)
-    } else {
-        Some(lsb - offset)
     }
 }
 

@@ -14,7 +14,8 @@ use crate::liberty_proto::ClockGate;
 use crate::netlist::bit_ref::select_bit_number;
 use crate::netlist::hierarchy::ElaboratedModuleBoundary;
 use crate::netlist::normalized::{
-    BitExpr, BitIndex, BitSource, NormalizedConnection, NormalizedInstance, NormalizedNetlistModule,
+    BitExpr, BitSource, NormalizedBitIndex, NormalizedConnection, NormalizedInstance,
+    NormalizedNetlistModule,
 };
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use crate::netlist::sequential_liberty::{
@@ -374,8 +375,8 @@ pub(crate) fn build_cell_formula_map(
 }
 
 fn check_undriven_bits(
-    used_as_input: &HashSet<BitIndex>,
-    driven: &HashSet<BitIndex>,
+    used_as_input: &HashSet<NormalizedBitIndex>,
+    driven: &HashSet<NormalizedBitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -397,7 +398,7 @@ struct ResolvedBitValues {
 struct PendingAssignBit {
     assign_index: usize,
     rhs_bit_index: usize,
-    target: BitIndex,
+    target: NormalizedBitIndex,
 }
 
 impl ResolvedBitValues {
@@ -407,8 +408,8 @@ impl ResolvedBitValues {
         }
     }
 
-    fn resolve_bit(&self, bit_idx: BitIndex) -> Option<AigOperand> {
-        self.values[bit_idx]
+    fn resolve_bit(&self, bit_idx: NormalizedBitIndex) -> Option<AigOperand> {
+        self.values[bit_idx.index()]
     }
 
     fn resolve_source(
@@ -445,13 +446,13 @@ impl ResolvedBitValues {
 
     fn write_bit(
         &mut self,
-        bit_idx: BitIndex,
+        bit_idx: NormalizedBitIndex,
         value: AigOperand,
         normalized: &NormalizedNetlistModule<'_>,
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
     ) -> Result<(), String> {
-        if self.values[bit_idx].is_some() {
+        if self.values[bit_idx.index()].is_some() {
             let bit = normalized.bit(bit_idx);
             return Err(format!(
                 "net '{}' bit {} was assigned more than once during projection",
@@ -459,13 +460,13 @@ impl ResolvedBitValues {
                 bit.bit_number
             ));
         }
-        self.values[bit_idx] = Some(value);
+        self.values[bit_idx.index()] = Some(value);
         Ok(())
     }
 
     fn write_bits(
         &mut self,
-        targets: &[BitIndex],
+        targets: &[NormalizedBitIndex],
         src_bv: &AigBitVector,
         normalized: &NormalizedNetlistModule<'_>,
         nets: &[Net],
@@ -490,7 +491,7 @@ impl ResolvedBitValues {
 
     fn materialize_output_or_false(
         &self,
-        output_bits: &[BitIndex],
+        output_bits: &[NormalizedBitIndex],
         gb: &mut GateBuilder,
     ) -> AigBitVector {
         let bits = output_bits
@@ -501,7 +502,9 @@ impl ResolvedBitValues {
     }
 }
 
-fn output_target_bits(connection: &NormalizedConnection) -> Result<Vec<BitIndex>, String> {
+fn output_target_bits(
+    connection: &NormalizedConnection,
+) -> Result<Vec<NormalizedBitIndex>, String> {
     connection
         .bits
         .iter()
@@ -756,11 +759,11 @@ pub fn project_labeled_netlist_aig_with_boundaries(
 /// The external clock and each net bit on the wiring paths to its FF pins.
 #[derive(Debug, Clone)]
 struct SelectedSequentialClock {
-    bit: BitIndex,
+    bit: NormalizedBitIndex,
     /// Clock wire or alias to its terminal (root clock or ICG output).
-    wiring_bits: HashMap<BitIndex, BitIndex>,
+    wiring_bits: HashMap<NormalizedBitIndex, NormalizedBitIndex>,
     /// FF instance index to the ICG output bit driving its clock.
-    gated_flops: HashMap<usize, BitIndex>,
+    gated_flops: HashMap<usize, NormalizedBitIndex>,
     port_name: String,
     active_edge: Option<SequentialClockEdge>,
 }
@@ -770,7 +773,7 @@ struct GateInstance<'a> {
     cell: &'a Cell,
     spec: &'a ClockGate,
     clock: BitSource,
-    output: BitIndex,
+    output: NormalizedBitIndex,
 }
 
 impl<'a> GateInstance<'a> {
@@ -1334,7 +1337,7 @@ fn physical_wire_terminals(
     normalized: &NormalizedNetlistModule<'_>,
     interner: &StringInterner<StringBackend<SymbolU32>>,
     instances: &[SequentialInstanceAigBinding],
-) -> Vec<Option<BitIndex>> {
+) -> Vec<Option<NormalizedBitIndex>> {
     if normalized.assigns.is_empty() {
         return Vec::new();
     }
@@ -1342,7 +1345,7 @@ fn physical_wire_terminals(
     for port in &normalized.ports {
         if port.direction == PortDirection::Input {
             for &bit in &port.bits {
-                terminals[bit] = Some(bit);
+                terminals[bit.index()] = Some(bit);
             }
         }
     }
@@ -1356,7 +1359,7 @@ fn physical_wire_terminals(
                 .iter()
                 .find(|conn| interner.resolve(conn.port) == Some(pin.pin_name.as_str()));
             if let Some([BitSource::Bit(bit)]) = connection.map(|conn| conn.bits.as_slice()) {
-                terminals[*bit] = Some(*bit);
+                terminals[bit.index()] = Some(*bit);
             }
         }
     }
@@ -1364,7 +1367,7 @@ fn physical_wire_terminals(
     for assign in &normalized.assigns {
         for (&target, rhs) in assign.lhs_bits.iter().zip(&assign.rhs_bits) {
             let source = match rhs {
-                BitExpr::Source(BitSource::Bit(source)) if terminals[target].is_none() => {
+                BitExpr::Source(BitSource::Bit(source)) if terminals[target.index()].is_none() => {
                     Some(*source)
                 }
                 _ => None,
@@ -1379,13 +1382,13 @@ fn physical_wire_terminals(
     let mut outgoing = vec![Vec::new(); normalized.bit_count()];
     for (target, source) in wire_sources {
         if let Some(source) = source {
-            outgoing[source].push(target);
+            outgoing[source.index()].push(target);
         }
     }
     let mut pending = terminals.iter().flatten().copied().collect::<Vec<_>>();
     while let Some(bit) = pending.pop() {
-        for &next in &outgoing[bit] {
-            terminals[next] = terminals[bit];
+        for &next in &outgoing[bit.index()] {
+            terminals[next.index()] = terminals[bit.index()];
             pending.push(next);
         }
     }
@@ -1393,9 +1396,12 @@ fn physical_wire_terminals(
 }
 
 /// Without a wire assign, the canonical bit itself identifies the terminal.
-fn physical_terminal(wire_terminals: &[Option<BitIndex>], canonical: BitIndex) -> BitIndex {
+fn physical_terminal(
+    wire_terminals: &[Option<NormalizedBitIndex>],
+    canonical: NormalizedBitIndex,
+) -> NormalizedBitIndex {
     wire_terminals
-        .get(canonical)
+        .get(canonical.index())
         .copied()
         .flatten()
         .unwrap_or(canonical)
@@ -1407,13 +1413,13 @@ fn named_wire_aliases(
     normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    wire_terminals: &[Option<BitIndex>],
+    wire_terminals: &[Option<NormalizedBitIndex>],
 ) -> HashMap<(String, u32), (String, u32)> {
     let net_key = |idx| {
         let bit = normalized.bit(idx);
         (
             crate::netlist::bit_ref::net_name(bit.net, nets, interner),
-            bit.bit_number,
+            bit.bit_number.0,
         )
     };
     normalized
@@ -1421,6 +1427,7 @@ fn named_wire_aliases(
         .iter()
         .enumerate()
         .filter_map(|(raw, &canonical)| {
+            let raw = NormalizedBitIndex::new(raw);
             let terminal = physical_terminal(wire_terminals, canonical);
             (raw != terminal).then(|| (net_key(raw), net_key(terminal)))
         })
@@ -1851,8 +1858,8 @@ fn top_input_clock_port(
     normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    clock_bit: BitIndex,
-) -> Result<(String, BitIndex), String> {
+    clock_bit: NormalizedBitIndex,
+) -> Result<(String, NormalizedBitIndex), String> {
     let mut inputs = normalized
         .ports
         .iter()
@@ -1884,12 +1891,12 @@ fn top_input_clock_port(
 
 fn resolve_simple_clock_source(
     source: BitSource,
-    assign_by_bit: &HashMap<BitIndex, Option<&BitExpr>>,
-    wiring_bits: &mut HashMap<BitIndex, BitIndex>,
+    assign_by_bit: &HashMap<NormalizedBitIndex, Option<&BitExpr>>,
+    wiring_bits: &mut HashMap<NormalizedBitIndex, NormalizedBitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> Result<BitIndex, String> {
+) -> Result<NormalizedBitIndex, String> {
     let mut current = source;
     let mut seen = HashSet::new();
     loop {
@@ -2011,9 +2018,11 @@ fn build_sequential_module_port_aig_bindings(
                         SequentialAigSignal::Operand(operand)
                     };
                     Ok(LabeledSequentialAigBit {
-                        bit_number: select_bit_number(msb, lsb, offset).ok_or_else(|| {
-                            format!("bit offset {offset} exceeds declared width of port '{name}'")
-                        })?,
+                        bit_number: select_bit_number(msb, lsb, offset)
+                            .ok_or_else(|| {
+                                format!("bit offset {offset} exceeds declared width of port '{name}'")
+                            })?
+                            .0,
                         signal,
                     })
                 })
@@ -2159,13 +2168,13 @@ fn collect_netlist_bit_usage<F>(
     interner: &StringInterner<StringBackend<SymbolU32>>,
     liberty_lib: &Library,
     mut should_skip_input_pin: F,
-) -> Result<(HashSet<BitIndex>, HashSet<BitIndex>), String>
+) -> Result<(HashSet<NormalizedBitIndex>, HashSet<NormalizedBitIndex>), String>
 where
     F: FnMut(usize, &str) -> bool,
 {
     let mut used_as_input = HashSet::new();
     let mut driven = HashSet::new();
-    let mut assign_sources = HashMap::<BitIndex, Vec<BitIndex>>::new();
+    let mut assign_sources = HashMap::<NormalizedBitIndex, Vec<NormalizedBitIndex>>::new();
     for port in &normalized.ports {
         if port.direction == PortDirection::Input {
             driven.extend(port.bits.iter().copied());
@@ -2682,7 +2691,7 @@ fn build_module_port_aig_bindings(
                         )
                     })?;
                     Ok(LabeledAigBit {
-                        bit_number: bit.bit_number,
+                        bit_number: bit.bit_number.0,
                         operand,
                     })
                 })
@@ -2723,7 +2732,7 @@ fn build_module_boundary_aig_bindings(
                             continue;
                         };
                         bits_lsb_to_msb.push(LabeledAigBit {
-                            bit_number: normalized.bit(*raw_bit_idx).bit_number,
+                            bit_number: normalized.bit(*raw_bit_idx).bit_number.0,
                             operand,
                         });
                     }
@@ -2748,9 +2757,9 @@ fn build_sequential_module_boundary_aig_bindings(
     boundaries: &[ElaboratedModuleBoundary],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     resolved: &ResolvedBitValues,
-    wire_terminals: &[Option<BitIndex>],
+    wire_terminals: &[Option<NormalizedBitIndex>],
     selected_clock: Option<&SelectedSequentialClock>,
-    gate_enables: &HashMap<BitIndex, AigOperand>,
+    gate_enables: &HashMap<NormalizedBitIndex, AigOperand>,
 ) -> Result<Vec<SequentialModuleBoundaryAigBinding>, String> {
     boundaries
         .iter()
@@ -2782,7 +2791,7 @@ fn build_sequential_module_boundary_aig_bindings(
                             SequentialAigSignal::Operand(operand)
                         };
                         bits_lsb_to_msb.push(LabeledSequentialAigBit {
-                            bit_number: normalized.bit(*raw_bit_idx).bit_number,
+                            bit_number: normalized.bit(*raw_bit_idx).bit_number.0,
                             signal,
                         });
                     }
@@ -2924,7 +2933,7 @@ fn build_pin_connection(
             let bit = normalized.bit(*bit_idx);
             Ok(PinConnection::Net {
                 net_name: crate::netlist::bit_ref::net_name(bit.net, nets, interner),
-                bit_number: bit.bit_number,
+                bit_number: bit.bit_number.0,
             })
         }
         [BitSource::Literal(value)] => Ok(PinConnection::Literal(*value)),
@@ -2952,7 +2961,9 @@ fn collect_module_io_bits(
     Ok(())
 }
 
-fn collect_module_output_bits(normalized: &NormalizedNetlistModule<'_>) -> HashSet<BitIndex> {
+fn collect_module_output_bits(
+    normalized: &NormalizedNetlistModule<'_>,
+) -> HashSet<NormalizedBitIndex> {
     let mut output_bits = HashSet::new();
     for port in &normalized.ports {
         if port.direction != PortDirection::Output {
@@ -3382,7 +3393,7 @@ mod tests {
     }
 
     fn bit_ref(idx: NetIndex, bit: u32) -> NetRef {
-        NetRef::BitSelect(idx, bit)
+        NetRef::BitSelect(idx, crate::netlist::bit_ref::DeclaredBitNumber(bit))
     }
 
     fn part_ref(idx: NetIndex, msb: u32, lsb: u32) -> NetRef {
@@ -3784,7 +3795,7 @@ endmodule
                 ),
                 (
                     interner.get_or_intern("Y"),
-                    NetRef::BitSelect(crate::netlist::parse::NetIndex(1), 3),
+                    bit_ref(crate::netlist::parse::NetIndex(1), 3),
                 ),
             ],
             inst_lineno: 0,
@@ -4228,7 +4239,7 @@ endmodule
                 ),
                 (
                     interner.get_or_intern("Q"),
-                    NetRef::BitSelect(crate::netlist::parse::NetIndex(1), 3),
+                    bit_ref(crate::netlist::parse::NetIndex(1), 3),
                 ),
             ],
             inst_lineno: 0,
@@ -4525,10 +4536,7 @@ endmodule
             instance_name: u1,
             connections: vec![
                 (interner.get_or_intern("D"), NetRef::Simple(NetIndex(0))),
-                (
-                    interner.get_or_intern("QN"),
-                    NetRef::BitSelect(NetIndex(1), 2),
-                ),
+                (interner.get_or_intern("QN"), bit_ref(NetIndex(1), 2)),
             ],
             inst_lineno: 0,
             inst_colno: 0,

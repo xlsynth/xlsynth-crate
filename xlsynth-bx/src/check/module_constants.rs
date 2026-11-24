@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
+
 use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
 
 use crate::ast::{Block, BlockStages, ConstDef, Expr, Type};
@@ -15,6 +17,7 @@ pub(super) struct ModuleDimensions<'a, 'm> {
     pub(super) position: Option<usize>,
     pub(super) warning_owner: Option<&'m str>,
     zero_binding: ZeroBinding<'a>,
+    pub(super) block_size_formals: Option<&'a BTreeSet<&'m str>>,
 }
 
 /// The declaration that owns the lexical `zero!` binding, or a binding
@@ -32,6 +35,7 @@ impl<'m> Declarations<'m> {
             position: self.positions.get(owner).copied(),
             warning_owner: self.positions.get_key_value(owner).map(|(&name, _)| name),
             zero_binding: ZeroBinding::Owner(owner),
+            block_size_formals: None,
         }
     }
 
@@ -46,35 +50,55 @@ impl<'m> Declarations<'m> {
             position,
             warning_owner,
             zero_binding: ZeroBinding::Resolved(zero_binding),
+            block_size_formals: None,
         }
     }
 }
 
 impl<'m> ModuleDimensions<'_, 'm> {
+    /// Data port widths and lengths can refer directly to a block's u32
+    /// formals.
+    pub(super) fn is_block_size_formal(&self, expr: &Expr) -> bool {
+        let Expr::Name(name) = expr else {
+            return false;
+        };
+        self.block_size_formals
+            .is_some_and(|names| names.contains(name.as_str()))
+    }
+
     /// Module constants already hold evaluated values. Stage inference needs
     /// only the unsigned stage number that the name denotes.
     pub(super) fn block_stages(&self, block: &Block) -> Result<BlockStages<u64>, String> {
-        block.map_stages(|name| {
-            if !self.decls.visible(name, self.position) {
-                return Err(format!(
-                    "stage constant '{name}' is declared later in the module"
-                ));
-            }
-            let constant =
-                self.decls.constants.get(name).ok_or_else(|| {
+        block.map_stages(
+            |name| {
+                if !self.decls.visible(name, self.position) {
+                    return Err(format!(
+                        "stage constant '{name}' is declared later in the module"
+                    ));
+                }
+                let constant = self.decls.constants.get(name).ok_or_else(|| {
                     format!("unknown module constant '{name}' in stage annotation")
                 })?;
-            if !matches!(bits(&constant.ty), Some((false, _))) {
-                return Err(format!(
-                    "stage constant '{name}' must be an unsigned integer, got {}",
-                    constant.ty
-                ));
-            }
-            constant
-                .value
-                .to_u64()
-                .map_err(|_| format!("stage constant '{name}' does not fit in u64"))
-        })
+                if !matches!(bits(&constant.ty), Some((false, _))) {
+                    return Err(format!(
+                        "stage constant '{name}' must be an unsigned integer, got {}",
+                        constant.ty
+                    ));
+                }
+                constant
+                    .value
+                    .to_u64()
+                    .map_err(|_| format!("stage constant '{name}' does not fit in u64"))
+            },
+            |name| {
+                if !self.decls.visible(name, self.position) {
+                    return Err(format!(
+                        "stage helper '{name}' is declared later in the module"
+                    ));
+                }
+                Ok(name.to_owned())
+            },
+        )
     }
 
     pub(super) fn zero_binding(&self) -> String {

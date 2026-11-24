@@ -11,13 +11,14 @@ use crate::aig::gate::{Input, Output};
 use crate::aig::sequential_cleanup::{SequentialCleanupStats, cleanup_sequential_gate_fn};
 use crate::aig::{AigBitVector, AigNode, AigOperand, GateFn, SequentialGateFn, TransitionInputId};
 use crate::liberty_model::{ClockGate, Library};
+use crate::netlist::bit_ref::DeclaredBitNumber;
 use crate::netlist::io::ParsedNetlist;
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssign, NetlistAssignKind, NetlistInstance,
     NetlistPort, PortDirection, Pos, Span,
 };
 use crate::netlist::register_mapping::{
-    RegisterBoundaryPorts, RegisterMappingLibrary, RegisterMappingPlan,
+    AssembledRegisters, RegisterBoundaryPorts, RegisterMappingLibrary, RegisterMappingPlan,
     validate_sequential_mapping_policy,
 };
 
@@ -329,7 +330,11 @@ impl PreparedSequentialMapping<'_> {
     }
 
     /// Replaces the mapped scalar interface with external ports, FFs, and ICGs.
-    pub(crate) fn assemble(&self, parsed: &mut ParsedNetlist, backend: &str) -> Result<(), String> {
+    pub(crate) fn assemble(
+        &self,
+        parsed: &mut ParsedNetlist,
+        backend: &str,
+    ) -> Result<AssembledRegisters<'_>, String> {
         let design = &self.design;
         let plan = &self.registers;
         let boundary = &self.boundary;
@@ -487,6 +492,7 @@ impl PreparedSequentialMapping<'_> {
                 gated_clocks.push(gated_clock);
             }
         }
+        let first_instance = parsed.modules[0].instances.len();
         for (index, bit) in plan.bits.iter().enumerate() {
             let cell = &plan.cells[bit.cell_index];
             let clock = gates
@@ -528,7 +534,10 @@ impl PreparedSequentialMapping<'_> {
             });
         }
         parsed.modules[0].net_index_range = 0..parsed.nets.len();
-        Ok(())
+        Ok(AssembledRegisters {
+            first_instance,
+            plan,
+        })
     }
 }
 
@@ -577,7 +586,7 @@ fn bit_ref(net: NetIndex, bit: usize, width: usize) -> NetRef {
     if width == 1 {
         NetRef::Simple(net)
     } else {
-        NetRef::BitSelect(net, bit as u32)
+        NetRef::BitSelect(net, DeclaredBitNumber(bit as u32))
     }
 }
 

@@ -2014,15 +2014,22 @@ impl<'s> Parser<'s> {
         Ok(StageAnnotation::Literal(cycle))
     }
 
-    /// Parse `@N` or `@(port: N, ...)` after the result type.
+    /// Parse a fixed stage, per-port stages, or a case-dependent stage helper.
     fn output_cycles(&mut self) -> Result<Option<OutputCycles<StageAnnotation>>, String> {
         if !self.eat("@") {
             return Ok(None);
         }
         if !self.eat("(") {
-            return Ok(Some(OutputCycles::Uniform(
-                self.stage_annotation("output")?,
-            )));
+            let stage = self.stage_annotation("output")?;
+            if let StageAnnotation::Constant(function) = &stage
+                && self.eat("(")
+            {
+                return Ok(Some(OutputCycles::CaseCall {
+                    function: function.clone(),
+                    inputs: self.list(")", Self::ident)?,
+                }));
+            }
+            return Ok(Some(OutputCycles::Uniform(stage)));
         }
         let entries = self.list(")", |parser| {
             let name = parser.ident()?;
