@@ -3,6 +3,7 @@
 //! Package-context portions of PIR verification.
 
 use crate::ir_builder::block_cycles::BlockHierarchy;
+use crate::ir_builder::{BlockWiringCycleOptions, BlockWiringHierarchy, BuilderError};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ir::{
@@ -882,7 +883,7 @@ fn verify_extern_block_models<'a>(
 /// Checks inout hierarchies on the same package snapshot that passed
 /// `verify_package_structure`, reusing each child's dependency summary.
 pub(crate) fn verify_package_inout_hierarchies(p: &Package) -> Result<(), ValidationError> {
-    let mut hierarchy = BlockHierarchy::default();
+    let mut hierarchy = InoutHierarchy::default();
     let mut with_inouts = HashSet::new();
     for member in &p.members {
         if let PackageMember::Block(block) = member
@@ -963,7 +964,7 @@ pub fn validate_block(
         }
     }
     if hierarchy_contains_inouts(f, &with_inouts) {
-        validate_block_inout_hierarchy(f, parent, &mut BlockHierarchy::default())?;
+        validate_block_inout_hierarchy(f, parent, &mut InoutHierarchy::default())?;
     }
     Ok(())
 }
@@ -1049,18 +1050,39 @@ fn validate_block_with(
     validate_block_registers(f)
 }
 
-/// Checks the shared pins of one block and its transitive instances.
-fn validate_block_inout_hierarchy(
-    block: &Block,
-    parent: &Package,
-    hierarchy: &mut BlockHierarchy,
+/// Reuses whole-node summaries until structural feedback requires refinement.
+#[derive(Default)]
+struct InoutHierarchy<'a> {
+    strict: BlockHierarchy,
+    refined: Option<(BlockWiringHierarchy<'a>, BuilderError)>,
+}
+
+/// Checks shared pins and transitive instances with package-scoped caches.
+fn validate_block_inout_hierarchy<'a>(
+    block: &'a Block,
+    parent: &'a Package,
+    hierarchy: &mut InoutHierarchy<'a>,
 ) -> Result<(), ValidationError> {
-    hierarchy
-        .summarize(block, parent)
-        .map_err(|error| ValidationError::BlockInvariantViolation {
-            block: block.name.clone(),
-            reason: error.to_string(),
-        })
+    let invalid = |error: BuilderError| ValidationError::BlockInvariantViolation {
+        block: block.name.clone(),
+        reason: error.to_string(),
+    };
+    if let Some((refined, original)) = &mut hierarchy.refined {
+        return refined.check(block, parent, original).map_err(invalid);
+    }
+    match hierarchy.strict.summarize(block, parent) {
+        Ok(()) => Ok(()),
+        Err(original @ BuilderError::CombinationalCycle { .. }) => {
+            let mut refined = BlockWiringHierarchy::new(BlockWiringCycleOptions::default());
+            refined.check(block, parent, &original).map_err(invalid)?;
+            // The strict traversal retains active frames on failure and cannot
+            // summarize a structurally valid whole-node cycle.
+            hierarchy.strict = BlockHierarchy::default();
+            hierarchy.refined = Some((refined, original));
+            Ok(())
+        }
+        Err(error) => Err(invalid(error)),
+    }
 }
 
 fn is_valid_inout_type(ty: &Type) -> bool {

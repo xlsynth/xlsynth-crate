@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::block_inline::inline_all_blocks_in_package;
+use crate::block_legalize::{
+    check_flatten_budget, legalize_after_inline_failure,
+    legalize_after_inline_failure_with_preprocess, legalize_node_graph,
+};
 use crate::dce::remove_dead_nodes;
 use crate::ir::{self, Block, BlockPort, MemberType, NodePayload, NodeRef, PackageMember, Type};
+use crate::ir_builder::{BuilderError, verify_block_combinational_cycles};
 use crate::ir_eval::eval_pure_if_supported;
 use crate::ir_parser::Parser;
+use crate::ir_rebase_ids::package_max_emitted_node_id;
 use crate::ir_utils::{compact_and_toposort_in_place, compute_users, operands, verify_no_cycle};
 use crate::{IrBits, IrValue};
 
@@ -22,14 +29,22 @@ pub struct Block2FnResult {
     pub function: ir::Fn,
 }
 
-// Converts the top block of the package into a function. Optionally ties off
-// inputs and drops outputs.
+/// Projects the top block of a verified package, optionally tying inputs and
+/// dropping outputs. Valid structural feedback is legalized when ordinary
+/// inlining or register collapse cannot schedule it. The function can retain
+/// calls to other package members; use [`block_package_to_fn_package`] for a
+/// standalone result.
 pub fn block_package_to_fn(
     pkg: &ir::Package,
     options: &Block2FnOptions,
 ) -> Result<Block2FnResult, String> {
-    let mut pkg = pkg.clone();
-    inline_all_blocks_in_package(&mut pkg).map_err(|error| format!("block2fn: {error}"))?;
+    let pkg = inline_for_function(pkg, options).map_err(|error| {
+        if error.starts_with("block2fn: ") {
+            error
+        } else {
+            format!("block2fn: {error}")
+        }
+    })?;
     let package_name = pkg.name.clone();
     let top_block = pkg
         .get_top_block()
@@ -40,7 +55,6 @@ pub fn block_package_to_fn(
             "block2fn: block contains instantiations; run block_inlining first".to_string(),
         );
     }
-    tie_input_ports(&mut block, options)?;
     drop_output_ports(&mut block, options)?;
     let output_count = block.output_ports().count();
     if output_count != 1 {
@@ -53,7 +67,11 @@ pub fn block_package_to_fn(
 
     collapse_registers(&mut f)?;
 
-    verify_no_cycle(&f).map_err(|e| format!("block2fn: {e}"))?;
+    if let Err(cycle) = verify_no_cycle(&f) {
+        let last_id = package_max_emitted_node_id(&pkg)
+            .max(f.nodes.iter().map(|node| node.text_id).max().unwrap_or(0));
+        legalize_node_graph(&mut f.graph, last_id).map_err(|_| format!("block2fn: {cycle}"))?;
+    }
     let mut f = remove_dead_nodes(&f);
     compact_and_toposort_in_place(&mut f).map_err(|e| format!("block2fn: compact failed: {e}"))?;
 
@@ -63,28 +81,129 @@ pub fn block_package_to_fn(
     })
 }
 
+/// Uses ordinary inlining unless a whole-node cycle requires structural
+/// legalization. Input ties can then simplify a private proof graph.
+fn inline_for_function(
+    package: &ir::Package,
+    options: &Block2FnOptions,
+) -> Result<ir::Package, String> {
+    let selected = select_inline_top(package)?;
+    let package = selected.as_ref();
+    let top = package
+        .get_top_block()
+        .ok_or("block_inline: package has no selected block")?;
+    check_flatten_budget(package, &top.name)?;
+    let mut inlined = package.clone();
+    let original = match inline_all_blocks_in_package(&mut inlined) {
+        Ok(()) => return tie_inlined_top(inlined, options),
+        Err(error) => error,
+    };
+    if options.tie_input_ports.is_empty() {
+        return legalize_after_inline_failure(package, &top.name, original);
+    }
+
+    if !matches!(
+        verify_block_combinational_cycles(top, package),
+        Err(BuilderError::CombinationalCycle { .. })
+    ) {
+        return Err(original);
+    }
+
+    // Reuse the hierarchy-preserving pass on a private copy so native invokes
+    // and local constants are exposed before ties simplify the flat graph.
+    let prepared = crate::block_simplify::simplify_block_hierarchy(package, &top.name)?;
+    check_flatten_budget(&prepared, &top.name)?;
+    let prepared_top = prepared
+        .get_block(&top.name)
+        .ok_or("simplified top block missing")?;
+    match verify_block_combinational_cycles(prepared_top, &prepared) {
+        Ok(()) => {
+            let mut inlined = prepared;
+            inline_all_blocks_in_package(&mut inlined)?;
+            tie_inlined_top(inlined, options)
+        }
+        Err(BuilderError::CombinationalCycle { .. }) => {
+            legalize_after_inline_failure_with_preprocess(
+                &prepared,
+                &top.name,
+                original,
+                |block, last_id| {
+                    tie_input_ports(block, options)?;
+                    crate::block_simplify::simplify_unordered_block(block, last_id)
+                },
+            )
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Selects the same first-block default as the legacy inliner without
+/// expanding unrelated block definitions.
+fn select_inline_top(package: &ir::Package) -> Result<Cow<'_, ir::Package>, String> {
+    match &package.top {
+        Some((_, MemberType::Function)) => Err("block_inline: package top is a function".into()),
+        Some((_, MemberType::Block)) => Ok(Cow::Borrowed(package)),
+        None => {
+            let first = package
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    PackageMember::Block(block) => Some(block.name.clone()),
+                    PackageMember::Function(_) => None,
+                })
+                .ok_or("block_inline: no block members to keep")?;
+            let mut selected = package.clone();
+            selected.top = Some((first, MemberType::Block));
+            Ok(Cow::Owned(selected))
+        }
+    }
+}
+
+/// Applies requested ties after ordinary inlining without changing the source.
+fn tie_inlined_top(
+    mut package: ir::Package,
+    options: &Block2FnOptions,
+) -> Result<ir::Package, String> {
+    let top = package
+        .get_top_block_mut()
+        .ok_or("block2fn: package has no block members")?;
+    tie_input_ports(top, options)?;
+    Ok(package)
+}
+
+/// Projects the top block of a verified package into a standalone function
+/// package containing its reachable callees. The top keeps its block name.
+/// A callee with the same name gets a fresh name in the output package.
+pub fn block_package_to_fn_package(
+    package: &ir::Package,
+    options: &Block2FnOptions,
+) -> Result<ir::Package, String> {
+    let projected = block_package_to_fn(package, options)?;
+    crate::ir_inline::package_with_projected_block_entry(package, &projected.function)
+}
+
+/// Parses block IR and projects its top with [`block_package_to_fn`].
 pub fn block_ir_to_fn(
     block_ir_text: &str,
     options: &Block2FnOptions,
 ) -> Result<Block2FnResult, String> {
-    let mut parser = Parser::new(block_ir_text);
-    let pkg = parser
-        .parse_and_validate_package()
-        .map_err(|e| format!("parse block IR: {e}"))?;
-    block_package_to_fn(&pkg, options)
+    block_package_to_fn(&parse_block_package(block_ir_text)?, options)
 }
 
+/// Parses block IR and builds a standalone package with
+/// [`block_package_to_fn_package`].
 pub fn block_ir_to_fn_package(
     block_ir_text: &str,
     options: &Block2FnOptions,
 ) -> Result<ir::Package, String> {
-    let result = block_ir_to_fn(block_ir_text, options)?;
-    Ok(ir::Package {
-        name: result.package_name,
-        file_table: ir::FileTable::new(),
-        members: vec![PackageMember::Function(result.function.clone())],
-        top: Some((result.function.name.clone(), MemberType::Function)),
-    })
+    block_package_to_fn_package(&parse_block_package(block_ir_text)?, options)
+}
+
+/// Parses the package used for block projection and local call resolution.
+fn parse_block_package(source: &str) -> Result<ir::Package, String> {
+    Parser::new(source)
+        .parse_and_verify_package()
+        .map_err(|e| format!("parse block IR: {e}"))
 }
 
 /// Projects a combinational block's ordered interface into a function
@@ -207,9 +326,7 @@ pub fn replace_combinational_block_logic(
             last_id = last_id
                 .checked_add(1)
                 .ok_or("replacement node IDs overflow usize")?;
-            if node.name.as_deref()
-                == Some(format!("{}.{}", node.payload.get_operator(), node.text_id).as_str())
-            {
+            if node.assigned_name().is_none() {
                 node.name = None;
             }
             node.text_id = last_id;
@@ -395,7 +512,18 @@ fn tie_input_ports(block: &mut Block, options: &Block2FnOptions) -> Result<(), S
         block.get_node_mut(port).name = None;
         block.ports.retain(|entry| *entry != BlockPort::Input(port));
         if block.reset.as_ref().is_some_and(|reset| reset.port == port) {
+            // Register collapse ignores reset control. Remove the matching
+            // declaration and write metadata together so the temporary block
+            // remains valid before function projection.
             block.reset = None;
+            for register in &mut block.registers {
+                register.reset_value = None;
+            }
+            for node in &mut block.nodes {
+                if let NodePayload::RegisterWrite { reset, .. } = &mut node.payload {
+                    *reset = None;
+                }
+            }
         }
     }
     Ok(())
@@ -649,6 +777,7 @@ fn ir_value_ones(bit_count: usize) -> Result<IrValue, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::{MemberType, PackageMember};
     use crate::ir_parser::Parser;
     use crate::ir_query::{find_matching_nodes, matches_node, parse_query};
 

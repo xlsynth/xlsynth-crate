@@ -17,11 +17,20 @@ use crate::ir_verify::{
 
 mod block;
 pub(crate) mod block_cycles;
+mod block_wiring_cycles;
+
+/// Bounds explicit element expansion when refining mixed array wiring.
+pub(crate) const MAX_WIRING_ARRAY_ELEMENTS: usize = 65_536;
 mod ops;
 
 pub use block::{
     BInoutNet, BInstantiation, BRegister, BlockBuilder, BlockState, RegisterWriteOptions,
     ResetBehavior,
+};
+pub use block_cycles::verify_block_combinational_cycles;
+pub(crate) use block_wiring_cycles::BlockWiringHierarchy;
+pub use block_wiring_cycles::{
+    BlockWiringCycleOptions, verify_block_wiring_cycles, verify_block_wiring_cycles_with_options,
 };
 pub use ops::{NaryAddOptions, NaryAddTerm, NormalizeLeftOptions};
 

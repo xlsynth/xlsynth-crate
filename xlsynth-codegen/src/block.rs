@@ -167,7 +167,8 @@ pub(crate) fn emit_package(
             }
         }
     }
-    crate::hierarchy::verify_hierarchy(&ordered)?;
+    let source_top = package.get_block(top).expect("selected top block");
+    crate::hierarchy::verify_hierarchy(source_top, package, options.array_index_bounds_checking)?;
     validate_module_names(&ordered, &emitted, top, top_module_name)?;
 
     let mut file = VastFile::new(VastFileType::SystemVerilog);

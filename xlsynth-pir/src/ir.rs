@@ -1049,6 +1049,25 @@ pub struct Node {
 }
 
 impl Node {
+    /// Returns an assigned name, excluding reserved operator-ID spellings.
+    pub(crate) fn assigned_name(&self) -> Option<&str> {
+        self.name.as_deref().filter(|name| {
+            !name.rsplit_once('.').is_some_and(|(op, id)| {
+                op == self.payload.get_operator()
+                    && !id.is_empty()
+                    && id.bytes().all(|digit| digit.is_ascii_digit())
+            })
+        })
+    }
+
+    /// Replaces an operation while retaining only a user-assigned name.
+    pub(crate) fn replace_payload(&mut self, payload: NodePayload) {
+        if self.assigned_name().is_none() {
+            self.name = None;
+        }
+        self.payload = payload;
+    }
+
     /// Returns a parameter's required name from its canonical graph node.
     pub fn param_name(&self) -> &str {
         assert!(

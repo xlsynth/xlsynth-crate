@@ -69,6 +69,13 @@ impl<'a> BlockInvokeInliner<'a> {
         Ok(Self::from_verified_package(package))
     }
 
+    /// Validates structure and callees without requiring inout feedback to
+    /// have been removed by a forthcoming transformation.
+    pub(crate) fn new_structural(package: &'a Package) -> Result<Self, String> {
+        verify_package_structure(package).map_err(|error| error.to_string())?;
+        Ok(Self::from_verified_package(package))
+    }
+
     /// Indexes callees after verification has established valid call targets
     /// and IDs.
     fn from_verified_package(package: &'a Package) -> Self {
@@ -96,7 +103,7 @@ impl<'a> BlockInvokeInliner<'a> {
     /// when it has none. Foreign functions require explicit extern instances.
     /// Block instances, maps, and counted loops retain their IR representation.
     pub fn inline_block(&mut self, name: &str) -> Result<Cow<'a, Block>, String> {
-        self.expand_calls(name, None)
+        self.expand_calls(name, false, None, false)
     }
 
     /// Also expands maps and counted loops, including those in nested callees.
@@ -106,10 +113,26 @@ impl<'a> BlockInvokeInliner<'a> {
         name: &str,
         max_added_nodes: usize,
     ) -> Result<Cow<'a, Block>, String> {
-        self.expand_calls(name, Some(max_added_nodes))
+        self.expand_calls(name, true, Some(max_added_nodes), false)
     }
 
-    fn expand_calls(&mut self, name: &str, limit: Option<usize>) -> Result<Cow<'a, Block>, String> {
+    /// Expands native invokes while retaining foreign invokes as opaque calls.
+    /// Block instantiations and their hierarchy remain unchanged.
+    pub(crate) fn inline_native_calls(
+        &mut self,
+        name: &str,
+        max_added_nodes: usize,
+    ) -> Result<Cow<'a, Block>, String> {
+        self.expand_calls(name, false, Some(max_added_nodes), true)
+    }
+
+    fn expand_calls(
+        &mut self,
+        name: &str,
+        unroll: bool,
+        limit: Option<usize>,
+        preserve_foreign: bool,
+    ) -> Result<Cow<'a, Block>, String> {
         let &(_, block) = self
             .blocks
             .get(name)
@@ -117,7 +140,7 @@ impl<'a> BlockInvokeInliner<'a> {
         let Some(mut index) = block
             .nodes
             .iter()
-            .position(|node| is_expandable(&node.payload, limit.is_some()))
+            .position(|node| self.should_expand(&node.payload, unroll, preserve_foreign))
         else {
             return Ok(Cow::Borrowed(block));
         };
@@ -128,7 +151,7 @@ impl<'a> BlockInvokeInliner<'a> {
         // once; restore operand-before-user order only after the last
         // call is expanded.
         while index < expanded.nodes.len() {
-            if !is_expandable(&expanded.nodes[index].payload, limit.is_some()) {
+            if !self.should_expand(&expanded.nodes[index].payload, unroll, preserve_foreign) {
                 index += 1;
                 continue;
             }
@@ -188,24 +211,24 @@ impl<'a> BlockInvokeInliner<'a> {
             };
             // Retain user-assigned names. Explicit operator.<id> spellings
             // must follow the new operator instead.
-            let call = &mut expanded.nodes[index];
-            if call
-                .name
-                .as_deref()
-                .and_then(|name| name.strip_prefix(call.payload.get_operator()))
-                .and_then(|suffix| suffix.strip_prefix('.'))
-                .is_some_and(|digits| {
-                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
-                })
-            {
-                call.name = None;
-            }
-            call.payload = replacement;
+            expanded.nodes[index].replace_payload(replacement);
             index += 1;
         }
         expanded.compact_and_toposort()?;
         self.last_id = last_id;
         Ok(Cow::Owned(expanded))
+    }
+
+    /// Selects expandable operations, optionally leaving foreign calls
+    /// untouched.
+    fn should_expand(&self, payload: &NodePayload, unroll: bool, preserve_foreign: bool) -> bool {
+        if !is_expandable(payload, unroll) {
+            return false;
+        }
+        if preserve_foreign && let NodePayload::Invoke { to_apply, .. } = payload {
+            return self.functions[to_apply.as_str()].is_some();
+        }
+        true
     }
 }
 

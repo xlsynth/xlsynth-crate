@@ -241,6 +241,69 @@ pub fn package_with_reachable_callees(
     })
 }
 
+/// Builds a standalone package for a function projected from a block. Original
+/// function references keep their namespace even if a callee shares the block
+/// name.
+pub(crate) fn package_with_projected_block_entry(
+    pkg: &Package,
+    entry: &crate::ir::Fn,
+) -> Result<Package, String> {
+    let roots: Vec<_> = direct_function_references(entry).into_iter().collect();
+    let ordered = reachable_functions_in_dependency_order(pkg, &roots)?;
+    let reachable: HashSet<_> = ordered.iter().map(|f| f.name.as_str()).collect();
+    let mut members: Vec<_> = pkg
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            PackageMember::Function(f) if reachable.contains(f.name.as_str()) => {
+                Some(member.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut top = entry.clone();
+    if reachable.contains(entry.name.as_str()) {
+        let base = format!("{}__callee", entry.name);
+        let mut fresh = base.clone();
+        for suffix in 1.. {
+            if !reachable.contains(fresh.as_str()) {
+                break;
+            }
+            fresh = format!("{base}_{suffix}");
+        }
+        for member in &mut members {
+            let graph = member.graph_mut();
+            if graph.name == entry.name {
+                graph.name.clone_from(&fresh);
+            }
+            rename_callee_references(graph, &entry.name, &fresh);
+        }
+        rename_callee_references(&mut top, &entry.name, &fresh);
+    }
+    members.push(PackageMember::Function(top));
+    Ok(Package {
+        name: pkg.name.clone(),
+        file_table: pkg.file_table.clone(),
+        members,
+        top: Some((entry.name.clone(), MemberType::Function)),
+    })
+}
+
+/// Redirects calls and higher-order function references after a namespace
+/// collision.
+fn rename_callee_references(graph: &mut crate::ir::NodeGraph, old: &str, new: &str) {
+    for node in &mut graph.nodes {
+        let callee = match &mut node.payload {
+            NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => to_apply,
+            NodePayload::CountedFor { body, .. } => body,
+            _ => continue,
+        };
+        if callee == old {
+            new.clone_into(callee);
+        }
+    }
+}
+
 /// Collects each root and its transitive callees once, callees before callers.
 /// Visits roots in the supplied order and sibling callees in name order.
 /// Includes loop bodies and reports missing functions or recursive calls.

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+mod legalize_wiring;
 
 use crate::ir::{
     self, Block, InstantiationKind, MemberType, NodePayload, NodeRef, PackageMember, Register,
@@ -154,6 +157,88 @@ pub fn extract_modeled_block_hierarchy(
     };
     crate::ir_verify::verify_package(&hierarchy).map_err(|e| e.to_string())?;
     Ok(hierarchy)
+}
+
+/// Flattens a selected hierarchy into a temporary wiring graph. Unlike ordinary
+/// block inlining, intermediate definitions are copied without topological
+/// sorting, so bit-select feedback can remain intact until legalization.
+/// The returned top must be legalized and compacted before package validation.
+pub(crate) fn flatten_block_hierarchy_for_legalization(
+    package: &ir::Package,
+    top: &str,
+) -> Result<ir::Package, String> {
+    let mut result = extract_modeled_block_hierarchy(package, top)?;
+    let block = flatten_wiring_hierarchy(&result, top)?;
+    result.replace_block(top, block)?;
+    prune_to_single_top_block(&mut result)?;
+    Ok(result)
+}
+
+/// Copies already selected child bodies without sorting intermediate wiring.
+fn flatten_wiring_hierarchy(package: &ir::Package, top: &str) -> Result<Block, String> {
+    let mut order = Vec::new();
+    let mut states = HashMap::<&str, u8>::new();
+    let mut pending = vec![(top, false)];
+    while let Some((name, complete)) = pending.pop() {
+        if complete {
+            states.insert(name, 2);
+            order.push(name);
+            continue;
+        }
+        match states.get(name) {
+            Some(2) => continue,
+            Some(1) => {
+                return Err(format!(
+                    "block_inline: recursive block instantiation involving '{name}'"
+                ));
+            }
+            _ => {}
+        }
+        let block = package
+            .get_block(name)
+            .ok_or_else(|| format!("block '{name}' not found"))?;
+        block.reject_inouts("block inlining")?;
+        crate::ir_verify::verify_graph_operand_indices_in_bounds(block)?;
+        states.insert(name, 1);
+        pending.push((name, true));
+        for instance in block.instantiations.iter().rev() {
+            let model = instance
+                .referenced_block()
+                .ok_or_else(|| format!("cannot inline external instance '{}'", instance.name))?;
+            pending.push((model, false));
+        }
+    }
+
+    let mut last_id = crate::ir_rebase_ids::package_max_emitted_node_id(package);
+    let mut bodies = HashMap::<&str, Cow<'_, Block>>::new();
+    for name in order {
+        let source = package
+            .get_block(name)
+            .expect("reachable block was indexed");
+        let body = if source.instantiations.is_empty() {
+            Cow::Borrowed(source)
+        } else {
+            let mut block = source.clone();
+            let mut wiring = legalize_wiring::Wiring::new(source)?;
+            for instance in &source.instantiations {
+                let child = bodies
+                    .get(
+                        instance
+                            .referenced_block()
+                            .expect("modeled child was selected"),
+                    )
+                    .expect("child precedes parent in hierarchy order");
+                wiring.copy_instance(&mut block, instance, child, &mut last_id)?;
+            }
+            wiring.finish(&mut block)?;
+            Cow::Owned(block)
+        };
+        bodies.insert(name, body);
+    }
+    Ok(bodies
+        .remove(top)
+        .expect("selected top was flattened")
+        .into_owned())
 }
 
 /// Inlines block instantiations, substituting the behavioral model for each
@@ -447,6 +532,11 @@ fn inline_single_instantiation(
     }
 
     for (target, replacement) in output_replacements {
+        if target == replacement {
+            return Err(format!(
+                "block_inline: self-connected output on instance '{inst_name}' forms a cycle"
+            ));
+        }
         crate::ir_utils::replace_graph_node_with_ref(caller, target, replacement)
             .map_err(|e| format!("block_inline: replace output failed: {e}"))?;
     }
@@ -719,6 +809,35 @@ top block parent(clk: clock, input_value: bits[1]) {
                 ("unnamed", ""),
             ]
         );
+        let mut fallback = flatten_block_hierarchy_for_legalization(&package, "parent").unwrap();
+        fallback
+            .get_top_block_mut()
+            .unwrap()
+            .compact_and_toposort()
+            .unwrap();
+        crate::ir_verify::verify_package(&fallback).unwrap();
+        let fallback_block = fallback.get_top_block().unwrap();
+        assert_eq!(
+            fallback_block
+                .registers
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["held", "first__q__1", "second__q"]
+        );
+        let mut fallback_labels = fallback_block
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.payload {
+                NodePayload::Assert { label, message, .. } => {
+                    Some((message.as_str(), label.as_str()))
+                }
+                NodePayload::Cover { label, .. } => Some(("cover", label.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        fallback_labels.sort_unstable();
+        assert_eq!(fallback_labels, labels);
     }
 
     #[test]
@@ -880,6 +999,28 @@ top block caller(clk: clock, reset_n: bits[1], other: bits[1], data: bits[8], re
             })
         );
         assert_eq!(block.clock_port_name(), Some("clk"));
+        assert_eq!(
+            block.registers[0].reset_value,
+            Some(crate::IrValue::make_ubits(8, 7).unwrap())
+        );
+    }
+
+    #[test]
+    fn legalization_flattening_preserves_child_reset_and_registers() {
+        let package = parse_pkg(RESET_HIERARCHY);
+        let mut flat = flatten_block_hierarchy_for_legalization(&package, "caller").unwrap();
+        flat.get_top_block_mut()
+            .unwrap()
+            .compact_and_toposort()
+            .unwrap();
+        crate::ir_verify::verify_package(&flat).unwrap();
+        let block = flat.get_top_block().unwrap();
+        assert_eq!(block.clock_port_name(), Some("clk"));
+        assert_eq!(
+            block.reset.as_ref().unwrap().port,
+            block.get_input_port("reset_n").unwrap()
+        );
+        assert_eq!(block.registers[0].name, "child__state");
         assert_eq!(
             block.registers[0].reset_value,
             Some(crate::IrValue::make_ubits(8, 7).unwrap())
@@ -1137,5 +1278,117 @@ top block top(clk: clock, a: bits[1], y: bits[1]) {
                 .any(|r| r.name.starts_with("u0__r__")),
             "expected uniquified inlined register name"
         );
+    }
+}
+
+#[cfg(test)]
+mod legalization_tests {
+    use super::*;
+    use crate::ir_parser::Parser;
+
+    const NESTED_WIRING: &str = r#"package test
+
+block leaf(d: bits[2], q: bits[2]) {
+  d: bits[2] = input_port(name=d, id=1)
+  q: () = output_port(d, name=q, id=2)
+}
+block middle(seed: bits[1], result: bits[2]) {
+  instantiation u(block=leaf, kind=block)
+  seed: bits[1] = input_port(name=seed, id=3)
+  q: bits[2] = instantiation_output(instantiation=u, port_name=q, id=4)
+  low: bits[1] = bit_slice(q, start=0, width=1, id=5)
+  d: bits[2] = concat(low, seed, id=6)
+  drive: () = instantiation_input(d, instantiation=u, port_name=d, id=7)
+  result: () = output_port(q, name=result, id=8)
+}
+top block root(seed: bits[1], result: bits[2]) {
+  instantiation inner(block=middle, kind=block)
+  seed: bits[1] = input_port(name=seed, id=9)
+  result_data: bits[2] = instantiation_output(instantiation=inner, port_name=result, id=10)
+  drive: () = instantiation_input(seed, instantiation=inner, port_name=seed, id=11)
+  result: () = output_port(result_data, name=result, id=12)
+}
+"#;
+
+    #[test]
+    fn optional_flattening_keeps_only_reachable_functions() {
+        let source = NESTED_WIRING
+            .replace("block leaf(d:", "fn used(x: bits[2] id=100) -> bits[2] {\n  ret result: bits[2] = identity(x, id=101)\n}\nfn unused(x: bits[2] id=102) -> bits[2] {\n  ret result: bits[2] = identity(x, id=103)\n}\nblock leaf(d:")
+            .replace("q: () = output_port(d, name=q, id=2)", "call: bits[2] = invoke(d, to_apply=used, id=104)\n  q: () = output_port(call, name=q, id=2)");
+        let package = Parser::new(&source).parse_and_verify_package().unwrap();
+        let flat = flatten_block_hierarchy_for_legalization(&package, "root").unwrap();
+        assert!(flat.get_fn("used").is_some());
+        assert!(flat.get_fn("unused").is_none());
+    }
+
+    #[test]
+    fn nested_feedback_remains_available_to_the_legalizer() {
+        let package = Parser::new(NESTED_WIRING)
+            .parse_and_verify_package()
+            .unwrap();
+        let flat = flatten_block_hierarchy_for_legalization(&package, "root").unwrap();
+        let top = flat.get_top_block().unwrap();
+        assert!(top.instantiations.is_empty());
+        assert!(crate::ir_utils::verify_no_cycle(top).is_err());
+        assert_eq!(
+            flat.members
+                .iter()
+                .filter(|member| matches!(member, PackageMember::Block(_)))
+                .count(),
+            1
+        );
+        let ids = top
+            .nodes
+            .iter()
+            .map(|node| node.text_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(ids.len(), top.nodes.len());
+    }
+
+    #[test]
+    fn enormous_zero_bit_alias_cycle_fails_before_materialization() {
+        let source = r#"package test
+block leaf(d: bits[0][100000000], q: bits[0][100000000]) {
+  d: bits[0][100000000] = input_port(name=d, id=1)
+  q: () = output_port(d, name=q, id=2)
+}
+top block root(result: bits[0][100000000]) {
+  instantiation a(block=leaf, kind=block)
+  instantiation b(block=leaf, kind=block)
+  qa: bits[0][100000000] = instantiation_output(instantiation=a, port_name=q, id=3)
+  qb: bits[0][100000000] = instantiation_output(instantiation=b, port_name=q, id=4)
+  da: () = instantiation_input(qb, instantiation=a, port_name=d, id=5)
+  db: () = instantiation_input(qa, instantiation=b, port_name=d, id=6)
+  result: () = output_port(qa, name=result, id=7)
+}
+"#;
+        let package = Parser::new(source).parse_and_verify_package().unwrap();
+        let error = flatten_block_hierarchy_for_legalization(&package, "root").unwrap_err();
+        assert!(
+            error.contains("excessively large empty aggregate"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn direct_alias_feedback_keeps_a_cycle() {
+        let source = r#"package test
+block leaf(d: bits[1], q: bits[1]) {
+  d: bits[1] = input_port(name=d, id=1)
+  q: () = output_port(d, name=q, id=2)
+}
+top block root(result: bits[1]) {
+  instantiation a(block=leaf, kind=block)
+  instantiation b(block=leaf, kind=block)
+  qa: bits[1] = instantiation_output(instantiation=a, port_name=q, id=3)
+  qb: bits[1] = instantiation_output(instantiation=b, port_name=q, id=4)
+  da: () = instantiation_input(qb, instantiation=a, port_name=d, id=5)
+  db: () = instantiation_input(qa, instantiation=b, port_name=d, id=6)
+  result: () = output_port(qa, name=result, id=7)
+}
+"#;
+        let package = Parser::new(source).parse_and_verify_package().unwrap();
+        let flat = flatten_block_hierarchy_for_legalization(&package, "root").unwrap();
+        assert!(crate::ir_utils::verify_no_cycle(flat.get_top_block().unwrap()).is_err());
     }
 }

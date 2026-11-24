@@ -4,7 +4,8 @@
 
 use std::collections::HashMap;
 
-use crate::block_inline::{flatten_block_hierarchy, uniquify_name};
+use crate::block_inline::uniquify_name;
+use crate::block_legalize::legalize_block_hierarchy;
 use crate::dce::remove_dead_nodes;
 use crate::ir::{
     self, Block, NodeGraph, NodePayload, NodeRef, Package, PackageMember, Register, Type,
@@ -46,7 +47,8 @@ pub struct BlockTransition {
 }
 
 /// Lowers the selected block and its child instances, preserving calls to
-/// package functions. Opaque external instances have no transition to lower.
+/// package functions. Acyclic structural feedback is legalized when needed;
+/// opaque external instances have no transition to lower.
 /// Asynchronous resets and multiple writes to a register require semantics
 /// outside this single-edge model.
 pub fn lower_block_transition(
@@ -60,7 +62,7 @@ pub fn lower_block_transition(
         verify_package(package).map_err(|e| e.to_string())?;
         return project_transition(package, block);
     }
-    let hierarchy = flatten_block_hierarchy(package, block_name)?;
+    let hierarchy = legalize_block_hierarchy(package, block_name)?;
     let block = hierarchy
         .get_top_block()
         .ok_or("flattened package has no top block")?;

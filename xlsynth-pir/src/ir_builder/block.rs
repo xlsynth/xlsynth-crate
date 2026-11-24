@@ -966,7 +966,11 @@ impl Builder<BlockState> {
     }
 
     /// Resolves wire ordering and verifies the completed block in its package.
-    fn finish_block(self, package: &Package) -> Result<Block, BuilderError> {
+    fn finish_block(
+        self,
+        package: &Package,
+        check_cycles: fn(&Block, &Package) -> Result<(), BuilderError>,
+    ) -> Result<Block, BuilderError> {
         for &index in &self.state.wires {
             if matches!(self.graph.nodes[index].payload, NodePayload::Param) {
                 return Err(invalid(format!("wire {index} has no driver")));
@@ -976,13 +980,13 @@ impl Builder<BlockState> {
         let mut block = self.into_block();
         if has_wires {
             // Preserve a cycle witness before reordering explicit operands.
-            super::block_cycles::verify_block_combinational_cycles(&block, package)?;
+            check_cycles(&block, package)?;
             block.compact_and_toposort().map_err(invalid)?;
         }
         verify_block_structure_in_package(&block, package, package.members.len())
             .map_err(|error| invalid(error.to_string()))?;
         if !has_wires && (!block.instantiations.is_empty() || !block.inout_nets.is_empty()) {
-            super::block_cycles::verify_block_combinational_cycles(&block, package)?;
+            check_cycles(&block, package)?;
         }
         Ok(block)
     }
@@ -1001,7 +1005,10 @@ impl Builder<BlockState> {
                 "blocks containing calls or instances require package-aware finalization",
             ));
         }
-        self.finish_block(&empty_package("builder_context"))
+        self.finish_block(
+            &empty_package("builder_context"),
+            super::block_cycles::verify_block_combinational_cycles,
+        )
     }
 
     /// Builds a one-block package with the block selected as top.
@@ -1020,6 +1027,31 @@ impl Builder<BlockState> {
     /// rebased above all existing nodes; package ownership and top are
     /// unchanged.
     pub fn build_in_package(self, package: &Package) -> Result<Block, BuilderError> {
+        self.finish_in_package(
+            package,
+            super::block_cycles::verify_block_combinational_cycles,
+        )
+    }
+
+    /// Builds a block for structural code generation, accepting acyclic wiring
+    /// that requires sub-node scheduling. Function conversion and native block
+    /// simulation legalize this wiring automatically as needed;
+    /// `block-legalize` is available for explicitly preparing other whole-node
+    /// consumers.
+    pub fn build_structural_in_package(self, package: &Package) -> Result<Block, BuilderError> {
+        self.finish_in_package(
+            package,
+            super::block_wiring_cycles::verify_block_wiring_cycles,
+        )
+    }
+
+    /// Runs common package checks and finalizes the block under the chosen
+    /// cycle model.
+    fn finish_in_package(
+        self,
+        package: &Package,
+        check_cycles: fn(&Block, &Package) -> Result<(), BuilderError>,
+    ) -> Result<Block, BuilderError> {
         check_name(&self.graph.name)?;
         check_package_name(&package.name)?;
         if package
@@ -1073,7 +1105,7 @@ impl Builder<BlockState> {
                 )));
             }
         }
-        let mut block = self.finish_block(package)?;
+        let mut block = self.finish_block(package, check_cycles)?;
         rebase_block_ids_in_place(&mut block, package_max_emitted_node_id(package))
             .map_err(|error| invalid(error.to_string()))?;
         Ok(block)
@@ -1082,6 +1114,14 @@ impl Builder<BlockState> {
     /// Appends a verified block, leaving the package untouched on failure.
     pub fn build_into_package(self, package: &mut Package) -> Result<(), BuilderError> {
         let block = self.build_in_package(package)?;
+        package.members.push(PackageMember::Block(block));
+        Ok(())
+    }
+
+    /// Appends a structurally checked block without changing the package on
+    /// failure.
+    pub fn build_structural_into_package(self, package: &mut Package) -> Result<(), BuilderError> {
+        let block = self.build_structural_in_package(package)?;
         package.members.push(PackageMember::Block(block));
         Ok(())
     }

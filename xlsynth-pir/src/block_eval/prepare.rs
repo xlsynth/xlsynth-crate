@@ -10,7 +10,9 @@ use crate::IrValue;
 use crate::ir::{
     Block, Fn, Node, NodeGraph, NodePayload, NodeRef, Package, PackageMember, Type, Unop,
 };
-use crate::ir_utils::{compact_and_toposort_with_mapping_in_place, remap_payload_with};
+use crate::ir_utils::{
+    compact_and_toposort_with_mapping_in_place, remap_payload_with, verify_no_cycle,
+};
 
 use super::BlockEvalField;
 
@@ -303,6 +305,7 @@ pub(super) fn prepare(package: &Package, top: &str) -> Result<Prepared, String> 
     let block = package
         .get_block(top)
         .ok_or_else(|| format!("block '{top}' not found"))?;
+    crate::block_legalize::check_projection_budget(package, top)?;
     let instances = elaborate(package, block)?;
     let fields = |port| BlockEvalField {
         name: block.port_name(port).to_owned(),
@@ -440,8 +443,29 @@ pub(super) fn prepare(package: &Package, top: &str) -> Result<Prepared, String> 
     // A parent and a child can each be acyclic alone, but their wiring can
     // close a combinational loop. This also schedules reused instances for a
     // single pass per edge.
-    let mapping = compact_and_toposort_with_mapping_in_place(&mut function)
-        .map_err(|e| format!("cannot schedule block '{top}': {e}"))?;
+    let mapping = match compact_and_toposort_with_mapping_in_place(&mut function) {
+        Ok(mapping) => mapping,
+        Err(original) => {
+            if verify_no_cycle(&function).is_ok() {
+                return Err(format!("cannot schedule block '{top}': {original}"));
+            }
+            crate::ir_builder::verify_block_wiring_cycles(block, package)
+                .map_err(|error| format!("cannot schedule block '{top}': {original} ({error})"))?;
+            let last_id = crate::ir_rebase_ids::package_max_emitted_node_id(package).max(
+                function
+                    .nodes
+                    .iter()
+                    .map(|node| node.text_id)
+                    .max()
+                    .unwrap_or(0),
+            );
+            crate::block_legalize::legalize_node_graph(&mut function.graph, last_id)
+                .map_err(|error| format!("cannot schedule block '{top}': {error}"))?;
+            origins.resize(function.nodes.len(), None);
+            compact_and_toposort_with_mapping_in_place(&mut function)
+                .map_err(|error| format!("cannot schedule block '{top}': {error}"))?
+        }
+    };
     let mut sorted = vec![None; function.nodes.len()];
     for (origin, new_ref) in origins.into_iter().zip(mapping) {
         if let Some(new_ref) = new_ref {
