@@ -4046,15 +4046,13 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         ;
 
     #[cfg(feature = "unstable-dslx-specialize")]
-    {
-        cmd = cmd.subcommand(
-            clap::Command::new("dslx-specialize")
-                .about(
-                    "Specialize parametric DSLX functions reachable from a top function within the current module",
-                )
-                .add_dslx_input_args(true),
-        );
-    }
+    let cmd = cmd.subcommand(
+        clap::Command::new("dslx-specialize")
+            .about(
+                "Specialize parametric DSLX functions reachable from a top function within the current module",
+            )
+            .add_dslx_input_args(true),
+    );
 
     let matches = cmd.get_matches();
 
