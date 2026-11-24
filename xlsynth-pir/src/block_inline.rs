@@ -15,10 +15,91 @@ fn member_key(member: &PackageMember) -> (&str, MemberType) {
     }
 }
 
+/// Rejects an opaque external instance reachable from the selected block, or
+/// from any block if no top is given. Check before behavior-dependent work.
+pub fn reject_reachable_opaque_extern_blocks(
+    package: &ir::Package,
+    top: Option<&str>,
+) -> Result<(), String> {
+    let blocks: HashMap<_, _> = package
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            PackageMember::Block(block) => Some((block.name.as_str(), block)),
+            PackageMember::Function(_) => None,
+        })
+        .collect();
+    let mut pending = Vec::new();
+    if let Some(top) = top {
+        if let Some(&block) = blocks.get(top) {
+            pending.push((block, None, block.name.as_str()));
+        }
+    } else {
+        pending.extend(
+            package
+                .members
+                .iter()
+                .rev()
+                .filter_map(|member| match member {
+                    PackageMember::Block(block) => Some((block, None, block.name.as_str())),
+                    PackageMember::Function(_) => None,
+                }),
+        );
+    }
+    let mut visited = HashSet::new();
+    let mut paths: Vec<(Option<usize>, &str)> = Vec::new();
+    while let Some((block, parent, segment)) = pending.pop() {
+        if !visited.insert(block.name.as_str()) {
+            continue;
+        }
+        let path_index = paths.len();
+        paths.push((parent, segment));
+        for instance in &block.instantiations {
+            if matches!(instance.kind, InstantiationKind::OpaqueExternBlock { .. }) {
+                let mut components = vec![instance.name.as_str()];
+                let mut ancestor = Some(path_index);
+                while let Some(index) = ancestor {
+                    let (parent, segment) = paths[index];
+                    components.push(segment);
+                    ancestor = parent;
+                }
+                let path = components
+                    .into_iter()
+                    .rev()
+                    .map(|segment| segment.replace('$', "$$").replace('.', "$d"))
+                    .collect::<Vec<_>>()
+                    .join(".");
+                return Err(format!(
+                    "opaque external block instance '{path}' of module '{}' has no behavioral model",
+                    instance.block
+                ));
+            }
+        }
+        pending.extend(block.instantiations.iter().rev().filter_map(|instance| {
+            let child = blocks.get(instance.referenced_block()?)?;
+            Some((*child, Some(path_index), instance.name.as_str()))
+        }));
+    }
+    Ok(())
+}
+
 /// Flattens one block hierarchy, retaining its transitively called functions.
-/// Registers from a child instance acquire an instance-prefixed name. External
-/// instances have no block body to inline and are rejected.
+/// Registers from a child instance acquire an instance-prefixed name, as do
+/// assertion and coverage labels that collide in the parent. External block
+/// instances use their behavioral model.
 pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::Package, String> {
+    let mut hierarchy = extract_modeled_block_hierarchy(package, top)?;
+    inline_all_blocks_in_package(&mut hierarchy)?;
+    Ok(hierarchy)
+}
+
+/// Extracts one block hierarchy and its function dependencies without inlining.
+/// This lets consumers of standard XLS IR exclude unrelated PIR declarations.
+pub fn extract_modeled_block_hierarchy(
+    package: &ir::Package,
+    top: &str,
+) -> Result<ir::Package, String> {
+    reject_reachable_opaque_extern_blocks(package, Some(top))?;
     if package.get_block(top).is_none() {
         return Err(format!("block '{top}' not found"));
     }
@@ -38,13 +119,10 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
             .ok_or_else(|| format!("missing block hierarchy dependency '{}'", key.0))?;
         if let PackageMember::Block(block) = member {
             for instance in &block.instantiations {
-                if instance.kind != InstantiationKind::Block {
-                    return Err(format!(
-                        "cannot inline external instance '{}'",
-                        instance.name
-                    ));
-                }
-                pending.push((&instance.block, MemberType::Block));
+                let child = instance.referenced_block().ok_or_else(|| {
+                    format!("cannot inline external instance '{}'", instance.name)
+                })?;
+                pending.push((child, MemberType::Block));
             }
         }
         pending.extend(
@@ -63,7 +141,7 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
                 }),
         );
     }
-    let mut hierarchy = ir::Package {
+    let hierarchy = ir::Package {
         name: package.name.clone(),
         file_table: package.file_table.clone(),
         members: package
@@ -75,13 +153,41 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
         top: Some((top.to_owned(), MemberType::Block)),
     };
     crate::ir_verify::verify_package(&hierarchy).map_err(|e| e.to_string())?;
-    inline_all_blocks_in_package(&mut hierarchy)?;
     Ok(hierarchy)
 }
 
-// Inlines all block instantiations in the package. All blocks are removed after
-// inlining except for the top block.
+/// Inlines block instantiations, substituting the behavioral model for each
+/// external block. Only the top block remains after inlining.
 pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String> {
+    reject_reachable_opaque_extern_blocks(pkg, pkg.get_top_block().map(|top| top.name.as_str()))?;
+    if let Some(top) = pkg.get_top_block() {
+        let mut selected = std::collections::BTreeSet::new();
+        let mut pending = vec![top.name.clone()];
+        while let Some(name) = pending.pop() {
+            if selected.insert(name.clone())
+                && let Some(block) = pkg.get_block(&name)
+            {
+                block.reject_inouts("block inlining")?;
+                pending.extend(
+                    block
+                        .instantiations
+                        .iter()
+                        .filter_map(|instance| instance.referenced_block().map(str::to_owned)),
+                );
+            }
+        }
+        pkg.members.retain(
+            |member| !matches!(member, PackageMember::Block(b) if !selected.contains(&b.name)),
+        );
+    } else {
+        // Without a selected block the inliner processes every block before
+        // pruning. Check their pins before mutating any of them.
+        for member in &pkg.members {
+            if let PackageMember::Block(block) = member {
+                block.reject_inouts("block inlining")?;
+            }
+        }
+    }
     loop {
         let mut progress = false;
         let mut has_instantiations = false;
@@ -121,13 +227,46 @@ pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String>
     Ok(())
 }
 
+/// Collects names that inlined registers and debug labels must avoid. Stock
+/// XLS's flat-layout emitter declares registers before reserving labels.
+fn fixed_names(block: &Block) -> HashMap<String, usize> {
+    let ports = block
+        .input_ports()
+        .chain(block.output_ports())
+        .chain(block.inout_ports())
+        .filter(|&port| block.port_type(port).bit_count() != 0)
+        .map(|port| block.port_name(port));
+    let labels = block.nodes.iter().filter_map(|node| match &node.payload {
+        NodePayload::Assert { label, .. } | NodePayload::Cover { label, .. } => {
+            Some(label.as_str())
+        }
+        _ => None,
+    });
+    block
+        .clock_port_name()
+        .into_iter()
+        .chain(ports)
+        .chain(block.instantiations.iter().map(|inst| inst.name.as_str()))
+        .chain(block.registers.iter().map(|reg| reg.name.as_str()))
+        .chain(labels)
+        .map(|name| (name.to_owned(), 1))
+        .collect()
+}
+
 fn inline_block_instantiations(pkg: &ir::Package, block: &mut Block) -> Result<bool, String> {
     let mut inlined_any = false;
+    let mut names = fixed_names(block);
     loop {
         let instantiations = block.instantiations.clone();
         let mut did_inline = false;
         for inst in instantiations {
-            let callee = match pkg.get_block(&inst.block) {
+            let model = inst.referenced_block().ok_or_else(|| {
+                format!(
+                    "block_inline: cannot inline foreign-function instantiation '{}' of '{}'",
+                    inst.name, inst.block
+                )
+            })?;
+            let callee = match pkg.get_block(model) {
                 Some(block) => block.clone(),
                 _ => {
                     return Err(format!(
@@ -146,7 +285,7 @@ fn inline_block_instantiations(pkg: &ir::Package, block: &mut Block) -> Result<b
                 .map(|node| node.text_id)
                 .max()
                 .unwrap_or(0);
-            inline_single_instantiation(block, &inst.name, &callee, package_max_id)?;
+            inline_single_instantiation(block, &inst.name, &callee, package_max_id, &mut names)?;
             did_inline = true;
             inlined_any = true;
             break;
@@ -163,6 +302,7 @@ fn inline_single_instantiation(
     inst_name: &str,
     callee: &Block,
     package_max_id: usize,
+    names: &mut HashMap<String, usize>,
 ) -> Result<(), String> {
     let input_map = collect_instantiation_inputs(caller, inst_name)?;
     let output_map = collect_callee_outputs(callee)?;
@@ -174,14 +314,9 @@ fn inline_single_instantiation(
     let reset = merge_inlined_reset(caller, callee, &input_map, inst_name)?;
 
     let mut register_name_map: HashMap<String, String> = HashMap::new();
-    let mut used_register_names: HashMap<String, usize> = caller
-        .registers
-        .iter()
-        .map(|r| (r.name.clone(), 1))
-        .collect();
     for reg in callee.registers.iter() {
         let base_name = format!("{}__{}", inst_name, reg.name);
-        let unique_name = uniquify_register_name(&base_name, &mut used_register_names);
+        let unique_name = uniquify_name(&base_name, names);
         register_name_map.insert(reg.name.clone(), unique_name.clone());
         caller.registers.push(Register {
             name: unique_name,
@@ -252,7 +387,17 @@ fn inline_single_instantiation(
                             panic!("block_inline: missing mapping for {}", dep.index)
                         })
                     });
-                let new_payload = rewrite_register_payload(new_payload, &register_name_map);
+                let mut new_payload = rewrite_register_payload(new_payload, &register_name_map);
+                if let NodePayload::Assert { label, .. } | NodePayload::Cover { label, .. } =
+                    &mut new_payload
+                    && !label.is_empty()
+                {
+                    if names.contains_key(label) {
+                        *label = uniquify_name(&format!("{inst_name}__{label}"), names);
+                    } else {
+                        names.insert(label.clone(), 1);
+                    }
+                }
                 max_text_id = max_text_id
                     .checked_add(1)
                     .ok_or("block_inline: node IDs overflow usize")?;
@@ -260,7 +405,7 @@ fn inline_single_instantiation(
                     text_id: max_text_id,
                     name: node.name.as_ref().map(|n| {
                         let base = format!("{}__{}", inst_name, n);
-                        uniquify_node_name(&base, &mut used_node_names)
+                        uniquify_name(&base, &mut used_node_names)
                     }),
                     ty: node.ty.clone(),
                     payload: new_payload,
@@ -417,24 +562,8 @@ fn rewrite_register_payload(
     }
 }
 
-fn uniquify_register_name(base: &str, used: &mut HashMap<String, usize>) -> String {
-    if !used.contains_key(base) {
-        used.insert(base.to_string(), 1);
-        return base.to_string();
-    }
-    let mut counter = *used.get(base).unwrap_or(&1);
-    loop {
-        let candidate = format!("{}__{}", base, counter);
-        if !used.contains_key(&candidate) {
-            used.insert(base.to_string(), counter + 1);
-            used.insert(candidate.clone(), 1);
-            return candidate;
-        }
-        counter += 1;
-    }
-}
-
-pub(crate) fn uniquify_node_name(base: &str, used: &mut HashMap<String, usize>) -> String {
+/// Reserves a name, appending a numerical suffix when the base is occupied.
+pub(crate) fn uniquify_name(base: &str, used: &mut HashMap<String, usize>) -> String {
     if !used.contains_key(base) {
         used.insert(base.to_string(), 1);
         return base.to_string();
@@ -479,6 +608,25 @@ mod tests {
     use crate::ir_parser::Parser;
     use crate::ir_query::{matches_node, parse_query};
 
+    #[test]
+    fn inlining_with_a_function_top_rejects_declaration_only_pins_before_pruning() {
+        let source = r#"package pads
+top fn main(x: bits[1] id=1) -> bits[1] {
+  ret result: bits[1] = identity(x, id=2)
+}
+block ordinary() {}
+block cell(pad: bits[1]) {
+  ext_inout_net isolated(bits[1])
+  pad: () = ext_inout_port(name=pad, net=isolated, id=3)
+}
+"#;
+        let mut package = Parser::new(source).parse_and_validate_package().unwrap();
+        let before = package.to_string();
+        let error = inline_all_blocks_in_package(&mut package).unwrap_err();
+        assert!(error.contains("ext_inout_net 'isolated'"), "{error}");
+        assert_eq!(package.to_string(), before);
+    }
+
     fn parse_pkg(text: &str) -> ir::Package {
         let mut parser = Parser::new(text);
         parser
@@ -496,6 +644,81 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn inlining_child_instances_keeps_debug_labels_unique_in_the_parent() {
+        let package = parse_pkg(
+            r#"package checks
+block child(clk: clock, value: bits[1]) {
+  reg q(bits[1])
+  value: bits[1] = input_port(name=value, id=1)
+  start_token: token = after_all(id=2)
+  a: token = assert(start_token, value, message="child", label="valid_value", id=3)
+  b: token = assert(a, value, message="child", label="input_value", id=4)
+  c: token = assert(b, value, message="unnamed", id=5)
+  event: () = cover(value, label="observed", id=6)
+  read_q: bits[1] = register_read(register=q, id=13)
+  write_q: () = register_write(value, register=q, id=14)
+  d: token = assert(c, read_q, message="child", label="held", id=15)
+}
+
+top block parent(clk: clock, input_value: bits[1]) {
+  reg held(bits[1])
+  instantiation first(block=child, kind=block)
+  instantiation second(block=child, kind=block)
+  input_value: bits[1] = input_port(name=input_value, id=7)
+  first_input: () = instantiation_input(input_value, instantiation=first, port_name=value, id=8)
+  second_input: () = instantiation_input(input_value, instantiation=second, port_name=value, id=9)
+  start: token = after_all(id=10)
+  a: token = assert(start, input_value, message="parent", label="observed", id=11)
+  event: () = cover(input_value, label="second__valid_value", id=12)
+  held_value: bits[1] = register_read(register=held, id=16)
+  store: () = register_write(input_value, register=held, id=17)
+  b: token = assert(a, held_value, message="parent", label="first__q", id=18)
+}
+"#,
+        );
+        let flattened = flatten_block_hierarchy(&package, "parent").unwrap();
+        let block = flattened.get_top_block().unwrap();
+        assert_eq!(
+            block
+                .registers
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["held", "first__q__1", "second__q"]
+        );
+        let mut labels = block
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.payload {
+                NodePayload::Assert { label, message, .. } => {
+                    Some((message.as_str(), label.as_str()))
+                }
+                NodePayload::Cover { label, .. } => Some(("cover", label.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        labels.sort_unstable();
+        assert_eq!(
+            labels,
+            [
+                ("child", "first__held"),
+                ("child", "first__input_value"),
+                ("child", "second__held"),
+                ("child", "second__input_value"),
+                ("child", "second__valid_value__1"),
+                ("child", "valid_value"),
+                ("cover", "first__observed"),
+                ("cover", "second__observed"),
+                ("cover", "second__valid_value"),
+                ("parent", "first__q"),
+                ("parent", "observed"),
+                ("unnamed", ""),
+                ("unnamed", ""),
+            ]
+        );
     }
 
     #[test]

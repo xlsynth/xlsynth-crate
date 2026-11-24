@@ -33,6 +33,15 @@ pub use model::{
 
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Reports whether a name is an unescaped, non-keyword SystemVerilog
+/// identifier.
+pub fn is_system_verilog_simple_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+        && !is_system_verilog_keyword(name)
+}
+
 /// Reports whether `identifier` is reserved in Verilog or SystemVerilog.
 ///
 /// Keywords are case-sensitive. This includes the complete Verilog keyword
@@ -975,6 +984,38 @@ impl VastFile {
         self.add_declaration(module, name, data_type, DataKind::Wire)
     }
 
+    /// Ties corresponding bits of two nets with bidirectional Verilog
+    /// primitives.
+    pub fn add_tran(
+        &mut self,
+        module: VastModule,
+        name: &str,
+        width: usize,
+        left: LogicRef,
+        right: LogicRef,
+    ) -> Result<(), VastError> {
+        if width == 0 {
+            return Err(VastError("tran requires a positive width".into()));
+        }
+        self.check(left.0);
+        self.check(right.0);
+        self.check_unique_module_name(module, name, "tran")?;
+        let index = self.check(module.0);
+        self.ast.modules[index]
+            .defined_names
+            .insert(name.to_owned());
+        self.push_member(
+            module,
+            MemberData::Tran {
+                name: name.to_owned(),
+                width,
+                left,
+                right,
+            },
+        );
+        Ok(())
+    }
+
     /// Appends a register declaration to a module.
     pub fn add_reg(
         &mut self,
@@ -1049,6 +1090,17 @@ impl VastFile {
     pub fn make_string_literal(&mut self, value: &str) -> Expr {
         self.add_expression(ExprData::StringLiteral {
             value: value.to_owned(),
+        })
+    }
+
+    /// Creates an expression from complete Verilog source text.
+    ///
+    /// Supply any required Verilog quotes and escapes as part of the text.
+    /// VAST preserves that text and parenthesizes it when nested in another
+    /// expression that requires grouping.
+    pub fn make_inline_verilog_expression(&mut self, text: &str) -> Expr {
+        self.add_expression(ExprData::InlineVerilog {
+            text: text.to_owned(),
         })
     }
 
@@ -1600,6 +1652,14 @@ impl VastFile {
     pub fn make_unsized_x_literal(&mut self) -> Expr {
         self.add_expression(ExprData::Literal {
             text: "'X".into(),
+            value: None,
+        })
+    }
+
+    /// Creates the context-sized SystemVerilog high-impedance literal.
+    pub fn make_unsized_z_literal(&mut self) -> Expr {
+        self.add_expression(ExprData::Literal {
+            text: "'z".into(),
             value: None,
         })
     }

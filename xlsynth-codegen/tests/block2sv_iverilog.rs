@@ -915,3 +915,176 @@ endmodule
         );
     }
 }
+
+/// Checks width-dependent ports and the decoded SystemVerilog string value.
+#[test]
+fn parameterized_external_block_applies_overrides_during_elaboration() {
+    simulate_flat_fixture(
+        include_str!("goldens/block2sv/extern/parameterized_extern.golden.ir"),
+        r#"
+module parameterized_rtl #(
+  parameter integer WIDTH = 4,
+  parameter LABEL = "default"
+) (
+  input wire [WIDTH-1:0] data,
+  output wire [WIDTH-1:0] out
+);
+  assign out = LABEL == "wide \"mode\"" ? data : '0;
+endmodule
+
+module tb;
+  logic [7:0] data = 8'ha5;
+  wire [7:0] result;
+  parameterized_wrapper dut(.data(data), .result(result));
+  initial begin
+    #1;
+    if (result !== data) $fatal(1, "external parameter override lost data: %h", result);
+    $finish;
+  end
+endmodule
+"#,
+    )
+    .unwrap();
+}
+
+/// Keeps scalar bit slices and unsigned comparisons independent of an inout's
+/// SV type.
+#[test]
+fn typed_scalar_inout_reads_follow_xls_semantics() {
+    simulate_flat_fixture(
+        include_str!("goldens/block2sv/structure/typed_scalar_inout.golden.ir"),
+        r#"
+module tb;
+  logic [7:0] drive, limit;
+  wire [7:0] io;
+  wire selected, below;
+  assign io = drive;
+  typed_scalar_inout dut(.*);
+
+  task check(input logic [7:0] value, threshold);
+    begin
+      drive = value; limit = threshold; #1;
+      if (selected !== value[1] || below !== (value < threshold))
+        $fatal(1, "io=%h limit=%h selected=%b below=%b", value, threshold, selected, below);
+    end
+  endtask
+
+  initial begin
+    check(8'h02, 8'h80);
+    check(8'h80, 8'h01);
+    check(8'h10, 8'h10);
+    $finish;
+  end
+endmodule
+"#,
+    )
+    .unwrap();
+}
+
+/// Every participant sees the same four-state value when local or external
+/// drivers release or contend.
+#[test]
+fn shared_inout_drivers_resolve_in_flat_layout() {
+    simulate_flat_fixture(
+        include_str!("goldens/block2sv/hierarchy/shared_inout.golden.ir"),
+        include_str!("testdata/shared_inout_tb.sv"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn private_inout_exchanges_request_and_reply_with_a_released_cycle() {
+    simulate_flat_fixture(
+        include_str!("goldens/block2sv/hierarchy/private_request_reply.golden.ir"),
+        include_str!("testdata/private_request_reply_tb.sv"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn independent_private_nets_keep_their_drivers_isolated() {
+    simulate_flat_fixture(
+        include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir"),
+        r#"
+module tb;
+  reg [3:0] tx = 4'b1010, external_data = 4'bzzzz;
+  reg oe = 0;
+  wire [3:0] rx;
+  host dut(.*);
+  assign dut.reader.test_point = external_data;
+  initial begin
+    #1; if (rx !== 4'bzzzz || dut.writer.test_point !== 4'bzzzz) $fatal;
+    oe = 1;
+    #1; if (rx !== 4'bzzzz || dut.writer.test_point !== tx) $fatal;
+    external_data = 4'b0101;
+    #1; if (rx !== external_data || dut.writer.test_point !== tx ||
+            dut.isolator.a !== external_data || dut.isolator.b !== tx) $fatal;
+    oe = 0;
+    #1; if (rx !== external_data || dut.writer.test_point !== 4'bzzzz) $fatal;
+    $finish;
+  end
+endmodule
+"#,
+    )
+    .unwrap();
+}
+
+/// Applies an opaque instance's width override when linking independent RTL.
+#[test]
+fn parameterized_opaque_extern_links_clock_and_bidirectional_pin() {
+    simulate_flat_fixture(
+        include_str!("goldens/block2sv/extern/opaque_extern.golden.ir"),
+        r#"
+module vendor_peripheral #(parameter WIDTH = 4) (
+    output logic [WIDTH-1:0] result,
+    input logic clk,
+    inout wire pad,
+    input logic [WIDTH-1:0] data);
+  assign pad = data[WIDTH-1] ? data[0] : 1'bz;
+  always_ff @(posedge clk) result <= {data[WIDTH-1:1], pad};
+endmodule
+
+module tb;
+  logic clk = 0;
+  logic [7:0] data = 8'h00;
+  logic external_drive = 1;
+  wire pin;
+  wire [7:0] out;
+  assign pin = external_drive ? 1'b1 : 1'bz;
+  wrapper dut(.parent_clk(clk), .data(data), .pin(pin), .out(out));
+
+  initial begin
+    #1; clk = 1;
+    #1; if (out !== 8'h01) $fatal(1, "external pin input was not sampled");
+    clk = 0;
+    external_drive = 0;
+    data = 8'h80;
+    #1; if (pin !== 1'b0) $fatal(1, "vendor output did not drive the wrapper pin");
+    clk = 1;
+    #1; if (out !== 8'h80) $fatal(1, "vendor clock or width override was not applied");
+    $finish;
+  end
+endmodule
+"#,
+    )
+    .unwrap();
+}
+
+/// Compiles and runs a testbench with flat generated RTL.
+fn simulate_flat_fixture(ir: &str, testbench: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()?;
+    let pkg = Parser::new(ir).parse_and_validate_package()?;
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("generated.sv");
+    let rtl = xlsynth_codegen::emit_system_verilog(&pkg, &Default::default())?.system_verilog;
+    fs::write(&source, format!("{rtl}\n{testbench}"))?;
+    let binary = tools.compile(
+        directory.path(),
+        &[&source],
+        "tb",
+        &[],
+        Duration::from_secs(30),
+    )?;
+    tools.run(directory.path(), &binary, Duration::from_secs(30))?;
+    Ok(())
+}

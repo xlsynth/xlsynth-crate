@@ -16,7 +16,7 @@ use super::{
 };
 use crate::ast::{ConstAssert, ConstDef, EnumDef, ExternFn, Module, Type, TypeAlias};
 use crate::typed::BoundParametricValue;
-use crate::typed::{AvailableFunctions, constant_work};
+use crate::typed::{AvailableFunctions, PENDING_FUNCTION_PREFIX, constant_work};
 
 /// An actual callback resolved in the caller's scope. An import ID includes
 /// its concrete DSLX specialization as well as its declaring module.
@@ -34,6 +34,14 @@ pub(super) struct FunctionSpecialization<'m> {
     pub(super) name: String,
     pub(super) targets: Vec<CallbackTarget<'m>>,
     pub(super) value_signature: Option<Rc<BoundValueSignature>>,
+}
+
+/// A concrete call in a discarded abstract body whose result may be needed
+/// by a later compile-time declaration.
+pub(super) struct PendingFunction<'m> {
+    template: &'m Function,
+    targets: Vec<CallbackTarget<'m>>,
+    value_signature: Option<Rc<BoundValueSignature>>,
 }
 
 /// Concrete signature and parametric environment in the template's definition
@@ -344,7 +352,7 @@ impl<'m> FunctionSpecializations<'m> {
         // in dependency order once its enum representations and dimensions are
         // known.
         definitions.extend(
-            StructTable::struct_schedule(module, position)?
+            StructTable::struct_schedule(module, position, |owner| decls.zero_binding(owner))?
                 .into_iter()
                 .map(|(at, index)| (at, Definition::Struct(index))),
         );
@@ -420,7 +428,7 @@ impl<'m> FunctionSpecializations<'m> {
                     // body together below, with type formals in scope.
                     if !f.has_inferred_parametrics() {
                         for ty in f.params.iter().map(|p| &p.ty).chain([&f.result]) {
-                            decls.check_type_visibility(ty, at, None)?;
+                            decls.check_type_visibility(ty, at, |_| false)?;
                         }
                     }
                     decls
@@ -488,9 +496,22 @@ impl<'m> FunctionSpecializations<'m> {
             }
             let mut checker = BodyChecker::new(decls, resolver, structs, BodyKind::Function);
             checker.function_registry = Some(self);
-            let body = checker
-                .check_function(function)
-                .map_err(|e| format!("fn '{}': {e}", function.name))?;
+            let body = match checker.check_function(function) {
+                Ok(body) => body,
+                Err(_) if checker.deferred_callback_declaration => {
+                    // A declaration reached an abstract callback during
+                    // constexpr evaluation. Check the remaining lexical names
+                    // now and elaborate the body with its actual callback.
+                    let mut lexical =
+                        BodyChecker::new(decls, resolver, structs, BodyKind::Function);
+                    lexical
+                        .check_value_template_names(function)
+                        .map_err(|e| format!("fn '{}': {e}", function.name))?;
+                    depths.insert(function.name.as_str(), 1);
+                    continue;
+                }
+                Err(e) => return Err(format!("fn '{}': {e}", function.name)),
+            };
             let callees = checker.local_callees;
             let mut depth = 1;
             for symbol in &callees {
@@ -557,6 +578,23 @@ impl<'m> FunctionSpecializations<'m> {
 }
 
 impl<'m> BodyChecker<'_, 'm> {
+    /// Make a concrete call executable once a required constant reaches it.
+    pub(super) fn materialize_pending_function(&mut self, index: usize) -> Result<(), String> {
+        let call = &self.pending_functions[index];
+        let symbol = self.intern_function(
+            call.template,
+            call.targets.clone(),
+            call.value_signature.clone(),
+        )?;
+        self.constant_functions
+            .as_mut()
+            .expect("active constexpr evaluation")
+            .pending_symbols
+            .insert(index, symbol);
+        self.decls.constexpr_instantiated_callee.set(true);
+        Ok(())
+    }
+
     /// Resolve the name used by a checked call and record its dependency.
     /// While validating a template in isolation, a call contributes only a
     /// source dependency, since the checked abstract body is discarded.
@@ -568,12 +606,23 @@ impl<'m> BodyChecker<'_, 'm> {
     ) -> Result<String, String> {
         // Abstract callback bodies normally validate calls without emitting
         // them. A constexpr actual still needs its concrete callee to run.
-        let name = if self.source_template.is_some()
+        if self.source_template.is_some()
             && self.function_spec.is_none()
             && self.constant_functions.is_none()
         {
-            template.name.clone()
-        } else {
+            self.local_callees.insert(template.name.clone());
+            if !self.preserve_assert_inputs {
+                return Ok(template.name.clone());
+            }
+            let index = self.pending_functions.len();
+            self.pending_functions.push(PendingFunction {
+                template,
+                targets,
+                value_signature,
+            });
+            return Ok(format!("{PENDING_FUNCTION_PREFIX}{index}"));
+        }
+        let name = {
             let registry = self
                 .function_registry
                 .as_deref_mut()

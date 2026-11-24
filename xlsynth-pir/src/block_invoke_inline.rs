@@ -9,14 +9,55 @@ use crate::IrValue;
 use crate::ir::{Block, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type, Unop};
 use crate::ir_rebase_ids::package_max_emitted_node_id;
 use crate::ir_utils::remap_payload_with;
-use crate::ir_verify::verify_package;
+use crate::ir_verify::{
+    verify_package, verify_package_inout_hierarchies, verify_package_structure,
+};
+
+/// Inlines ordinary calls in every block, retaining the package's functions,
+/// block hierarchy, and register boundaries. Checks hierarchy dependencies
+/// after expansion so an ignored argument cannot introduce a spurious cycle.
+pub fn inline_block_invokes_in_package(package: Package) -> Result<Package, String> {
+    let block_names: Vec<_> = package
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            PackageMember::Block(block) => Some(block.name.clone()),
+            PackageMember::Function(_) => None,
+        })
+        .collect();
+    inline_block_invokes_in_blocks(package, &block_names)
+}
+
+/// Inlines calls in the named blocks in order, then verifies the entire
+/// package. Unselected blocks can still contain invokes.
+pub fn inline_block_invokes_in_blocks(
+    mut package: Package,
+    block_names: &[String],
+) -> Result<Package, String> {
+    verify_package_structure(&package).map_err(|error| error.to_string())?;
+    let mut inliner = BlockInvokeInliner::from_verified_package(&package);
+    let mut replacements = Vec::new();
+    for name in block_names {
+        if let Cow::Owned(block) = inliner.inline_block(name)? {
+            replacements.push((inliner.blocks[name.as_str()].0, block));
+        }
+    }
+    if !replacements.is_empty() {
+        for (index, block) in replacements {
+            package.members[index] = PackageMember::Block(block);
+        }
+        verify_package_structure(&package).map_err(|error| error.to_string())?;
+    }
+    verify_package_inout_hierarchies(&package).map_err(|error| error.to_string())?;
+    Ok(package)
+}
 
 /// Resolves calls against one verified package and allocates fresh IDs across
 /// its expanded blocks.
 pub struct BlockInvokeInliner<'a> {
     /// Foreign functions have no inlineable implementation.
     functions: HashMap<&'a str, Option<&'a Fn>>,
-    blocks: HashMap<&'a str, &'a Block>,
+    blocks: HashMap<&'a str, (usize, &'a Block)>,
     last_id: usize,
 }
 
@@ -25,24 +66,30 @@ impl<'a> BlockInvokeInliner<'a> {
     /// recursive calls.
     pub fn new(package: &'a Package) -> Result<Self, String> {
         verify_package(package).map_err(|error| error.to_string())?;
+        Ok(Self::from_verified_package(package))
+    }
+
+    /// Indexes callees after verification has established valid call targets
+    /// and IDs.
+    fn from_verified_package(package: &'a Package) -> Self {
         let mut functions = HashMap::new();
         let mut blocks = HashMap::new();
-        for member in &package.members {
+        for (index, member) in package.members.iter().enumerate() {
             match member {
                 PackageMember::Function(function) => {
                     let foreign = function.ffi_proto().is_some();
                     functions.insert(function.name.as_str(), (!foreign).then_some(function));
                 }
                 PackageMember::Block(block) => {
-                    blocks.insert(block.name.as_str(), block);
+                    blocks.insert(block.name.as_str(), (index, block));
                 }
             }
         }
-        Ok(Self {
+        Self {
             functions,
             blocks,
             last_id: package_max_emitted_node_id(package),
-        })
+        }
     }
 
     /// Inlines the callee at each `invoke` node, borrowing the original block
@@ -63,7 +110,7 @@ impl<'a> BlockInvokeInliner<'a> {
     }
 
     fn expand_calls(&mut self, name: &str, limit: Option<usize>) -> Result<Cow<'a, Block>, String> {
-        let &block = self
+        let &(_, block) = self
             .blocks
             .get(name)
             .ok_or_else(|| format!("block '{name}' not found"))?;
@@ -75,7 +122,7 @@ impl<'a> BlockInvokeInliner<'a> {
             return Ok(Cow::Borrowed(block));
         };
         let mut expanded = block.clone();
-        let mut names = block_names(block);
+        let mut names = block.occupied_names();
         let mut last_id = self.last_id;
         // Appended callees may contain further calls. Each node is visited
         // once; restore operand-before-user order only after the last
@@ -179,9 +226,11 @@ fn index_literal(index: usize, width: usize) -> Result<NodePayload, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Appends ordinary invokes in iteration order without changing the register
-/// graph.
-fn expand_iterations(
+/// Unrolls a verified map or counted_for by appending one ordinary invoke per
+/// iteration. The returned payload replaces the original operation. Callers
+/// bound the expansion before calling (three nodes per map element or two
+/// per loop iteration) and provide the package's last allocated node ID.
+pub fn expand_iterations(
     call: &Node,
     function: &Fn,
     nodes: &mut Vec<Node>,
@@ -302,38 +351,6 @@ fn copy_callee(
         .index])
 }
 
-/// Reserves user-visible names before assigning names to copied operations and
-/// debug labels.
-fn block_names(block: &Block) -> HashSet<String> {
-    let mut names: HashSet<_> = block
-        .nodes
-        .iter()
-        .filter_map(|node| node.name.clone())
-        .collect();
-    names.extend(block.clock_port_name().map(str::to_owned));
-    names.extend(block.registers.iter().map(|reg| reg.name.clone()));
-    names.extend(
-        block
-            .instantiations
-            .iter()
-            .map(|instance| instance.name.clone()),
-    );
-    for node in &block.nodes {
-        match &node.payload {
-            NodePayload::InputPort { name, .. }
-            | NodePayload::OutputPort { name, .. }
-            | NodePayload::Assert { label: name, .. }
-            | NodePayload::Cover { label: name, .. } => {
-                names.insert(name.clone());
-            }
-            _ => {
-                // Other operations have no additional module-scoped names.
-            }
-        }
-    }
-    names
-}
-
 /// Qualifies local names by the unique call site, including labels that will
 /// become RTL identifiers.
 fn call_scoped_name(names: &mut HashSet<String>, call_id: usize, local: &str) -> String {
@@ -395,7 +412,7 @@ top block sample(init: bits[81], x: bits[81], a: bits[81], b: bits[81]) {
     }
 
     #[test]
-    fn expanded_blocks_can_be_reassembled_in_one_package() {
+    fn package_stage_expands_nested_calls_in_all_blocks() {
         let ir = r#"package calls
 
 fn seen(x: bits[1] id=1) -> bits[1] {
@@ -436,7 +453,8 @@ block untouched() {
             inliner.inline_block("untouched").unwrap(),
             Cow::Borrowed(_)
         ));
-        let first = inliner.inline_block("first").unwrap().into_owned();
+        let expanded = inline_block_invokes_in_package(package).unwrap();
+        let first = expanded.get_block("first").unwrap();
         let labels: Vec<_> = first
             .nodes
             .iter()
@@ -446,7 +464,7 @@ block untouched() {
             })
             .collect();
         assert_eq!(labels, ["invoke_6_was_seen__1"]);
-        let second = inliner.inline_block("second").unwrap().into_owned();
+        let second = expanded.get_block("second").unwrap();
         assert!(
             !second
                 .nodes
@@ -454,13 +472,54 @@ block untouched() {
                 .any(|node| matches!(node.payload, NodePayload::Invoke { .. }))
         );
 
-        let mut expanded = package.clone();
-        expanded.replace_block("first", first).unwrap();
-        expanded.replace_block("second", second).unwrap();
-        verify_package(&expanded).unwrap();
-        Parser::new(&expanded.to_string())
-            .parse_and_validate_package()
-            .unwrap();
+        let text = expanded.to_string();
+        let reparsed = Parser::new(&text).parse_and_validate_package().unwrap();
+        assert_eq!(
+            inline_block_invokes_in_package(reparsed)
+                .unwrap()
+                .to_string(),
+            text
+        );
+    }
+
+    #[test]
+    fn hierarchy_cycles_use_inlined_pin_driver_dependencies() {
+        let ir = r#"package pins
+fn drive(sensed: bits[1] id=1) -> bits[1] {
+  ret zero: bits[1] = literal(value=0, id=2)
+}
+block child(data: bits[1], io: bits[1]) {
+  ext_inout_net pad(bits[1])
+  io: () = ext_inout_port(name=io, net=pad, id=10)
+  data: bits[1] = input_port(name=data, id=3)
+  on: bits[1] = literal(value=1, id=4)
+  driven: bits[1] = invoke(data, to_apply=drive, id=5)
+  drive_pad: () = ext_inout_drive(driven, on, net=pad, id=6)
+}
+top block parent(pin: bits[1]) {
+  ext_inout_net bus(bits[1])
+  instantiation cell(block=child, kind=block)
+  pin: () = ext_inout_port(name=pin, net=bus, id=11)
+  bind_pin: () = ext_instantiation_inout(instantiation=cell, port_name=io, net=bus, id=7)
+  sample: bits[1] = ext_inout_read(net=bus, id=8)
+  sense: () = instantiation_input(sample, instantiation=cell, port_name=data, id=9)
+}
+"#;
+        let package = Parser::new(ir).parse_package().unwrap();
+        // The standalone verifier conservatively considers the call to read
+        // data.
+        assert!(
+            verify_package(&package)
+                .unwrap_err()
+                .to_string()
+                .contains("combinational cycle")
+        );
+        inline_block_invokes_in_package(package).unwrap();
+
+        let feedback = ir.replace("literal(value=0, id=2)", "identity(sensed, id=2)");
+        let package = Parser::new(&feedback).parse_package().unwrap();
+        let error = inline_block_invokes_in_package(package).unwrap_err();
+        assert!(error.contains("combinational cycle"), "{error}");
     }
 
     #[test]

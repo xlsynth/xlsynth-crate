@@ -23,7 +23,9 @@ use xlsynth_g8r::netlist::abc::{
 use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, load_labeled_sequential_netlist_aig_with_liberty,
 };
-use xlsynth_g8r::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
+use xlsynth_g8r::netlist::normalized::{
+    BitExpr, BitSource, NormalizedBitIndex, NormalizedNetlistModule,
+};
 use xlsynth_g8r::netlist::sequential_mapping::SequentialMappingOptions;
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_random::{
@@ -90,10 +92,14 @@ pub fn preflight() -> Result<(), String> {
 }
 
 /// Finds wire equivalence without treating buffers or inverters as aliases.
-fn wire_root(parents: &mut [usize], mut bit: usize) -> usize {
-    while parents[bit] != bit {
-        parents[bit] = parents[parents[bit]];
-        bit = parents[bit];
+fn wire_root(
+    parents: &mut [NormalizedBitIndex],
+    mut bit: NormalizedBitIndex,
+) -> NormalizedBitIndex {
+    while parents[bit.index()] != bit {
+        let parent = parents[bit.index()];
+        parents[bit.index()] = parents[parent.index()];
+        bit = parents[bit.index()];
     }
     bit
 }
@@ -110,7 +116,7 @@ fn check_direct_connections(mapped: &AbcMappedDesign) {
             if let BitExpr::Source(BitSource::Bit(rhs)) = rhs {
                 let lhs = wire_root(&mut parents, *lhs);
                 let rhs = wire_root(&mut parents, *rhs);
-                parents[lhs] = rhs;
+                parents[lhs.index()] = rhs;
             }
         }
     }

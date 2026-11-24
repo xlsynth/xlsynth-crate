@@ -59,6 +59,9 @@ fn append_operand_values<'a>(
     match payload {
         Nil
         | Param
+        | ExtInoutPort { .. }
+        | ExtInoutRead { .. }
+        | ExtInstantiationInout { .. }
         | InputPort { .. }
         | Literal(_)
         | InstantiationOutput { .. }
@@ -73,7 +76,12 @@ fn append_operand_values<'a>(
             push(start);
         }
         TupleIndex { tuple, .. } => push(tuple),
-        Binop(_, lhs, rhs) => {
+        ExtInoutDrive {
+            drive: lhs,
+            output_enable: rhs,
+            ..
+        }
+        | Binop(_, lhs, rhs) => {
             push(lhs);
             push(rhs);
         }
@@ -258,6 +266,12 @@ fn eval_order(f: &ir::Fn, order_policy: EvalOrderPolicy) -> EvalOrder {
             }
         }
     }
+}
+
+/// Returns the order in which the interpreter evaluates a verified function,
+/// including unused calls that can emit events.
+pub fn evaluation_order(f: &ir::Fn) -> impl Iterator<Item = ir::NodeRef> {
+    eval_order(f, EvalOrderPolicy::Checked)
 }
 
 #[derive(Clone, Copy)]
@@ -1169,6 +1183,10 @@ pub(crate) fn eval_pure_if_supported(n: &ir::Node, operand_values: &[&IrValue]) 
         | ir::NodePayload::Param
         | ir::NodePayload::Assert { .. }
         | ir::NodePayload::Trace { .. }
+        | ir::NodePayload::ExtInstantiationInout { .. }
+        | ir::NodePayload::ExtInoutPort { .. }
+        | ir::NodePayload::ExtInoutRead { .. }
+        | ir::NodePayload::ExtInoutDrive { .. }
         | ir::NodePayload::InstantiationInput { .. }
         | ir::NodePayload::InstantiationOutput { .. }
         | ir::NodePayload::RegisterRead { .. }

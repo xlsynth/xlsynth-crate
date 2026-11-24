@@ -14,7 +14,7 @@ use xlsynth_pir::ir::Package;
 use xlsynth_pir::random_inputs::generate_uniform_value_with_rng;
 
 use super::InvariantProgram;
-use super::invariant::BxInvariantProof;
+use super::invariant::{BxInvariantProof, InvariantHarness};
 use super::quickcheck::{Concrete, PirCircuit};
 use super::simulation::{Observed, Simulation};
 use super::{
@@ -40,7 +40,7 @@ struct TrialFailure {
     error: ExecutionError,
 }
 
-impl BxInvariantProof {
+impl InvariantHarness {
     fn model_size(&self, cycles: usize) -> Result<usize, String> {
         let data = self.domains.len();
         let reset = usize::from(self.transition.reset.is_some());
@@ -82,24 +82,28 @@ impl BxInvariantProof {
         }
         Ok(model)
     }
+}
 
+impl BxInvariantProof {
     /// Replay an initialized bounded counterexample and identify its first
     /// failing sample.
     pub(crate) fn replay(&self, depth: usize, model: &[IrValue]) -> Result<String, String> {
-        let trace = Trace::from_model(self, depth, model)?;
-        let mut pir = PirCircuit::from_transition(&self.package, self.transition.clone());
+        let harness = &self.harness;
+        let trace = Trace::from_model(harness, depth, model)?;
+        let mut pir =
+            PirCircuit::from_transition(&self.replay_hardware, harness.transition.clone());
         pir.reset_trial(&trace.registers);
         match trace.execute(
-            self,
+            harness,
             &mut Concrete {
                 pir: &mut pir,
                 rtl: None,
             },
         ) {
             Err(failure) if matches!(failure.error, ExecutionError::Assertion(_)) => {
-                Ok(trace.describe(self, &failure, false))
+                Ok(trace.describe(harness, &failure, false))
             }
-            Err(failure) => Err(trace.describe(self, &failure, false)),
+            Err(failure) => Err(trace.describe(harness, &failure, false)),
             Ok(()) => Err("solver counterexample passed concrete invariant replay".into()),
         }
     }
@@ -107,27 +111,27 @@ impl BxInvariantProof {
 
 impl<'a> Trace<'a> {
     fn from_model(
-        proof: &BxInvariantProof,
+        harness: &InvariantHarness,
         cycles: usize,
         model: &'a [IrValue],
     ) -> Result<Self, String> {
-        let expected = proof.model_size(cycles)?;
+        let expected = harness.model_size(cycles)?;
         if model.len() != expected {
             return Err(format!(
                 "invariant model expects {expected} values, got {}",
                 model.len()
             ));
         }
-        let (initial, mut samples) = model.split_at(proof.transition.registers.len());
+        let (initial, mut samples) = model.split_at(harness.transition.registers.len());
         let mut registers = BTreeMap::new();
-        for (reg, value) in proof.transition.registers.iter().zip(initial) {
+        for (reg, value) in harness.transition.registers.iter().zip(initial) {
             if reg.ty != value.type_() {
                 return Err(format!("invalid initial value for register '{}'", reg.name));
             }
             registers.insert(reg.name.clone(), value.clone());
         }
-        let data = proof.domains.len();
-        let reset_inputs = if proof.transition.reset.is_some() {
+        let data = harness.domains.len();
+        let reset_inputs = if harness.transition.reset.is_some() {
             let (init, rest) = samples.split_at(data);
             samples = rest;
             Some(init)
@@ -146,13 +150,13 @@ impl<'a> Trace<'a> {
             .into_iter()
             .chain((0..cycles).map(|i| trace.frame(i)))
         {
-            for (j, (value, domain)) in frame.iter().zip(&proof.domains).enumerate() {
-                if value.type_() != proof.transition.inputs[proof.input_indices[j]].ty
+            for (j, (value, domain)) in frame.iter().zip(&harness.domains).enumerate() {
+                if value.type_() != harness.transition.inputs[harness.input_indices[j]].ty
                     || !domain.admits(value)
                 {
                     return Err(format!(
                         "invalid invariant input '{}': {value}",
-                        proof.program.params[j].name
+                        harness.program.params[j].name
                     ));
                 }
             }
@@ -170,16 +174,16 @@ impl<'a> Trace<'a> {
     }
 
     fn drive(
-        proof: &BxInvariantProof,
+        harness: &InvariantHarness,
         circuit: &mut dyn ClockedHarness,
         frame: &[IrValue],
     ) -> Result<(), String> {
-        for (param, value) in proof.program.params.iter().zip(frame) {
+        for (param, value) in harness.program.params.iter().zip(frame) {
             circuit.drive(&param.name, value)?;
         }
-        if let Some(reset) = &proof.transition.reset {
+        if let Some(reset) = &harness.transition.reset {
             let level = frame
-                .get(proof.domains.len())
+                .get(harness.domains.len())
                 .cloned()
                 .unwrap_or_else(|| IrValue::bool(!reset.active_low));
             circuit.drive(&reset.name, &level)?;
@@ -191,24 +195,25 @@ impl<'a> Trace<'a> {
     /// is remembered while the trace continues looking for a definite failure.
     fn execute(
         &self,
-        proof: &BxInvariantProof,
+        harness: &InvariantHarness,
         circuit: &mut dyn ClockedHarness,
     ) -> Result<(), TrialFailure> {
-        let program = &proof.program;
-        let runtime = |cycle, message| TrialFailure {
+        let program = &harness.program;
+        let failure = |cycle, error| TrialFailure {
             position: program.position,
             cycle,
-            error: ExecutionError::Runtime(message),
+            error,
         };
         if let Some(frame) = self.reset_inputs {
-            Self::drive(proof, circuit, frame)
+            Self::drive(harness, circuit, frame)
+                .map_err(ExecutionError::Runtime)
                 .and_then(|()| circuit.tick())
-                .map_err(|e| runtime(None, e))?;
+                .map_err(|e| failure(None, e))?;
         }
         let mut unknown = None;
         for i in 0..self.cycles {
             let cycle = Some(i);
-            Self::drive(proof, circuit, self.frame(i)).map_err(|e| runtime(cycle, e))?;
+            Self::drive(harness, circuit, self.frame(i)).map_err(|e| failure(cycle, e.into()))?;
             for index in (1..=program.lemmas.len()).chain(std::iter::once(0)) {
                 let (label, position) = if index == 0 {
                     ("property", program.position)
@@ -216,7 +221,15 @@ impl<'a> Trace<'a> {
                     let lemma = &program.lemmas[index - 1];
                     (lemma.name.as_str(), lemma.position)
                 };
-                match circuit.sample(index).map_err(|e| runtime(cycle, e))? {
+                let sample = circuit.sample(index).map_err(|error| match error {
+                    ExecutionError::Assertion(message) if index != 0 => TrialFailure {
+                        position,
+                        cycle,
+                        error: ExecutionError::Assertion(format!("lemma '{label}': {message}")),
+                    },
+                    error => failure(cycle, error),
+                })?;
+                match sample {
                     Observed::Known(value) if value.bits_equals_u64_value(1) => {
                         // This observation holds; check the rest of the
                         // predicates.
@@ -242,13 +255,13 @@ impl<'a> Trace<'a> {
                     }
                 }
             }
-            circuit.tick().map_err(|e| runtime(cycle, e))?;
+            circuit.tick().map_err(|e| failure(cycle, e))?;
         }
         unknown.map_or(Ok(()), Err)
     }
 
-    fn describe(&self, proof: &BxInvariantProof, failure: &TrialFailure, from_x: bool) -> String {
-        let program = &proof.program;
+    fn describe(&self, harness: &InvariantHarness, failure: &TrialFailure, from_x: bool) -> String {
+        let program = &harness.program;
         let where_at = failure
             .cycle
             .map_or_else(|| "initial reset edge".to_owned(), |i| format!("cycle {i}"));
@@ -259,7 +272,7 @@ impl<'a> Trace<'a> {
         };
         let mut text = format!(
             "{}:{}:{}: invariant '{}' at {where_at}: {message}",
-            proof.path.display(),
+            harness.path.display(),
             failure.position.line,
             failure.position.column,
             program.name
@@ -281,9 +294,9 @@ impl<'a> Trace<'a> {
                 .zip(values)
                 .map(|(p, v)| format!("{}={v}", p.name))
                 .collect::<Vec<_>>();
-            if let Some(reset) = &proof.transition.reset {
+            if let Some(reset) = &harness.transition.reset {
                 let asserted = values
-                    .get(proof.domains.len())
+                    .get(harness.domains.len())
                     .is_none_or(|level| level.bits_equals_u64_value(u64::from(!reset.active_low)));
                 fields.push(format!("rst={asserted}"));
             }
@@ -317,8 +330,8 @@ pub(super) fn run(
         four_valued: qc.cross_check_vastly.then(FourValuedReport::default),
     };
     let result = (|| -> Result<(), String> {
-        let proof = BxInvariantProof::prepare(program, checked, hardware, path)?;
-        let mut pir = PirCircuit::from_transition(&proof.package, proof.transition.clone());
+        let harness = InvariantHarness::prepare(program, checked, hardware, path)?;
+        let mut pir = PirCircuit::from_transition(hardware, harness.transition.clone());
         let mut rtl = if qc.cross_check_vastly {
             let flat = flatten_block_hierarchy(hardware, &program.harness)?;
             Some(Simulation::from_flattened(&flat, &program.harness)?)
@@ -328,8 +341,8 @@ pub(super) fn run(
         let mut rng = Pcg64Mcg::seed_from_u64(qc.seed);
         let cycles = options.invariant_cycles.get();
         for trial in 1..=qc.trials.get() {
-            let model = proof.draw_model(cycles, &mut rng)?;
-            let trace = Trace::from_model(&proof, cycles, &model)?;
+            let model = harness.draw_model(cycles, &mut rng)?;
+            let trace = Trace::from_model(&harness, cycles, &model)?;
             report.trials = trial;
             pir.reset_trial(&trace.registers);
             if let Some(sim) = &mut rtl {
@@ -338,12 +351,12 @@ pub(super) fn run(
             let describe = |failure: &TrialFailure, x| {
                 format!(
                     "{}\n  seed {}, trial {trial}",
-                    trace.describe(&proof, failure, x),
+                    trace.describe(&harness, failure, x),
                     qc.seed
                 )
             };
             let concrete = trace.execute(
-                &proof,
+                &harness,
                 &mut Concrete {
                     pir: &mut pir,
                     rtl: rtl.as_mut(),
@@ -352,7 +365,7 @@ pub(super) fn run(
             let failure = concrete.err().map(|e| describe(&e, false));
             if let (Some(sim), Some(four)) = (&mut rtl, &mut report.four_valued) {
                 sim.reset_trial(None)?;
-                match trace.execute(&proof, sim) {
+                match trace.execute(&harness, sim) {
                     Ok(()) => four.passed += 1,
                     Err(x_failure) => {
                         if let Some(message) =
@@ -399,6 +412,56 @@ block count_bound(clk, rst, enable: bool) -> bool {
     #[lemma] let below_two = count < u2:2;
     true
 }"#;
+
+    #[test]
+    fn child_runtime_assertion_fails_a_concrete_invariant_and_blocks_its_proof()
+    -> Result<(), String> {
+        let source = r#"block monitored(clk, ok: bool) -> bool {
+    assert!(ok, "child_contract");
+    ok
+}
+#[invariant]
+block observe(clk) -> bool {
+    let ok = monitored(false);
+    !ok
+}"#;
+        let path = Path::new("contract.bx");
+        let reset = ResetBehavior::default();
+        let imports = ImportOptions::default();
+        let tests = run_tests_with_options(
+            source,
+            path,
+            empty_package("contract"),
+            reset,
+            &imports,
+            true,
+            BxTestOptions::default(),
+        )?;
+        assert_eq!(
+            tests.tests[0]
+                .failure
+                .as_deref()
+                .and_then(|message| message.lines().next()),
+            Some(
+                "contract.bx:6:7: invariant 'observe' at cycle 0: IR assertion 'child_contract' failed: assertion failed at contract.bx:2:5"
+            )
+        );
+        let suite = prepare_invariant_proofs(
+            source,
+            path,
+            empty_package("contract"),
+            reset,
+            &imports,
+            true,
+        )?;
+        assert_eq!(
+            suite.properties[0].proof.as_ref().err().map(String::as_str),
+            Some(
+                "contract.bx:6:7: invariant 'observe': bounded proof does not yet support reachable hardware assertion 'child_contract' in 'bx_test_observe'"
+            )
+        );
+        Ok(())
+    }
 
     #[test]
     fn base_replay_locates_a_later_false_lemma_for_both_reset_polarities() -> Result<(), String> {

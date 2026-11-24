@@ -17,7 +17,7 @@ use xlsynth_pir::{
     RegisterWriteOptions, ResetBehavior,
 };
 
-use crate::ast::{BinaryOp, Param, Type, UnaryOp};
+use crate::ast::{BinaryOp, Param, SourceFile, Type, UnaryOp};
 use crate::bx_import::library_item;
 use crate::check::{
     CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind,
@@ -594,6 +594,8 @@ struct BlockResources {
     registers: BTreeMap<String, Register>,
     instances: BTreeMap<String, BInstantiation>,
     cycle_sources: CycleSources,
+    asserted_reset: Option<BValue>,
+    assertion_token: Option<BValue>,
 }
 
 /// The destination package and symbols reserved for user definitions and
@@ -835,6 +837,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 physical
             };
             self.values.insert(name.clone(), asserted);
+            resources.asserted_reset = Some(asserted);
             Some(physical)
         } else {
             None
@@ -855,7 +858,13 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 resources.instances.insert(name.clone(), instance);
             }
         }
-        self.wire_statements(&block.statements, &mut resources, reset, None)?;
+        self.wire_statements(
+            &block.statements,
+            &mut resources,
+            reset,
+            None,
+            block.source.as_ref(),
+        )?;
         let ports = &block.output_ports;
         if let TypedExprKind::Tuple(fields) = &block.output.kind {
             // Drive fields separately to preserve their feedback dependencies.
@@ -874,7 +883,8 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 | Type::ParametricArray { .. }
                 | Type::Applied { .. }
                 | Type::ParametricStruct { .. }
-                | Type::TypeApplied { .. } => {
+                | Type::TypeApplied { .. }
+                | Type::MixedApplied { .. } => {
                     return Err(BuilderError::InvalidOperation(format!(
                         "cannot lower block result with unresolved type '{}'",
                         block.result
@@ -886,17 +896,41 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
         Ok((self.builder, resources.cycle_sources))
     }
 
-    /// Wires register updates using one shared load-enable node for each
-    /// conditional scope.
+    /// Wires register updates and assertions under their enclosing guards.
     fn wire_statements(
         &mut self,
         statements: &[CheckedStmt],
         resources: &mut BlockResources,
         reset: Option<BValue>,
         guard: Option<BValue>,
+        source: Option<&SourceFile>,
     ) -> Result<(), BuilderError> {
         for statement in statements {
             match statement {
+                CheckedStmt::Assert {
+                    predicate,
+                    position,
+                    label,
+                } => {
+                    let mut condition = self.expr(predicate)?;
+                    if let Some(active) = guard {
+                        let inactive = self.builder.not(active)?;
+                        condition = self.builder.or(inactive, condition)?;
+                    }
+                    if let Some(asserted) = resources.asserted_reset {
+                        condition = self.builder.or(asserted, condition)?;
+                    }
+                    let token = match resources.assertion_token {
+                        Some(previous) => previous,
+                        None => self.builder.after_all(&[])?,
+                    };
+                    resources.assertion_token = Some(self.builder.assert(
+                        token,
+                        condition,
+                        &format!("assertion failed at {}", position.location(source)),
+                        label.as_deref().unwrap_or_default(),
+                    )?);
+                }
                 CheckedStmt::Reg {
                     name,
                     ty,
@@ -994,7 +1028,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                         Some(parent) => self.builder.and(parent, condition)?,
                         None => condition,
                     };
-                    self.wire_statements(body, resources, reset, Some(active))?;
+                    self.wire_statements(body, resources, reset, Some(active), source)?;
                 }
                 CheckedStmt::Inst { .. } => {
                     // Instance outputs were made available before wiring any
@@ -1493,7 +1527,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
                 }
                 self.builder.array(self.layouts.lower(element)?, &values)
             }
-            TypedExprKind::Index { value, index } => {
+            TypedExprKind::Index { value, index, .. } => {
                 let value = self.expr(value)?;
                 let index = self.expr(index)?;
                 self.builder.array_index(value, index)

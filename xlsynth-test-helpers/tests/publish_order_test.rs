@@ -93,3 +93,65 @@ fn publish_order_is_topological_for_publish_time_dependencies() {
         violations.join("; ")
     );
 }
+
+#[test]
+fn workspace_path_dependencies_are_acyclic_including_dev_dependencies() {
+    let metadata = MetadataCommand::new().no_deps().exec().unwrap();
+    let names_by_path = metadata
+        .packages
+        .iter()
+        .map(|package| {
+            (
+                package.manifest_path.parent().unwrap().to_path_buf(),
+                package.name.to_string(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let graph = metadata
+        .packages
+        .iter()
+        .map(|package| {
+            let dependencies = package
+                .dependencies
+                .iter()
+                .filter_map(|dependency| dependency.path.as_ref())
+                .filter_map(|path| names_by_path.get(path).cloned())
+                .collect::<BTreeSet<_>>();
+            (package.name.to_string(), dependencies)
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut visited = BTreeSet::new();
+    let mut stack = Vec::new();
+    for name in graph.keys() {
+        if let Some(cycle) = dependency_cycle(name, &graph, &mut visited, &mut stack) {
+            panic!("workspace path dependency cycle: {}", cycle.join(" -> "));
+        }
+    }
+}
+
+/// Reports a cycle in normal, build, or development workspace path
+/// dependencies.
+fn dependency_cycle<'a>(
+    name: &'a str,
+    graph: &'a BTreeMap<String, BTreeSet<String>>,
+    visited: &mut BTreeSet<&'a str>,
+    stack: &mut Vec<&'a str>,
+) -> Option<Vec<&'a str>> {
+    if let Some(start) = stack.iter().position(|entry| *entry == name) {
+        let mut cycle = stack[start..].to_vec();
+        cycle.push(name);
+        return Some(cycle);
+    }
+    if !visited.insert(name) {
+        return None;
+    }
+    stack.push(name);
+    for dependency in &graph[name] {
+        if let Some(cycle) = dependency_cycle(dependency, graph, visited, stack) {
+            return Some(cycle);
+        }
+    }
+    stack.pop();
+    None
+}

@@ -10,12 +10,12 @@ use xlsynth_pir::{
 };
 
 use crate::ast::{
-    BinaryOp, ExternBlock, ExternFn, OutputCycles, Param, SourceFile, SourceSpan, StructDef, Type,
-    UnaryOp,
+    BinaryOp, ExternBlock, ExternFn, OutputCycles, Param, SourceFile, SourcePosition, SourceSpan,
+    StructDef, Type, UnaryOp,
 };
 use crate::builtin::BuiltinOp;
 use crate::bx_import::library_item;
-use crate::dslx_import::{ImportedCall, ResolvedImports};
+use crate::dslx_import::{ImportResolver, ImportedCall, ResolvedImports};
 use crate::warnings::BxWarning;
 use TypedExprKind as K;
 
@@ -29,6 +29,17 @@ pub(crate) const CONSTEXPR_PREFIX: &str = "$constexpr_";
 /// A shared match-arm let supplies an IR value on its selected path. The
 /// enclosing sequence separately retains its free names for DSLX bytecode.
 pub(super) const MATCH_LET_PREFIX: &str = "$match_let_";
+
+/// An abstract callback has a checked signature and no executable target.
+pub(super) const UNBOUND_CALLBACK: &str = "$unbound_callback";
+
+/// An abstract template only instantiates this concrete call if a required
+/// constant reaches it through a preceding binding.
+pub(super) const PENDING_FUNCTION_PREFIX: &str = "$pending_function_";
+
+/// Internal operand for a local constant whose type is known before its
+/// callback is specialized. It never appears in a concrete function.
+pub(super) const DEFERRED_CALLBACK_VALUE: &str = "$deferred_callback_value";
 
 pub(crate) fn is_constexpr_only_name(name: &str) -> bool {
     name.starts_with(CONSTEXPR_PREFIX)
@@ -265,10 +276,15 @@ pub struct CheckedBlock {
     pub output: TypedExpr,
 }
 
-/// A structural declaration or a single driver with its complete enable
-/// condition.
+/// A checked statement in a block, including guarded hardware effects.
 #[derive(Clone, Debug)]
 pub enum CheckedStmt {
+    /// A runtime assertion, enabled by the enclosing block statement guards.
+    Assert {
+        predicate: TypedExpr,
+        position: SourcePosition,
+        label: Option<String>,
+    },
     Reg {
         name: String,
         ty: Type,
@@ -493,6 +509,9 @@ pub enum TypedExprKind {
     Index {
         value: Box<TypedExpr>,
         index: Box<TypedExpr>,
+        /// All index inputs are constexpr. A helper may supply the value
+        /// after the checker first attempted to verify its bounds.
+        constant_index: bool,
     },
     ArrayUpdate {
         array: Box<TypedExpr>,
@@ -564,6 +583,7 @@ pub(super) fn bits(ty: &Type) -> Option<(bool, usize)> {
         | Type::Applied { .. }
         | Type::ParametricStruct { .. }
         | Type::TypeApplied { .. }
+        | Type::MixedApplied { .. }
         | Type::ParametricBits { .. }
         | Type::ParametricArray { .. }
         | Type::Array { .. } => None,
@@ -582,16 +602,23 @@ pub(crate) fn repr_bits(ty: &Type) -> Option<(bool, usize)> {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ConstantUse {
     Bx,
+    RegisterReset,
     Dslx,
-    Assertion,
+    /// A lexical const, type alias or const_assert! requires its declaration's
+    /// constexpr operands, including prerequisites of projected bindings.
+    Declaration,
 }
 
 impl ConstantUse {
+    pub(super) fn is_bx(self) -> bool {
+        matches!(self, Self::Bx | Self::RegisterReset)
+    }
+
     fn requires_capture(self, capture: CaptureUse) -> bool {
         match self {
-            Self::Assertion => capture.constexpr(),
+            Self::Declaration => capture.constexpr(),
             Self::Dslx => capture.runtime(false),
-            Self::Bx => false,
+            Self::Bx | Self::RegisterReset => false,
         }
     }
 }
@@ -600,6 +627,8 @@ impl ConstantUse {
 /// constant later needs a value that speculative folding deferred.
 pub(super) enum ConstantBinding {
     Known(IrValue),
+    /// An abstract callback's result can be used after specialization.
+    CallbackDependent,
     /// BX folded a selected path. DSLX may need to inspect other inputs
     /// when this let is used as a value parametric.
     Selected {
@@ -609,27 +638,50 @@ pub(super) enum ConstantBinding {
         parametric_ready: bool,
     },
     Deferred(usize),
-    /// Without a value-parametric callee in scope, an ordinary body does not
-    /// retain speculative helper calls. Assertions can still replay them.
-    AssertionDeferred(usize),
+    /// A pure call can be replayed for a reset or assertion. Ordinary
+    /// constexpr consumers can replay it in modules that retain parametric
+    /// inputs.
+    DeferredCall {
+        definition: usize,
+        parametric_inputs: bool,
+    },
 }
 
 /// A checked expression could not finish evaluating in the current context.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ConstantFailure {
     InvalidEnumCast(String),
+    ImportedCall(String),
+    /// A concrete native call is executed only during required evaluation.
+    NeedsImport,
     WorkLimit,
     Deferred(BTreeSet<usize>),
+    /// A checked call needs the callback implementation to produce a value.
+    UnboundCallback,
+    /// An operation needs a constant already deferred by the abstract body.
+    DeferredCallbackValue,
     /// An ordinary speculative fold reached a call. A value-parametric use
     /// can replay the let with the module's concrete functions available.
     NeedsFunctions,
+    PendingFunction(usize),
+}
+
+/// Helper implementations available for the current fold. Speculative folds
+/// defer native execution until the enclosing expression demands its value.
+#[derive(Default)]
+pub(super) struct ConstantCallees<'a> {
+    pub(super) local: Option<&'a mut ConstantFunctions>,
+    pub(super) imports: Option<&'a mut ImportResolver>,
 }
 
 /// Memoize concrete local function calls while evaluating an initializer or
 /// a value-parametric binding in its lexical scope.
 pub(super) struct ConstantFunctions {
     available: AvailableFunctions,
+    pub(super) pending_symbols: HashMap<usize, String>,
     values: HashMap<ConstantCall, FoldedConstant>,
+    /// Counts evaluations that reached a helper, including cache hits.
+    pub(super) calls: usize,
 }
 
 /// An evaluated value and whether a BX fold omitted DSLX constexpr work.
@@ -655,7 +707,9 @@ impl ConstantFunctions {
     pub(super) fn new(available: AvailableFunctions) -> Self {
         Self {
             available,
+            pending_symbols: HashMap::new(),
             values: HashMap::new(),
+            calls: 0,
         }
     }
 }
@@ -681,15 +735,27 @@ impl ConstantBinding {
         }
     }
 
-    pub(super) fn deferred_definition(&self, usage: ConstantUse) -> Option<usize> {
+    pub(super) fn deferred_definition(
+        &self,
+        usage: ConstantUse,
+        has_functions: bool,
+    ) -> Option<usize> {
         match self {
             Self::Deferred(index) => Some(*index),
-            Self::AssertionDeferred(index) if usage == ConstantUse::Assertion => Some(*index),
+            Self::DeferredCall {
+                definition,
+                parametric_inputs,
+            } if has_functions
+                && (*parametric_inputs
+                    || matches!(usage, ConstantUse::RegisterReset | ConstantUse::Declaration)) =>
+            {
+                Some(*definition)
+            }
             Self::Selected {
                 definition,
                 parametric_ready,
                 ..
-            } if usage == ConstantUse::Assertion
+            } if usage == ConstantUse::Declaration
                 || usage == ConstantUse::Dslx && !parametric_ready =>
             {
                 Some(*definition)
@@ -699,20 +765,23 @@ impl ConstantBinding {
     }
 
     fn read(&self, work: &mut CountedWork<'_>) -> Option<&IrValue> {
-        if let Some(index) = self.deferred_definition(work.usage) {
+        if let Some(index) = self.deferred_definition(work.usage, work.functions.is_some()) {
             work.failure = Some(ConstantFailure::Deferred(BTreeSet::from([index])));
             return None;
         }
         match self {
             Self::Known(value) => Some(value),
+            Self::CallbackDependent => {
+                work.failure = Some(ConstantFailure::DeferredCallbackValue);
+                None
+            }
             Self::Selected { value, .. } => {
                 work.needs_dslx_replay = true;
                 Some(value)
             }
-            Self::AssertionDeferred(_) => {
-                // A speculative BX fold that depends on this helper must also
-                // retain its own definition for a later assertion replay.
-                if work.usage == ConstantUse::Bx {
+            Self::DeferredCall { .. } => {
+                // Propagate the requirement through enclosing let definitions.
+                if work.usage.is_bx() {
                     work.failure = Some(ConstantFailure::NeedsFunctions);
                 }
                 None
@@ -787,6 +856,7 @@ struct CountedWork<'a> {
     failure: Option<ConstantFailure>,
     missing_local: Option<(usize, BTreeSet<usize>)>,
     functions: Option<&'a mut ConstantFunctions>,
+    imports: Option<&'a mut ImportResolver>,
 }
 
 /// Reserve room for one syntax-depth-limited expression tree at initializer
@@ -799,6 +869,50 @@ fn on_constant_stack<T>(evaluate: impl FnOnce() -> T) -> T {
 }
 
 impl CountedWork<'_> {
+    /// Keep other failures intact when an operand can wait for specialization.
+    fn take_callback_failure(&mut self) -> Option<ConstantFailure> {
+        match self.failure {
+            Some(ConstantFailure::UnboundCallback | ConstantFailure::DeferredCallbackValue) => {
+                self.failure.take()
+            }
+            _ => None,
+        }
+    }
+
+    /// When an abstract callback prevents evaluation, check the remaining
+    /// eager operands for a definite error before deferring the result.
+    fn eager_operand<'e>(
+        &mut self,
+        expr: &TypedExpr,
+        following: impl IntoIterator<Item = &'e TypedExpr>,
+        names: &ConstantScope<'_>,
+    ) -> Option<IrValue> {
+        let value = expr.constant_with_budget(names, self);
+        if value.is_some() || self.usage != ConstantUse::Declaration {
+            return value;
+        }
+        let deferred = self.take_callback_failure()?;
+        for next in following {
+            if next.constant_with_budget(names, self).is_none() {
+                self.take_callback_failure()?;
+            }
+        }
+        self.failure = Some(deferred);
+        None
+    }
+
+    fn eager_values(
+        &mut self,
+        items: &[TypedExpr],
+        names: &ConstantScope<'_>,
+    ) -> Option<Vec<IrValue>> {
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, expr)| self.eager_operand(expr, &items[i + 1..], names))
+            .collect()
+    }
+
     /// Queue the remaining unconditional lets of a selected assertion scope
     /// together. Retrying the scope once per let would rescan its whole prefix.
     fn queue_sequence_inputs(&mut self, names: &ConstantScope<'_>, operands: &[TypedExpr]) {
@@ -830,10 +944,9 @@ impl CountedWork<'_> {
             (ConstantScope::Outer(bindings), _, Some(ConstantFailure::Deferred(pending))) => {
                 for operand in operands {
                     operand.unconditional_sequence_inputs(bytecode, &mut |name, _| {
-                        if let Some(index) = bindings
-                            .get(name)
-                            .and_then(|b| b.deferred_definition(self.usage))
-                        {
+                        if let Some(index) = bindings.get(name).and_then(|b| {
+                            b.deferred_definition(self.usage, self.functions.is_some())
+                        }) {
                             pending.insert(index);
                         }
                         true
@@ -911,23 +1024,50 @@ impl CountedWork<'_> {
         args: &[TypedExpr],
         names: &ConstantScope<'_>,
     ) -> Option<IrValue> {
-        let Some(functions) = self.functions.as_ref() else {
+        if name == DEFERRED_CALLBACK_VALUE {
+            self.failure = Some(ConstantFailure::DeferredCallbackValue);
+            return None;
+        }
+        let Some(functions) = self.functions.as_mut() else {
             self.failure = Some(ConstantFailure::NeedsFunctions);
             return None;
         };
-        let function = functions.available.borrow().get(name)?.clone();
-        let args = args
-            .iter()
-            .map(|arg| arg.constant_with_budget(names, self))
-            .collect::<Option<Vec<_>>>()?;
+        functions.calls += 1;
+        if name == UNBOUND_CALLBACK {
+            // A concrete callback still needs constant arguments. Only defer
+            // the declaration when its arguments have passed that check.
+            self.eager_values(args, names)?;
+            self.failure = Some(ConstantFailure::UnboundCallback);
+            return None;
+        }
+        let symbol = if let Some(index) = name.strip_prefix(PENDING_FUNCTION_PREFIX) {
+            let index = index
+                .parse::<usize>()
+                .expect("generated pending function index");
+            let Some(symbol) = functions.pending_symbols.get(&index) else {
+                self.failure = Some(ConstantFailure::PendingFunction(index));
+                return None;
+            };
+            symbol.as_str()
+        } else {
+            name
+        };
+        let function = functions.available.borrow().get(symbol)?.clone();
+        let args = self.eager_values(args, names)?;
         self.charge(
             args.iter()
                 .fold(1usize, |work, arg| work.saturating_add(constant_work(arg))),
         )?;
         let call = ConstantCall {
-            name: name.to_owned(),
+            name: function.name.clone(),
             arguments: args,
-            usage: self.usage,
+            // Ordinary BX and reset calls share evaluation rules once the
+            // concrete arguments have crossed into the helper's lexical scope.
+            usage: if self.usage.is_bx() {
+                ConstantUse::Bx
+            } else {
+                self.usage
+            },
         };
         if let Some(cached) = self.functions.as_ref()?.values.get(&call) {
             self.needs_dslx_replay |= cached.needs_dslx_replay;
@@ -946,6 +1086,37 @@ impl CountedWork<'_> {
             },
         );
         Some(value)
+    }
+
+    /// Execute the selected pure DSLX specialization with concrete BX inputs.
+    fn imported_call(
+        &mut self,
+        id: usize,
+        args: &[TypedExpr],
+        names: &ConstantScope<'_>,
+    ) -> Option<IrValue> {
+        let args = self.eager_values(args, names)?;
+        if self.imports.is_none() {
+            self.failure = Some(ConstantFailure::NeedsImport);
+            return None;
+        }
+        if let Some(functions) = self.functions.as_mut() {
+            functions.calls += 1;
+        }
+        self.charge(
+            args.iter()
+                .fold(1usize, |sum, arg| sum.saturating_add(constant_work(arg))),
+        )?;
+        match self.imports.as_mut()?.evaluate_constant_call(id, args) {
+            Ok(value) => {
+                self.charge(constant_work(&value))?;
+                Some(value)
+            }
+            Err(error) => {
+                self.failure = Some(ConstantFailure::ImportedCall(error));
+                None
+            }
+        }
     }
 
     /// Evaluate the checked bindings and output with only the callee's
@@ -1355,6 +1526,7 @@ impl TypedExpr {
             K::Index {
                 value: left,
                 index: right,
+                ..
             }
             | K::WidthSlice {
                 value: left,
@@ -1399,9 +1571,13 @@ impl TypedExpr {
         names: &BTreeMap<String, ConstantBinding>,
         pending: &mut BTreeSet<usize>,
         usage: ConstantUse,
+        has_functions: bool,
     ) {
         self.all_inputs(false, &mut |name, _| {
-            if let Some(index) = names.get(name).and_then(|b| b.deferred_definition(usage)) {
+            if let Some(index) = names
+                .get(name)
+                .and_then(|b| b.deferred_definition(usage, has_functions))
+            {
                 pending.insert(index);
             }
             true
@@ -1425,7 +1601,12 @@ impl TypedExpr {
                 || usage.runtime(false)
                     && names
                         .get(name)
-                        .and_then(|value| value.deferred_definition(ConstantUse::Assertion))
+                        .and_then(|value| {
+                            value.deferred_definition(
+                                ConstantUse::Declaration,
+                                /* has_functions= */ true,
+                            )
+                        })
                         .is_none()
         })
     }
@@ -1458,10 +1639,10 @@ impl TypedExpr {
         remaining: &mut usize,
         replaying: bool,
         usage: ConstantUse,
-        functions: Option<&mut ConstantFunctions>,
+        callees: ConstantCallees<'_>,
         enums: &BTreeMap<String, CheckedEnum>,
     ) -> Result<Option<FoldedConstant>, ConstantFailure> {
-        let may_call = functions.is_some();
+        let may_call = callees.local.is_some() || callees.imports.is_some();
         let mut work = CountedWork {
             enums,
             remaining,
@@ -1471,7 +1652,8 @@ impl TypedExpr {
             usage,
             failure: None,
             missing_local: None,
-            functions,
+            functions: callees.local,
+            imports: callees.imports,
         };
         if replaying && work.charge(1).is_none() {
             return Err(ConstantFailure::WorkLimit);
@@ -1500,15 +1682,36 @@ impl TypedExpr {
         // DSLX emits bytecode for a constexpr match or loop with bindings for
         // all its free names, including unselected arms. A helper's parameters
         // and iteration locals already have concrete values when executed.
-        if remaining.usage != ConstantUse::Bx
+        if !remaining.usage.is_bx()
             && names.depth() == 0
             && matches!(self.kind, K::Match { .. } | K::For(_) | K::Map(_))
-            && !self.all_inputs(true, &mut |name, usage| {
-                !remaining.usage.requires_capture(usage)
-                    || remaining.charge(1).is_some() && names.read(name, remaining).is_some()
-            })
         {
-            return None;
+            let mut deferred = None;
+            let ready = self.all_inputs(true, &mut |name, usage| {
+                if !remaining.usage.requires_capture(usage) {
+                    return true;
+                }
+                if remaining.charge(1).is_none() {
+                    return false;
+                }
+                if names.read(name, remaining).is_some() {
+                    return true;
+                }
+                if let Some(failure) = remaining.take_callback_failure() {
+                    // Bytecode needs every capture, even if a preceding one
+                    // can only be evaluated after callback specialization.
+                    deferred = Some(failure);
+                    return true;
+                }
+                false
+            });
+            if !ready {
+                return None;
+            }
+            if deferred.is_some() {
+                remaining.failure = deferred;
+                return None;
+            }
         }
         let value = match &self.kind {
             K::Sequence {
@@ -1516,14 +1719,15 @@ impl TypedExpr {
                 result,
                 bytecode_only,
             } => {
-                if remaining.usage != ConstantUse::Assertion {
+                if remaining.usage != ConstantUse::Declaration {
                     remaining.needs_dslx_replay = true;
                 }
-                if remaining.usage == ConstantUse::Assertion
+                if remaining.usage == ConstantUse::Declaration
                     && (!bytecode_only || names.depth() != 0 || remaining.inside_match)
                 {
                     for (index, operand) in operands.iter().enumerate() {
-                        if operand.constant_with_budget(names, remaining).is_none() {
+                        let following = operands[index + 1..].iter().chain([result.as_ref()]);
+                        if remaining.eager_operand(operand, following, names).is_none() {
                             remaining.queue_sequence_inputs(names, &operands[index..]);
                             return None;
                         }
@@ -1546,19 +1750,13 @@ impl TypedExpr {
             K::Literal(v) => Some(v.clone()),
             K::Name(name) => Some(names.read(name, remaining)?.clone()),
             K::Tuple(fields) => Some(IrValue::Tuple(
-                fields
-                    .iter()
-                    .map(|f| f.constant_with_budget(names, remaining))
-                    .collect::<Option<_>>()?,
+                remaining.eager_values(fields, names)?.into(),
             )),
             K::Array(elements) => {
                 let Type::Array { size, .. } = &self.ty else {
                     return None;
                 };
-                let mut elements = elements
-                    .iter()
-                    .map(|e| e.constant_with_budget(names, remaining))
-                    .collect::<Option<Vec<_>>>()?;
+                let mut elements = remaining.eager_values(elements, names)?;
                 let fill = size.checked_sub(elements.len())?;
                 if fill > 0 {
                     let last = elements.last()?;
@@ -1567,14 +1765,18 @@ impl TypedExpr {
                 }
                 IrValue::make_array(&elements).ok()
             }
-            K::Index { value, index } => {
-                let array = value.constant_with_budget(names, remaining)?;
+            K::Index {
+                value,
+                index,
+                constant_index,
+            } => {
+                let array = remaining.eager_operand(value, [index.as_ref()], names)?;
                 let size = array.get_element_count().ok()?;
                 let index = index.constant_with_budget(names, remaining)?;
                 let bits = index.as_bits().ok()?;
-                let i = if names.depth() > 0 || remaining.usage != ConstantUse::Bx {
-                    // An iteration or constexpr actual can make an index
-                    // constant for the first time. Check its array bounds.
+                let i = if *constant_index || names.depth() > 0 || !remaining.usage.is_bx() {
+                    // A helper, iteration or constexpr actual can supply an
+                    // index whose bounds the checker could not yet verify.
                     ir_bits_to_usize_in_range(bits, size)?
                 } else {
                     let last = size.checked_sub(1)?;
@@ -1589,14 +1791,19 @@ impl TypedExpr {
                 index,
                 replacement,
             } => {
-                let IrValue::Array(array) = array.constant_with_budget(names, remaining)? else {
+                let IrValue::Array(array) = remaining.eager_operand(
+                    array,
+                    [index.as_ref(), replacement.as_ref()],
+                    names,
+                )?
+                else {
                     return None;
                 };
                 // DSLX constexpr evaluation requires an in-bounds update.
                 // Runtime IR handles an out-of-bounds index as a no-op.
                 let i = ir_bits_to_usize_in_range(
-                    index
-                        .constant_with_budget(names, remaining)?
+                    remaining
+                        .eager_operand(index, [replacement.as_ref()], names)?
                         .as_bits()
                         .ok()?,
                     array.elements().len(),
@@ -1607,15 +1814,12 @@ impl TypedExpr {
                 IrValue::make_array_typed(array.element_type().clone(), &elements).ok()
             }
             K::Builtin { op, args } => {
-                let args = args
-                    .iter()
-                    .map(|arg| arg.constant_with_budget(names, remaining))
-                    .collect::<Option<Vec<_>>>()?;
+                let args = remaining.eager_values(args, names)?;
                 remaining.charge(op.evaluation_work(&args))?;
                 op.evaluate(&args)
             }
             K::WidthSlice { value, start } => {
-                let value = value.constant_with_budget(names, remaining)?;
+                let value = remaining.eager_operand(value, [start.as_ref()], names)?;
                 let source = value.as_bits().ok()?;
                 let start = start.constant_with_budget(names, remaining)?;
                 let width = bits(&self.ty)?.1;
@@ -1636,7 +1840,8 @@ impl TypedExpr {
                 names.read(name, remaining)?.get_element(*index).ok()
             }
             K::Call { name, args } => remaining.call(name, args, names),
-            K::ImportedCall { .. } | K::InstanceOutput { .. } => None,
+            K::ImportedCall { id, args } => remaining.imported_call(*id, args, names),
+            K::InstanceOutput { .. } => None,
             K::Match { subject, arms } => {
                 let outer = std::mem::replace(&mut remaining.inside_match, true);
                 let result = (|| {
@@ -1681,7 +1886,7 @@ impl TypedExpr {
                 left,
                 right,
             } if matches!(self.ty, Type::Array { .. }) => {
-                let lhs = left.constant_with_budget(names, remaining)?;
+                let lhs = remaining.eager_operand(left, [right.as_ref()], names)?;
                 let rhs = right.constant_with_budget(names, remaining)?;
                 let (IrValue::Array(a), IrValue::Array(b)) = (&lhs, &rhs) else {
                     return None;
@@ -1691,7 +1896,7 @@ impl TypedExpr {
                 IrValue::make_array_typed(a.element_type().clone(), &elements).ok()
             }
             K::Binary { op, left, right } => {
-                let lhs = left.constant_with_budget(names, remaining)?;
+                let lhs = remaining.eager_operand(left, [right.as_ref()], names)?;
                 let rhs = right.constant_with_budget(names, remaining)?;
                 if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
                     return Some(IrValue::bool((lhs == rhs) == (*op == BinaryOp::Eq)));
@@ -1739,7 +1944,10 @@ impl TypedExpr {
                 Some(IrValue::Bits(result))
             }
         }?;
-        if remaining.inside_loop {
+        // A register reset can call a helper without materializing and
+        // charging every straight-line expression around it. Its returned
+        // value still consumes work, including on a cache hit.
+        if remaining.inside_loop || matches!(self.kind, K::Call { .. }) {
             remaining.charge(constant_work(&value))?;
         }
         Some(value)
@@ -1753,9 +1961,9 @@ mod tests {
     use xlsynth_pir::{IrBits, IrValue};
 
     use super::{
-        CONSTEXPR_PREFIX, CheckedBinding, CheckedStmt, ConstantBinding, ConstantFailure,
-        ConstantFunctions, ConstantUse, TEST_DISCARD_PREFIX, Type, TypedExpr, TypedExprKind,
-        body_inputs,
+        CONSTEXPR_PREFIX, CheckedBinding, CheckedStmt, ConstantBinding, ConstantCallees,
+        ConstantFailure, ConstantFunctions, ConstantUse, TEST_DISCARD_PREFIX, Type, TypedExpr,
+        TypedExprKind, body_inputs,
     };
     use crate::{check_module, parse_module};
 
@@ -1814,7 +2022,10 @@ mod tests {
                             &mut remaining,
                             true,
                             ConstantUse::Bx,
-                            Some(&mut calls),
+                            ConstantCallees {
+                                local: Some(&mut calls),
+                                imports: None
+                            },
                             &BTreeMap::new(),
                         )
                         .map(|v| v.map(|fold| fold.value)),
@@ -1903,7 +2114,7 @@ block folded(clk) -> u16 {{
                         &mut remaining,
                         false,
                         ConstantUse::Bx,
-                        None,
+                        ConstantCallees::default(),
                         &BTreeMap::new()
                     )
                     .map(|v| v.map(|fold| fold.value)),
@@ -1927,7 +2138,7 @@ block folded(clk) -> u16 {{
                 &mut remaining,
                 false,
                 ConstantUse::Bx,
-                None,
+                ConstantCallees::default(),
                 &BTreeMap::new(),
             ),
             Err(ConstantFailure::WorkLimit),
@@ -1960,7 +2171,7 @@ fn pack(x: uN[256][2]) -> uN[512] { x as uN[512] }
                     &mut remaining,
                     false,
                     ConstantUse::Bx,
-                    None,
+                    ConstantCallees::default(),
                     &BTreeMap::new(),
                 ),
                 Err(ConstantFailure::WorkLimit),
@@ -1997,7 +2208,7 @@ block folded(clk, rows: u8[2][2]) -> u8[2][2] {
                     &mut ample,
                     false,
                     ConstantUse::Bx,
-                    None,
+                    ConstantCallees::default(),
                     &BTreeMap::new()
                 )
                 .map(|v| v.map(|fold| fold.value)),
@@ -2010,7 +2221,7 @@ block folded(clk, rows: u8[2][2]) -> u8[2][2] {
                 &mut limited,
                 false,
                 ConstantUse::Bx,
-                None,
+                ConstantCallees::default(),
                 &BTreeMap::new()
             ),
             Err(ConstantFailure::WorkLimit)
@@ -2188,7 +2399,7 @@ block wide_capture(clk, data: Payload) -> bool {
                     &mut remaining,
                     false,
                     ConstantUse::Bx,
-                    None,
+                    ConstantCallees::default(),
                     &BTreeMap::new()
                 ),
                 Err(ConstantFailure::WorkLimit),

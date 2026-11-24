@@ -140,8 +140,8 @@ impl<'m> WarningCollector<'m> {
         self.splats.entry(owner).or_default().insert(position);
     }
 
-    pub(crate) fn record_block(&mut self, name: &'m str, requires_hardware: bool) {
-        *self.hardware.entry(name).or_default() |= requires_hardware;
+    pub(crate) fn record_block(&mut self, name: &'m str, has_block_only_behavior: bool) {
+        *self.hardware.entry(name).or_default() |= has_block_only_behavior;
     }
 
     /// Include warnings from unused imports and uninstantiated block
@@ -273,7 +273,7 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                 // Compile-time predicates cannot instantiate hardware.
                 continue;
             }
-            SourceNode::Statement(Stmt::Reg { .. } | Stmt::Write { .. }) => {
+            SourceNode::Statement(Stmt::Assert { .. } | Stmt::Reg { .. } | Stmt::Write { .. }) => {
                 return TemplateHardware::Known(true);
             }
             SourceNode::Statement(Stmt::Let { name, .. } | Stmt::Wire { name, .. }) => {
@@ -340,6 +340,21 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn runtime_assertions_exempt_both_concrete_and_uninstantiated_blocks() -> Result<(), String> {
+        let source = r#"
+block checked(x: bool) -> bool { assert!(x); x }
+block checked_template<T>(x: T, en: bool) -> T { if en { assert!(en); } x }
+block value_only(x: bool) -> bool { const_assert!(true); x }
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        let warnings = checked.warnings();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].declaration, "value_only");
+        assert_eq!(warnings[0].kind, super::BxWarningKind::CombinationalBlock);
+        Ok(())
+    }
 
     #[test]
     fn structural_children_exempt_their_parent_even_in_a_zero_trip_unroll() -> Result<(), String> {

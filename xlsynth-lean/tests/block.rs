@@ -2,7 +2,10 @@
 
 //! Public block emission contracts, including port and sequential semantics.
 
-use std::path::{Path, PathBuf};
+#[path = "common/block_project.rs"]
+mod block_project;
+
+use block_project::compile_project;
 
 use xlsynth_lean::LeanModuleName;
 use xlsynth_lean::block::{emit, select_block, write_to};
@@ -19,51 +22,66 @@ use xlsynth_pir::{
 
 const BLOCK: &str = include_str!("fixtures/block_step.ir");
 
-fn compile_lean(root: &Path, imports: &[&Path], source: &Path, object: &Path) {
-    let lean = std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable");
-    let output = std::process::Command::new(lean)
-        .current_dir(root)
-        .env_remove("LEAN_SYSROOT")
-        .env("LEAN_PATH", std::env::join_paths(imports).unwrap())
-        .arg("-o")
-        .arg(object)
-        .arg(source)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "Lean failed to compile {}:\n{}\n{}",
-        source.display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+/// Elaborate the shared renderer golden and execute its call and array-update
+/// guards.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn shared_helpers_and_caller_operands_elaborate() {
+    let directory = tempfile::tempdir().unwrap();
+    let client = directory.path().join("Example.lean");
+    std::fs::write(&client, include_str!("goldens/shared_helpers.lean")).unwrap();
+    compile_project(directory.path(), [client]).unwrap();
 }
 
-fn compile_project(root: &Path, sources: impl IntoIterator<Item = PathBuf>) {
-    // Compile the repository module once, outside the model output directory.
-    let support = tempfile::tempdir().unwrap();
-    let library = Path::new(env!("CARGO_MANIFEST_DIR")).join("lean");
-    let object = support.path().join("XlsynthLean/IR.olean");
-    std::fs::create_dir(object.parent().unwrap()).unwrap();
-    compile_lean(&library, &[], &library.join("XlsynthLean/IR.lean"), &object);
-    for source in sources {
-        compile_lean(
-            root,
-            &[root, support.path()],
-            &source,
-            &source.with_extension("olean"),
-        );
-    }
-}
-
+/// Compiles the top block as `XlsBlock`, then checks a client that imports it.
 fn check_block(package: &Package, client: &str) {
+    check_block_in(package, "XlsBlock", client);
+}
+
+/// Compile the named block module and a separate Lean client that imports it.
+fn check_block_in(package: &Package, module: &str, client: &str) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    let name = LeanModuleName::new("XlsBlock").unwrap();
+    let name = LeanModuleName::new(module).unwrap();
     let block = write_to(package, package.get_top_block().unwrap(), &name, root).unwrap();
     let proof = root.join("Client.lean");
-    std::fs::write(&proof, format!("import XlsBlock\n{client}")).unwrap();
-    compile_project(root, [block, proof]);
+    std::fs::write(&proof, format!("import {module}\n{client}")).unwrap();
+    compile_project(root, [block, proof]).unwrap();
+}
+
+// Verifies: Each indexed dimension contributes one Lean vector operation.
+// Catches: Repeating earlier array reads in a fallback or nested update.
+#[test]
+fn multidimensional_array_operations_emit_each_level_once() {
+    let rank = 10;
+    let array_type = format!("bits[8]{}", "[1]".repeat(rank));
+    let indices = vec!["i"; rank].join(", ");
+    let package = Parser::new(&format!(
+        "package arrays
+top block arrays(a: {array_type}, i: bits[1], v: bits[8], read: bits[8], written: {array_type}) {{
+  a: {array_type} = input_port(name=a, id=1)
+  i: bits[1] = input_port(name=i, id=2)
+  v: bits[8] = input_port(name=v, id=3)
+  element: bits[8] = array_index(a, indices=[{indices}], id=4)
+  updated: {array_type} = array_update(a, v, indices=[{indices}], id=5)
+  read: () = output_port(element, name=read, id=6)
+  written: () = output_port(updated, name=written, id=7)
+}}"
+    ))
+    .parse_and_validate_package()
+    .unwrap();
+    let source = emit(&package, package.get_top_block().unwrap()).unwrap();
+    let read = source
+        .lines()
+        .find(|line| line.contains("_element :"))
+        .unwrap();
+    let write = source
+        .lines()
+        .find(|line| line.contains("_updated :"))
+        .unwrap();
+    assert_eq!(read.matches("IR.arrayIndex").count(), rank);
+    assert_eq!(write.matches("IR.arrayIndex").count(), 0);
+    assert_eq!(write.matches("IR.arrayModify").count(), rank);
 }
 
 // Verifies: Raw emission preserves old outputs, simultaneous writes, and
@@ -111,6 +129,79 @@ def sample (rst en : BitVec 1) :=
 example : sample 1 1 = (2, 3, 2, true) := by decide
 example : sample 0 1 = (2, 1, 2, true) := by decide
 example : sample 1 0 = (2, 2, 2, false) := by decide
+"#,
+    );
+}
+
+// Verifies: Distinct callbacks reach a nested helper and the next block
+// segment. Catches: Hard-wired raw calls or swapped callbacks across a segment
+// cut.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn raw_block_can_supply_a_different_nested_callee() {
+    use std::fmt::Write;
+
+    let mut ir = String::from(
+        r#"package calls
+fn inc(x: bits[8] id=1) -> bits[8] {
+  one: bits[8] = literal(value=1, id=2)
+  ret plus_one: bits[8] = add(x, one, id=3)
+}
+fn twice(x: bits[8] id=4) -> bits[8] {
+  first: bits[8] = invoke(x, to_apply=inc, id=5)
+  ret second: bits[8] = invoke(first, to_apply=inc, id=6)
+}
+top block pipeline(x: bits[8], out: bits[8]) {
+  x: bits[8] = input_port(name=x, id=7)
+  v0: bits[8] = invoke(x, to_apply=twice, id=8)
+"#,
+    );
+    // An even number of complements is the identity and crosses the 160-op cut.
+    for i in 1..=160 {
+        writeln!(ir, "  v{i}: bits[8] = not(v{}, id={})", i - 1, i + 8).unwrap();
+    }
+    ir.push_str("  result: bits[8] = invoke(v160, to_apply=inc, id=169)\n  out: () = output_port(result, name=out, id=170)\n}");
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    check_block(
+        &package,
+        r#"
+open XlsBlock
+#guard (eval {} { x := 10 }).output.out == 13
+#guard (evalWith (Bodies.twice (fun n => n + 3)) (fun n => n * 2) {} { x := 10 }).output.out == 32
+"#,
+    );
+}
+
+// Verifies: A disconnected assertion tracks its input across a cut.
+// Catches: Dropping a live predicate because no output or register uses it.
+#[cfg(feature = "lean-tests")]
+#[test]
+fn segmented_raw_eval_keeps_disconnected_assertion_activation() {
+    use std::fmt::Write;
+
+    let mut ir = String::from(
+        r#"package flags
+top block flags(flag: bits[1], v0: bits[8], out: bits[8]) {
+  flag: bits[1] = input_port(name=flag, id=1)
+  v0: bits[8] = input_port(name=v0, id=2)
+  active: bits[1] = not(flag, id=3)
+  tok: token = literal(value=token, id=4)
+  checked: token = assert(tok, active, message="flag set", label="flag", id=5)
+"#,
+    );
+    // Only the assertion uses active. Its public result needs the predicate
+    // after the independent data path has crossed the cut.
+    for i in 1..=160 {
+        writeln!(ir, "  v{i}: bits[8] = not(v{}, id={})", i - 1, i + 5).unwrap();
+    }
+    ir.push_str("  out: () = output_port(v160, name=out, id=166)\n}");
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    check_block(
+        &package,
+        r#"
+open XlsBlock
+#guard (assertions {} {flag := 0, v0 := 0}).checked
+#guard !(assertions {} {flag := 1, v0 := 0}).checked
 "#,
     );
 }
@@ -208,51 +299,48 @@ open XlsBlock
     );
 }
 
-// Each field becomes a projection in the Lean structure's namespace.
-// Report the owning field when Lean would generate the same declaration.
+// Verifies: Dotted-module clients can use source names on all four records.
+// Catches: Fields hiding record types or calls missing the renamed helper.
+#[cfg(feature = "lean-tests")]
 #[test]
-fn raw_emission_rejects_field_names_used_by_lean() {
-    let check = |ir: String, owner: &str, field: &str| {
-        let package = Parser::new(&ir).parse_and_validate_package().unwrap();
-        let error = emit(&package, package.get_top_block().unwrap()).unwrap_err();
-        assert_eq!(
-            error.root_cause().to_string(),
-            format!("cannot emit {owner}.{field}: Lean generates a declaration with this name")
-        );
-    };
-    for field in [
-        "rec",
-        "recOn",
-        "casesOn",
-        "noConfusion",
-        "noConfusionType",
-        "ctorIdx",
-        "_sizeOf_1",
-        "_sizeOf_inst",
-    ] {
-        let ir = format!(
-            "package ports\n\ntop block ports({field}: bits[1], out: bits[1]) {{
-  {field}: bits[1] = input_port(name={field}, id=1)
-  out: () = output_port({field}, name=out, id=2)
-}}"
-        );
-        check(ir, "Input", field);
-    }
-    check(
-        BLOCK
-            .replace("reg b(", "reg rec(")
-            .replace("register=b", "register=rec"),
-        "State",
-        "rec",
+fn raw_projections_keep_lean_generated_member_names() {
+    let package = Parser::new(
+        r#"package ports
+fn _root_(x: bits[1] id=10) -> bits[1] {
+  ret inverted: bits[1] = not(x, id=11)
+}
+top block ports(clk: clock, Input: bits[1], recOn: bits[1], rec: bits[1]) {
+  #![reset(port="recOn", asynchronous=false, active_low=false)]
+  reg noConfusion(bits[1], reset_value=1)
+  reg b(bits[1])
+  Input: bits[1] = input_port(name=Input, id=2)
+  recOn: bits[1] = input_port(name=recOn, id=1)
+  en: bits[1] = invoke(Input, to_apply=_root_, id=12)
+  current: bits[1] = register_read(register=noConfusion, id=3)
+  old_b: bits[1] = register_read(register=b, id=9)
+  tok: token = literal(value=token, id=4)
+  ctorIdx: token = assert(tok, en, message="enabled", label="enabled", id=5)
+  set_current: () = register_write(en, register=noConfusion, reset=recOn, id=6)
+  save_old: () = register_write(current, register=b, id=7)
+  rec: () = output_port(current, name=rec, id=8)
+}"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    check_block_in(
+        &package,
+        "Generated.Counter",
+        r#"
+open Generated.Counter
+example (rst en : BitVec 1) :
+    let x : Input := ⟨en, rst⟩
+    (x.recOn, x.Input) = (rst, en) := rfl
+example (q : State) (x : Input) : (observe q x).rec = q.noConfusion := rfl
+example (q : State) (x : Input) : (step q x).b = q.noConfusion := rfl
+example (q : State) (x : Input) : (eval q x).assertions.ctorIdx = (BitVec.not x.Input == 1) := rfl
+example (q : State) (x : Input) : (reset q x).next.noConfusion = 1 := rfl
+"#,
     );
-    check(
-        BLOCK
-            .replace("out:", "rec:")
-            .replace("name=out", "name=rec"),
-        "Output",
-        "rec",
-    );
-    check(BLOCK.replace("checked:", "rec:"), "Assertions", "rec");
 }
 
 // A port named mk must remain distinct from the constructor and from ports
@@ -289,6 +377,8 @@ example (q : State) (x : Input) : (observe q x).result = x.mk_ := rfl
     );
 }
 
+// Verifies: Lean and PIR combine both selected tuple cases field by field.
+// Catches: Dropping a selected case or reversing the generated case order.
 #[cfg(feature = "lean-tests")]
 #[test]
 fn tuple_one_hot_select_agrees_with_pir_for_functions_and_blocks() {
@@ -384,7 +474,8 @@ example : selected 3 (1, 2, ()) (4, 8, ()) = (5, 10, ()) := by decide
             root.join("Generated/Swap.lean"),
             client,
         ],
-    );
+    )
+    .unwrap();
 }
 
 // Verifies: Named, top, and sole-block selection, including invalid choices.
@@ -425,6 +516,27 @@ fn emission_rejects_block_from_another_package() {
 
 // Negative test: Unsupported resets and operations return contextual emission
 // errors.
+#[test]
+fn emission_rejects_an_open_inout_port() {
+    let package = Parser::new(
+        r#"package pads
+top block cell(io: bits[1]) {
+  ext_inout_net isolated(bits[1])
+  contact: () = ext_inout_port(name=io, net=isolated, id=1)
+}
+block ordinary() {}
+"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    let error = emit(&package, package.get_top_block().unwrap()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Lean block emission: ext_inout_net 'isolated' in 'cell' requires block-to-Verilog codegen"
+    );
+    emit(&package, package.get_block("ordinary").unwrap()).unwrap();
+}
+
 #[test]
 fn emission_rejects_asynchronous_reset_and_unsupported_operations() {
     let asynchronous = Parser::new(&BLOCK.replace("asynchronous=false", "asynchronous=true"))

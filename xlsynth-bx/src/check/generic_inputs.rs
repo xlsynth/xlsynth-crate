@@ -3,24 +3,23 @@
 //! Infer a template's type arguments across all of its data inputs.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
 use crate::ast::{Expr, Param, Type};
-use crate::infer_literal::has_concrete_element_type;
-use crate::typed::{TypedExpr, TypedExprKind as K};
+use crate::typed::{BoundParametricValue, TypedExpr, TypedExprKind as K};
 
-use super::generic_blocks::Bindings;
+use super::generic_blocks::{Bindings, BlockPortTypes};
 use super::struct_parametrics::StructWitness;
 use super::{
-    BlockTemplate, BodyChecker, BoundCallback, BranchSelector, MAX_ELABORATION_DEPTH,
+    BlockParametricArguments, BlockTemplate, BodyChecker, BranchSelector, MAX_ELABORATION_DEPTH,
     MAX_TYPE_SIZE, MatchSelector, has_aggregate_literal,
 };
 
-/// Concrete types, callbacks, and checked port values for one structural call.
+/// Parametric bindings, dimension-resolved ports, and checked inputs of one
+/// block call.
 pub(super) struct BlockArguments<'m> {
-    pub(super) bindings: Bindings,
-    pub(super) callbacks: Vec<Rc<BoundCallback<'m>>>,
-    pub(super) values: Vec<TypedExpr>,
+    pub(super) parametrics: BlockParametricArguments<'m>,
+    pub(super) concrete_ports: Option<BlockPortTypes>,
+    pub(super) inputs: Vec<TypedExpr>,
 }
 
 /// A call argument after its explicitly typed operands have supplied bindings.
@@ -46,8 +45,8 @@ pub(super) enum Input<'e> {
     },
 }
 
-/// A function may have already checked this operand to infer a dimension.
-/// Blocks enter inference with their nominal types and dimensions resolved.
+/// A resolved port can check its concrete shape during inference. A source
+/// annotation may still need dimensions, with a checked operand as a witness.
 pub(super) enum InputPattern {
     Block,
     Function(Option<TypedExpr>),
@@ -117,31 +116,33 @@ impl InputPattern {
 }
 
 impl<'e> Input<'e> {
-    /// Collect partially typed constructor arguments for each unbound
-    /// parameter.
-    fn collect_constructors<'a>(
+    /// Map callbacks supply a checked element directly and have no source
+    /// operand.
+    pub(super) fn source(&self) -> Option<&'e Expr> {
+        match self {
+            Self::Checked { expr, .. } => *expr,
+            Self::Contextual { expr, .. }
+            | Self::Aggregate { expr, .. }
+            | Self::Branches { expr, .. } => Some(expr),
+        }
+    }
+
+    /// Visit an argument's leaves in source order with their corresponding
+    /// formal patterns. Rows and conditional results share their pattern.
+    pub(super) fn visit_leaves<'a>(
         &'a mut self,
         formal: &'a Type,
-        bindings: &Bindings,
-        groups: &mut BTreeMap<&'a str, Vec<(&'e Expr, &'a mut Self)>>,
-    ) {
-        if let (Type::Named(name), Self::Contextual { expr, .. }) = (formal, &*self)
-            && bindings.declares(name)
-            && bindings.get(name).is_none()
-            && (matches!(expr, Expr::Tuple(_)) || expr.unannotated_array().is_some())
-        {
-            groups.entry(name).or_default().push((*expr, self));
-            return;
-        }
+        visit: &mut impl FnMut(&'a Type, &'a mut Self) -> Result<(), String>,
+    ) -> Result<(), String> {
         match (formal, self) {
             (ty, Self::Branches { results, .. }) => {
                 for result in results {
-                    result.collect_constructors(ty, bindings, groups);
+                    result.visit_leaves(ty, visit)?;
                 }
             }
             (Type::Tuple(types), Self::Aggregate { members, .. }) => {
                 for (member, ty) in members.iter_mut().zip(types) {
-                    member.collect_constructors(ty, bindings, groups);
+                    member.visit_leaves(ty, visit)?;
                 }
             }
             (
@@ -149,11 +150,12 @@ impl<'e> Input<'e> {
                 Self::Aggregate { members, .. },
             ) => {
                 for member in members {
-                    member.collect_constructors(element, bindings, groups);
+                    member.visit_leaves(element, visit)?;
                 }
             }
-            _ => { /* Already checked values and fixed formals need no joint inference. */ }
+            (ty, input) => visit(ty, input)?,
         }
+        Ok(())
     }
 }
 
@@ -165,9 +167,10 @@ impl<'m> BodyChecker<'_, 'm> {
         template: &BlockTemplate<'m>,
         args: &[Expr],
         callbacks: &[String],
+        supplied: Vec<BoundParametricValue>,
     ) -> Result<BlockArguments<'m>, String> {
         let target = &template.block.name;
-        let formals = &template.params;
+        let formals = &template.ports.params;
         if formals.len() != args.len() {
             return Err(format!(
                 "block '{target}' expects {} data arguments, got {}",
@@ -191,6 +194,7 @@ impl<'m> BodyChecker<'_, 'm> {
                 template,
                 prepared.iter().map(|arg| arg.as_ref()),
                 callbacks,
+                supplied,
             )
         });
         self.checking_callback_inputs = previous;
@@ -204,17 +208,33 @@ impl<'m> BodyChecker<'_, 'm> {
         template: &BlockTemplate<'m>,
         args: impl Iterator<Item = &'e Expr>,
         actuals: &[String],
+        supplied: Vec<BoundParametricValue>,
     ) -> Result<BlockArguments<'m>, String> {
         let target = template.block.name.as_str();
-        let formals = &template.params;
+        // Source patterns retain the distinction between a type formal and
+        // a nominal type introduced by expanding a module alias.
+        let dependent = template.port_binding_work != 0;
+        let formals = if dependent {
+            &template.block.params
+        } else {
+            &template.ports.params
+        };
         let type_params = &template.block.type_params;
         let input_error =
             |p: &Param, e: String| format!("input '{}', call to block '{target}': {e}", p.name);
         let mut bindings = Bindings::new(type_params);
         let mut inputs = Vec::with_capacity(formals.len());
+        self.charge_expansion("block port dimensions", template.port_binding_work)?;
         for (p, arg) in formals.iter().zip(args) {
+            // An argument of type T[N] can supply T before a default computes N
+            // from that type. The concrete port below checks the array length.
+            let pattern = if dependent {
+                InputPattern::Function(None)
+            } else {
+                InputPattern::Block
+            };
             inputs.push(
-                self.infer_input(&p.ty, arg, &mut bindings, InputPattern::Block)
+                self.infer_input(&p.ty, arg, &mut bindings, pattern)
                     .map_err(|e| input_error(p, e))?,
             );
         }
@@ -244,35 +264,60 @@ impl<'m> BodyChecker<'_, 'm> {
                 ));
             }
         }
-        let values = inputs
+        let values = template.apply_value_defaults(self, supplied, &bindings)?;
+        let concrete_ports = template.specialize_dependent_ports(self, &bindings, &values)?;
+        let inputs = inputs
             .into_iter()
-            .zip(formals)
+            .zip(
+                concrete_ports
+                    .as_ref()
+                    .map_or(formals, |ports| &ports.params),
+            )
             .map(|(input, p)| {
-                let ty = self
-                    .bound_block_type(&p.ty, &bindings)
-                    .map_err(|e| input_error(p, e))?;
-                self.finish_input(input, &ty).map_err(|e| input_error(p, e))
+                let checked = if concrete_ports.is_some() {
+                    self.finish_input(input, &p.ty)
+                } else {
+                    self.bound_block_type(target, &p.ty, &bindings)
+                        .and_then(|ty| self.finish_input(input, &ty))
+                };
+                checked.map_err(|e| input_error(p, e))
             })
             .collect::<Result<_, _>>()?;
         Ok(BlockArguments {
-            bindings,
-            callbacks,
-            values,
+            parametrics: BlockParametricArguments {
+                bindings,
+                callbacks,
+                values,
+            },
+            concrete_ports,
+            inputs,
         })
     }
 
     /// Combine evidence from complementary tuple fields or array elements
     /// across arguments that share a type variable.
-    pub(super) fn infer_input_groups(
+    pub(super) fn infer_input_groups<'p>(
         &mut self,
         inputs: &mut [Input<'_>],
-        formals: &[Param],
+        formals: impl IntoIterator<Item = &'p Param>,
         bindings: &mut Bindings,
         callee: &str,
     ) -> Result<(), String> {
         let mut groups = BTreeMap::new();
         for (input, p) in inputs.iter_mut().zip(formals) {
-            input.collect_constructors(&p.ty, bindings, &mut groups);
+            input.visit_leaves(&p.ty, &mut |ty, input| {
+                if let (Type::Named(name), Input::Contextual { expr, .. }) = (ty, &*input)
+                    && bindings.declares(name)
+                    && bindings.get(name).is_none()
+                    && (matches!(expr, Expr::Tuple(_)) || expr.unannotated_array().is_some())
+                {
+                    groups
+                        .entry(name.as_str())
+                        .or_insert_with(Vec::new)
+                        .push((*expr, input));
+                }
+                Ok(())
+            })?;
         }
         for (name, constructors) in groups {
             let exprs: Vec<_> = constructors.iter().map(|(expr, _)| *expr).collect();
@@ -304,7 +349,7 @@ impl<'m> BodyChecker<'_, 'm> {
 
     /// Unify corresponding fields against concrete siblings. A type
     /// parameter needs a typed witness. A dimension can use minimum widths.
-    fn infer_constructors(
+    pub(super) fn infer_constructors(
         &mut self,
         items: &[&Expr],
         infer_literal_widths: bool,
@@ -380,7 +425,7 @@ impl<'m> BodyChecker<'_, 'm> {
         }
         let mut deferred = false;
         for (index, item) in items.iter().enumerate() {
-            if has_concrete_element_type(item, self.common_widths())? {
+            if self.has_concrete_element_type(item)? {
                 let anchor = match self.type_struct_witness(item)? {
                     StructWitness::Other => self.expr(item, None)?,
                     StructWitness::Deferred => {
@@ -416,8 +461,7 @@ impl<'m> BodyChecker<'_, 'm> {
         let partial_constructor = branches
             && !matches!(pattern, InputPattern::Function(Some(_)))
             && (self.contains_type_struct_constructor(arg)
-                || (has_aggregate_literal(arg)
-                    && !has_concrete_element_type(arg, self.common_widths())?));
+                || (has_aggregate_literal(arg) && !self.has_concrete_element_type(arg)?));
         if branches
             && !partial_constructor
             && matches!(pattern, InputPattern::Function(None))
@@ -542,7 +586,9 @@ impl<'m> BodyChecker<'_, 'm> {
             {
                 return Ok(pattern.contextual(arg));
             }
-            (Type::TypeApplied { .. }, _) if !bindings.has_unbound_variable(formal) => {
+            (Type::TypeApplied { .. } | Type::MixedApplied { .. }, _)
+                if !bindings.has_unbound_variable(formal) =>
+            {
                 return Ok(pattern.contextual(arg));
             }
             _ => {
@@ -554,7 +600,7 @@ impl<'m> BodyChecker<'_, 'm> {
                     // from another argument or from the constructor group.
                     return Ok(pattern.contextual(arg));
                 }
-                if !has_concrete_element_type(arg, self.common_widths())? {
+                if !self.has_concrete_element_type(arg)? {
                     return Ok(pattern.contextual(arg));
                 }
                 let checked = match &mut pattern {

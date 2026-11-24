@@ -40,21 +40,29 @@ pub fn check_function_type_parametrics(data: &[u8]) -> Result<(), String> {
         2 => (format!("{out_bits}[2]"), "[v,!v]"),
         _ => (out_bits.clone(), "v"),
     };
-    let helpers = format!(
-        r#"
+    let helpers = |factory: &str, zero: &str| {
+        let condition = if flags & 1 == 0 {
+            format!("{zero} != (a.value as bool)")
+        } else {
+            format!("(a.value as bool) != {zero}")
+        };
+        format!(
+            r#"
 struct Left {{ value:{left_bits} }}
 struct Right {{ value:{right_bits} }}
 struct Output {{ value:{out_bits}, flag:bool }}
+{factory}
 fn left(x:{left_bits})->Left {{ Left {{ value:x }} }}
 fn right(x:{right_bits})->{right} {{ {pack_right} }}
 fn combine(a:Left,b:{right})->{out} {{
     let v = (a.value as {out_bits}) - (({read_right}) as {out_bits});
-    {pack_out}
+    if {condition} {{ {pack_out} }} else {{ cleared() }}
 }}
 fn wrong(a:(Left,Left),b:{right})->{out} {{ combine(a.0,b) }}
 fn take_left(a:Left,_b:{right})->Left {{ a }}
 "#
-    );
+        )
+    };
     let selected = if mutation == 5 { "wrong" } else { "combine" };
     let actual_len = if mutation == 6 { len + 1 } else { len };
     let formal_len = if mutation == 7 { len + 1 } else { len };
@@ -71,8 +79,9 @@ fn take_left(a:Left,_b:{right})->Left {{ a }}
         format!("{selected},{formal_len}")
     };
     let bx_body = format!("{bindings} (zip_with<{actuals}>(xs,ys), zip_with<take_left>(xs,ys))");
+    let bx_helpers = helpers("fn cleared<T>()->T { zero!() }", "zero!()");
     let bx = format!(
-        "{helpers}\nfn id<T>(x:T)->T {{ x }}\n{ZIP_WITH}\n{}",
+        "{bx_helpers}\nfn id<T>(x:T)->T {{ x }}\n{ZIP_WITH}\n{}",
         bx_source(&params, &result, &bx_body)
     );
     // The reference spells out one call per element. Its concrete parameter
@@ -81,8 +90,12 @@ fn take_left(a:Left,_b:{right})->Left {{ a }}
         .map(|i| format!("{selected}(xs[u32:{i}],ys[u32:{i}])"))
         .collect::<Vec<_>>()
         .join(", ");
+    let dslx_helpers = helpers(
+        &format!("fn cleared()->{out} {{ zero!<{out}>() }}"),
+        "zero!<bool>()",
+    );
     let native = format!(
-        "#![feature(generics)]\n{helpers}\nfn id<T:type>(x:T)->T {{ x }}\n\
+        "#![feature(generics)]\n{dslx_helpers}\nfn id<T:type>(x:T)->T {{ x }}\n\
          fn zip_ref(xs:Left[{formal_len}],ys:{right}[{formal_len}])->{out}[{formal_len}] {{ [{elements}] }}"
     );
     compare_bx_program(

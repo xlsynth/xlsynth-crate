@@ -44,6 +44,12 @@ pub struct CIrFunctionJit {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+/// Opaque interpreter runtime that borrows an IR package and its procs.
+#[repr(C)]
+pub struct CIrProcRuntime {
+    _private: [u8; 0],
+}
+
 /// Opaque context for the libxls AOT C API.
 ///
 /// The bindings are retained so `xlsynth-sys` covers libxls APIs that are not
@@ -581,7 +587,7 @@ unsafe extern "C" {
     pub fn xls_value_from_bits_owned(bits: *mut CIrBits) -> *mut CIrValue;
     pub fn xls_value_flatten_to_bits(value: *const CIrValue) -> *mut CIrBits;
 
-    pub fn xls_value_eq(value: *const CIrValue, value: *const CIrValue) -> bool;
+    pub fn xls_value_eq(lhs: *const CIrValue, rhs: *const CIrValue) -> bool;
     pub fn xls_parse_ir_package(
         ir: *const std::os::raw::c_char,
         filename: *const std::os::raw::c_char,
@@ -767,6 +773,41 @@ unsafe extern "C" {
     pub fn xls_verify_package(
         p: *mut CIrPackage,
         error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+
+    /// The package must outlive the runtime. Free the runtime before rewriting
+    /// its IR. Use a separate package for `xls_schedule_and_codegen_package`
+    /// while the runtime is live.
+    pub fn xls_proc_runtime_create(
+        package: *mut CIrPackage,
+        error_out: *mut *mut std::os::raw::c_char,
+        runtime_out: *mut *mut CIrProcRuntime,
+    ) -> bool;
+    pub fn xls_proc_runtime_free(runtime: *mut CIrProcRuntime);
+    pub fn xls_proc_runtime_tick(
+        runtime: *mut CIrProcRuntime,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+    /// Transfers the latest tick's messages to the caller for release with
+    /// `xls_trace_messages_free`.
+    pub fn xls_proc_runtime_take_trace_messages(
+        runtime: *mut CIrProcRuntime,
+        messages_out: *mut *mut CTraceMessage,
+        count_out: *mut libc::size_t,
+    );
+    pub fn xls_proc_runtime_write(
+        runtime: *mut CIrProcRuntime,
+        channel_name: *const std::os::raw::c_char,
+        value: *const CIrValue,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+    /// Returns an owned value through `value_out`, or a null pointer for an
+    /// empty channel.
+    pub fn xls_proc_runtime_try_read(
+        runtime: *mut CIrProcRuntime,
+        channel_name: *const std::os::raw::c_char,
+        error_out: *mut *mut std::os::raw::c_char,
+        value_out: *mut *mut CIrValue,
     ) -> bool;
 
     pub fn xls_make_function_jit(
@@ -1226,6 +1267,8 @@ unsafe extern "C" {
         struct_def: *const CDslxStructDef,
     ) -> *mut std::os::raw::c_char;
 
+    pub fn xls_dslx_struct_def_get_module(struct_def: *mut CDslxStructDef) -> *mut CDslxModule;
+
     pub fn xls_dslx_struct_def_is_parametric(struct_def: *const CDslxStructDef) -> bool;
 
     pub fn xls_dslx_struct_def_get_parametric_binding_count(
@@ -1413,6 +1456,7 @@ unsafe extern "C" {
 
     pub fn xls_dslx_type_is_enum(type_: *const CDslxType) -> bool;
     pub fn xls_dslx_type_is_struct(type_: *const CDslxType) -> bool;
+    pub fn xls_dslx_type_is_tuple(type_: *const CDslxType) -> bool;
     pub fn xls_dslx_type_is_array(type_: *const CDslxType) -> bool;
 
     pub fn xls_dslx_type_dim_is_parametric(dim: *const CDslxTypeDim) -> bool;
@@ -1431,9 +1475,25 @@ unsafe extern "C" {
     pub fn xls_dslx_type_get_enum_def(ty: *const CDslxType) -> *mut CDslxEnumDef;
 
     pub fn xls_dslx_type_get_struct_def(ty: *const CDslxType) -> *mut CDslxStructDef;
+    /// Returns a caller-owned environment for release with
+    /// `xls_dslx_parametric_env_free`.
+    pub fn xls_dslx_type_get_struct_parametric_env(
+        ty: *const CDslxType,
+        error_out: *mut *mut std::os::raw::c_char,
+        env_out: *mut *mut CDslxParametricEnv,
+    ) -> bool;
     pub fn xls_dslx_type_struct_get_member_count(ty: *const CDslxType) -> i64;
     pub fn xls_dslx_type_struct_get_member_type(ty: *const CDslxType, index: i64)
     -> *mut CDslxType;
+
+    /// Requires a tuple type.
+    pub fn xls_dslx_type_tuple_get_member_count(ty: *const CDslxType) -> i64;
+    /// Requires a tuple type and an index in `0..member_count`. The returned
+    /// member type is borrowed from the tuple.
+    pub fn xls_dslx_type_tuple_get_member_type(
+        ty: *const CDslxType,
+        index: i64,
+    ) -> *const CDslxType;
 
     pub fn xls_dslx_type_array_get_element_type(ty: *const CDslxType) -> *mut CDslxType;
     pub fn xls_dslx_type_array_get_size(ty: *const CDslxType) -> *mut CDslxTypeDim;

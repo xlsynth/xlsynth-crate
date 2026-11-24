@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use xlsynth_pir::block_eval::BlockEvaluator;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
+use xlsynth_pir::block_transition::lower_block_transition;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
-use xlsynth_pir::desugar_extensions::desugar_extensions_in_package;
-use xlsynth_pir::ir::{Block, MemberType, NodePayload, Package, PackageMember, Type};
+use xlsynth_pir::desugar_extensions::{
+    ExtensionEmitMode, desugar_extensions_in_package, emit_package_with_extension_mode,
+};
+use xlsynth_pir::ir::{
+    Block, InstantiationKind, MemberType, NodePayload, OpaqueExternPort, OpaqueExternPortKind,
+    Package, PackageMember, Type,
+};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_rebase_ids::package_max_emitted_node_id;
@@ -681,8 +688,76 @@ fn extern_finalization_rejects_renamed_unconnected_parameters_with_identical_typ
 }
 
 #[test]
+fn extern_block_module_name_defaults_to_the_model_name_in_canonical_ir() {
+    let canonical = r#"package external_module_name
+
+block model() {
+}
+
+top block parent() {
+  instantiation u(block=model, kind=behavioral_extern_block)
+}
+"#;
+    let explicit = canonical.replace(
+        "block=model, kind=behavioral_extern_block",
+        "block=model, module_name=model, kind=behavioral_extern_block",
+    );
+    for source in [canonical, explicit.as_str()] {
+        let package = Parser::new(source).parse_and_verify_package().unwrap();
+        assert_eq!(package.to_string(), canonical);
+    }
+}
+
+#[test]
+fn extern_block_builder_keeps_named_parameter_overrides() {
+    let mut package = BlockBuilder::new("model")
+        .build_package("extern_models")
+        .unwrap();
+    let model = package.get_block("model").unwrap();
+    let mut parent = BlockBuilder::new("wrapper");
+    for (name, value) in [("bad-name", "42"), ("WIDTH", " ")] {
+        assert!(
+            parent
+                .instantiate_extern_block_with_parameters(
+                    "u",
+                    model,
+                    "rtl",
+                    BTreeMap::from([(name.to_string(), value.to_string())]),
+                )
+                .is_err()
+        );
+    }
+    parent
+        .instantiate_extern_block_with_parameters(
+            "u",
+            model,
+            "rtl",
+            BTreeMap::from([
+                ("WIDTH".to_string(), "42".to_string()),
+                ("BAR".to_string(), "0".to_string()),
+            ]),
+        )
+        .unwrap();
+    parent.build_into_package(&mut package).unwrap();
+    package.set_top_block("wrapper").unwrap();
+    assert_eq!(
+        package.to_string(),
+        r#"package extern_models
+
+block model() {
+}
+
+top block wrapper() {
+  instantiation u(block=model, module_name=rtl, parameters={BAR:"0", WIDTH:"42"}, kind=behavioral_extern_block)
+}
+"#
+    );
+    assert_pir_package(&package);
+}
+
+#[test]
 fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() {
-    for registered in [false, true] {
+    for (registered, external) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut child = BlockBuilder::new("child");
         let input = child.input_port("data", Type::Bits(8)).unwrap();
         let value = if registered {
@@ -702,9 +777,13 @@ fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() 
         if registered {
             parent.clock_port("clk").unwrap();
         }
-        let instance = parent
-            .instantiate("child_instance", package.get_block("child").unwrap())
-            .unwrap();
+        let child = package.get_block("child").unwrap();
+        let instance = if external {
+            parent.instantiate_extern_block("child_instance", child, "rtl_register")
+        } else {
+            parent.instantiate("child_instance", child)
+        }
+        .unwrap();
         let output = parent.instantiation_output(instance, "result").unwrap();
         parent
             .instantiation_input(instance, "data", output)
@@ -715,7 +794,23 @@ fn instance_feedback_distinguishes_combinational_cycles_from_registered_state() 
         if registered {
             built.unwrap();
             package.set_top_block("parent").unwrap();
-            assert_standard_package(&package);
+            if external {
+                assert_pir_package(&package);
+                let text = package.to_string();
+                let parsed = Parser::new(&text).parse_and_validate_package().unwrap();
+                let instance = &parsed.get_top_block().unwrap().instantiations[0];
+                assert_eq!(instance.block, "child");
+                assert_eq!(
+                    instance.kind,
+                    InstantiationKind::BehavioralExternBlock {
+                        module_name: "rtl_register".to_string(),
+                        parameters: BTreeMap::new(),
+                        input_casts: BTreeMap::new(),
+                    }
+                );
+            } else {
+                assert_standard_package(&package);
+            }
         } else {
             assert!(built.is_err());
             assert_eq!(package.to_string(), before);
@@ -890,4 +985,344 @@ fn stage_keyword_is_rejected_without_poisoning_block_resources() {
             .collect::<Vec<_>>(),
         (1..=4).map(|id| id + maximum).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn opaque_builder_preserves_named_parameter_overrides() {
+    let mut builder = BlockBuilder::new("wrapper");
+    for (name, value) in [("bad-name", "42"), ("WIDTH", " ")] {
+        assert!(
+            builder
+                .instantiate_opaque_extern_block_with_parameters(
+                    "u",
+                    "external_cell",
+                    Vec::new(),
+                    BTreeMap::from([(name.to_string(), value.to_string())]),
+                )
+                .is_err()
+        );
+    }
+    let parameters = BTreeMap::from([("WIDTH".to_string(), "16".to_string())]);
+    builder
+        .instantiate_opaque_extern_block_with_parameters(
+            "u",
+            "external_cell",
+            Vec::new(),
+            parameters.clone(),
+        )
+        .unwrap();
+    let package = builder.build_package("opaque").unwrap();
+    let text = package.to_string();
+    let parsed = Parser::new(&text).parse_and_verify_package().unwrap();
+    assert_eq!(
+        parsed.get_top_block().unwrap().instantiations[0].kind,
+        InstantiationKind::OpaqueExternBlock {
+            ports: Vec::new(),
+            parameters,
+            input_casts: BTreeMap::new(),
+        }
+    );
+}
+
+#[test]
+fn builder_records_input_casts_for_both_external_block_kinds() {
+    let model = leaf_block();
+    let mut package = Package {
+        name: "extern_casts".to_string(),
+        file_table: xlsynth_pir::ir::FileTable::new(),
+        members: vec![PackageMember::Block(model.clone())],
+        top: None,
+    };
+    let mut builder = BlockBuilder::new("wrapper");
+    let behavioral = builder
+        .instantiate_extern_block("behavioral", &model, "model_rtl")
+        .unwrap();
+    let opaque = builder
+        .instantiate_opaque_extern_block(
+            "opaque",
+            "opaque_rtl",
+            [
+                ("x", OpaqueExternPortKind::Input(Type::Bits(8))),
+                ("y", OpaqueExternPortKind::Output(Type::Bits(8))),
+            ]
+            .into_iter()
+            .map(|(name, kind)| OpaqueExternPort {
+                name: name.to_string(),
+                kind,
+            })
+            .collect(),
+        )
+        .unwrap();
+
+    let mut other = BlockBuilder::new("other");
+    let internal = other.instantiate("internal", &model).unwrap();
+    assert_eq!(
+        builder.set_instantiation_input_cast(internal, "x", "mode_t"),
+        Err(BuilderError::ForeignInstantiation)
+    );
+    assert!(
+        other
+            .set_instantiation_input_cast(internal, "x", "mode_t")
+            .is_err()
+    );
+
+    let value = builder.input_port("value", Type::Bits(8)).unwrap();
+    for (instance, output_name, cast) in [
+        (behavioral, "modeled_result", "mode_t"),
+        (opaque, "opaque_result", "pkg::mode_t"),
+    ] {
+        assert!(
+            builder
+                .set_instantiation_input_cast(instance, "y", cast)
+                .is_err()
+        );
+        assert!(
+            builder
+                .set_instantiation_input_cast(instance, "x", "pkg::")
+                .is_err()
+        );
+        builder
+            .set_instantiation_input_cast(instance, "x", cast)
+            .unwrap();
+        assert!(
+            builder
+                .set_instantiation_input_cast(instance, "x", "other_t")
+                .is_err()
+        );
+        builder.instantiation_input(instance, "x", value).unwrap();
+        let result = builder.instantiation_output(instance, "y").unwrap();
+        builder.output_port(output_name, result).unwrap();
+    }
+
+    builder.build_into_package(&mut package).unwrap();
+    package.set_top_block("wrapper").unwrap();
+    assert_pir_package(&package);
+    let emitted = package.to_string();
+    let parsed = Parser::new(&emitted).parse_and_verify_package().unwrap();
+    let block = parsed.get_top_block().unwrap();
+    for (instance, cast) in block.instantiations.iter().zip(["mode_t", "pkg::mode_t"]) {
+        let input_casts = match &instance.kind {
+            InstantiationKind::BehavioralExternBlock { input_casts, .. }
+            | InstantiationKind::OpaqueExternBlock { input_casts, .. } => input_casts,
+            unexpected => panic!("expected external block instance, got {unexpected:?}"),
+        };
+        assert_eq!(
+            input_casts,
+            &BTreeMap::from([("x".to_string(), cast.to_string())])
+        );
+    }
+}
+
+#[test]
+fn opaque_builder_connects_typed_pins_without_an_executable_child() {
+    let mut builder = BlockBuilder::new("wrapper");
+    let bad_interface = vec![
+        OpaqueExternPort {
+            name: "same".to_string(),
+            kind: OpaqueExternPortKind::Input(Type::Bits(1)),
+        },
+        OpaqueExternPort {
+            name: "same".to_string(),
+            kind: OpaqueExternPortKind::Output(Type::Bits(1)),
+        },
+    ];
+    assert_eq!(
+        builder.instantiate_opaque_extern_block("u", "external_cell", bad_interface),
+        Err(BuilderError::InvalidOperation(
+            "duplicate opaque extern port 'same'".to_string()
+        ))
+    );
+    let ports = [
+        ("clk_i", OpaqueExternPortKind::Clock),
+        ("data", OpaqueExternPortKind::Input(Type::Bits(1))),
+        ("result", OpaqueExternPortKind::Output(Type::Bits(1))),
+        ("left", OpaqueExternPortKind::Inout(Type::Bits(1))),
+        ("right", OpaqueExternPortKind::Inout(Type::Bits(1))),
+    ]
+    .into_iter()
+    .map(|(name, kind)| OpaqueExternPort {
+        name: name.to_string(),
+        kind,
+    })
+    .collect();
+    let instance = builder
+        .instantiate_opaque_extern_block("u", "external_cell", ports)
+        .unwrap();
+    builder.clock_port("clk").unwrap();
+    let result = builder.instantiation_output(instance, "result").unwrap();
+    assert_eq!(builder.get_type(result).unwrap(), &Type::Bits(1));
+    builder
+        .instantiation_input(instance, "data", result)
+        .unwrap();
+    builder.output_port("observed", result).unwrap();
+
+    let left = builder
+        .declare_inout_net("left_net", Type::Bits(1))
+        .unwrap();
+    let right = builder
+        .declare_inout_net("right_net", Type::Bits(1))
+        .unwrap();
+    builder.bind_inout_net(instance, "left", left).unwrap();
+    builder.bind_inout_net(instance, "right", right).unwrap();
+    // No connection is inferred between the two opaque pins.
+    let read = builder.ext_inout_read(right).unwrap();
+    builder.ext_inout_drive(left, read, result).unwrap();
+
+    let package = builder.build_package("opaque").unwrap();
+    assert_eq!(package.members.len(), 1);
+    assert_pir_package(&package);
+}
+
+#[test]
+fn inout_builder_preserves_aggregate_ports_and_rejects_invalid_connections() {
+    let ty = Type::Tuple(vec![Box::new(Type::Bits(128)), Box::new(Type::Bits(3))]);
+    let mut cell = BlockBuilder::new("cell");
+    let contact = cell.declare_inout_net("contact", ty.clone()).unwrap();
+    let pin = cell.ext_inout_port("pad", ty.clone(), contact).unwrap();
+    cell.set_port_sv_type(pin, Some("pkg::pad_t")).unwrap();
+    let sense = cell.ext_inout_read(contact).unwrap();
+    cell.output_port("observed", sense).unwrap();
+    let mut package = cell.build_package("pads").unwrap();
+    let child = package.get_block("cell").unwrap();
+    let port = child.get_inout_port("pad").unwrap();
+    assert_eq!(child.port_type(port), &ty);
+    assert_eq!(child.get_node_ty(port), &Type::nil());
+    assert!(
+        matches!(&child.get_node(port).payload, NodePayload::ExtInoutPort { sv_type: Some(sv), .. } if sv == "pkg::pad_t")
+    );
+
+    let mut parent = BlockBuilder::new("parent");
+    let data = parent.input_port("data", ty.clone()).unwrap();
+    let oe = parent.input_port("oe", Type::Bits(1)).unwrap();
+    let bus = parent.declare_inout_net("bus", ty.clone()).unwrap();
+    assert!(parent.ext_inout_port("io", ty.clone(), contact).is_err());
+    assert!(parent.ext_inout_port("io", Type::Bits(131), bus).is_err());
+    parent.ext_inout_port("io", ty, bus).unwrap();
+    assert!(parent.ext_inout_drive(bus, data, data).is_err());
+    assert!(parent.ext_inout_drive(bus, oe, oe).is_err());
+    parent.ext_inout_drive(bus, data, oe).unwrap();
+    assert!(parent.ext_inout_drive(bus, data, oe).is_err());
+    let instance = parent.instantiate("u", child).unwrap();
+    let observed = parent.instantiation_output(instance, "observed").unwrap();
+    parent.output_port("rx", observed).unwrap();
+    assert!(parent.bind_inout_net(instance, "pad", contact).is_err());
+    parent.bind_inout_net(instance, "pad", bus).unwrap();
+    assert!(parent.bind_inout_net(instance, "pad", bus).is_err());
+    parent.build_into_package(&mut package).unwrap();
+    assert_pir_package(&package);
+}
+
+#[test]
+fn open_inout_keeps_its_interface_and_is_rejected_by_two_state_backends() {
+    let mut leaf = BlockBuilder::new("leaf");
+    let ty = Type::new_array(Type::Bits(8), 2);
+    let pin = leaf.declare_inout_net("pin", ty.clone()).unwrap();
+    let open = leaf.ext_inout_port("pad", ty.clone(), pin).unwrap();
+    leaf.set_port_sv_type(open, Some("pkg::lanes")).unwrap();
+    let mut package = leaf.build_package("pins").unwrap();
+    let child = package.get_block("leaf").unwrap();
+    assert_eq!(child.inout_nets.len(), 1);
+    assert!(package.uses_pir_extensions());
+    let port = child.get_inout_port("pad").unwrap();
+    assert_eq!(child.port_type(port), &ty);
+    assert!(
+        matches!(&child.get_node(port).payload, NodePayload::ExtInoutPort { net, sv_type: Some(sv), .. } if net == "pin" && sv == "pkg::lanes")
+    );
+    assert_pir_package(&package);
+    let mut parent = BlockBuilder::new("parent");
+    let instance = parent.instantiate("u", child).unwrap();
+    let private = parent.declare_inout_net("bus", ty).unwrap();
+    parent.bind_inout_net(instance, "pad", private).unwrap();
+    parent.build_into_package(&mut package).unwrap();
+    for name in ["leaf", "parent"] {
+        let error = BlockEvaluator::prepare(&package, name)
+            .err()
+            .expect("inout evaluation");
+        assert!(error.to_string().contains("inout"), "{error}");
+        let error = combinational_block_to_fn(package.get_block(name).unwrap()).unwrap_err();
+        assert!(error.contains("inout"), "{error}");
+        let error = lower_block_transition(&package, name)
+            .err()
+            .expect("inout transition projection");
+        assert!(error.contains("inout"), "{error}");
+    }
+    for mode in [
+        ExtensionEmitMode::Desugared,
+        ExtensionEmitMode::AsFfiFunction,
+    ] {
+        let error = emit_package_with_extension_mode(&package, mode).unwrap_err();
+        assert!(error.to_string().contains("inout"), "{error}");
+    }
+}
+
+#[test]
+fn inout_net_builder_shares_private_wires_and_preserves_public_aliases() {
+    let mut leaf = BlockBuilder::new("leaf");
+    let ty = Type::Bits(8);
+    let pin = leaf.declare_inout_net("pin", ty.clone()).unwrap();
+    leaf.ext_inout_port("a", ty.clone(), pin).unwrap();
+    assert!(leaf.ext_inout_port("a", ty.clone(), pin).is_err());
+    leaf.ext_inout_port("b", ty.clone(), pin).unwrap();
+    let mut package = leaf.build_package("nets").unwrap();
+    let child = package.get_block("leaf").unwrap();
+    assert_eq!(
+        child
+            .inout_ports()
+            .map(|port| child.port_name(port))
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    let mut builder = BlockBuilder::new("host");
+    let data = builder.input_port("bus", ty.clone()).unwrap();
+    let oe = builder.input_port("oe", Type::Bits(1)).unwrap();
+    let bus = builder.declare_inout_net("bus", ty.clone()).unwrap();
+    assert!(builder.declare_inout_net("bus", ty.clone()).is_err());
+    let spare = builder.declare_inout_net("spare", ty.clone()).unwrap();
+    builder.ext_inout_port("external", ty, spare).unwrap();
+    for name in ["left", "right"] {
+        let instance = builder.instantiate(name, child).unwrap();
+        builder.bind_inout_net(instance, "a", bus).unwrap();
+        builder.bind_inout_net(instance, "b", spare).unwrap();
+    }
+    builder.ext_inout_drive(bus, data, oe).unwrap();
+    let read = builder.ext_inout_read(spare).unwrap();
+    builder.output_port("sample", read).unwrap();
+    builder.build_into_package(&mut package).unwrap();
+    assert_pir_package(&package);
+}
+
+#[test]
+fn unobserved_private_net_read_is_unsupported_even_without_public_ports() {
+    let mut builder = BlockBuilder::new("probe");
+    let bus = builder.declare_inout_net("bus", Type::Bits(8)).unwrap();
+    builder.ext_inout_read(bus).unwrap();
+    let package = builder.build_package("pins").unwrap();
+    assert!(package.uses_pir_extensions());
+    let block = package.get_block("probe").unwrap();
+    assert!(block.ports.is_empty());
+    let diagnostic = "ext_inout_net 'bus' in 'probe'";
+    let error = BlockEvaluator::prepare(&package, "probe")
+        .err()
+        .expect("private net evaluation");
+    assert!(error.to_string().contains(diagnostic), "{error}");
+    assert!(
+        combinational_block_to_fn(block)
+            .unwrap_err()
+            .contains(diagnostic)
+    );
+    let transition_error = lower_block_transition(&package, &block.name)
+        .err()
+        .expect("transition projection must reject a private net");
+    assert!(transition_error.contains(diagnostic), "{transition_error}");
+    for mode in [
+        ExtensionEmitMode::Desugared,
+        ExtensionEmitMode::AsFfiFunction,
+    ] {
+        assert!(
+            emit_package_with_extension_mode(&package, mode)
+                .unwrap_err()
+                .to_string()
+                .contains(diagnostic)
+        );
+    }
 }

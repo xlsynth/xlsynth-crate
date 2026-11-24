@@ -269,7 +269,7 @@ Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_parame
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_function_type_parametrics.rs
 
-Generates calls to a pure BX zip function over arrays with independently chosen element and result types. Inferred lengths, explicit lengths, named generic identity maps, and callbacks returning records, tuples, arrays, or bits exercise type binding and specialization reuse. The target checks acceptance against concrete DSLX signatures and compares BX IR with unrolled DSLX calls in compiled IR and concrete evaluation. It catches misbound nominal types, mismatched lengths, and incorrect callback results or element order.
+Generates calls to a pure BX zip function over arrays with independently chosen element and result types. Inferred lengths, explicit lengths, named generic identity maps, and callbacks returning records, tuples, arrays, or bits exercise type binding and specialization reuse. The generated callback compares an inferred zero with a typed operand in either order and can return an all-zero value through a result-inferred BX factory. The DSLX reference supplies the concrete types to `zero!`. The target checks acceptance against concrete DSLX signatures and compares BX IR with unrolled DSLX calls in compiled IR and concrete evaluation. It catches misbound nominal types, mismatched lengths, and incorrect callback results or element order.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_type_parametrics --sanitizer none`.
 
@@ -312,6 +312,21 @@ mismatch reports both generated programs.
 
 Run from `xlsynth-bx` with `XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_clocked_test`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_runtime_assert.rs
+
+Compares the first failing edge of an ordinary BX block's guarded `assert!`
+in PIR and Vastly with the pinned DSLX interpreter on the same trace. The
+DSLX test checks the predicate against its own pre-edge register state and
+then applies reset or an enabled write. Each edge has a distinct DSLX
+assertion source line. The target
+varies the explicit assertion label, comparison, input data, guard, register
+load, reset value, and reset polarity. On the first failing edge, both BX
+backends must report the generated label and its source file, line, and column.
+This catches lost or altered labels, skipped or spurious assertions, and
+failures sampled on the wrong edge.
+
+Run from `xlsynth-bx` with `XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_runtime_assert`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_pure_test.rs
 
 Runs identical `#[test] fn` source through the BX test runner and the pinned
@@ -343,6 +358,12 @@ For let-bound `ceillog2` predicates the target compares BX IR with concrete DSLX
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_const_assert -- -max_len=14 -len_control=0`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_local_declarations.rs
+
+Generates function-local constants and type aliases in nested blocks and conditional branches. Cases vary lexical shadowing, constexpr lets, alias chains, signed and unsigned widths, aggregate types, and successive value and type parameter bindings. For each accepted case the BX block returns results from both the local function and a concrete function with its declarations hoisted to module scope under fresh names. Compiled DSLX IR and concrete DSLX calls evaluate the local function on the same inputs and supply the expected value for both BX results. Rejection cases check runtime-dependent initializers and dimensions, mismatched annotations, forward references, and references outside a declaration's scope.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_local_declarations -- -max_len=13 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_constants.rs
 
 Generates module constants with dependent scalar expressions, nested aggregates, and calls to earlier pure functions. BX blocks and local functions read them in expressions, named match patterns, map callbacks, loop bounds, and slice widths. Constants also set element signedness, bit widths, and array lengths in annotations. Counted traversals use the same length constant as the array they index. The target compares BX and pinned DSLX acceptance, including shadowing, forward references, duplicate definitions, builtin name collisions, and invalid dimension types. It checks every constant's name, declaration order, concrete type, and computed value against DSLX metadata, including signedness and width inside tuples and arrays. It compares block results on shared inputs against both compiled DSLX IR and concrete DSLX calls.
@@ -351,7 +372,7 @@ Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_module_constant
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_imported_constants.rs
 
-Compares BX qualified and member imports of native DSLX constants with pinned DSLX typechecking, constexpr execution, and compiled IR. Two DSLX modules expose same-named constants with distinct values, including signed and unsigned words from zero to 129 bits, arrays, enums, records, and nested tuples. The dependent module computes new constants from the first module's values and pure functions. BX blocks read native constants, import public constants re-exported by a BX library, or call an intermediate BX function. Consumers exercise named match patterns, type dimensions, local shadowing, private nominal types, and rejection of private or missing names. Calls with record constants that have identical fields but distinct value parameters test specialization identity. For aggregates containing empty arrays, the target compares scalar projections against DSLX constexpr execution because the pinned IR converter cannot represent empty array values. The DSLX reference uses qualified names because its experimental member-import syntax permits private constants.
+Compares BX qualified and member imports of native DSLX constants with pinned DSLX typechecking, constexpr execution, and compiled IR. Two DSLX modules expose same-named constants with distinct values, including signed and unsigned words from zero to 129 bits, arrays, enums, records, and nested tuples. The dependent module computes new constants from the first module's values and pure functions. BX blocks read native constants, import public constants re-exported by a BX library, or call an intermediate BX function. Consumers exercise named match patterns, type dimensions, local shadowing, private nominal types, and rejection of private or missing names. Calls with record constants that have identical fields but distinct value parameters test specialization identity. For aggregates containing empty arrays, the target compares scalar projections against DSLX constexpr execution because the pinned IR converter cannot represent empty array values. The DSLX reference reads same-named constants through qualified imports of both modules.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_imported_constants`.
 
@@ -380,11 +401,17 @@ Generates DSLX structs with two value parameters and two specializations that sh
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_imported_struct_parametrics --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_mixed_struct_parametrics.rs
+
+Compares mixed type and value parameters on native BX structs with the same generic structs in pinned DSLX using `#![feature(generics)]`. It varies declaration order, positional constructor prefixes, type and length inference from array fields, and a phantom value with a dependent default. The phantom can have the bound payload type `T`, with signed and unsigned widths from 1 through 129, an explicit bit pattern or the default `zero!<T>()`. Repeated calls and struct updates return both payload data and inferred parameters, exposing lost bindings when specialized layouts coincide. Rejection cases cover swapped argument kinds, excess arguments, conflicting field types and assignments between incompatible specializations. Accepted programs run on the same inputs through BX Block IR, native DSLX IR and DSLX constant evaluation.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_mixed_struct_parametrics -- -max_len=14 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_struct_parametrics.rs
 
 Generates native BX and DSLX struct templates with scalar and array fields. Cases vary explicit and inferred arguments, derived defaults, nested symbolic applications, widths inferred from unsized fields, and `xN[S][N]` signedness with signed or unsigned width parameters. Signed arguments vary decimal, hexadecimal, and binary spellings at the sign bit and beyond the declared width. Phantom parameters distinguish instances with identical fields using enum members or bit patterns that can differ only above bit 63. Nested records forward values between signed, unsigned, and boolean formals and check whether each value fits the destination. Some BX cases use turbofish for the same applications spelled with plain angle brackets in DSLX. Rejected programs exercise incompatible specializations, wrong nominal values, conflicting field types, and extra arguments. The target compares source acceptance and checks projected data and inferred bindings against both compiled DSLX IR and concrete DSLX calls.
 
-DSLX v0.62.0 forwards nonnegative values from sources wider than 64 bits as hexadecimal literals, allowing the destination's sign bit to turn a positive value negative. For that overflow case the reference requires a constexpr `checked_cast` to check BX's value-preserving rule. For tuple-, array-, and struct-valued parameters, which the pinned DSLX typechecker cannot specialize on structs, the target compares BX results to DSLX functions that take those same constants as ordinary arguments.
+For tuple-, array-, and struct-valued parameters, which the pinned DSLX typechecker cannot specialize on structs, the target compares BX results to DSLX functions that take those same constants as ordinary arguments.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_struct_parametrics --sanitizer none`.
 

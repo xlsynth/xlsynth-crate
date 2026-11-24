@@ -1744,7 +1744,7 @@ dslx_stdlib_path = "{}"
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     assert!(stdout.contains(
         "fn __std__popcount(x: bits[32] id=1) -> bits[32] {
-  ret x: bits[32] = param(name=x, id=1)
+  ret x: bits[32] = param(name=x, id=1, pos=[(0,0,16)])
 }"
     ))
 }
@@ -9335,7 +9335,7 @@ fn add1(x: u8) -> u8 { x + u8:1 }
 
 #[quickcheck] fn qc_increment_changes(x: u8) -> bool {
   let y = add1(x);
-  assert!(y != x, "increment differs");
+  assert!(y != x, "increment_differs");
   (y > x) || (x == u8:255)
 }
 "#;
@@ -9970,7 +9970,7 @@ fn test_dslx_equiv_default_semantics_matches_toolchain(solver: &str) {
 
     let lhs_dslx = r#"
 fn main(x: u32) -> u32 {
-  assert!(false, "lhs failure");
+  assert!(false, "lhs_failure");
   x
 }
 "#;
@@ -10028,7 +10028,7 @@ fn test_prove_quickcheck_default_semantics_matches_toolchain(solver: &str) {
 
     let dslx_source = r#"
 fn always_fail() -> bool {
-  assert!(false, "lhs failure");
+  assert!(false, "lhs_failure");
   true
 }
 
@@ -12858,7 +12858,6 @@ fn test_prover_first_with_timeout_and_success() {
 }
 
 #[test]
-#[cfg(feature = "unstable-dslx-specialize")]
 fn test_dslx_specialize_basic() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -13578,7 +13577,6 @@ fn test_aig2ir_ir_equiv_roundtrip_from_ir2g8r_interesting_signatures_aiger_out()
 }
 
 #[test]
-#[cfg(feature = "unstable-dslx-specialize")]
 fn test_dslx_specialize_parametric_top_binding() {
     let _ = env_logger::builder().is_test(true).try_init();
 

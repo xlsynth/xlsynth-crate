@@ -48,7 +48,7 @@ Functions and blocks can call these builtins directly.
 | Encoding and selection | `encode`, `decode<T>`, `one_hot`, `one_hot_sel`, `priority_sel`, `gate!` |
 | Extension and multiplication | `signex`, `widening_cast<T>`, `checked_cast<T>`, `smulp`, `umulp` |
 | Arrays | `array_rev`, `array_size`, `array_slice`, `zip`, `update`, `map` |
-| Typed values and shape queries | `zero!<T>()`, `all_ones!<T>()`, `bit_count<T>()`, `element_count<T>()` |
+| Typed values and shape queries | `zero!()`, `zero!<T>()`, `all_ones!<T>()`, `bit_count<T>()`, `element_count<T>()` |
 | Compile-time values | `ceillog2`, `configured_value_or` |
 
 ```text
@@ -155,9 +155,11 @@ BX evaluates pure value expressions and calls to earlier local functions,
 including value-parametric specializations, within its compile-time work limit.
 Evaluation follows the dependencies of the result. For example, an
 out-of-bounds access in an unused helper binding can
-go unevaluated in BX even when DSLX reports a constexpr error. Calls to imported
-DSLX functions and extern functions require runtime evaluation, including when
-reached through a local helper.
+go unevaluated in BX even when DSLX reports a constexpr error. Module constants
+and register initializers can also call public, pure DSLX functions with
+compile-time arguments. For example, after `use config;`, a block can write
+`reg q: u8 = config::initial_value();`. DSLX evaluates the imported helper
+using its own constexpr rules. Extern calls require runtime evaluation.
 
 ### Compile-time assertions
 
@@ -187,8 +189,46 @@ A successful assertion emits no hardware.
 BX can evaluate a counted loop with constant inputs directly in an assertion.
 For a match with constant inputs it executes the selected arm, so an invalid
 array read in a helper called only by an untaken arm does not fail the
-assertion. Pinned DSLX v0.62.0 can reject both forms in a direct predicate,
+assertion. The DSLX typechecker can reject both forms in a direct predicate,
 even when it accepts the same expression inside a constexpr helper.
+
+### Runtime assertions in blocks
+
+Write `assert!(predicate, "label");` in an ordinary block to check a
+`bool` computed from inputs, registers, or local values. The optional label
+names the assertion in Block IR and generated SystemVerilog. Choose a name
+unique within the block, such as `reserved_payload`. It must start with an
+ASCII letter or underscore and contain only ASCII letters, digits, and
+underscores. SystemVerilog keywords are reserved.
+You can also write `assert!(predicate);`. Failures report the BX line and column
+and include the source filename when available.
+
+```text
+block capture(clk, valid: bool, payload: u8) -> u8 {
+    reg q: u8 = u8:0;
+    if valid {
+        assert!(payload != u8:255, "reserved_payload");
+        q := payload;
+    }
+    q
+}
+```
+
+On a rising edge, `capture` checks the incoming payload only when `valid`
+is true and reset is inactive. Predicates that read a register see its
+pre-edge value. BX emits a native Block IR assertion. In SystemVerilog, a
+clocked block uses `assert property`, and a clockless block uses `assert final`
+in `always_comb` so its signals can settle. The generated checks skip unknown predicates
+and are excluded when `SYNTHESIS` is defined.
+
+The stock XLS v0.63.0 emitter also reserves the module name and names it
+generates for internal signals, such as `xs_unflattened` for an array port
+named `xs`. Using one of those as a label works with `block2sv` but can fail
+with the stock emitter.
+
+Inside a clocked `bx-test` harness, `tick!()` checks assertions in its
+flattened DUT, including child blocks. An assertion written directly in the
+test body executes when the test reaches that statement.
 
 ### Constants in concrete dimensions
 
@@ -205,10 +245,9 @@ fn sum(xs: uN[WIDTH][LANES]) -> uN[WIDTH] {
 
 Widths can also appear in `bits[WIDTH]`, `sN[WIDTH]`, and
 `xN[SIGNED][WIDTH]`. Use a `bool` or `u1` constant for `SIGNED`. For a
-computed width or length, declare the expression as a module constant, then
-use its name in the type. A public BX or DSLX library constant can be qualified, as
-in `u8[packet::LANES]`. Width slices and value-parametric functions also
-accept dimension expressions.
+computed width or length, use a constexpr expression directly, as in
+`uN[config::width()]`, or name it once with `const WIDTH = config::width();`.
+A public BX or DSLX library constant can be qualified, as in `u8[packet::LANES]`.
 
 ## Module-level type aliases
 
@@ -296,8 +335,7 @@ in the block body.
 ### Type parameters on structs
 
 Declare a type parameter with `<T>` or `<T: type>`. A type application such as
-`FlowOut<Packet>` supplies a type for each parameter. Type parameters and value
-parametrics belong to separate struct declarations.
+`FlowOut<Packet>` supplies a type for each parameter. A struct can interleave type parameters and value parametrics.
 
 ```text
 struct FlowOut<T> { pop_valid: bool, pop_data: T }
@@ -327,14 +365,35 @@ Each specialization exposes `pop_valid` and `pop_data` as named output ports.
 Here `pop_data` is one port of type `Packet`. A caller can read its fields with
 expressions such as `stage.pop_data.tag`.
 
+### Mixed type and value parameters
+
+Use a type parameter for an element's type and a value parametric for its
+count. Explicit arguments follow declaration order, including when a value
+parameter comes before a type parameter.
+
+```text
+struct Lanes<T, N: u32> { data: T[N], valid: bool }
+
+fn make<T, N: u32>(data: T[N]) -> Lanes<T, N> {
+    Lanes { data, valid: true }
+}
+```
+
+For `data: u16[4]`, the constructor infers `Lanes<u16, 4>`. You can
+supply the arguments directly with `Lanes::<u16, 4> { data, valid: true }`
+or supply a prefix with `Lanes<u16> { data, valid: true }`. A value
+parameter's type or default can use earlier bindings, as in
+`struct Stamp<N: u32, T, Init: T> { data: T[N] }`. Every binding
+participates in type identity, even when it does not appear in a field.
+
 ### Struct updates
 
 Use `..base` at the end of a struct literal to copy fields that the literal
 doesn't specify. Place `..base` after any explicit fields, with no trailing
 comma. The base expression is evaluated once and must have the same nominal
-struct type as the literal. The base can supply omitted value parametrics or
-infer a struct's type parameters when the entire argument list is omitted.
-Explicit arguments must agree with its specialization.
+struct type as the literal. The base can supply omitted type and value
+parameters, including the suffix of a mixed argument list. Explicit arguments
+must agree with its specialization.
 
 When the literal supplies every field explicitly, BX emits
 `useless_struct_splat` at `..`. To remove the splat, spell out any parametric
@@ -351,6 +410,36 @@ fn invalidate<T>(previous: FlowOut<T>) -> FlowOut<T> {
 Write `fn name(parameters) -> ResultType { ... }` or `pub fn` at module scope. Function signatures can include bits, structs, tuples, and arrays. In function type annotations, both `(u8)` and `(u8,)` mean a one-element tuple. In a value expression, write `(x,)` to construct that tuple.
 
 Inside a function, `let` can bind a name or destructure a tuple, as in `let (data, valid) = packet;`. Braced expressions and `if` arms can introduce their own local bindings. The final expression supplies the result. A function that returns `()` may omit the result annotation and end with a semicolon or an empty body.
+
+Use `const NAME = expression;` or `const NAME: Type = expression;` inside a
+function to require a compile-time value. The initializer can read preceding
+constants, compile-time `let` values, and the function's parametric bindings.
+For example, `let n = width(); const W = n;` is valid if BX can evaluate
+`width()` at compile time. In an elaborated scope, an initializer that needs
+a runtime input is invalid even when the constant is unused.
+Use `type Name = Type;` to give a concrete type a local alias. Each function
+specialization resolves its own constants and aliases. For a parametric
+struct, supply the bindings needed to make its type concrete, as in
+`type Payload = Packet<N>;`.
+
+A callback's declared return type lets BX check uses of a local constant
+such as `const W = F();` before selecting an implementation of `F`.
+When elaboration needs the callback's actual value, for example to resolve
+`type Word = uN[W];`, BX checks the remaining names and finishes checking
+the body at each specialization.
+
+```text
+fn bump<N: u32>(x: uN[N]) -> uN[N] {
+    const WIDTH = N;
+    type Word = uN[WIDTH];
+    const STEP: Word = 1;
+    x + STEP
+}
+```
+
+Both declarations are visible from the following statement to the end of
+the enclosing braces. A nested declaration can shadow an outer name. Its
+initializer or aliased type uses the bindings visible before that declaration.
 
 Give a bound integer literal its intended width before passing it to a function.
 For a parameter of type `u8`, write `let n: u8 = 1; take(n)` or `take(u8:1)`.
@@ -395,7 +484,31 @@ BX emits XLS IR for runtime array operations. For an out-of-range index, IR read
 
 Pure functions use the same inferred type parameters as blocks. Both `fn id<T>(x: T) -> T { x }` and `fn id<T: type>(x: T) -> T { x }` specialize at `id(x)`. The call's data arguments bind types, including element types inside arrays and fields inside tuples. Repeated occurrences must agree on signedness and nominal record identity. `bool` and `u1` are equivalent. Give an integer a width when it is the only source for its type, as in `id(u8:1)`.
 
-Each type parameter needs an inference source in a data argument or a callback result. BX resolves named callbacks in declaration order, using the input types known at that point. In the example below, `xs` and `ys` determine `A`, `B`, and the common array length `N`. BX checks that `join` accepts those element types and infers `R` from its return type.
+A pure function can also infer a type parameter from the expected result of a call.
+For example, `let x: u8 = id(0);` binds `T` to `u8` before checking the literal.
+A generic factory needs no data argument when its caller supplies the result type.
+
+```text
+struct Packet { data: u8, valid: bool }
+fn cleared<T>() -> T { zero!() }
+
+block capture(clk, x: Packet) -> Packet {
+    reg q: Packet = cleared();
+    q := x;
+    q
+}
+```
+
+Here `Packet` determines the specialization of `cleared`, and its return type
+determines the type of `zero!()`. Writing `reg q: Packet = zero!();` directly
+works as well. Without a type from context, use `zero!<Packet>()`.
+
+A typed operand can supply the result type in `zero!() == x` or
+`cleared() == x`. BX uses the function's declared signature to choose which
+operand determines the type. When inference depends on nested calls, an
+annotation supplies the context directly, as in `let y: u8 = id(cleared());`.
+
+BX resolves named callbacks in declaration order, using the input types known at that point. In the example below, `xs` and `ys` determine `A`, `B`, and the common array length `N`. BX checks that `join` accepts those element types and infers `R` from its return type.
 
 ```text
 struct Left { x: u8 }
@@ -433,7 +546,8 @@ fn widths(x: u8) -> (u9, u16) { (resize(x), resize<8, 16>(x)) }
 
 In `resize(x)`, the input width binds `N` to 8 and the default binds `M` to 9.
 BX can infer a directly named width or array length (`u32`) and signedness
-(`bool`) from the data arguments, including tuple members and array elements.
+(`bool`) from data arguments or the expected function result, including tuple
+members and array elements. Explicit bindings and declared defaults take precedence.
 For example, `xs: xN[S][N][L]` supplies the signedness, element width, and
 array length. In a computed dimension such as `uN[N + u32:1]`, supply `N`
 explicitly, give it a default, or infer it from another parameter.
@@ -667,8 +781,14 @@ The PIR interpreter starts each trial with independently drawn bits in every
 DUT register, including registers with a synchronous reset value. A reset edge
 loads that value. Testbench stimulus registers use their declared initializers
 or typed zero. Enum parameters draw from their declared members. PIR checks
-linked hardware assertions on rising edges with the flattened block's reset
+hardware assertions on rising edges with the flattened block's reset
 deasserted. Procedural BX assertions sample at their source statement.
+If a hardware predicate depends on a linked array operation marked
+`assumed_in_bounds=true`, PIR checks that contract when sampling the
+predicate. A block-level `if` guards the assertion, while the array
+operation remains part of the predicate's combinational logic.
+When a linked IR function executes a hardware assertion, PIR also checks
+the bounds contracts in that invocation, including its executed loop iterations.
 A failed concrete trial reports its seed, trial number, parameters, initial
 register values, and stimulus trace. If a clock edge fails, the trace includes
 the attempted tick and its reset setting.
@@ -682,11 +802,13 @@ condition. The four-valued counts are reported separately from the concrete
 property result. A failed concrete property, backend error, or concrete
 mismatch makes `bx-test` exit unsuccessfully. For the optional RTL run,
 maps and counted loops are expanded with a limit of 65,536 additional IR
-nodes per property harness, including nested body copies. Use the PIR backend
-for linked hardware that emits SystemVerilog `assert property` statements.
-Vastly currently cannot parse this syntax.
+nodes per property harness, including nested body copies. The Vastly test
+harness samples hardware assertion predicates on the same edges as PIR.
 
 ### Bounded proofs for clocked properties
+
+See the [clocked testing and proof glossary](#clocked-testing-and-proof-glossary)
+for terms shared by the concrete runner and the prover.
 
 ```shell
 xlsynth-driver bx-prove-quickcheck counter.bx
@@ -709,9 +831,14 @@ in `tick!(rst: drive.reset)` can itself be symbolic.
 
 A property that exceeds the static expansion limit is reported as inconclusive.
 The command continues checking the other properties in the file.
-Reachable hardware assertions in linked IR, array operations marked
-`assumed_in_bounds=true`, and partial-product multiplies (`umulp` and `smulp`)
-are currently unsupported. A solver counterexample is replayed through the
+For `array_index` and `array_update` marked `assumed_in_bounds=true`, the
+solver proves that every index fits its array dimension whenever the test
+samples the expression or clocks a register update that depends on it. This
+includes operations in called functions. A violated bound disproves the
+property even when the sampled values compare equal. The bounded and inductive
+provers currently reject reachable hardware assertions, including `assert!`
+in ordinary BX blocks. Bounded proof also rejects partial-product multiplies
+(`umulp` and `smulp`). A solver counterexample is replayed through the
 concrete BX runner to report the failing observation, clock edge, and stimulus
 trace. The proof covers the edges executed by the property.
 
@@ -782,15 +909,47 @@ xlsynth-driver bx-prove-invariant parity.bx --engine=bitwuzla --max-depth 8
 ```
 
 Concrete trials and bounded proofs check the helpers and the trailing Boolean
-on every sampled cycle. A reachable failure identifies the failing predicate
-and the stimulus trace. An induction step that remains open at the depth limit
-is inconclusive. The word-level proof has the same linked-IR operation limits
-as bounded clocked QuickChecks.
+on every sampled cycle. They also check marked array accesses in each sampled
+expression and register update, including updates on the initial reset edge
+and the last edge of a bounded trace. A reachable failure identifies the
+failing predicate or array operation and the stimulus trace. An induction step
+that remains open at the depth limit is inconclusive. The word-level proof
+has the same linked-IR operation limits as bounded clocked QuickChecks.
 
 For runnable observational equivalence proofs, see the widened accumulator,
 binary versus one-hot detector, and parity machine with an unreachable state.
 Each harness imports the two DSLX step functions and compares their outputs
 on a shared input stream. [Observational equivalence case studies](../xlsynth-driver/examples/bx-observational-equivalence/README.md)
+
+### Clocked testing and proof glossary
+
+| Term | Meaning in BX |
+| --- | --- |
+| Invariant trial | One run of an `#[invariant]` block with a chosen starting register state and a concrete sequence of inputs. `bx-test` generates these values and checks the invariant on each sampled cycle. |
+| Symbolic query | A question for the solver in which inputs or register values are variables. For example, can any legal input make a sampled array index go out of bounds? |
+| Property and predicate | A property is a claim about the circuit. A predicate is a Boolean expression that states a condition, such as `index < u2:3`. |
+| Clocked invariant | A property claimed to hold on every sampled cycle of every legal execution, however long the circuit runs. |
+| Harness | The test circuit BX builds to connect the design, drive its inputs, and expose the expressions the runner or prover needs to observe. |
+| Stimulus and stimulus domain | Stimulus is the input supplied to the circuit. Its domain is the set of allowed values. For example, an enum input ranges over its declared members. |
+| Frame and trace | A frame describes the inputs and current register values at one point in execution. A trace records a starting state and the sequence of inputs and clock edges that follow. |
+| Sample and tick | Sampling reads a value using the current inputs and register state. A tick advances the clock and applies the register updates together. |
+| Guard | The condition that determines whether a procedural check executes. In `if enabled { assert!(ok); }`, the guard is `enabled`. |
+| Proof obligation | A condition the prover must establish. For a marked array access, every index must be smaller than its dimension's length whenever the access is checked. |
+| Bounded model checking (BMC) | Checking whether any legal execution from initialization can violate a property within a specified number of cycles. |
+| Base check and induction step | The base checks the first `k` sampled cycles from legal initialization. The induction step asks whether the property holding for `k` consecutive cycles guarantees it holds on the next one. Together they can prove an invariant for all cycles. |
+| Helper lemma | An additional property marked `#[lemma]`. BX proves the helpers before using them in the main induction step. |
+| Counterexample and replay | A counterexample gives values that make a check fail. For a failure reachable from initialization, replay runs those values through the original circuit to locate the failing check or array access. |
+| Transition function | A function that takes the current inputs and register values and returns the sampled outputs followed by the next register values. |
+| PIR transition package | The transition function and the functions it calls, stored in the project's Rust representation of XLS IR (PIR). |
+| Dependency cone | The operations and operands that feed a particular value. Two outputs of the same block can depend on different array accesses. |
+| Bounds instrumentation | Adding Boolean checks to the proof's transition function and its callees so the prover can verify accesses marked `assumed_in_bounds=true`. |
+| Contract projection | Selecting the Boolean bounds-check field that belongs to a particular output or next register value in the transition's result tuple. |
+
+For example, a transition that returns `(out, next_q)` can return
+`(out, next_q, out_in_bounds, next_q_in_bounds)` in the proof. Sampling
+`out` selects `out_in_bounds`. Clocking the update to `q` selects
+`next_q_in_bounds`. Each selection is a **contract projection**. The
+selected bit says whether all bounds checks associated with that value hold.
 
 ## Compile and link
 
@@ -828,8 +987,8 @@ The linker checks argument order, widths, aggregate shapes, and result type befo
 `compile`, `compile_with_options`, `bx-test`, `bx2ir`, and `bx2gv` treat BX warnings as
 errors by default. The `combinational_block` warning points to a block that
 only computes a value. Prefer a `fn` for this kind of helper. A block with a
-register or a child instance already serves a hardware role. A helper that
-only reads the `rst` declared in its signature can take the normalized reset as an explicit
+register, a child instance, or a runtime assertion already serves a hardware
+role. A helper that only reads the `rst` declared in its signature can take the normalized reset as an explicit
 `bool` function argument. Clocked type-generic blocks retain their exemption.
 
 For an intentional combinational RTL leaf, omit `clk` and add
@@ -899,7 +1058,7 @@ directory. Library API callers supply directories in
 
 ### Using DSLX modules and members
 
-`use arithmetic;` resolves `arithmetic.x` on DSLX's module search path. For a nested module, `use ip::arithmetic;` makes its public functions, constants, structs, and numeric enums available as `arithmetic::name`. To bind individual members, write `use ip::arithmetic::clamp;` or group several under the same path, as in `use ip::arithmetic::{clamp, Limits};`. Each leaf binds its final name in the BX module. To migrate an aliased import, use the module’s final name or select the member directly. If two modules export the same member name, qualify it with distinct module bindings. If the module names also collide, bind one module and the other member directly. For example, `use a::math; use b::math::clamp;` gives you `math::clamp(...)` and `clamp(...)`. BX checks every `use` declaration, including unused ones.
+`use arithmetic;` resolves `arithmetic.x` on DSLX's module search path. For a nested module, `use ip::arithmetic;` makes its public functions, constants, structs, and numeric enums available as `arithmetic::name`. To bind individual members, write `use ip::arithmetic::clamp;` or group several under the same path, as in `use ip::arithmetic::{clamp, Limits};`. Each leaf binds its final name in the BX module. To migrate an aliased import, use the module’s final name or select the member directly. If two modules export the same member name, qualify it with distinct module bindings. If the module names also collide, bind one module and the other member directly. For example, `use a::math; use b::math::clamp;` gives you `math::clamp(...)` and `clamp(...)`. BX checks every `use` declaration, including unused ones. A direct DSLX member import requires a public declaration in the selected module.
 
 DSLX evaluates each imported `pub const` in its declaring module. BX reads its
 typed value, including signedness and the identity of any structs or numeric
@@ -1010,29 +1169,27 @@ also return a new instance by naming the public template or a concrete alias
 in its DSLX result type. BX recovers the instance's `u32` bindings from the
 checked value, including parameters that do not appear in any field.
 
-The pinned DSLX converter can emit invalid IR or dispatch to the wrong helper
-when a type-valued parameter such as `T: type` is bound to a struct. When a
-BX call passes or returns a concrete parametric struct, its imported DSLX
-functions can use bits and arrays of bits as type-valued arguments. BX
-diagnoses unsupported aggregate bindings, ambiguous
+When a BX call passes or returns a concrete parametric struct, its imported
+DSLX functions can bind a type parameter such as `T: type` to bits or an
+array of bits. BX diagnoses unsupported aggregate bindings, ambiguous
 native symbols, and method dispatches whose specialization the converter API
 cannot verify. DSLX `map` callbacks and indirect calls are outside this subset.
 Functions such as `apfloat::add` specialize on ordinary value parameters.
 
 For imports that enable DSLX generics, BX checks the native symbols of the
 selected specializations. Distinct numeric enums can specialize the same
-helper even when their source names match. The pinned mangler can give nested
-tuples such as `(E, (u8, u8), u8)` and `(E, (u8, u8, u8))` the same symbol.
-BX diagnoses that collision when both specializations occur in one conversion
-batch. When the batch can specialize a numeric enum, BX also reports an
-import error if the native call graph omits a method or indirect call target
-inside a specialized function and BX cannot verify its symbols.
+helper even when their source names match. Nested tuple types such as
+`(E, (u8, u8), u8)` and `(E, (u8, u8, u8))` produce separate specializations
+and can occur in the same conversion batch. When the batch can specialize a
+numeric enum, BX reports an import error if the native call graph omits a
+method or indirect call target inside a specialized function and BX cannot
+verify its symbols.
 
 If an imported function requires an implicit token, BX reports the DSLX call path and highlights the effectful operation when it can locate it in the original source. For example, a runtime `assert!(N >= u32:2, "min_width")` in a helper makes its caller effectful. When `N` is a width parametric, `const_assert!(N >= u32:2)` checks the invariant during DSLX typechecking and keeps the helper pure.
 
 BX can follow a direct helper call in the body of a counted loop over a nonempty literal range, such as `for (_, acc) in u32:0..u32:1 { leaf::checked(acc) }(x)`. If the body branches between helpers, the range might be empty, or the initializer could introduce an earlier effect, BX reports the call path it can verify.
 
-Lowering emits an ordinary IR `invoke` and includes the specialized function and its callees. Some functions, including `std::popcount`, contain a loop in their original IR. Consumers such as `xlsynth-codegen` that require unrolled loops need an optimization step for those bodies before RTL emission.
+Lowering emits an ordinary IR `invoke` and includes the specialized function and its callees. When writing block IR, `bx2ir` inlines calls in block bodies, including nested calls, and retains the function definitions. Rust callers passing a lowered BX package to `xlsynth-codegen` can prepare it with `xlsynth_pir::block_invoke_inline::inline_block_invokes_in_package`. Some functions, including `std::popcount`, contain a loop in their original IR. These loops also need unrolling before RTL emission.
 
 ## Clocked blocks
 
@@ -1108,10 +1265,28 @@ combinational operands must align, and a register adds one stage. Each write
 guard must align with the data at the write edge, including enclosing guards
 in nested `if` statements. In the example, `q` and `r` are both at stage 1.
 When `en` is low, `q` holds its previous value and the sum still responds to
-`r`. A stage annotation checks alignment in the datapath. The block's enable
-and valid signals determine which transactions actually advance.
+`r`.
 
-The checker follows names, unary and binary operators, casts, `if`
+The output annotation promises that BX can assign the declared stage to the
+output. It checks where data and control meet in the datapath; it does not
+promise that a new result arrives on that clock. For example, this passes:
+
+```text
+block held(clk, en: bool, x: u8) -> u8 @1 {
+    reg q: u8;
+    if en { q := x; }
+    q
+}
+```
+
+`q` is at stage 1 even when `en` is false and it holds an old value. Returning
+`q + x` instead fails because the adder would combine stages 1 and 0. In
+`add_held` above, `q + r` passes because both operands are at stage 1, but BX
+does not prove that they belong to the same transaction. A stage-1 output can
+also come from a stage-1 input rather than a register inside the block, and a
+constant can fit any stage.
+
+The checker follows names, unary and binary operators, casts, `if` and `match`
 expressions, and struct and tuple construction and field reads. A scalar
 literal such as `u8:7` can be used at any stage. With `const A = [u8:7];`,
 `A` can also be used at any stage because BX evaluates the constant before
@@ -1144,6 +1319,58 @@ caller, even if its inputs are annotated. An extern block also supplies no stage
 Register feedback such as `q := q + x;` is legal BX. Following a timed
 output back through that feedback currently produces a diagnostic.
 
+#### Output stages by case
+
+An output can name a pure BX function that returns the expected stage for
+each combination of control inputs. The checker evaluates the function at
+compile time and checks each case separately:
+
+```text
+enum Op : u1 { Fast = 0, Slow = 1 }
+
+fn stage(op: Op) -> u32 {
+    match op {
+        Op::Fast => u32:1,
+        Op::Slow => u32:2,
+    }
+}
+
+block pulse(clk, op: Op) -> bool @stage(op) {
+    reg fast_q: bool;
+    reg slow_q: bool;
+    reg slow_qq: bool;
+    fast_q := op == Op::Fast;
+    slow_q := op == Op::Slow;
+    slow_qq := slow_q;
+    fast_q | slow_qq
+}
+```
+
+For Fast, `fast_q` is true at stage 1, so the OR is true at stage 1.
+For Slow, `slow_qq` is true at stage 2, so it is true at stage 2.
+This example allows pulses from different operations to overlap.
+The OR can also feed a fixed-stage child: a one-cycle tail would move those
+two stages to 2 and 3, respectively.
+
+Case checking does not prove that operations can safely share a resource. If
+Slow reaches a shared tail at stage 6 and Fast reaches it at stage 3, issuing
+Fast three clocks after Slow sends both to the tail on the same clock. Their
+individual stage annotations can still pass. Ruling out that collision needs
+a separate constraint or proof about when operations may issue.
+
+A `match` or `if` selecting data still requires its selector and selected
+data to align. A stage-0 opcode cannot select stage-1 data. A guarded register
+keeps its stage when disabled, but the checker cannot assume what bits it
+holds. Resettable registers likewise have no exact case value when reset
+could override the write. As with fixed stages, the annotation does not promise
+freshness, validity, or exclusive use of an output.
+
+Controls must be block input ports of Boolean, enum, or small unsigned bit
+type. The checker limits their combined domain to 64 hardware encodings,
+including unnamed enum encodings, since a port or runtime cast can supply
+those values. Case-dependent child outputs do not yet expose a timing
+interface to their callers.
+
 #### Related work
 
 Dahlia and Filament showed how hardware timing constraints can be checked
@@ -1163,9 +1390,11 @@ stages 1 and 0, and BX reports the mismatch at the adder.
 
 ### Calling a block
 
-An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. Either kind of parent can instantiate a clockless child. A clocked child requires a clocked parent, and BX connects the child's clock and any required reset automatically. Reading the binding multiple times reads the same instance's outputs.
+An unconditional `let` with a child-block call as its initializer creates one persistent child instance. Pass the data inputs in declaration order. Either kind of parent can instantiate a clockless child. A clocked child requires a clocked parent, and BX connects the child's clock and any required reset automatically. Reading the binding multiple times reads the same instance's outputs.
 
-Block lets accept DSLX tuple patterns. For example, `let (valid, (first, .., last)) = packet;` binds the valid bit and the first and last members of the nested tuple. Use `_` to discard one member and `..` to skip zero or more members at that tuple level. An optional annotation after the pattern gives the type of the entire initializer. Each nested pattern must match a tuple of the corresponding shape. A pattern may rebind a data value. In `let (x, previous) = (x + u8:1, x);`, both uses on the right read the previous `x`.
+An ordinary block `let` or a tuple pattern can shadow a data input or an earlier `let`. The initializer reads the bindings visible before the statement. For example, `let previous = x; let x = x + u8:1;` keeps the original input in `previous` and makes the sum available as `x`. A binding inside a guarded update is visible only in that guard's body. Clock, reset, register, and deferred wire names remain reserved.
+
+Block lets accept DSLX tuple patterns. For example, `let (valid, (first, .., last)) = packet;` binds the valid bit and the first and last members of the nested tuple. Use `_` to discard one member and `..` to skip zero or more members at that tuple level. An optional annotation after the pattern gives the type of the entire initializer. Each nested pattern must match a tuple of the corresponding shape. In `let (x, previous) = (x + u8:1, x);`, both uses on the right read the previous `x`.
 
 A pattern can also bind a child's tuple result directly, as in `let (valid_out, data_out) = pipe_reg(valid, payload);`. This instantiates the child once, and both bindings read that instance's outputs. Patterns also work in guarded register updates, value-producing `if` arms, and `unroll_for!` bodies.
 
@@ -1244,9 +1473,29 @@ Use a call binding to supply the arguments for inference. When a payload literal
 
 ### Value parametrics on blocks
 
-A block can take required `u32` value parametrics for compile-time expressions
-in its body. Supply each value explicitly in angle brackets at the call site.
-BX infers type parameters from the data inputs.
+A block can take `bool` and `u32` value parametrics for compile-time expressions
+in its body. For a block declared as `route<SPLIT: bool = {false}>`,
+`route(data)` binds `SPLIT` to `false` and `route<true>(data)` binds it to
+`true`. Omitted trailing value arguments use their braced defaults, evaluated
+in the block's declaration scope with preceding value parameters in scope.
+A `u32` parameter can supply the bit width or array length of an input port,
+result, or register. BX infers type parameters from the data inputs,
+including the element type of a port declared as `T[N]`.
+
+```text
+block storage<W: u32, N: u32>(clk, data: bits[W][N]) -> bits[W][N] {
+    reg q: bits[W][N];
+    q := data;
+    q
+}
+
+block samples(clk, data: u12[4]) -> u12[4] {
+    let previous = storage<12, 4>(data);
+    previous
+}
+```
+
+Here the input, output, and register each hold four 12-bit words.
 
 ```text
 block stage<T>(clk, data: T) -> T {

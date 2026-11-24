@@ -25,6 +25,17 @@ fn write_module(root: &Path, relative_path: &str, source: &str) -> io::Result<()
     fs::write(path, source)
 }
 
+/// Native declarations linked by the entry point of a BX or DSLX package.
+fn imported_names(package: &Package, entry: &str) -> BTreeSet<String> {
+    package
+        .members
+        .iter()
+        .map(|m| &m.graph().name)
+        .filter(|name| name.as_str() != entry)
+        .cloned()
+        .collect()
+}
+
 /// Evaluates the entire block, including its linked calls, for one u8 input.
 fn run_block(package: &Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
     let block = package.get_top_block().ok_or("expected a top block")?;
@@ -59,6 +70,50 @@ fn assert_import_rejected(module: &str, body: &str, result: &str, options: &Impo
         .is_err(),
         "{native}"
     );
+}
+
+#[test]
+fn nominal_specializations_share_native_names_with_explicit_value_calls()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(root.path(), "left.x", "pub enum Mode : u2 { A=0, B=1 }")?;
+    write_module(root.path(), "right.x", "pub enum Mode : u2 { A=1, B=0 }")?;
+    write_module(
+        root.path(),
+        "ops.x",
+        r#"#![feature(generics)]
+import left;
+import right;
+fn classify<T: type>(x:T)->bool { x == T::A }
+fn classify__Mode(x:u2)->bool { x == u2:0 }
+pub fn compare<N:u32>(x:left::Mode, y:right::Mode)->(bool, bool, bool) {
+    (classify(x), classify(y), classify__Mode(N as u2))
+}"#,
+    )?;
+    let call = "ops::compare<1>(x,y)";
+    let bx = format!(
+        "use left; use right; use ops; #[allow(combinational_block)] block b(clk,x:left::Mode,y:right::Mode)->(bool,bool,bool) {{ {call} }}"
+    );
+    let linked = compile_with_options(
+        &bx,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &search_paths(&[root.path()]),
+    )?;
+    let caller = parse_and_typecheck(
+        &format!(
+            "import left; import right; import ops; fn main(x:left::Mode,y:right::Mode)->(bool,bool,bool) {{ {call} }}"
+        ),
+        "caller.x",
+        "caller",
+        &mut ImportData::new(None, &[root.path()]),
+    )?;
+    let native = Parser::new(&caller.to_ir_text()?).parse_and_verify_package()?;
+    assert_eq!(
+        imported_names(&linked, "b"),
+        imported_names(&native, "__caller__main")
+    );
+    Ok(())
 }
 
 #[test]
@@ -247,10 +302,10 @@ fn native_constant_imports_obey_visibility_and_source_order() -> Result<(), Box<
 }"#;
     check_source_with_options(&format!("use config; {empty_loop}"), &options)?;
     assert!(check_source_with_options(&format!("{empty_loop} use config;"), &options).is_err());
-    // As for imported types and functions, DSLX resolves an unused member
-    // binding. BX checks that the declaration is public at the read site.
-    check_source_with_options("use config::PRIVATE; use middle::WIDTH;", &options)?;
+    check_source_with_options("use config::WIDTH;", &options)?;
     for source in [
+        "use config::PRIVATE;",
+        "use middle::WIDTH;",
         "use config::PRIVATE; const BAD = PRIVATE;",
         "use middle::WIDTH; const BAD = WIDTH;",
         "use middle; const BAD = middle::WIDTH;",
@@ -267,6 +322,138 @@ fn native_constant_imports_obey_visibility_and_source_order() -> Result<(), Box<
             "{source}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn native_helpers_supply_typed_resets_and_keep_runtime_calls() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "config.x",
+        r#"
+pub struct State { word: uN[81], tags: u8[0] }
+pub fn state<N: u32>(word: uN[N]) -> State {
+    State { word: word as uN[81], tags: zero!<u8[0]>() }
+}
+pub fn bump(x: s8) -> s8 { x + s8:1 }
+pub fn width() -> u32 { u32:4 }
+"#,
+    )?;
+    let source = r#"
+use config;
+use config::bump;
+const BOOT = config::state<81>(uN[81]:0x1_0000_0000_0000_0001);
+fn next(x: s8) -> s8 { bump(x) }
+fn nibble(x:u8) -> u4 {
+    let w = config::width();
+    let width = w;
+    x[0+:uN[width]]
+}
+pub block delay(clk, x:s8) -> s8 {
+    let seed = next(s8:-4);
+    reg q:s8 = seed;
+    q := bump(x);
+    q
+}
+"#;
+    let options = search_paths(&[root.path()]);
+    let checked = check_source_with_options(source, &options)?;
+    let boot = &checked.constants()[0];
+    assert_eq!(boot.ty, Type::Named("config::State".into()));
+    let empty = IrValue::make_array_typed(xlsynth_pir::ir::Type::Bits(8), &[])?;
+    assert_eq!(
+        boot.value,
+        IrValue::make_tuple(&[
+            IrValue::parse_typed("bits[81]:0x1_0000_0000_0000_0001")?,
+            empty,
+        ])
+    );
+    let package = lower_module(&checked, empty_package("design"), ResetBehavior::default())?;
+    let block = package.get_top_block().ok_or("expected delay block")?;
+    assert_eq!(
+        block.registers[0].reset_value,
+        Some(IrValue::make_sbits(8, -3)?)
+    );
+    assert!(package.get_fn("__config__bump").is_some());
+    Ok(())
+}
+
+#[test]
+fn native_constexpr_calls_reconstruct_private_fields_of_a_public_struct()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "config.x",
+        r#"
+enum Mode: u2 { Off = 0, On = 1 }
+struct Inner { x: u8, mode: Mode }
+pub struct Wrapper { inner: Inner }
+pub fn make() -> Wrapper { Wrapper { inner: Inner { x: u8:13, mode: Mode::On } } }
+pub fn read(w: Wrapper) -> u8 { w.inner.x + (w.inner.mode as u8) }
+"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    let checked = check_source_with_options(
+        "use config; const V = config::read(config::make());",
+        &options,
+    )?;
+    assert_eq!(checked.constants()[0].value, IrValue::make_ubits(8, 14)?);
+    Ok(())
+}
+
+#[test]
+fn native_reset_calls_require_constant_data_and_pure_helpers() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "settings.x",
+        r#"
+pub fn id(x:u8) -> u8 { x }
+pub fn pick(i:u32) -> u8 { [u8:7, u8:42][i] }
+pub fn require(x:u8) -> u8 { if x == u8:0 { fail!("zero", x) } else { x } }
+"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    for (call, diagnostic) in [
+        ("settings::id(x)", "must be a compile-time constant"),
+        ("settings::require(u8:1)", "implicit token"),
+        (
+            "settings::pick(u32:4)",
+            "constexpr call to 'settings::pick'",
+        ),
+    ] {
+        let source =
+            format!("use settings; block delay(clk, x:u8)->u8 {{ reg q:u8 = {call}; q := x; q }}");
+        let error = check_source_with_options(&source, &options).unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+    // Runtime IR can index out of bounds. Native constexpr checking occurs
+    // only when the result of the imported call is demanded at compile time.
+    let source = r#"
+use settings;
+block delay(clk, x:u8) -> u8 {
+    let last = settings::pick(u32:4);
+    reg q:u8 = if true { u8:1 } else { last };
+    q := x + last;
+    q
+}
+"#;
+    let package = compile_with_options(
+        source,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(
+        package
+            .get_top_block()
+            .ok_or("expected delay block")?
+            .registers[0]
+            .reset_value,
+        Some(IrValue::make_ubits(8, 1)?)
+    );
     Ok(())
 }
 
@@ -685,22 +872,51 @@ fn imported_module_errors_report_the_original_path_across_checks() -> Result<(),
 }
 
 #[test]
+fn a_frame_like_parameter_name_preserves_the_following_call_target() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    // In native IR the argument is immediately followed by ", to_apply=" and
+    // the specialized callee. The digits in the argument belong to its name.
+    write_module(
+        root.path(),
+        "ops.x",
+        r#"#![feature(generics)]
+fn keep<T: type>(x: T) -> T { x }
+pub fn run(x_0T__1_A_0__120_x: u8) -> u8 { keep(x_0T__1_A_0__120_x) }"#,
+    )?;
+    let bx = "use ops; #[allow(combinational_block)] block run(clk, x: u8) -> u8 { ops::run(x) }";
+    let package = compile_with_options(
+        bx,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &search_paths(&[root.path()]),
+    )?;
+    assert!(package.get_fn("_0T__3_ops_0__4_keep__T3_u8_").is_some());
+    assert_eq!(run_block(&package, 42)?, IrValue::make_ubits(8, 42)?);
+    Ok(())
+}
+
+#[test]
 fn imported_lambda_symbols_match_native_source_spans_across_checks() -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;
     let modules = root.path().join("lambda search-path");
     write_module(
         &modules,
-        "wire.x",
-        "pub fn adjust(x: u8) -> u8 { x + u8:1 }",
+        "nested/wire.x",
+        r#"#![feature(generics)]
+pub enum Flag : u1 { On = 1 }
+fn keep<T: type>(x:T)->T { x }
+pub fn adjust(x: u8) -> u8 { keep((Flag::On, x)).1 + u8:1 }"#,
     )?;
     // A native lambda symbol includes its filename and both endpoint columns.
     // Putting the import on this line makes relocation affect both columns.
+    // Its enclosing function has a frame-like name. The synthetic loop must
+    // preserve both that name and the specialized lambda that follows it.
     write_module(
         &modules,
         "wire_x.x",
-        "import wire; pub fn score(x: u8, arr: u8[2]) -> u8[2] { map(arr, |i| wire::adjust(i + x)) }",
+        "import nested.wire; pub fn run_0T__1_A_0__20_x(x: u8, arr: u8[2]) -> u8[2] { map(arr, |i| wire::adjust(i + x)) }",
     )?;
-    let bx = "use wire_x; #[allow(combinational_block)] block run(clk, x: u8, arr: u8[2]) -> u8[2] { wire_x::score(x, arr) }";
+    let bx = "use wire_x; #[allow(combinational_block)] block run(clk, x: u8, arr: u8[2]) -> u8[2] { wire_x::run_0T__1_A_0__20_x(x, arr) }";
     let options = search_paths(&[&modules]);
     let compile = || {
         compile_with_options(
@@ -715,26 +931,18 @@ fn imported_lambda_symbols_match_native_source_spans_across_checks() -> Result<(
 
     let mut data = ImportData::new(None, &[&modules]);
     let caller = parse_and_typecheck(
-        "import wire_x; fn main(x: u8, arr: u8[2]) -> u8[2] { wire_x::score(x, arr) }",
+        "import wire_x; fn main(x: u8, arr: u8[2]) -> u8[2] { wire_x::run_0T__1_A_0__20_x(x, arr) }",
         "caller.x",
         "caller",
         &mut data,
     )?;
     let native = Parser::new(&caller.to_ir_text()?).parse_and_verify_package()?;
-    let imported_names = |package: &Package, entry: &str| -> BTreeSet<String> {
-        package
-            .members
-            .iter()
-            .map(|m| &m.graph().name)
-            .filter(|name| name.as_str() != entry)
-            .cloned()
-            .collect()
-    };
     let expected = imported_names(&native, "__caller__main");
     assert!(
         expected
             .iter()
-            .any(|name| name.starts_with("__wire_x__lambda_capture_struct_at_"))
+            .any(|name| name.starts_with("_0T__")
+                && name.contains("lambda_5Fcapture_5Fstruct_5Fat_"))
     );
     assert_eq!(imported_names(&first, "run"), expected);
     Ok(())

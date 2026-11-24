@@ -5,7 +5,6 @@
 mod binding_types;
 mod constants;
 mod effect_source;
-mod enum_conversion;
 mod enums;
 mod outline_graph;
 mod runfiles;
@@ -54,7 +53,8 @@ struct AggregateProjection {
 /// check dependencies with the same rules as native DSLX callers.
 pub(crate) struct ImportedStructs {
     graph: Rc<OutlineGraph>,
-    files: Option<NativeSourceFiles>,
+    /// Native source locations for this import graph's frozen modules.
+    pub(crate) files: Option<NativeSourceFiles>,
     bindings: HashMap<dslx::StructDef, StructBinding>,
     declarations: BTreeMap<DeclId, dslx::StructDef>,
     explicit_types: BTreeMap<String, dslx::Type>,
@@ -81,7 +81,6 @@ pub(crate) struct ImportedStructs {
     definitions: Vec<StructDef>,
     enums: enums::ImportedEnums,
     constants: constants::ImportedConstants,
-    enum_conversion_snapshot: std::cell::OnceCell<Result<Option<NativeSourceFiles>, String>>,
     probe_index: usize,
 }
 
@@ -152,7 +151,6 @@ impl ImportedStructs {
             definitions: Vec::new(),
             enums: Default::default(),
             constants: Default::default(),
-            enum_conversion_snapshot: Default::default(),
             probe_index: 0,
         }
     }
@@ -502,6 +500,7 @@ impl ImportedStructs {
             | Type::ParametricBits { .. }
             | Type::ParametricStruct { .. }
             | Type::TypeApplied { .. }
+            | Type::MixedApplied { .. }
             | Type::Bool
             | Type::Enum { .. } => false,
         }

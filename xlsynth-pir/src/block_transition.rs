@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::block_inline::{flatten_block_hierarchy, uniquify_node_name};
+use crate::block_inline::{flatten_block_hierarchy, uniquify_name};
 use crate::dce::remove_dead_nodes;
 use crate::ir::{
     self, Block, NodeGraph, NodePayload, NodeRef, Package, PackageMember, Register, Type,
@@ -46,8 +46,9 @@ pub struct BlockTransition {
 }
 
 /// Lowers the selected block and its child instances, preserving calls to
-/// package functions. Asynchronous resets and multiple writes to a register
-/// require semantics outside this single-edge model.
+/// package functions. Opaque external instances have no transition to lower.
+/// Asynchronous resets and multiple writes to a register require semantics
+/// outside this single-edge model.
 pub fn lower_block_transition(
     package: &Package,
     block_name: &str,
@@ -76,6 +77,7 @@ struct RegisterWrite {
 /// Reuses each input and register-read node as a parameter. Write and output
 /// sinks still evaluate to unit when another IR node consumes their value.
 fn project_transition(package: &Package, block: &Block) -> Result<BlockTransition, String> {
+    block.reject_inouts("block transition projection")?;
     if block.reset.as_ref().is_some_and(|reset| reset.asynchronous) {
         return Err(format!(
             "cannot lower asynchronous reset in block '{}' to a rising-edge transition",
@@ -101,7 +103,7 @@ fn project_transition(package: &Package, block: &Block) -> Result<BlockTransitio
             PackageMember::Block(_) => None,
         })
         .collect();
-    let mut graph = NodeGraph::new(uniquify_node_name(&block.name, &mut function_names));
+    let mut graph = NodeGraph::new(uniquify_name(&block.name, &mut function_names));
     graph.nodes = block.nodes.clone();
     let mut used_names: HashMap<String, usize> = block
         .nodes
@@ -120,7 +122,7 @@ fn project_transition(package: &Package, block: &Block) -> Result<BlockTransitio
         .collect();
     for &port in &params {
         let node = graph.get_node_mut(port);
-        node.name = Some(uniquify_node_name(block.port_name(port), &mut used_names));
+        node.name = Some(uniquify_name(block.port_name(port), &mut used_names));
         node.payload = NodePayload::Param;
     }
     let mut reads = HashMap::new();
@@ -129,10 +131,7 @@ fn project_transition(package: &Package, block: &Block) -> Result<BlockTransitio
         match &node.payload {
             NodePayload::RegisterRead { register } => {
                 reads.insert(register.clone(), NodeRef { index });
-                node.name = Some(uniquify_node_name(
-                    &format!("{register}__q"),
-                    &mut used_names,
-                ));
+                node.name = Some(uniquify_name(&format!("{register}__q"), &mut used_names));
                 node.payload = NodePayload::Param;
             }
             NodePayload::RegisterWrite {

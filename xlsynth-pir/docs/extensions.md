@@ -349,3 +349,65 @@ Also add tests in the same style as the existing extension tests:
 - Desugar/prover equivalence under `xlsynth-prover/tests/`
 - g8r lowering and prep-for-gatify coverage under `xlsynth-g8r/tests/`
 - Fuzz target coverage when the op affects `xlsynth-g8r` behavior
+
+## Bidirectional block nets
+
+A block declares each resolved wire with `ext_inout_net`. An
+`ext_inout_port` node declares a public pin and binds it to one whole local
+net with `net=`. The port and net must have the same PIR type.
+The port node takes no operands and returns `()`. Its public `name` identifies
+the block header entry that supplies its pin type. The node retains that
+type and can carry a port-specific `sv_type` annotation.
+
+```text
+package pads
+
+block receiver(io: bits[8], data: bits[8]) {
+  ext_inout_net pin(bits[8])
+  io: () = ext_inout_port(name=io, net=pin, id=9)
+  sample: bits[8] = ext_inout_read(net=pin, id=1)
+  data: () = output_port(sample, name=data, id=2)
+}
+
+top block parent(tx: bits[8], oe: bits[1], rx: bits[8], spare: bits[8]) {
+  ext_inout_net bus(bits[8])
+  ext_inout_net spare_pin(bits[8])
+  spare: () = ext_inout_port(name=spare, net=spare_pin, id=10)
+  instantiation u(block=receiver, kind=block)
+  tx: bits[8] = input_port(name=tx, id=3)
+  oe: bits[1] = input_port(name=oe, id=4)
+  link: () = ext_instantiation_inout(instantiation=u, port_name=io, net=bus, id=5)
+  send: () = ext_inout_drive(tx, oe, net=bus, id=6)
+  received: bits[8] = instantiation_output(instantiation=u, port_name=data, id=7)
+  rx: () = output_port(received, name=rx, id=8)
+}
+```
+
+The parent drives the internal `wire [7:0] bus` with `assign bus = oe ? tx : 'z;`.
+The child samples it through `io` and returns the resolved value on `data`. Each net
+can have any number of reads and at most one local drive operation. The data
+must match the net type exactly. The active-high `bits[1]` enable controls
+the whole wire. Each child inout binds exactly once to a whole parent net of
+the same type. A parent that only connects children needs no read, drive, or
+enable.
+
+Each declared net needs at least one public port, child binding, read, or drive.
+A single public pin or a single child pin can be its only connection. To keep
+two pins independent inside a block, give each its own net.
+
+To expose the example's wire, add `pad: bits[8]` to the parent header and
+`pad: () = ext_inout_port(name=pad, net=bus, id=11)` to its body. Additional
+public pins on the same net each have their own port node. Flat codegen emits
+`spare_pin` as the module port `inout wire [7:0] spare` and ties public aliases
+with bidirectional `tran` primitives. Four-state RTL simulation
+resolves undriven wires to Z and conflicting equal-strength drives to X on
+the affected bits. Synthesis support for public aliases depends on the tool.
+For example, Yosys 0.68's Verilog writer can turn a `tran` into a one-way
+assignment.
+
+Hierarchy verification follows electrical aliases across instances. Feedback
+from a read to a driver on the same resolved net through either data or enable
+is invalid. Registers break combinational feedback. Use `block2sv --layout=none`
+(the default) for RTL. Evaluation, formal and gate projection, desugared/FFI
+extension emission, and pipeline layout reject blocks with inout ports or
+nets, including blocks whose only inout is a public pin on its own net.

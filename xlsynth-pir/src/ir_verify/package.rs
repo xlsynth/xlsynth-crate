@@ -2,20 +2,25 @@
 
 //! Package-context portions of PIR verification.
 
-use std::collections::{HashMap, HashSet};
+use crate::ir_builder::block_cycles::BlockHierarchy;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ir::{
-    Binop, Block, BlockPort, Fn, InstantiationKind, MemberType, NaryOp, NodeGraph, NodePayload,
-    NodeRef, Package, PackageMember, Type,
+    self, Binop, Block, BlockPort, BlockProvenance, BlockProvenanceKind, Fn, InstantiationKind,
+    MemberType, NaryOp, NodeGraph, NodePayload, NodeRef, OpaqueExternPort, OpaqueExternPortKind,
+    Package, PackageMember, Type,
 };
 use crate::ir_deduce::deduce_graph_result_type;
-use crate::ir_utils::operands;
+use crate::ir_utils::{direct_function_references, is_valid_identifier_name, operands};
 
 /// Errors that can arise during validation of XLS IR structures.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ValidationError {
     /// Two package members share the same name.
     DuplicateMemberName(String),
+    /// Two blocks name the same source member in their effective provenance
+    /// attributes.
+    DuplicateBlockProvenance(BlockProvenance),
     /// The `top` attribute references a missing function.
     MissingTop(String),
     /// A node references an undefined operand (index out of bounds).
@@ -130,6 +135,16 @@ pub enum ValidationError {
         func: String,
         instantiation: String,
         block: String,
+    },
+    /// Two external instances with the same module and overrides use different
+    /// models.
+    ExternBlockModelConflict {
+        module_name: String,
+        parameters: BTreeMap<String, String>,
+        first_model: String,
+        first_instance: String,
+        model: String,
+        instance: String,
     },
     /// An external instantiation references a function absent from the package.
     InstantiationForeignFunctionNotFound {
@@ -250,6 +265,17 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::DuplicateMemberName(name) => {
                 write!(f, "duplicate member name '{}'", name)
+            }
+            ValidationError::DuplicateBlockProvenance(provenance) => {
+                let kind = match provenance.kind {
+                    BlockProvenanceKind::Proc => "proc",
+                    BlockProvenanceKind::Function => "function",
+                };
+                write!(
+                    f,
+                    "multiple blocks have the same provenance: {kind} {:?}",
+                    provenance.name
+                )
             }
             ValidationError::MissingTop(name) => {
                 write!(f, "top member '{}' not found", name)
@@ -457,6 +483,28 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "function '{}' instantiation '{}' references missing block '{}'",
                     func, instantiation, block
+                )
+            }
+            ValidationError::ExternBlockModelConflict {
+                module_name,
+                parameters,
+                first_model,
+                first_instance,
+                model,
+                instance,
+            } => {
+                write!(f, "external module '{module_name}'")?;
+                if !parameters.is_empty() {
+                    write!(
+                        f,
+                        " with parameter overrides {}",
+                        ir::format_extern_block_string_map(parameters)
+                    )?;
+                }
+                write!(
+                    f,
+                    " uses behavioral model '{first_model}' in \
+                     instance '{first_instance}' and conflicting model '{model}' in instance '{instance}'"
                 )
             }
             ValidationError::InstantiationForeignFunctionNotFound {
@@ -669,9 +717,10 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-pub(crate) struct InstantiationInfo {
-    input_types: std::collections::HashMap<String, Type>,
-    output_types: std::collections::HashMap<String, Type>,
+/// Named data ports and the required coverage of their input/output bindings.
+struct InstantiationInfo {
+    input_types: BTreeMap<String, Type>,
+    output_types: BTreeMap<String, Type>,
     require_complete_mapping: bool,
 }
 
@@ -690,18 +739,42 @@ impl std::fmt::Display for InstantiationPortDirection {
     }
 }
 
-/// Validates an entire package, ensuring all member names are unique, the top
-/// function (if set) exists, and all contained functions are valid.
+/// Verifies all package members, their references, and their inout hierarchies.
+///
+/// Member names must be unique within each kind, and a declared top must
+/// resolve to a member of that kind. Blocks may omit provenance. Among blocks
+/// that declare it, each effective source name and kind must be unique.
+/// External instances of an RTL module with identical overrides must refer
+/// to the same model block.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
+    verify_package_structure(p)?;
+    verify_package_inout_hierarchies(p)
+}
+
+/// Checks all package invariants except the inout hierarchy analysis, which
+/// can use more precise dependencies after function calls are inlined.
+pub(crate) fn verify_package_structure(p: &Package) -> Result<(), ValidationError> {
     let mut names = HashSet::<(String, MemberType)>::new();
     let mut functions = HashMap::new();
+    let mut provenances = HashSet::new();
     for member in &p.members {
         let (name, member_type) = match member {
             PackageMember::Function(f) => {
                 functions.insert(f.name.as_str(), f);
                 (f.name.clone(), MemberType::Function)
             }
-            PackageMember::Block(block) => (block.name.clone(), MemberType::Block),
+            PackageMember::Block(block) => {
+                let provenance = crate::ir_parser::block_provenance(block).map_err(|error| {
+                    ValidationError::BlockInvariantViolation {
+                        block: block.name.clone(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                if let Some(duplicate) = provenance.and_then(|p| provenances.replace(p)) {
+                    return Err(ValidationError::DuplicateBlockProvenance(duplicate));
+                }
+                (block.name.clone(), MemberType::Block)
+            }
         };
         if !names.insert((name.clone(), member_type)) {
             return Err(ValidationError::DuplicateMemberName(name));
@@ -730,6 +803,7 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
         }
     }
     validate_function_call_graph(p, &functions)?;
+    verify_extern_block_models(&p.members, None)?;
 
     // Enforce package-wide uniqueness of node text ids (including parameter
     // nodes).
@@ -756,6 +830,71 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Checks external module bindings in package order, with an optional block
+/// replacing a member or being appended by the block builder.
+fn verify_extern_block_models<'a>(
+    members: &'a [PackageMember],
+    replacement: Option<(usize, &'a Block)>,
+) -> Result<(), ValidationError> {
+    let blocks = members.iter().enumerate().filter_map(|(index, member)| {
+        if let Some((at, block)) = replacement
+            && at == index
+        {
+            return Some(block);
+        }
+        match member {
+            PackageMember::Block(block) => Some(block),
+            PackageMember::Function(_) => None,
+        }
+    });
+    let appended = replacement
+        .filter(|(index, _)| *index >= members.len())
+        .map(|(_, block)| block);
+    let mut bindings = HashMap::new();
+    for block in blocks.chain(appended) {
+        for inst in &block.instantiations {
+            let InstantiationKind::BehavioralExternBlock {
+                module_name,
+                parameters,
+                ..
+            } = &inst.kind
+            else {
+                continue;
+            };
+            let (first_block, first_inst) = bindings
+                .entry((module_name.as_str(), parameters))
+                .or_insert((block, inst));
+            if first_inst.block != inst.block {
+                return Err(ValidationError::ExternBlockModelConflict {
+                    module_name: module_name.clone(),
+                    parameters: parameters.clone(),
+                    first_model: first_inst.block.clone(),
+                    first_instance: format!("{}.{}", first_block.name, first_inst.name),
+                    model: inst.block.clone(),
+                    instance: format!("{}.{}", block.name, inst.name),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks inout hierarchies on the same package snapshot that passed
+/// `verify_package_structure`, reusing each child's dependency summary.
+pub(crate) fn verify_package_inout_hierarchies(p: &Package) -> Result<(), ValidationError> {
+    let mut hierarchy = BlockHierarchy::default();
+    let mut with_inouts = HashSet::new();
+    for member in &p.members {
+        if let PackageMember::Block(block) = member
+            && hierarchy_contains_inouts(block, &with_inouts)
+        {
+            with_inouts.insert(block.name.as_str());
+            validate_block_inout_hierarchy(block, p, &mut hierarchy)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_function_call_graph(
     p: &Package,
     functions: &HashMap<&str, &Fn>,
@@ -776,21 +915,7 @@ fn validate_function_call_graph(
             return Ok(());
         }
         active.push(function_name.to_string());
-        let mut callees = std::collections::BTreeSet::new();
-        for node in &function.nodes {
-            match &node.payload {
-                NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
-                    callees.insert(to_apply.as_str());
-                }
-                NodePayload::CountedFor { body, .. } => {
-                    callees.insert(body.as_str());
-                }
-                _ => {
-                    // All other node kinds do not reference functions.
-                }
-            }
-        }
-        for callee in callees {
+        for callee in direct_function_references(function) {
             visit(functions, functions[callee], visited, active)?;
         }
         active.pop();
@@ -826,12 +951,52 @@ pub fn validate_block(
     parent: &Package,
     member_index: usize,
 ) -> Result<(), ValidationError> {
+    verify_block_structure_in_package(f, parent, member_index)?;
+    let mut with_inouts = HashSet::new();
+    if !f.instantiations.is_empty() {
+        for member in parent.members.iter().take(member_index) {
+            if let PackageMember::Block(prior) = member
+                && hierarchy_contains_inouts(prior, &with_inouts)
+            {
+                with_inouts.insert(prior.name.as_str());
+            }
+        }
+    }
+    if hierarchy_contains_inouts(f, &with_inouts) {
+        validate_block_inout_hierarchy(f, parent, &mut BlockHierarchy::default())?;
+    }
+    Ok(())
+}
+
+/// Identifies ancestors of inout blocks, including those exposing only ordinary
+/// ports.
+fn hierarchy_contains_inouts(block: &Block, prior: &HashSet<&str>) -> bool {
+    !block.inout_nets.is_empty()
+        || block
+            .instantiations
+            .iter()
+            .any(|inst| inst.kind.is_block() && prior.contains(inst.block.as_str()))
+}
+
+/// Verifies a block's local invariants against a verified package context.
+pub(crate) fn verify_block_structure_in_package(
+    f: &Block,
+    parent: &Package,
+    member_index: usize,
+) -> Result<(), ValidationError> {
     validate_block_with(
         f,
         parent,
         member_index,
         CalleeLookup::Unverified(&|name| parent.get_fn(name)),
-    )
+    )?;
+    if f.instantiations
+        .iter()
+        .any(|inst| matches!(inst.kind, InstantiationKind::BehavioralExternBlock { .. }))
+    {
+        verify_extern_block_models(&parent.members, Some((member_index, f)))?;
+    }
+    Ok(())
 }
 
 fn validate_block_with(
@@ -844,8 +1009,10 @@ fn validate_block_with(
     validate_block_resources(f)?;
     let prior_blocks = collect_prior_blocks(parent, member_index);
     for inst in f.instantiations.iter() {
-        match inst.kind {
-            InstantiationKind::Block if !prior_blocks.contains_key(&inst.block) => {
+        match &inst.kind {
+            InstantiationKind::Block | InstantiationKind::BehavioralExternBlock { .. }
+                if !prior_blocks.contains_key(&inst.block) =>
+            {
                 return Err(ValidationError::InstantiationBlockNotFound {
                     func: f.name.clone(),
                     instantiation: inst.name.clone(),
@@ -878,7 +1045,188 @@ fn validate_block_with(
         Some(&instantiation_info),
         true,
     )?;
+    validate_inout_bindings(f, &prior_blocks)?;
     validate_block_registers(f)
+}
+
+/// Checks the shared pins of one block and its transitive instances.
+fn validate_block_inout_hierarchy(
+    block: &Block,
+    parent: &Package,
+    hierarchy: &mut BlockHierarchy,
+) -> Result<(), ValidationError> {
+    hierarchy
+        .summarize(block, parent)
+        .map_err(|error| ValidationError::BlockInvariantViolation {
+            block: block.name.clone(),
+            reason: error.to_string(),
+        })
+}
+
+fn is_valid_inout_type(ty: &Type) -> bool {
+    !ty.contains_token() && ty.checked_bit_count().is_some_and(|width| width != 0)
+}
+
+/// Checks the inline interface shared by parsed and built opaque instances.
+pub(crate) fn validate_opaque_extern_ports(ports: &[OpaqueExternPort]) -> Result<(), String> {
+    let mut names = HashSet::new();
+    let mut has_clock = false;
+    for port in ports {
+        if !is_valid_identifier_name(&port.name) {
+            return Err(format!("invalid opaque extern port name '{}'", port.name));
+        }
+        if !names.insert(port.name.as_str()) {
+            return Err(format!("duplicate opaque extern port '{}'", port.name));
+        }
+        match &port.kind {
+            OpaqueExternPortKind::Clock => {
+                if has_clock {
+                    return Err("an opaque extern block may have only one clock port".to_string());
+                }
+                has_clock = true;
+            }
+            OpaqueExternPortKind::Input(ty) | OpaqueExternPortKind::Output(ty) => {
+                if ty.checked_bit_count().is_none() {
+                    return Err(format!(
+                        "opaque extern port '{}' width overflows",
+                        port.name
+                    ));
+                }
+            }
+            OpaqueExternPortKind::Inout(ty) => {
+                if !is_valid_inout_type(ty) {
+                    return Err(format!(
+                        "opaque extern inout '{}' requires a nonempty, token-free type of representable width",
+                        port.name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks declared net types, local drivers, and bindings of all child inouts.
+fn validate_inout_bindings(
+    block: &Block,
+    prior: &HashMap<String, &Block>,
+) -> Result<(), ValidationError> {
+    let error = |reason: String| ValidationError::BlockInvariantViolation {
+        block: block.name.clone(),
+        reason,
+    };
+    let mut net_indices = HashMap::new();
+    for (index, net) in block.inout_nets.iter().enumerate() {
+        if net.name.is_empty() || net_indices.insert(net.name.as_str(), index).is_some() {
+            return Err(error(format!(
+                "empty or duplicate inout net name '{}'",
+                net.name
+            )));
+        }
+        if !is_valid_inout_type(&net.ty) {
+            return Err(error(format!(
+                "inout net '{}' requires a nonempty, token-free type",
+                net.name
+            )));
+        }
+    }
+
+    let mut expected = BTreeMap::new();
+    for inst in &block.instantiations {
+        if let Some(child_name) = inst.referenced_block() {
+            let child = prior[child_name];
+            for port in child.inout_ports() {
+                let Some(NodePayload::ExtInoutPort {
+                    name, port_type, ..
+                }) = child.nodes.get(port.index).map(|node| &node.payload)
+                else {
+                    return Err(error(format!(
+                        "child block '{}' has an invalid inout port reference at index {}",
+                        child.name, port.index
+                    )));
+                };
+                expected.insert((inst.name.as_str(), name.as_str()), port_type);
+            }
+        } else if let InstantiationKind::OpaqueExternBlock { ports, .. } = &inst.kind {
+            for port in ports {
+                if let OpaqueExternPortKind::Inout(ty) = &port.kind {
+                    expected.insert((inst.name.as_str(), port.name.as_str()), ty);
+                }
+            }
+        }
+    }
+    // Keep the expected endpoints available after a binding, so a duplicate
+    // can be distinguished from binding an ordinary port or unknown instance.
+    let mut bound = HashSet::new();
+    let mut drivers = HashSet::new();
+    let mut connections = vec![false; block.inout_nets.len()];
+    for node in &block.nodes {
+        let (name, actual_type) = match &node.payload {
+            NodePayload::ExtInoutPort {
+                name,
+                net,
+                port_type,
+                ..
+            } => {
+                if !is_valid_inout_type(port_type) {
+                    return Err(error(format!(
+                        "inout port '{name}' requires a nonempty, token-free type"
+                    )));
+                }
+                (net, port_type)
+            }
+            NodePayload::ExtInoutRead { net } => (net, &node.ty),
+            NodePayload::ExtInoutDrive { net, drive, .. } => {
+                if !drivers.insert(net) {
+                    return Err(error(format!("duplicate driver for inout net '{net}'")));
+                }
+                (net, block.get_node_ty(*drive))
+            }
+            NodePayload::ExtInstantiationInout {
+                instantiation,
+                port_name,
+                net,
+            } => {
+                let endpoint = (instantiation.as_str(), port_name.as_str());
+                let ty = expected.get(&endpoint).ok_or_else(|| {
+                    error(format!(
+                        "no block instance inout named {instantiation}.{port_name}"
+                    ))
+                })?;
+                if !bound.insert(endpoint) {
+                    return Err(error(format!(
+                        "duplicate inout binding {instantiation}.{port_name}"
+                    )));
+                }
+                (net, *ty)
+            }
+            _ => continue,
+        };
+        let &index = net_indices
+            .get(name.as_str())
+            .ok_or_else(|| error(format!("undeclared inout net '{name}'")))?;
+        let ty = &block.inout_nets[index].ty;
+        if actual_type != ty {
+            return Err(error(format!(
+                "{} node {} references net '{name}' of type {ty}, got {actual_type}",
+                node.payload.get_operator(),
+                node.text_id
+            )));
+        }
+        connections[index] = true;
+    }
+    if let Some((inst, pin)) = expected.keys().find(|endpoint| !bound.contains(*endpoint)) {
+        return Err(error(format!("missing inout binding {inst}.{pin}")));
+    }
+    for (net, connected) in block.inout_nets.iter().zip(connections) {
+        if !connected {
+            return Err(error(format!(
+                "inout net '{}' has no connections",
+                net.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Checks declarations before any resolver indexes resources by name.
@@ -887,7 +1235,8 @@ fn validate_block_resources(block: &Block) -> Result<(), ValidationError> {
         block: block.name.clone(),
         reason,
     };
-    if !block.registers.is_empty() && block.clock_port_name().is_none() {
+    let has_clock = block.clock_port_name().is_some();
+    if !block.registers.is_empty() && !has_clock {
         return Err(violation("registers require a clock port".to_string()));
     }
     let mut names = HashSet::new();
@@ -919,6 +1268,38 @@ fn validate_block_resources(block: &Block) -> Result<(), ValidationError> {
                 "duplicate instantiation '{}'",
                 instance.name
             )));
+        }
+        if instance.kind.is_external_block()
+            && let Some(module_name) = instance.rtl_module_name()
+            && !is_valid_identifier_name(module_name)
+        {
+            return Err(violation(format!(
+                "extern block instance '{}' has an invalid module name '{}'",
+                instance.name, module_name
+            )));
+        }
+        if let InstantiationKind::BehavioralExternBlock { parameters, .. }
+        | InstantiationKind::OpaqueExternBlock { parameters, .. } = &instance.kind
+        {
+            ir::validate_extern_block_parameters(&instance.name, parameters).map_err(violation)?;
+        }
+        if let InstantiationKind::OpaqueExternBlock { ports, .. } = &instance.kind {
+            validate_opaque_extern_ports(ports).map_err(|reason| {
+                violation(format!(
+                    "opaque extern instance '{}': {reason}",
+                    instance.name
+                ))
+            })?;
+            if !has_clock
+                && ports
+                    .iter()
+                    .any(|port| matches!(port.kind, OpaqueExternPortKind::Clock))
+            {
+                return Err(violation(format!(
+                    "clocked opaque extern instance '{}' requires a clock on its parent block",
+                    instance.name
+                )));
+            }
         }
     }
     Ok(())
@@ -956,7 +1337,9 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
                 clock_seen = true;
                 (name.as_str(), 0)
             }
-            BlockPort::Input(reference) | BlockPort::Output(reference) => {
+            BlockPort::Input(reference)
+            | BlockPort::Output(reference)
+            | BlockPort::Inout(reference) => {
                 let node = block.nodes.get(reference.index).ok_or_else(|| {
                     violation(
                         reference.index,
@@ -965,7 +1348,8 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
                 })?;
                 let name = match (port, &node.payload) {
                     (BlockPort::Input(_), NodePayload::InputPort { name, .. })
-                    | (BlockPort::Output(_), NodePayload::OutputPort { name, .. }) => name,
+                    | (BlockPort::Output(_), NodePayload::OutputPort { name, .. })
+                    | (BlockPort::Inout(_), NodePayload::ExtInoutPort { name, .. }) => name,
                     _ => {
                         return Err(violation(
                             reference.index,
@@ -991,7 +1375,9 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
     }
     for (index, node) in block.nodes.iter().enumerate() {
         match node.payload {
-            NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } => {
+            NodePayload::InputPort { .. }
+            | NodePayload::OutputPort { .. }
+            | NodePayload::ExtInoutPort { .. } => {
                 if !port_nodes.contains(&NodeRef { index }) {
                     return Err(violation(
                         index,
@@ -1224,7 +1610,7 @@ fn validate_graph_with<R>(
     f: &NodeGraph,
     lookup: Option<CalleeLookup<'_, '_>>,
     register_type_resolver: R,
-    instantiation_info: Option<&std::collections::HashMap<String, InstantiationInfo>>,
+    instantiation_info: Option<&BTreeMap<String, InstantiationInfo>>,
     allow_registers: bool,
 ) -> Result<(), ValidationError>
 where
@@ -1284,7 +1670,14 @@ where
             }
         }
         match &node.payload {
-            NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } if !allow_registers => {
+            NodePayload::InputPort { .. }
+            | NodePayload::OutputPort { .. }
+            | NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInoutRead { .. }
+            | NodePayload::ExtInoutDrive { .. }
+            | NodePayload::ExtInstantiationInout { .. }
+                if !allow_registers =>
+            {
                 return Err(ValidationError::NodeSemanticViolation {
                     func: f.name.clone(),
                     node_index: i,
@@ -1866,19 +2259,46 @@ fn build_instantiation_info(
     block: &Block,
     prior_blocks: &std::collections::HashMap<String, &Block>,
     parent: &Package,
-) -> Result<std::collections::HashMap<String, InstantiationInfo>, ValidationError> {
-    let mut info_map = std::collections::HashMap::new();
-    for inst in block.instantiations.iter() {
+) -> Result<BTreeMap<String, InstantiationInfo>, ValidationError> {
+    let mut info_map = BTreeMap::new();
+    for inst in &block.instantiations {
+        if let InstantiationKind::OpaqueExternBlock { ports, .. } = &inst.kind {
+            let mut input_types = BTreeMap::new();
+            let mut output_types = BTreeMap::new();
+            for port in ports {
+                match &port.kind {
+                    OpaqueExternPortKind::Input(ty) => {
+                        input_types.insert(port.name.clone(), ty.clone());
+                    }
+                    OpaqueExternPortKind::Output(ty) => {
+                        output_types.insert(port.name.clone(), ty.clone());
+                    }
+                    OpaqueExternPortKind::Clock | OpaqueExternPortKind::Inout(_) => {
+                        // Those pins are connected through separate mechanisms.
+                    }
+                }
+            }
+            validate_extern_input_casts(block, inst, &input_types)?;
+            info_map.insert(
+                inst.name.clone(),
+                InstantiationInfo {
+                    input_types,
+                    output_types,
+                    require_complete_mapping: true,
+                },
+            );
+            continue;
+        }
         if inst.kind == InstantiationKind::Extern {
             let foreign_function = parent
                 .get_fn(&inst.block)
                 .expect("foreign function missing after target validation");
             validate_fn_signature(foreign_function)?;
-            let mut input_types = std::collections::HashMap::new();
+            let mut input_types = BTreeMap::new();
             for param in foreign_function.param_nodes() {
                 collect_external_port_types(param.param_name(), &param.ty, &mut input_types);
             }
-            let mut output_types = std::collections::HashMap::new();
+            let mut output_types = BTreeMap::new();
             collect_external_port_types("return", &foreign_function.ret_ty, &mut output_types);
             info_map.insert(
                 inst.name.clone(),
@@ -1902,6 +2322,7 @@ fn build_instantiation_info(
                 )
             })
             .collect();
+        validate_extern_input_casts(block, inst, &input_types)?;
         let output_types = callee
             .output_ports()
             .map(|port| {
@@ -1923,12 +2344,37 @@ fn build_instantiation_info(
     Ok(info_map)
 }
 
+/// Checks that SystemVerilog casts name valid data inputs in the local
+/// signature.
+fn validate_extern_input_casts(
+    block: &Block,
+    inst: &ir::Instantiation,
+    input_types: &BTreeMap<String, Type>,
+) -> Result<(), ValidationError> {
+    let input_casts = match &inst.kind {
+        InstantiationKind::BehavioralExternBlock { input_casts, .. }
+        | InstantiationKind::OpaqueExternBlock { input_casts, .. } => input_casts,
+        InstantiationKind::Block | InstantiationKind::Extern => return Ok(()),
+    };
+    let violation = |reason| ValidationError::BlockInvariantViolation {
+        block: block.name.clone(),
+        reason,
+    };
+    for (port_name, sv_type) in input_casts {
+        let input_type = input_types.get(port_name).ok_or_else(|| {
+            violation(format!(
+                "extern block instance '{}' has no data input '{port_name}' for input_casts",
+                inst.name
+            ))
+        })?;
+        ir::validate_extern_block_input_cast(&inst.name, port_name, input_type, sv_type)
+            .map_err(violation)?;
+    }
+    Ok(())
+}
+
 /// Records aggregate external ports and each addressable tuple component.
-fn collect_external_port_types(
-    name: &str,
-    ty: &Type,
-    port_types: &mut std::collections::HashMap<String, Type>,
-) {
+fn collect_external_port_types(name: &str, ty: &Type, port_types: &mut BTreeMap<String, Type>) {
     port_types.insert(name.to_string(), ty.clone());
     if let Type::Tuple(elements) = ty {
         for (index, element) in elements.iter().enumerate() {
@@ -1942,6 +2388,142 @@ mod tests {
     use super::*;
     use crate::ir;
     use crate::ir_parser::Parser;
+
+    #[test]
+    fn inout_net_permitted_connections() {
+        let read = "sample: bits[1] = ext_inout_read(net=bus, id=3)";
+        let drive = "drive: () = ext_inout_drive(one, one, net=bus, id=3)";
+        let child = r#"instantiation u(block=device, kind=block)
+  link: () = ext_instantiation_inout(instantiation=u, port_name=io, net=bus, id=3)"#;
+        let no_ports: &[&str] = &[];
+        let single_port: &[&str] = &["pad"];
+        for (ports, connection, error) in [
+            (no_ports, "", Some("inout net 'bus' has no connections")),
+            (single_port, "", None),
+            (&["a", "b"][..], "", None),
+            (no_ports, read, None),
+            (no_ports, drive, None),
+            (no_ports, child, None),
+            (single_port, read, None),
+            (single_port, drive, None),
+            (single_port, child, None),
+        ] {
+            let header = ports
+                .iter()
+                .map(|p| format!("{p}: bits[1]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let public = ports
+                .iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    format!(
+                        "{name}: () = ext_inout_port(name={name}, net=bus, id={})",
+                        index + 6
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            let source = format!(
+                r#"package connections
+block device(io: bits[1]) {{
+  ext_inout_net pin(bits[1])
+  io: () = ext_inout_port(name=io, net=pin, id=5)
+  sense: bits[1] = ext_inout_read(net=pin, id=1)
+}}
+top block test({header}) {{
+  ext_inout_net bus(bits[1])
+  ext_inout_net observed(bits[1])
+  {public}
+  one: bits[1] = literal(value=1, id=2)
+  {connection}
+  other_read: bits[1] = ext_inout_read(net=observed, id=4)
+}}"#
+            );
+            let package = Parser::new(&source).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&package),
+                error.map_or(Ok(()), |reason| Err(
+                    ValidationError::BlockInvariantViolation {
+                        block: "test".into(),
+                        reason: reason.into(),
+                    }
+                )),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn child_net_with_only_a_public_port_can_bind_to_a_parent_net() {
+        let source = r#"package bound_child
+block child(pad: bits[1]) {
+  ext_inout_net pin(bits[1])
+  pad: () = ext_inout_port(name=pad, net=pin, id=2)
+}
+top block parent(io: bits[1]) {
+  ext_inout_net bus(bits[1])
+  io: () = ext_inout_port(name=io, net=bus, id=3)
+  instantiation u(block=child, kind=block)
+  link: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=1)
+}"#;
+        for kind in [
+            "kind=block",
+            "module_name=external_cell, kind=behavioral_extern_block",
+        ] {
+            let source = source.replace("kind=block", kind);
+            let package = Parser::new(&source).parse_package().unwrap();
+            assert_eq!(validate_package(&package), Ok(()));
+
+            let wrong_width = source
+                .replace("parent(io: bits[1])", "parent(io: bits[2])")
+                .replace("ext_inout_net bus(bits[1])", "ext_inout_net bus(bits[2])");
+            let package = Parser::new(&wrong_width).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&package),
+                Err(ValidationError::BlockInvariantViolation {
+                    block: "parent".to_string(),
+                    reason: "ext_instantiation_inout node 1 references net 'bus' of type bits[2], got bits[1]"
+                        .to_string(),
+                }),
+            );
+        }
+    }
+
+    // Verifies: PIR and XLS use each block's last provenance name and kind.
+    // Catches: Comparing raw spelling or counting an overridden origin.
+    #[test]
+    fn blocks_require_distinct_effective_provenance() {
+        let function_f = r#"#![provenance(name="f", kind="function")]"#;
+        let function_g = r#"#![provenance(name="g", kind="function")]"#;
+        let proc_f = r#"#![provenance(name="f", kind="proc")]"#;
+        let escaped_f = r#"#![provenance(kind="function", name="\x66")]"#;
+        for (first, second, valid) in [
+            ("", "", true),
+            (function_f, function_g, true),
+            (function_f, proc_f, true),
+            (function_f, escaped_f, false),
+            // When an attribute is repeated within a block, XLS uses the last.
+            (function_f, &format!("{function_f}\n{function_g}"), true),
+            (function_f, &format!("{function_g}\n{function_f}"), false),
+        ] {
+            let text =
+                format!("package p\ntop block a() {{\n{first}\n}}\nblock b() {{\n{second}\n}}");
+            let native = xlsynth::IrPackage::parse_ir(&text, None);
+            assert_eq!(native.is_ok(), valid, "native: {text}");
+            let package = Parser::new(&text).parse_package().unwrap();
+            let result = validate_package(&package);
+            let expected = if valid {
+                Ok(())
+            } else {
+                Err(ValidationError::DuplicateBlockProvenance(BlockProvenance {
+                    name: "f".into(),
+                    kind: BlockProvenanceKind::Function,
+                }))
+            };
+            assert_eq!(result, expected, "{text}");
+        }
+    }
 
     const VALID_REGISTER_BLOCK: &str = r#"package public_register_validation
 
@@ -2028,6 +2610,20 @@ top block register_block(clk: clock, rst: bits[1], enable: bits[1], data: bits[8
                 block.instantiations = vec![instance.clone(), instance];
             }),
             "duplicate instantiation 'child'",
+        );
+        check(
+            verify_mutated_register_block(|block| {
+                block.instantiations.push(ir::Instantiation {
+                    name: "child".to_string(),
+                    block: "target".to_string(),
+                    kind: InstantiationKind::BehavioralExternBlock {
+                        module_name: "invalid.module".to_string(),
+                        parameters: BTreeMap::new(),
+                        input_casts: BTreeMap::new(),
+                    },
+                });
+            }),
+            "extern block instance 'child' has an invalid module name 'invalid.module'",
         );
     }
 
@@ -2639,12 +3235,21 @@ block add_block(a: bits[32], b: bits[32], x: bits[32], y: bits[32]) {
   y: () = output_port(b, name=y, id=6)
 }
 "#;
-        let mut parser = Parser::new(ir);
-        let pkg = parser.parse_package().unwrap();
-        assert!(matches!(
-            validate_package(&pkg),
-            Err(ValidationError::InstantiationBlockNotFound { .. })
-        ));
+        for kind in [
+            "kind=block",
+            "module_name=external_adder, kind=behavioral_extern_block",
+        ] {
+            let ir = ir.replace("kind=block", kind);
+            let pkg = Parser::new(&ir).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&pkg),
+                Err(ValidationError::InstantiationBlockNotFound {
+                    func: "my_block".to_string(),
+                    instantiation: "inst_add".to_string(),
+                    block: "add_block".to_string(),
+                })
+            );
+        }
     }
 
     #[test]
@@ -2669,6 +3274,341 @@ top block wrapper(value: bits[8], result: bits[8]) {
                 foreign_function: "missing".to_string(),
             })
         );
+    }
+
+    const EXTERN_BLOCK_MODEL_BINDINGS: &str = r#"package extern_models
+
+block model() {
+}
+
+block alternate() {
+}
+
+top block wrapper() {
+  instantiation first(block=model, kind=behavioral_extern_block)
+}
+
+block later() {
+  instantiation repeat(block=model, module_name=model, parameters={}, kind=behavioral_extern_block)
+  instantiation alias(block=model, module_name=alternate, kind=behavioral_extern_block)
+}
+"#;
+
+    #[test]
+    fn extern_instances_require_one_behavioral_model_per_rtl_module() {
+        let package = Parser::new(EXTERN_BLOCK_MODEL_BINDINGS)
+            .parse_package()
+            .unwrap();
+        assert_eq!(validate_package(&package), Ok(()));
+
+        let conflicting_ir = EXTERN_BLOCK_MODEL_BINDINGS.replace(
+            "repeat(block=model, module_name=model",
+            "repeat(block=alternate, module_name=model",
+        );
+        let package = Parser::new(&conflicting_ir).parse_package().unwrap();
+        assert_eq!(
+            validate_package(&package),
+            Err(ValidationError::ExternBlockModelConflict {
+                module_name: "model".to_string(),
+                parameters: BTreeMap::new(),
+                first_model: "model".to_string(),
+                first_instance: "wrapper.first".to_string(),
+                model: "alternate".to_string(),
+                instance: "later.repeat".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn extern_model_bindings_compare_decoded_parameter_maps() {
+        let ir = r#"package specialized_models
+
+block narrow() {
+}
+
+block wide() {
+}
+
+top block wrapper() {
+  instantiation first(block=narrow, module_name=rtl, parameters={WIDTH:"42", BAR:"0"}, kind=behavioral_extern_block)
+}
+
+block later() {
+  instantiation second(block=wide, module_name=rtl, parameters={BAR:"0", WIDTH:"43"}, kind=behavioral_extern_block)
+}
+"#;
+        for width in ["43", " 42 ", "32'd42"] {
+            let ir = ir.replace(r#"WIDTH:"43""#, &format!("WIDTH:\"{width}\""));
+            let package = Parser::new(&ir).parse_package().unwrap();
+            assert_eq!(validate_package(&package), Ok(()));
+        }
+
+        let conflicting_ir = ir.replace(r#"WIDTH:"43""#, r#"WIDTH:"\x34\x32""#);
+        let package = Parser::new(&conflicting_ir).parse_package().unwrap();
+        let error = validate_package(&package).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            r#"external module 'rtl' with parameter overrides {BAR:"0", WIDTH:"42"} uses behavioral model 'narrow' in instance 'wrapper.first' and conflicting model 'wide' in instance 'later.second'"#
+        );
+        assert_eq!(
+            error,
+            ValidationError::ExternBlockModelConflict {
+                module_name: "rtl".to_string(),
+                parameters: BTreeMap::from([
+                    ("BAR".to_string(), "0".to_string()),
+                    ("WIDTH".to_string(), "42".to_string()),
+                ]),
+                first_model: "narrow".to_string(),
+                first_instance: "wrapper.first".to_string(),
+                model: "wide".to_string(),
+                instance: "later.second".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn extern_block_instantiation_rejects_blank_parameter_expressions() {
+        for instantiation in [
+            r#"first(block=model, parameters={WIDTH:" \t"}, kind=behavioral_extern_block)"#,
+            r#"first(module_name=rtl, ports={}, parameters={WIDTH:" \t"}, kind=opaque_extern_block)"#,
+        ] {
+            let ir = EXTERN_BLOCK_MODEL_BINDINGS.replace(
+                "first(block=model, kind=behavioral_extern_block)",
+                instantiation,
+            );
+            let package = Parser::new(&ir).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&package),
+                Err(ValidationError::BlockInvariantViolation {
+                    block: "wrapper".to_string(),
+                    reason: "extern block instance 'first' requires a nonempty SystemVerilog expression for parameter 'WIDTH'"
+                        .to_string(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn extern_model_bindings_check_replacement_against_later_blocks() {
+        let package = Parser::new(EXTERN_BLOCK_MODEL_BINDINGS)
+            .parse_and_verify_package()
+            .unwrap();
+        let replacement = Parser::new(
+            "block wrapper() { instantiation first(block=alternate, module_name=model, kind=behavioral_extern_block) }",
+        )
+        .parse_block()
+        .unwrap();
+        assert_eq!(
+            verify_block_structure_in_package(&replacement, &package, 2),
+            Err(ValidationError::ExternBlockModelConflict {
+                module_name: "model".to_string(),
+                parameters: BTreeMap::new(),
+                first_model: "alternate".to_string(),
+                first_instance: "wrapper.first".to_string(),
+                model: "model".to_string(),
+                instance: "later.repeat".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn block_builder_rejects_conflicting_extern_models_before_appending() {
+        let mut package = Parser::new(EXTERN_BLOCK_MODEL_BINDINGS)
+            .parse_and_verify_package()
+            .unwrap();
+        let before = package.to_string();
+        let mut builder = crate::BlockBuilder::new("new_user");
+        builder
+            .instantiate_extern_block(
+                "new_instance",
+                package.get_block("alternate").unwrap(),
+                "model",
+            )
+            .unwrap();
+        assert_eq!(
+            builder.build_into_package(&mut package),
+            Err(crate::BuilderError::InvalidOperation(
+                "external module 'model' uses behavioral model 'model' in instance 'wrapper.first' \
+                 and conflicting model 'alternate' in instance 'new_user.new_instance'"
+                    .to_string(),
+            ))
+        );
+        assert_eq!(package.to_string(), before);
+    }
+
+    #[test]
+    fn opaque_extern_requires_typed_inline_port_bindings_and_a_parent_clock() {
+        let ir = r#"package opaque
+
+top block wrapper(clk: clock, din: bits[8], dout: bits[8], io: bits[1]) {
+  ext_inout_net bus(bits[1])
+  instantiation u(module_name=external_cell, ports={clk_i:clock, d:input bits[8], q:output bits[8], pad:inout bits[1]}, kind=opaque_extern_block)
+  io: () = ext_inout_port(name=io, net=bus, id=1)
+  din: bits[8] = input_port(name=din, id=2)
+  send: () = instantiation_input(din, instantiation=u, port_name=d, id=3)
+  receive: bits[8] = instantiation_output(instantiation=u, port_name=q, id=4)
+  dout: () = output_port(receive, name=dout, id=5)
+  link: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=6)
+}
+"#;
+        let package = Parser::new(ir).parse_package().unwrap();
+        assert_eq!(validate_package(&package), Ok(()));
+
+        let wrong_port_type = ir.replace("q:output bits[8]", "q:output bits[16]");
+        let package = Parser::new(&wrong_port_type).parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&package),
+            Err(ValidationError::InstantiationPortTypeMismatch {
+                direction: InstantiationPortDirection::Output,
+                expected: Type::Bits(16),
+                actual: Type::Bits(8),
+                ..
+            })
+        ));
+
+        let missing_input = ir.replace("d:input bits[8]", "d:input bits[8], reset:input bits[1]");
+        let package = Parser::new(&missing_input).parse_package().unwrap();
+        assert_eq!(
+            validate_package(&package),
+            Err(ValidationError::MissingInstantiationPorts {
+                func: "wrapper".to_string(),
+                instantiation: "u".to_string(),
+                missing: vec!["reset".to_string()],
+                direction: InstantiationPortDirection::Input,
+            })
+        );
+
+        for (source, reason) in [
+            (
+                ir.replace("clk: clock, ", ""),
+                "clocked opaque extern instance 'u' requires a clock on its parent block",
+            ),
+            (
+                ir.replace("pad:inout bits[1]", "pad:inout bits[2]"),
+                "ext_instantiation_inout node 6 references net 'bus' of type bits[1], got bits[2]",
+            ),
+            (
+                ir.replace(
+                    "  link: () = ext_instantiation_inout(instantiation=u, port_name=pad, net=bus, id=6)\n",
+                    "",
+                ),
+                "missing inout binding u.pad",
+            ),
+        ] {
+            let package = Parser::new(&source).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&package),
+                Err(ValidationError::BlockInvariantViolation {
+                    block: "wrapper".to_string(),
+                    reason: reason.to_string(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn external_input_casts_require_data_inputs_and_named_sv_types() {
+        let ir = r#"package enum_inputs
+
+block model(clk_i: clock, mode: bits[2], active: bits[1]) {
+  mode: bits[2] = input_port(name=mode, id=1)
+  zero: bits[1] = literal(value=0, id=2)
+  active: () = output_port(zero, name=active, id=3)
+}
+
+top block wrapper(clk: clock, mode: bits[2], active: bits[1]) {
+  instantiation u(ATTRIBUTES)
+  mode: bits[2] = input_port(name=mode, id=4)
+  connected: () = instantiation_input(mode, instantiation=u, port_name=mode, id=5)
+  received: bits[1] = instantiation_output(instantiation=u, port_name=active, id=6)
+  active: () = output_port(received, name=active, id=7)
+}
+"#;
+        for (target, kind) in [
+            ("block=model, module_name=vendor", "behavioral_extern_block"),
+            (
+                "module_name=vendor, ports={clk_i:clock, mode:input bits[2], active:output bits[1]}",
+                "opaque_extern_block",
+            ),
+        ] {
+            let ir_with_cast = |port, sv_type| {
+                let attributes =
+                    format!(r#"{target}, input_casts={{{port}:"{sv_type}"}}, kind={kind}"#);
+                ir.replace("ATTRIBUTES", &attributes)
+            };
+            let package_with_cast = |port, sv_type| {
+                Parser::new(&ir_with_cast(port, sv_type))
+                    .parse_package()
+                    .unwrap()
+            };
+            let zero_width = ir_with_cast("mode", "pkg::mode_t").replace("bits[2]", "bits[0]");
+            let zero_width = Parser::new(&zero_width).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&zero_width),
+                Err(ValidationError::BlockInvariantViolation {
+                    block: "wrapper".to_string(),
+                    reason: "extern block instance 'u' cannot cast zero-width input 'mode'"
+                        .to_string(),
+                })
+            );
+            for sv_type in ["mode$t", "pkg$rtl::mode$t"] {
+                assert_eq!(
+                    validate_package(&package_with_cast("mode", sv_type)),
+                    Ok(())
+                );
+            }
+            for port in ["clk_i", "active", "missing"] {
+                assert_eq!(
+                    validate_package(&package_with_cast(port, "pkg::mode_t")),
+                    Err(ValidationError::BlockInvariantViolation {
+                        block: "wrapper".to_string(),
+                        reason: format!(
+                            "extern block instance 'u' has no data input '{port}' for input_casts"
+                        ),
+                    })
+                );
+            }
+            for sv_type in ["pkg::mode_t'(0)", "$pkg::mode_t", "pkg::$mode_t", "module"] {
+                assert_eq!(
+                    validate_package(&package_with_cast("mode", sv_type)),
+                    Err(ValidationError::BlockInvariantViolation {
+                        block: "wrapper".to_string(),
+                        reason: format!(
+                            "extern block instance 'u' input cast for port 'mode' requires a SystemVerilog type name, got '{sv_type}'"
+                        ),
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extern_block_instantiation_checks_model_port_types() {
+        let ir = r#"package external_test
+
+block model(value: bits[8], result: bits[8]) {
+  value: bits[8] = input_port(name=value, id=1)
+  result: () = output_port(value, name=result, id=2)
+}
+
+top block wrapper(input: bits[8], output: bits[16]) {
+  instantiation u(block=model, module_name=external_cell, kind=behavioral_extern_block)
+  input: bits[8] = input_port(name=input, id=3)
+  connected: () = instantiation_input(input, instantiation=u, port_name=value, id=4)
+  received: bits[16] = instantiation_output(instantiation=u, port_name=result, id=5)
+  output: () = output_port(received, name=output, id=6)
+}
+"#;
+        let package = Parser::new(ir).parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&package),
+            Err(ValidationError::InstantiationPortTypeMismatch {
+                direction: InstantiationPortDirection::Output,
+                expected: Type::Bits(8),
+                actual: Type::Bits(16),
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2772,15 +3712,22 @@ block my_block(in0: bits[32], in1: bits[32], out0: bits[32], out1: bits[32]) {
   out1: () = output_port(instantiation_output.13, name=out1, id=15)
 }
 "#;
-        let mut parser = Parser::new(ir);
-        let pkg = parser.parse_package().unwrap();
-        assert!(matches!(
-            validate_package(&pkg),
-            Err(ValidationError::MissingInstantiationPorts {
-                direction: InstantiationPortDirection::Input,
-                ..
-            })
-        ));
+        for kind in [
+            "kind=block",
+            "module_name=external_adder, kind=behavioral_extern_block",
+        ] {
+            let ir = ir.replace("kind=block", kind);
+            let pkg = Parser::new(&ir).parse_package().unwrap();
+            assert_eq!(
+                validate_package(&pkg),
+                Err(ValidationError::MissingInstantiationPorts {
+                    func: "my_block".to_string(),
+                    instantiation: "inst_add".to_string(),
+                    missing: vec!["b".to_string()],
+                    direction: InstantiationPortDirection::Input,
+                })
+            );
+        }
     }
 
     #[test]

@@ -7,13 +7,222 @@ mod cases;
 mod support;
 use cases::*;
 use std::collections::BTreeSet;
-use xlsynth_codegen::{BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog};
+use xlsynth_codegen::{
+    BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog, inline_invokes_for_codegen,
+};
 use xlsynth_pir::ir::{BlockReset, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_test_helpers::assert_valid_sv;
 use xlsynth_vastly::{
     FixtureRunner, LogicBit, Signedness, Value4, compile_combo_module, compile_pipeline_module,
     eval_combo, plan_combo_eval,
 };
+
+const SHARED_INOUT: &str = include_str!("goldens/block2sv/hierarchy/shared_inout.golden.ir");
+
+#[test]
+fn invalid_inout_bindings_fail_before_emission() {
+    let source = SHARED_INOUT.split("// OPTIONS").next().unwrap();
+    let link = "  left_link: () = ext_instantiation_inout(instantiation=left, port_name=io, net=bus, id=18)";
+    let wrong_bindings = [
+        (link, ""),
+        (
+            "instantiation=right, port_name=io",
+            "instantiation=left, port_name=io",
+        ),
+        (
+            "ext_instantiation_inout(instantiation=left",
+            "ext_instantiation_inout(instantiation=absent",
+        ),
+        ("port_name=io, net=bus", "port_name=drive, net=bus"),
+        ("port_name=io, net=bus", "port_name=io, net=left_data"),
+        ("port_name=io, net=bus", "port_name=io, net=seen"),
+        ("port_name=io, net=bus", "port_name=io, net=sample"),
+        (
+            "instantiation_input(left_data, instantiation=left, port_name=drive",
+            "instantiation_input(left_data, instantiation=left, port_name=io",
+        ),
+        ("ext_inout_drive(drive, oe", "ext_inout_drive(drive, drive"),
+    ];
+    for (from, to) in wrong_bindings {
+        let ir = source.replacen(from, to, 1);
+        assert!(
+            Parser::new(&ir).parse_and_validate_package().is_err(),
+            "accepted {from} -> {to}"
+        );
+    }
+    // The listener's ordinary output feeds a sibling's local driver on the same
+    // net.
+    let original = "  left_drive: () = instantiation_input(left_data, instantiation=left, port_name=drive, id=14)";
+    let ir = source.replace(original, "").replace(
+        "  seen: ()",
+        &format!(
+            "{}\n  seen: ()",
+            original.replace("input(left_data", "input(sample")
+        ),
+    );
+    let error = Parser::new(&ir).parse_and_validate_package().unwrap_err();
+    assert!(error.to_string().contains("combinational cycle"), "{error}");
+
+    let enable =
+        "  left_enable: () = instantiation_input(left_oe, instantiation=left, port_name=oe, id=16)";
+    let ir = source.replace(enable, "").replace(
+        "  seen: ()",
+        &format!(
+            "  bit: bits[1] = bit_slice(sample, start=0, width=1, id=25)\n{}\n  seen: ()",
+            enable.replace("input(left_oe", "input(bit")
+        ),
+    );
+    let error = Parser::new(&ir).parse_and_validate_package().unwrap_err();
+    assert!(error.to_string().contains("combinational cycle"), "{error}");
+}
+
+#[test]
+fn register_breaks_an_inout_feedback_path() {
+    let source = include_str!("goldens/block2sv/registers/registered_inout.golden.ir");
+    let ir = source.replace(
+        "register_write(data, register=data_reg",
+        "register_write(pin, register=data_reg",
+    );
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
+    let pipeline = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    assert_eq!(
+        emit_system_verilog(&package, &pipeline).unwrap_err(),
+        BlockCodegenError::NotPipeline(
+            "block `registered_pad` cannot use layout=pipeline with inout net `pin`; use layout=none"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn pipeline_layout_rejects_a_wiring_only_child() {
+    let ir = include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir");
+    let package = Parser::new(ir).parse_and_validate_package().unwrap();
+    let error = emit_system_verilog(
+        &package,
+        &BlockCodegenOptions {
+            layout: Layout::Pipeline,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        BlockCodegenError::NotPipeline(
+            "block `contact` cannot use layout=pipeline with inout net `io`; use layout=none"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn a_port_only_net_requires_flat_layout() {
+    let ir = r#"package pins
+top block probe(io: bits[1]) {
+  ext_inout_net pin(bits[1])
+  io: () = ext_inout_port(name=io, net=pin, id=1)
+}"#;
+    let package = Parser::new(ir).parse_and_validate_package().unwrap();
+    let options = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    assert_eq!(
+        emit_system_verilog(&package, &options).unwrap_err(),
+        BlockCodegenError::NotPipeline(
+            "block `probe` cannot use layout=pipeline with inout net `pin`; use layout=none".into()
+        ),
+    );
+}
+
+#[test]
+fn flat_codegen_rejects_an_unused_net_even_when_a_port_has_the_same_name() {
+    let ir = r#"package pins
+top block unused(floating: bits[3]) {
+  ext_inout_net floating(bits[3])
+  ext_inout_net pin(bits[3])
+  p: () = ext_inout_port(name=floating, net=pin, id=1)
+}"#;
+    let package = Parser::new(ir).parse_package().unwrap();
+    assert_eq!(
+        emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap_err(),
+        BlockCodegenError::InvalidBlock(
+            "block 'unused' violates a resource invariant: inout net 'floating' has no connections"
+                .into()
+        ),
+    );
+}
+
+#[test]
+fn inout_data_types_and_enables_are_checked() {
+    let single = r#"package pads
+top block cell_io(data: bits[4], oe: bits[1], io: bits[4]) {
+  ext_inout_net pin(bits[4])
+  pad: () = ext_inout_port(name=io, net=pin, id=4)
+  data: bits[4] = input_port(name=data, id=1)
+  oe: bits[1] = input_port(name=oe, id=2)
+  drive: () = ext_inout_drive(data, oe, net=pin, id=3)
+}"#;
+    Parser::new(single).parse_and_validate_package().unwrap();
+    for (old, new) in [
+        ("ext_inout_drive(data, oe,", "ext_inout_drive(data,"),
+        ("ext_inout_drive(data, oe,", "ext_inout_drive(data, oe, oe,"),
+        ("ext_inout_drive(data, oe,", "ext_inout_drive(oe, oe,"),
+        ("oe: bits[1]", "oe: bits[2]"),
+        ("io: bits[4]", "io: bits[2][2]"),
+        ("bits[4]", "bits[0]"),
+        ("bits[4]", "(token, bits[4])"),
+    ] {
+        let ir = single.replace(old, new);
+        assert!(
+            Parser::new(&ir).parse_and_validate_package().is_err(),
+            "accepted {ir}"
+        );
+    }
+    // Equal flattened widths are insufficient when binding physical ports.
+    let ir = include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir");
+    let (contact, rest) = ir.split_once("\nblock forward").unwrap();
+    let child_scalar = format!(
+        "{}\nblock forward{rest}",
+        contact.replace("bits[2][2]", "bits[4]")
+    );
+    let error = Parser::new(&child_scalar)
+        .parse_and_validate_package()
+        .unwrap_err();
+    assert!(error.to_string().contains("references net"), "{error}");
+}
+
+#[test]
+fn inout_projection_checks_only_the_selected_hierarchy() {
+    let mut package = Parser::new(SHARED_INOUT)
+        .parse_and_validate_package()
+        .unwrap();
+    let options = xlsynth_pir::block2fn::Block2FnOptions::default();
+    assert!(
+        xlsynth_pir::block2fn::block_package_to_fn(&package, &options)
+            .unwrap_err()
+            .contains("ext_inout_net")
+    );
+    let evaluation_error = xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "pads")
+        .err()
+        .expect("an inout pin cannot be evaluated");
+    assert!(evaluation_error.to_string().contains("ext_inout_net"));
+    assert!(xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "listener").is_ok());
+    assert!(
+        xlsynth_pir::block_transition::lower_block_transition(&package, "pad_cell")
+            .err()
+            .expect("an inout pin cannot be projected to a transition")
+            .contains("ext_inout_net")
+    );
+    package.set_top_block("listener").unwrap();
+    let result = xlsynth_pir::block2fn::block_package_to_fn(&package, &options).unwrap();
+    assert_eq!(result.function.params.len(), 1);
+}
 
 #[test]
 fn simple_passthrough_has_stable_exact_systemverilog() {
@@ -885,8 +1094,9 @@ top block parent(clk: clock, value: bits[8], fast: bits[8], slow: bits[8]) {
     for expression in ["add(lhs, rhs, id=20)", "identity(lhs, id=20)"] {
         let source = ir.replace("add(lhs, rhs, id=20)", expression);
         assert_stock_xls_accepts(&source);
-        let generated = emit(
-            &source,
+        let expanded = inline_invokes_for_codegen(package(&source), None).unwrap();
+        let generated = support::TestRtl::emit(
+            &expanded,
             &BlockCodegenOptions {
                 layout: Layout::Pipeline,
                 ..BlockCodegenOptions::default()
@@ -1003,6 +1213,45 @@ fn hierarchy_emits_each_child_once_before_its_parent() {
 }
 
 #[test]
+fn direct_emission_requires_inlined_calls_only_in_reachable_blocks() {
+    let ir = r#"package selected_calls
+fn passthrough(x: bits[1] id=1) -> bits[1] {
+  ret x: bits[1] = param(name=x, id=1)
+}
+block caller() {
+  zero: bits[1] = literal(value=0, id=2)
+  unused: bits[1] = invoke(zero, to_apply=passthrough, id=3)
+}
+top block parent() {
+  instantiation child(block=caller, kind=block)
+}
+block independent() {
+}
+"#;
+    let parsed = package(ir);
+    for layout in [Layout::None, Layout::Pipeline] {
+        for top in ["parent", "caller", "independent"] {
+            let options = BlockCodegenOptions {
+                layout,
+                top: Some(top.to_owned()),
+                ..Default::default()
+            };
+            let result = emit_system_verilog(&parsed, &options);
+            if top == "independent" {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    BlockCodegenError::Unsupported(
+                        "block `caller` contains an invoke of `passthrough`. Inline function calls before SystemVerilog emission.".into()
+                    )
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn child_function_dependencies_determine_whether_feedback_is_combinational() {
     let ir = r#"package invoked_child
 
@@ -1026,7 +1275,7 @@ top block parent(value: bits[8], result: bits[8]) {
   result: () = output_port(received, name=result, id=9)
 }
 "#;
-    let parsed = package(ir);
+    let parsed = inline_invokes_for_codegen(package(ir), None).unwrap();
     for layout in [Layout::None, Layout::Pipeline] {
         for top in ["parent", "child"] {
             let options = BlockCodegenOptions {
@@ -1054,7 +1303,9 @@ top block parent(value: bits[8], result: bits[8]) {
     }
     // The same wiring becomes a real combinational loop when the callee
     // uses the argument driven by its own output.
-    let cyclic = package(&ir.replace("not(value,", "not(ignored,"));
+    let cyclic =
+        inline_invokes_for_codegen(package(&ir.replace("not(value,", "not(ignored,")), None)
+            .unwrap();
     assert!(matches!(
         emit_system_verilog(&cyclic, &BlockCodegenOptions::default()),
         Err(BlockCodegenError::InvalidBlock(message))
@@ -1106,7 +1357,7 @@ top block parent(clk: clock, value: bits[8], result: bits[8]) {
     ] {
         let source = ir.replace("not(value, id=3)", expression);
         assert_stock_xls_accepts(&source);
-        let parsed = package(&source);
+        let parsed = inline_invokes_for_codegen(package(&source), None).unwrap();
         let flat = support::TestRtl::emit(&parsed, &BlockCodegenOptions::default());
         // Vastly executes one module. Drive the emitted child's feedback port
         // from its last registered output, as it is wired in the parent.
@@ -1200,6 +1451,127 @@ top block parent(clk: clock, value: bits[8], result: bits[8]) {
         .filter(|line| line.trim() == ".clk(clk),")
         .count();
     assert_eq!(clocks, 3);
+}
+
+const MODEL_BACKED_EXTERN: &str =
+    include_str!("goldens/block2sv/extern/model_backed_extern.golden.ir");
+
+#[test]
+fn pipeline_layout_rejects_reachable_external_blocks() {
+    let child_source = MODEL_BACKED_EXTERN.replacen("top block wrapper", "block wrapper", 1);
+    let nested_source = format!(
+        r#"{child_source}
+top block nested(clk: clock, reset: bits[1], data: bits[8], out: bits[8]) {{
+  instantiation u(block=wrapper, kind=block)
+  reset: bits[1] = input_port(name=reset, id=22)
+  data: bits[8] = input_port(name=data, id=23)
+  connected_reset: () = instantiation_input(reset, instantiation=u, port_name=parent_reset, id=24)
+  connected_data: () = instantiation_input(data, instantiation=u, port_name=data, id=25)
+  received: bits[8] = instantiation_output(instantiation=u, port_name=out, id=26)
+  out: () = output_port(received, name=out, id=27)
+}}
+"#
+    );
+    let options = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    for source in [MODEL_BACKED_EXTERN, nested_source.as_str()] {
+        assert_eq!(
+            emit_system_verilog(&package(source), &options).unwrap_err(),
+            BlockCodegenError::NotPipeline(
+                "block `wrapper` cannot use layout=pipeline with external block instance `u_ext`; \
+                 use layout=none"
+                    .into()
+            )
+        );
+    }
+    let select_delay = BlockCodegenOptions {
+        top: Some("delay".to_owned()),
+        ..options
+    };
+    emit_system_verilog(&package(&nested_source), &select_delay).unwrap();
+}
+
+#[test]
+fn external_block_module_name_cannot_shadow_generated_top() {
+    let options = BlockCodegenOptions {
+        module_name: Some("external_rtl".to_string()),
+        ..BlockCodegenOptions::default()
+    };
+    let package = package(MODEL_BACKED_EXTERN);
+    assert_eq!(
+        emit_system_verilog(&package, &options),
+        Err(BlockCodegenError::InvalidBlock(
+            "external module `external_rtl` instantiated as `u_ext` in block `wrapper` \
+             conflicts with a generated module"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
+fn opaque_external_block_rejects_pipeline_layout() {
+    let source = include_str!("goldens/block2sv/extern/opaque_extern.golden.ir");
+    let options = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..BlockCodegenOptions::default()
+    };
+    assert_eq!(
+        emit_system_verilog(&package(source), &options).unwrap_err(),
+        BlockCodegenError::NotPipeline(
+            "block `wrapper` cannot use layout=pipeline with external block instance `u`; \
+             use layout=none"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn opaque_external_module_name_cannot_shadow_generated_top() {
+    let source = include_str!("goldens/block2sv/extern/opaque_extern.golden.ir");
+    let options = BlockCodegenOptions {
+        module_name: Some("vendor_peripheral".into()),
+        ..BlockCodegenOptions::default()
+    };
+    assert_eq!(
+        emit_system_verilog(&package(source), &options).unwrap_err(),
+        BlockCodegenError::InvalidBlock(
+            "external module `vendor_peripheral` instantiated as `u` in block `wrapper` \
+             conflicts with a generated module"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn default_external_module_name_cannot_shadow_generated_child() {
+    let source = SHARED_INOUT.replacen(
+        "instantiation left(block=pad_cell, kind=block)",
+        "instantiation left(block=pad_cell, kind=behavioral_extern_block)",
+        1,
+    );
+    assert_eq!(
+        emit_system_verilog(&package(&source), &BlockCodegenOptions::default()).unwrap_err(),
+        BlockCodegenError::InvalidBlock(
+            "external module `pad_cell` instantiated as `left` in block `pads` \
+             conflicts with a generated module"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn external_model_requires_a_clock_for_its_clocked_child() {
+    let ir = MODEL_BACKED_EXTERN.replace("block model(model_clk: clock, ", "block model(");
+    assert_eq!(
+        emit_system_verilog(&package(&ir), &BlockCodegenOptions::default()),
+        Err(BlockCodegenError::InvalidBlock(
+            "instance `u_delay` of block `delay` requires clock port `delay_clk`, \
+             but parent block `model` has no clock"
+                .to_string()
+        ))
+    );
 }
 
 #[test]
@@ -1328,7 +1700,7 @@ top block debug_events(clk: clock, predicate: bits[1], value: bits[8], result: b
   predicate: bits[1] = input_port(name=predicate, id=1)
   value: bits[8] = input_port(name=value, id=2)
   start_token: token = after_all(id=3)
-  checked: token = assert(start_token, predicate, message="bad value", label="value_is_valid", id=4)
+  checked: token = assert(start_token, predicate, message="value is 50% of \"limit\"\n\000end", label="value_is_valid", id=4)
   observed: token = trace(checked, predicate, format="value={}", data_operands=[value], verbosity=0, id=5)
   covered: () = cover(predicate, label="value_was_observed", id=6)
   result: () = output_port(value, name=result, id=7)
@@ -1336,6 +1708,7 @@ top block debug_events(clk: clock, predicate: bits[1], value: bits[8], result: b
 "#;
     assert_stock_xls_accepts(ir);
     let enabled = emit(ir, &BlockCodegenOptions::default());
+    assert_valid_sv(&enabled);
     let assertions = enabled
         .lines()
         .filter(|line| line.contains("assert property"))
@@ -1344,7 +1717,7 @@ top block debug_events(clk: clock, predicate: bits[1], value: bits[8], result: b
     assert_eq!(
         assertions,
         [
-            "value_is_valid: assert property (@(posedge clk) disable iff ($sampled($isunknown(predicate))) predicate) else $error(\"bad value\");"
+            r#"value_is_valid: assert property (@(posedge clk) disable iff ($sampled($isunknown(predicate))) predicate) else $error("value is 50%% of \"limit\"\n\000end");"#
         ]
     );
     let covers = enabled
@@ -1392,6 +1765,7 @@ top block assertion({clock}predicate: bits[1], result: bits[1]) {{
         );
         assert_stock_xls_accepts(&ir);
         let generated = emit(&ir, &BlockCodegenOptions::default());
+        assert_valid_sv(&generated);
         if clocked {
             let assertions = generated
                 .lines()
@@ -1410,7 +1784,7 @@ top block assertion({clock}predicate: bits[1], result: bits[1]) {{
                 generated
                     .lines()
                     .any(|line| line.trim()
-                        == "if (!($isunknown(predicate))) assert (predicate) else $error(\"condition failed\");")
+                        == "assert final ($isunknown(predicate) || (predicate)) else $error(\"condition failed\");")
             );
         }
         assert!(!generated.contains("begin : \n"));
@@ -1465,22 +1839,22 @@ top block guarded(clk: clock, {reset}: bits[1], predicate: bits[1], result: bits
             );
             assert_stock_xls_accepts(&ir);
             let generated = emit(&ir, &BlockCodegenOptions::default());
+            assert_valid_sv(&generated);
             let assertions = generated
                 .lines()
                 .filter(|line| line.contains("assert property"))
                 .map(str::trim)
                 .collect::<Vec<_>>();
             let inactive = if active_low { "1'b1" } else { "1'b0" };
-            let disabled = format!("{reset} !== {inactive} || $isunknown(predicate)");
-            let disabled = if asynchronous {
-                disabled
+            let reset_check = if asynchronous {
+                format!("{reset} !== {inactive}")
             } else {
-                format!("$sampled({disabled})")
+                format!("$sampled({reset} !== {inactive})")
             };
             assert_eq!(
                 assertions,
                 [format!(
-                    "assert property (@(posedge clk) disable iff ({disabled}) predicate) else $error(\"condition failed\");"
+                    "assert property (@(posedge clk) disable iff ({reset_check} || $sampled($isunknown(predicate))) predicate) else $error(\"condition failed\");"
                 )],
                 "asynchronous={asynchronous}, active_low={active_low}"
             );
@@ -1511,10 +1885,11 @@ top block wrapper(clk: clock, lhs: bits[8], rhs: bits[8], result: bits[8]) {
 }
 "#;
     assert_stock_xls_accepts(ir);
+    let expanded = inline_invokes_for_codegen(package(ir), None).unwrap();
     for layout in [Layout::None, Layout::Pipeline] {
         for emit_asserts in [true, false] {
-            let rtl = emit(
-                ir,
+            let rtl = support::TestRtl::emit(
+                &expanded,
                 &BlockCodegenOptions {
                     layout,
                     emit_asserts,
@@ -1710,7 +2085,7 @@ top block fixed_label(data: bits[1], out: bits[1]) {
   assign check__1 = ~data;
   `ifndef SYNTHESIS
   always_comb begin : check
-    if (!($isunknown(check__1))) assert (check__1) else $error("check");
+    assert final ($isunknown(check__1) || (check__1)) else $error("check");
   end
   `endif
   assign out = check__1;
@@ -1845,7 +2220,7 @@ fn check_combinational_output(rtl: &str, inputs: &[(&str, u32, u64)], expected: 
 /// Checks the packed result of an invoked function under both codegen layouts.
 fn check_invoke_result(ir: &str, inputs: &[(&str, u32, u64)], expected: u64) {
     assert_stock_xls_accepts(ir);
-    let parsed = package(ir);
+    let parsed = inline_invokes_for_codegen(package(ir), None).unwrap();
     let block_name = &parsed.get_top_block().unwrap().name;
     for layout in [Layout::None, Layout::Pipeline] {
         let options = BlockCodegenOptions {
@@ -2102,13 +2477,14 @@ top block caller(empty: bits[0], out: bits[0]) {
 }
 "#;
     assert_stock_xls_accepts(ir);
+    let expanded = inline_invokes_for_codegen(package(ir), None).unwrap();
     for layout in [Layout::None, Layout::Pipeline] {
         let options = BlockCodegenOptions {
             layout,
             ..BlockCodegenOptions::default()
         };
         assert_eq!(
-            emit_system_verilog(&package(ir), &options).unwrap_err(),
+            emit_system_verilog(&expanded, &options).unwrap_err(),
             BlockCodegenError::Unsupported(
                 "counted_for is not supported in `caller`; unroll loops before block2sv code generation".to_owned()
             )

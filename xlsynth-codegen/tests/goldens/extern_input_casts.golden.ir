@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package extern_input_casts
+
+block model(mode: bits[2], active: bits[1]) {
+  mode: bits[2] = input_port(name=mode, id=1)
+  run: bits[2] = literal(value=1, id=2)
+  is_run: bits[1] = eq(mode, run, id=3)
+  active: () = output_port(is_run, name=active, id=4)
+}
+
+top block wrapper(mode: bits[2], modeled: bits[1], opaque: bits[1]) {
+  instantiation u_model(block=model, module_name=vendor, parameters={ENABLE:"1'b1"}, input_casts={mode:"vendor$pkg::mode$t"}, kind=behavioral_extern_block)
+  instantiation u_opaque(module_name=vendor, ports={mode:input bits[2], active:output bits[1]}, parameters={ENABLE:"1'b1"}, input_casts={mode:"vendor$pkg::mode$t"}, kind=opaque_extern_block)
+  mode: bits[2] = input_port(name=mode, id=5)
+  model_mode: () = instantiation_input(mode, instantiation=u_model, port_name=mode, id=6)
+  model_active: bits[1] = instantiation_output(instantiation=u_model, port_name=active, id=7)
+  opaque_mode: () = instantiation_input(mode, instantiation=u_opaque, port_name=mode, id=8)
+  opaque_active: bits[1] = instantiation_output(instantiation=u_opaque, port_name=active, id=9)
+  modeled: () = output_port(model_active, name=modeled, id=10)
+  opaque: () = output_port(opaque_active, name=opaque, id=11)
+}
+
+// OPTIONS: layout = "none"
+// EXPECT-SV: module wrapper(
+// EXPECT-SV:   input logic [1:0] mode,
+// EXPECT-SV:   output logic modeled,
+// EXPECT-SV:   output logic opaque
+// EXPECT-SV: );
+// EXPECT-SV:   logic model_active;
+// EXPECT-SV:   logic opaque_active;
+// EXPECT-SV:   assign modeled = model_active;
+// EXPECT-SV:   assign opaque = opaque_active;
+// EXPECT-SV:   vendor #(
+// EXPECT-SV:     .ENABLE(1'b1)
+// EXPECT-SV:   ) u_model (
+// EXPECT-SV:     .mode(vendor$pkg::mode$t'(mode)),
+// EXPECT-SV:     .active(model_active)
+// EXPECT-SV:   );
+// EXPECT-SV:   vendor #(
+// EXPECT-SV:     .ENABLE(1'b1)
+// EXPECT-SV:   ) u_opaque (
+// EXPECT-SV:     .mode(vendor$pkg::mode$t'(mode)),
+// EXPECT-SV:     .active(opaque_active)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

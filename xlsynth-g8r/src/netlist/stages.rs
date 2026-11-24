@@ -3,7 +3,7 @@
 //! Structural register-stage partitioning and complete area accounting.
 
 use crate::liberty_model::{Library, PinDirection};
-use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
+use crate::netlist::normalized::{BitExpr, BitSource, NormalizedBitIndex, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use crate::netlist::sta::is_sequential_boundary_cell;
 use anyhow::{Result, anyhow};
@@ -41,8 +41,8 @@ struct InstanceInfo {
 
 #[derive(Clone, Debug, Default)]
 struct CombinationalParticipation {
-    inputs: BTreeSet<usize>,
-    outputs: BTreeSet<usize>,
+    inputs: BTreeSet<NormalizedBitIndex>,
+    outputs: BTreeSet<NormalizedBitIndex>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -93,8 +93,8 @@ pub fn analyze_register_stages(
     }
 
     let bit_count = normalized.bit_count();
-    let mut successors: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); bit_count];
-    let mut predecessors: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); bit_count];
+    let mut successors: Vec<BTreeSet<NormalizedBitIndex>> = vec![BTreeSet::new(); bit_count];
+    let mut predecessors: Vec<BTreeSet<NormalizedBitIndex>> = vec![BTreeSet::new(); bit_count];
     for assign in &normalized.assigns {
         for (lhs, rhs) in assign.lhs_bits.iter().copied().zip(assign.rhs_bits.iter()) {
             if let BitExpr::Source(BitSource::Bit(source)) = rhs {
@@ -103,8 +103,9 @@ pub fn analyze_register_stages(
         }
     }
 
-    let mut register_outputs: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); infos.len()];
-    let mut register_inputs: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); infos.len()];
+    let mut register_outputs: Vec<BTreeSet<NormalizedBitIndex>> =
+        vec![BTreeSet::new(); infos.len()];
+    let mut register_inputs: Vec<BTreeSet<NormalizedBitIndex>> = vec![BTreeSet::new(); infos.len()];
     let mut combinational = vec![CombinationalParticipation::default(); infos.len()];
     for (inst_idx, instance) in normalized.instances.iter().enumerate() {
         let cell = &library.cells[infos[inst_idx].cell_idx];
@@ -184,12 +185,12 @@ pub fn analyze_register_stages(
         .filter(|port| port.direction == PortDirection::Input)
     {
         for bit in &port.bits {
-            origins[*bit].insert(Origin::PrimaryInput);
+            origins[bit.index()].insert(Origin::PrimaryInput);
         }
     }
     for reg_idx in &register_indices {
         for bit in &register_outputs[*reg_idx] {
-            origins[*bit].insert(Origin::Register(*reg_idx));
+            origins[bit.index()].insert(Origin::Register(*reg_idx));
         }
     }
     propagate_sets(&mut origins, &successors);
@@ -201,12 +202,12 @@ pub fn analyze_register_stages(
         .filter(|port| port.direction == PortDirection::Output)
     {
         for bit in &port.bits {
-            sinks[*bit].insert(Sink::ModuleOutput);
+            sinks[bit.index()].insert(Sink::ModuleOutput);
         }
     }
     for reg_idx in &register_indices {
         for bit in &register_inputs[*reg_idx] {
-            sinks[*bit].insert(Sink::Register(*reg_idx));
+            sinks[bit.index()].insert(Sink::Register(*reg_idx));
         }
     }
     propagate_sets(&mut sinks, &predecessors);
@@ -214,7 +215,7 @@ pub fn analyze_register_stages(
     let mut register_edges = BTreeSet::new();
     for dst in &register_indices {
         for bit in &register_inputs[*dst] {
-            for origin in &origins[*bit] {
+            for origin in &origins[bit.index()] {
                 if let Origin::Register(src) = origin {
                     register_edges.insert((*src, *dst));
                 }
@@ -315,25 +316,25 @@ fn connection_map<'a>(
     Ok(map)
 }
 
-fn as_bit(source: &BitSource) -> Option<usize> {
+fn as_bit(source: &BitSource) -> Option<NormalizedBitIndex> {
     match source {
         BitSource::Bit(bit) => Some(*bit),
         BitSource::Literal(_) | BitSource::Unknown => None,
     }
 }
 
-fn extend_bit_set(target: &mut BTreeSet<usize>, bits: &[BitSource]) {
+fn extend_bit_set(target: &mut BTreeSet<NormalizedBitIndex>, bits: &[BitSource]) {
     target.extend(bits.iter().filter_map(as_bit));
 }
 
 fn add_edge(
-    source: usize,
-    sink: usize,
-    successors: &mut [BTreeSet<usize>],
-    predecessors: &mut [BTreeSet<usize>],
+    source: NormalizedBitIndex,
+    sink: NormalizedBitIndex,
+    successors: &mut [BTreeSet<NormalizedBitIndex>],
+    predecessors: &mut [BTreeSet<NormalizedBitIndex>],
 ) {
-    successors[source].insert(sink);
-    predecessors[sink].insert(source);
+    successors[source.index()].insert(sink);
+    predecessors[sink.index()].insert(source);
 }
 
 fn is_combinational_timing_type(raw: &str) -> bool {
@@ -343,24 +344,27 @@ fn is_combinational_timing_type(raw: &str) -> bool {
     )
 }
 
-fn propagate_sets<T: Clone + Ord>(sets: &mut [BTreeSet<T>], successors: &[BTreeSet<usize>]) {
-    let mut queue: VecDeque<usize> = sets
+fn propagate_sets<T: Clone + Ord>(
+    sets: &mut [BTreeSet<T>],
+    successors: &[BTreeSet<NormalizedBitIndex>],
+) {
+    let mut queue: VecDeque<NormalizedBitIndex> = sets
         .iter()
         .enumerate()
-        .filter_map(|(idx, values)| (!values.is_empty()).then_some(idx))
+        .filter_map(|(idx, values)| (!values.is_empty()).then_some(NormalizedBitIndex::new(idx)))
         .collect();
     let mut queued = vec![false; sets.len()];
     for source in &queue {
-        queued[*source] = true;
+        queued[source.index()] = true;
     }
     while let Some(source) = queue.pop_front() {
-        queued[source] = false;
-        let propagated = sets[source].clone();
-        for sink in &successors[source] {
-            let old_len = sets[*sink].len();
-            sets[*sink].extend(propagated.iter().cloned());
-            if sets[*sink].len() != old_len && !queued[*sink] {
-                queued[*sink] = true;
+        queued[source.index()] = false;
+        let propagated = sets[source.index()].clone();
+        for sink in &successors[source.index()] {
+            let old_len = sets[sink.index()].len();
+            sets[sink.index()].extend(propagated.iter().cloned());
+            if sets[sink.index()].len() != old_len && !queued[sink.index()] {
+                queued[sink.index()] = true;
                 queue.push_back(*sink);
             }
         }
@@ -375,11 +379,11 @@ fn classify_combinational_stage(
 ) -> Option<usize> {
     let mut cell_origins = BTreeSet::new();
     for bit in &participation.inputs {
-        cell_origins.extend(origins[*bit].iter().copied());
+        cell_origins.extend(origins[bit.index()].iter().copied());
     }
     let mut cell_sinks = BTreeSet::new();
     for bit in &participation.outputs {
-        cell_sinks.extend(sinks[*bit].iter().copied());
+        cell_sinks.extend(sinks[bit.index()].iter().copied());
     }
     if cell_origins.contains(&Origin::PrimaryInput) || cell_sinks.contains(&Sink::ModuleOutput) {
         return None;

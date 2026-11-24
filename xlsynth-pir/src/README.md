@@ -112,24 +112,65 @@ to declare the block reset and supply a one-bit reset in `RegisterWriteOptions`.
 Multiple writes require load enables and the same reset operand; mutually
 exclusive enables remain the caller's responsibility.
 
-`instantiate(name, &child_block)` and `instantiate_extern(name, &function)`
-return scoped `BInstantiation` handles. `instantiation_input` connects each
-named input once; `instantiation_output` caches a typed output handle. External
-tuple components use names such as `arg.0` and `return.0`; upstream XLS requires
-the referenced function's Verilog FFI template as well.
-The pinned libxls v0.54.7 parser rejects PIR's current `foreign_function=` extern
-declaration syntax, so extern builder tests use PIR verification and roundtrips,
-not upstream parsing. Other supported block forms are cross-checked with libxls.
+`instantiate(name, &child_block)`, `instantiate_extern(name, &function)`, and
+`instantiate_extern_block(name, &model, module_name)` return scoped
+`BInstantiation` handles. `instantiation_input` connects each named input once,
+and `instantiation_output` caches a typed output handle. Foreign-function tuple
+components use names such as `arg.0` and `return.0`. Codegen uses the referenced
+function's Verilog FFI template.
 
-Package finalization checks combinational cycles through block instances, with
-registers as state boundaries. Traversal stops at extern boundaries because
-the implementing RTL is supplied separately. A clocked child requires a
-parent clock, but their clock names need not match.
+A behavioral external block uses a model defined earlier in the package.
+`instantiation u(block=model, kind=behavioral_extern_block)` emits an instance of
+the external SystemVerilog module `model`. Set `module_name=external_rtl` to
+target a different module. The model supplies the port names, types, and
+behavior used for evaluation. Instances of the same RTL module with the
+same override map use the same behavioral model within a package.
+
+Both kinds accept named SystemVerilog parameter overrides. For example,
+`parameters={WIDTH:"42"}` emits `.WIDTH(42)`. The PIR strings contain
+SystemVerilog expression text. A string override such as `LABEL:"\"fast\""`
+emits `.LABEL("fast")`. Choose a behavioral model or inline interface that matches
+the elaborated configuration. An omitted map and an empty map
+are equivalent. Behavioral consistency is checked by module name and the
+exact map of decoded expression text.
+
+The Rust builder accepts overrides through
+`instantiate_extern_block_with_parameters` and
+`instantiate_opaque_extern_block_with_parameters`.
+
+Both kinds accept `input_casts={mode:"pkg::mode_t"}` to cast a named input
+connection in the generated SystemVerilog. The port must be a nonzero-width
+data input. Its PIR type is used for connection checking and behavioral
+evaluation. Specify a simple or package-qualified typedef name and supply the
+compatible typedef with the external RTL. Use
+`BlockBuilder::set_instantiation_input_cast` from Rust.
+
+An opaque external instance declares its interface inline. Its RTL module
+name and port map are required. Use `ports={}` for a module with zero ports.
+
+```text
+instantiation u(
+  module_name=vendor_peripheral,
+  ports={clk:clock, data:input bits[8], result:output bits[8], pad:inout bits[1]},
+  kind=opaque_extern_block
+)
+```
+
+Use `instantiate_opaque_extern_block(name, module_name, ports)` in the Rust
+builder. Bind named inputs, outputs, and inouts just as for an ordinary block.
+An optional clock pin connects to the parent clock. Reset uses a named input
+binding. Supply the SystemVerilog implementation separately for either external
+block kind and use the PIR parser to read these instantiations.
+
+Package finalization uses behavioral models to check combinational dependencies
+and treats foreign-function and opaque instances as leaf boundaries. Evaluation,
+flattening, and proof preparation report an error when the selected hierarchy
+reaches an opaque instance.
 
 `build()` verifies a standalone block. `build_package(package_name)` additionally
-marks it as top in a one-block package. Calls and instances require
-`build_in_package(&package)` or `build_into_package(&mut package)`: their supplied
-signatures must match existing package members. Finalization rebases all node
+marks it as top in a one-block package. Calls and instances that reference package
+members require `build_in_package(&package)` or `build_into_package(&mut package)`.
+Their supplied signatures must match existing package members. Finalization rebases all node
 IDs, including ports, and leaves the existing top selection unchanged. Rejected
 operations do not consume IDs or reserve names; failed package insertion leaves
 the package unchanged.

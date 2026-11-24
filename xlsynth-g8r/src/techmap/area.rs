@@ -307,20 +307,9 @@ impl AreaMappingLibrary {
                 cell.name
             );
             let n = pins.len();
-            let mut tt = 0u64;
-            for assignment in 0..1usize << n {
-                let values = pins
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| (p.clone(), assignment & (1 << i) != 0))
-                    .collect();
-                if term
-                    .evaluate_partial(&values)
-                    .ok_or_else(|| anyhow!("incomplete function {}", cell.name))?
-                {
-                    tt |= 1 << assignment;
-                }
-            }
+            let tt = term
+                .truth_table(&pins)
+                .ok_or_else(|| anyhow!("incomplete function {}", cell.name))?;
             let index = cells.len();
             let pin_delays = if let Some(options) = timing {
                 let original = lib.cells.iter().position(|c| c.name == cell.name).unwrap();

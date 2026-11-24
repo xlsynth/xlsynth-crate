@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
+
 use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
 
 use crate::ast::{Block, BlockStages, ConstDef, Expr, Type};
-use crate::dslx_import::ImportResolver;
 use crate::infer_literal::has_implicit_constant_type;
 use crate::typed::bits;
 
-use super::{Bindings, BodyChecker, CheckedConstant, Declarations, compatible};
+use super::{Bindings, BodyChecker, CheckedConstant, Declarations, TypeResolver, compatible};
 
 /// Module scope visible where a declaration writes its type annotations.
 #[derive(Clone, Copy)]
@@ -16,6 +17,7 @@ pub(super) struct ModuleDimensions<'a, 'm> {
     pub(super) position: Option<usize>,
     pub(super) warning_owner: Option<&'m str>,
     zero_binding: ZeroBinding<'a>,
+    pub(super) block_size_formals: Option<&'a BTreeSet<&'m str>>,
 }
 
 /// The declaration that owns the lexical `zero!` binding, or a binding
@@ -33,6 +35,7 @@ impl<'m> Declarations<'m> {
             position: self.positions.get(owner).copied(),
             warning_owner: self.positions.get_key_value(owner).map(|(&name, _)| name),
             zero_binding: ZeroBinding::Owner(owner),
+            block_size_formals: None,
         }
     }
 
@@ -47,35 +50,55 @@ impl<'m> Declarations<'m> {
             position,
             warning_owner,
             zero_binding: ZeroBinding::Resolved(zero_binding),
+            block_size_formals: None,
         }
     }
 }
 
-impl ModuleDimensions<'_, '_> {
+impl<'m> ModuleDimensions<'_, 'm> {
+    /// Data port widths and lengths can refer directly to a block's u32
+    /// formals.
+    pub(super) fn is_block_size_formal(&self, expr: &Expr) -> bool {
+        let Expr::Name(name) = expr else {
+            return false;
+        };
+        self.block_size_formals
+            .is_some_and(|names| names.contains(name.as_str()))
+    }
+
     /// Module constants already hold evaluated values. Stage inference needs
     /// only the unsigned stage number that the name denotes.
     pub(super) fn block_stages(&self, block: &Block) -> Result<BlockStages<u64>, String> {
-        block.map_stages(|name| {
-            if !self.decls.visible(name, self.position) {
-                return Err(format!(
-                    "stage constant '{name}' is declared later in the module"
-                ));
-            }
-            let constant =
-                self.decls.constants.get(name).ok_or_else(|| {
+        block.map_stages(
+            |name| {
+                if !self.decls.visible(name, self.position) {
+                    return Err(format!(
+                        "stage constant '{name}' is declared later in the module"
+                    ));
+                }
+                let constant = self.decls.constants.get(name).ok_or_else(|| {
                     format!("unknown module constant '{name}' in stage annotation")
                 })?;
-            if !matches!(bits(&constant.ty), Some((false, _))) {
-                return Err(format!(
-                    "stage constant '{name}' must be an unsigned integer, got {}",
-                    constant.ty
-                ));
-            }
-            constant
-                .value
-                .to_u64()
-                .map_err(|_| format!("stage constant '{name}' does not fit in u64"))
-        })
+                if !matches!(bits(&constant.ty), Some((false, _))) {
+                    return Err(format!(
+                        "stage constant '{name}' must be an unsigned integer, got {}",
+                        constant.ty
+                    ));
+                }
+                constant
+                    .value
+                    .to_u64()
+                    .map_err(|_| format!("stage constant '{name}' does not fit in u64"))
+            },
+            |name| {
+                if !self.decls.visible(name, self.position) {
+                    return Err(format!(
+                        "stage helper '{name}' is declared later in the module"
+                    ));
+                }
+                Ok(name.to_owned())
+            },
+        )
     }
 
     pub(super) fn zero_binding(&self) -> String {
@@ -93,10 +116,13 @@ impl ModuleDimensions<'_, '_> {
         expected: &Type,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
-        resolver: &mut ImportResolver,
+        types: &mut TypeResolver<'_, 'm>,
     ) -> Result<IrValue, String> {
         let Expr::Name(name) = expr else {
-            return Err("a concrete type dimension requires a literal or a module constant".into());
+            let mut checker = types.struct_scope(*self);
+            checker.enclosing_type_locals = Some(is_local);
+            checker.function_type_bindings = bindings.cloned();
+            return checker.parametric_value(expr, expected);
         };
         let head = name
             .split_once("::")
@@ -118,7 +144,8 @@ impl ModuleDimensions<'_, '_> {
         let constant = if let Some(constant) = self.decls.constants.get(name.as_str()) {
             constant
         } else {
-            imported = resolver
+            imported = types
+                .resolver
                 .resolve_constant(name)?
                 .ok_or_else(|| format!("unknown module constant '{name}' in type dimension"))?;
             &imported
@@ -137,7 +164,7 @@ impl ModuleDimensions<'_, '_> {
         expr: &Expr,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
-        resolver: &mut ImportResolver,
+        types: &mut TypeResolver<'_, 'm>,
     ) -> Result<usize, String> {
         let expected = Type::unsigned(32);
         if let Expr::Literal { ty, text } = expr
@@ -148,7 +175,7 @@ impl ModuleDimensions<'_, '_> {
                 .map(|width| width as usize)
                 .map_err(|_| format!("invalid u32 type dimension '{text}'"));
         }
-        let value = self.constant(expr, &expected, is_local, bindings, resolver)?;
+        let value = self.constant(expr, &expected, is_local, bindings, types)?;
         ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
             .ok_or_else(|| "type dimension does not fit usize".into())
     }
@@ -158,12 +185,12 @@ impl ModuleDimensions<'_, '_> {
         expr: &Expr,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
-        resolver: &mut ImportResolver,
+        types: &mut TypeResolver<'_, 'm>,
     ) -> Result<bool, String> {
         if let Expr::Bool(value) = expr {
             return Ok(*value);
         }
-        self.constant(expr, &Type::Bool, is_local, bindings, resolver)?
+        self.constant(expr, &Type::Bool, is_local, bindings, types)?
             .to_bool()
             .map_err(|e| e.to_string())
     }

@@ -12,8 +12,7 @@ use xlsynth_pir::IrValue;
 /// declaration with the same name in its importer.
 pub(crate) const BUILTIN_PREFIX: &str = "$builtin$";
 
-/// Recognize a pure builtin whose type arguments are inferred from its
-/// operands.
+/// Recognize a pure builtin that can be called without explicit type arguments.
 pub(crate) fn is_call_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -39,6 +38,7 @@ pub(crate) fn is_call_builtin(name: &str) -> bool {
             | "array_slice"
             | "zip"
             | "update"
+            | "zero!"
     )
 }
 
@@ -66,14 +66,19 @@ impl BodyChecker<'_, '_> {
         self.expr(arg, None)
     }
 
-    /// Resolve independent widths from the data arguments, then remove
-    /// operands that only witness a type or a constexpr control.
-    pub(super) fn builtin_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
+    /// Resolve the builtin's type from its operands or the expected result.
+    pub(super) fn builtin_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), String> {
         let arity = match name {
             "array_rev" | "array_size" | "array_slice" | "zip" => {
                 return self.array_builtin(name, args);
             }
             "update" => return self.builtin_array_update(args),
+            "zero!" => 0,
             "one_hot"
             | "one_hot_sel"
             | "gate!"
@@ -91,6 +96,10 @@ impl BodyChecker<'_, '_> {
             ));
         }
         let (ty, op, operands) = match name {
+            "zero!" => {
+                let ty = expected.ok_or("cannot infer the result type of 'zero!()'; provide a type annotation or use zero!<T>()")?;
+                return Ok((ty.clone(), self.intrinsic_zero(ty)?));
+            }
             "ceillog2" => return self.ceillog2(&args[0]),
             "configured_value_or" => return self.configured_value_or(&args[0], &args[1]),
             "gate!" => {

@@ -5,10 +5,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth_pir::IrBits;
-use xlsynth_pir::block_inline::inline_all_blocks_in_package;
+use xlsynth_pir::block_inline::{
+    extract_modeled_block_hierarchy, inline_all_blocks_in_package,
+    reject_reachable_opaque_extern_blocks,
+};
 use xlsynth_pir::dce::remove_dead_nodes;
 use xlsynth_pir::ir::{
-    self, Block, MemberType, NodeGraph, NodePayload, NodeRef, PackageMember, Type,
+    self, Block, InstantiationKind, MemberType, NodeGraph, NodePayload, NodeRef, PackageMember,
+    Type,
 };
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::{get_topological, operands, remap_payload_with};
@@ -75,6 +79,18 @@ pub fn optimize_and_lower_bx_block(
     gatify_options: GatifyOptions,
 ) -> Result<SequentialGateFn, String> {
     let top = selected_block_name(package)?;
+    let has_opaque_instances = package.members.iter().any(|member| {
+        matches!(member, PackageMember::Block(block) if block.instantiations.iter().any(|instance| {
+            matches!(instance.kind, InstantiationKind::OpaqueExternBlock { .. })
+        }))
+    });
+    let modeled_hierarchy;
+    let package = if has_opaque_instances {
+        modeled_hierarchy = extract_modeled_block_hierarchy(package, &top)?;
+        &modeled_hierarchy
+    } else {
+        package
+    };
     let optimized = xlsynth::optimize_ir_text(&package.to_string(), &top)
         .map_err(|e| format!("optimizing block '{top}': {e}"))?;
     let mut package = Parser::new(&optimized)
@@ -130,10 +146,11 @@ fn lower_block_package_with_clock_policy(
     gatify_options: GatifyOptions,
     child_clock: ChildClock,
 ) -> Result<SequentialGateFn, String> {
+    let top_name = selected_block_name(package)?;
+    reject_reachable_opaque_extern_blocks(package, Some(&top_name))
+        .map_err(|error| format!("block2sequential: {error}"))?;
     ir_verify::verify_package(package)
         .map_err(|e| format!("block2sequential: input package validation failed: {e}"))?;
-
-    let top_name = selected_block_name(package)?;
     validate_hierarchical_sequential_metadata(package, &top_name, child_clock)?;
     let mut inlined_package = package.clone();
     inlined_package.top = Some((top_name, MemberType::Block));
@@ -154,6 +171,7 @@ pub fn lower_block_to_sequential_gate_fn_with_controls(
     block: &Block,
     gatify_options: GatifyOptions,
 ) -> Result<SequentialGateFn, String> {
+    block.reject_inouts("block2sequential")?;
     if !block.instantiations.is_empty() {
         return Err(
             "block2sequential: block contains instantiations; lower a package so they can be inlined"

@@ -153,25 +153,11 @@ impl ImportedStructs {
             expr: format!("bx_owner::{member}"),
         };
         let ty = self.reflect_at(&native, data, &witness, None, true, 0)?;
-        self.constants.shapes.validate(&ty, &self.definitions)?;
-        let layout = Layouts::lower_with(
-            &ty,
-            &|name| self.named_layouts.get(name).map(|&i| &self.definitions[i]),
-            &mut self.constants.layouts,
-        )
-        .map_err(|e| e.to_string())?;
         let interp = self.constants.owners[subject]
             .context
             .get_const_expr(&expr)
             .map_err(|e| e.to_string())?;
-        let value = if layout.bit_count() == 0 {
-            zero_ir_value_for_type(&layout)
-        } else if contains_empty_array(&layout) {
-            self.copy_with_empty_arrays(&ty, &layout, &witness, data)?
-        } else {
-            let native = interp.convert_to_ir().map_err(|e| e.to_string())?;
-            value_from_libxls(&native, &layout).map_err(|e| e.to_string())?
-        };
+        let value = self.copy_constant(&ty, &interp, &witness, data)?;
         let constant = Rc::new(CheckedConstant {
             name: name.clone(),
             public: true,
@@ -180,6 +166,58 @@ impl ImportedStructs {
         });
         self.constants.values.insert(name, Rc::clone(&constant));
         Ok(constant)
+    }
+
+    /// Typecheck a constant invocation with the same DSLX sources and convert
+    /// its result to BX.
+    pub(crate) fn evaluate_constant_call(
+        &mut self,
+        ty: &Type,
+        witness: &TypeWitness,
+        data: &mut ImportData,
+    ) -> Result<IrValue, String> {
+        let probe = format!("0bx_const_call_{}", self.probe_index);
+        self.probe_index += 1;
+        let source = format!("{}\nconst RESULT = {};", witness.imports, witness.expr);
+        let checked = self.check_probe(&source, &probe, data)?;
+        let module = checked.get_module();
+        let Some(MatchableModuleMember::ConstantDef(result)) = module
+            .get_member(module.get_member_count() - 1)
+            .to_matchable()
+        else {
+            return Err("missing DSLX constexpr call result".into());
+        };
+        let interp = checked
+            .get_type_info()
+            .get_const_expr(&result.get_value())
+            .map_err(|e| e.to_string())?;
+        self.copy_constant(ty, &interp, witness, data)
+    }
+
+    /// Decode a native constant using its reflected layout, including typed
+    /// empty arrays.
+    fn copy_constant(
+        &mut self,
+        ty: &Type,
+        interp: &dslx::InterpValue,
+        witness: &TypeWitness,
+        data: &mut ImportData,
+    ) -> Result<IrValue, String> {
+        self.constants.shapes.validate(ty, &self.definitions)?;
+        let layout = Layouts::lower_with(
+            ty,
+            &|name| self.named_layouts.get(name).map(|&i| &self.definitions[i]),
+            &mut self.constants.layouts,
+        )
+        .map_err(|e| e.to_string())?;
+        if layout.bit_count() == 0 {
+            Ok(zero_ir_value_for_type(&layout))
+        } else if contains_empty_array(&layout) {
+            self.copy_with_empty_arrays(ty, &layout, witness, data)
+        } else {
+            let native = interp.convert_to_ir().map_err(|e| e.to_string())?;
+            value_from_libxls(&native, &layout).map_err(|e| e.to_string())
+        }
     }
 
     /// Native IR values cannot contain empty arrays. Evaluate a projection with

@@ -13,7 +13,7 @@ use std::{
 use crate::BxWarningKind;
 
 mod source_nodes;
-pub(crate) use source_nodes::SourceNode;
+pub(crate) use source_nodes::{ScopedSourceNodes, SourceNode};
 
 // Generate both directions of the spelling map from the same operator list.
 macro_rules! operator_enum {
@@ -131,9 +131,44 @@ pub enum Type {
         name: String,
         args: Vec<Type>,
     },
+    /// A native struct application whose declaration interleaves types and
+    /// values.
+    MixedApplied {
+        name: String,
+        args: Vec<StructArgument>,
+    },
+}
+
+/// An explicit argument to a struct with both type and value parameters.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum StructArgument {
+    Type(Type),
+    Value(Expr),
+}
+
+impl StructArgument {
+    pub(crate) fn as_type(&self) -> Option<&Type> {
+        match self {
+            Self::Type(ty) => Some(ty),
+            Self::Value(_) => None,
+        }
+    }
 }
 
 impl Type {
+    /// Borrow the argument list from any spelling of a struct application.
+    pub(crate) fn struct_application(&self) -> Option<(&str, StructLiteralArgs<'_>)> {
+        match self {
+            Self::Applied { name, args } => Some((name, StructLiteralArgs::Integers(args))),
+            Self::ParametricStruct { name, args } => {
+                Some((name, StructLiteralArgs::Expressions(args)))
+            }
+            Self::TypeApplied { name, args } => Some((name, StructLiteralArgs::Types(args))),
+            Self::MixedApplied { name, args } => Some((name, StructLiteralArgs::Mixed(args))),
+            _ => None,
+        }
+    }
+
     /// Construct an unsigned bit-vector type of the given width.
     pub(crate) fn unsigned(width: usize) -> Self {
         Self::Bits {
@@ -174,6 +209,42 @@ impl StructDef {
     pub fn is_parametric(&self) -> bool {
         !self.type_params.is_empty() || !self.value_parametrics.is_empty()
     }
+
+    /// Visit type and value parameters in their original declaration order.
+    pub fn parametric_bindings(&self) -> impl Iterator<Item = StructParametricRef<'_>> {
+        let mut types = self.type_params.iter();
+        let mut values = self.value_parametrics.iter().peekable();
+        (0..self.type_params.len() + self.value_parametrics.len()).filter_map(move |index| {
+            if let Some(value) = values.next_if(|p| p.index == index) {
+                Some(StructParametricRef::Value(value))
+            } else {
+                types.next().map(|name| StructParametricRef::Type(name))
+            }
+        })
+    }
+}
+
+/// A struct formal in declaration order.
+#[derive(Clone, Copy, Debug)]
+pub enum StructParametricRef<'a> {
+    Type(&'a str),
+    Value(&'a ParametricBinding),
+}
+
+/// The grammar expected for an argument in a struct parameter list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StructParametricKind {
+    Type,
+    Value,
+}
+
+impl StructParametricRef<'_> {
+    pub fn kind(self) -> StructParametricKind {
+        match self {
+            Self::Type(_) => StructParametricKind::Type,
+            Self::Value(_) => StructParametricKind::Value,
+        }
+    }
 }
 
 /// One named value in a numeric enum, before constant evaluation.
@@ -183,8 +254,8 @@ pub struct EnumMember {
     pub value: Expr,
 }
 
-/// A module-level name for a concrete value type.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A name for a value type in its declaring scope.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TypeAlias {
     pub name: String,
     pub public: bool,
@@ -200,8 +271,8 @@ pub struct EnumDef {
     pub members: Vec<EnumMember>,
 }
 
-/// A module-level value evaluated at compile time.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A named value evaluated at compile time in its declaring scope.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ConstDef {
     pub name: String,
     pub public: bool,
@@ -254,6 +325,8 @@ impl Hash for ConstAssert {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ScopeStatement {
     Let(LetBinding),
+    Const(ConstDef),
+    TypeAlias(TypeAlias),
     ConstAssert(ConstAssert),
     /// A value expression followed by a semicolon. DSLX requires its value
     /// when evaluating the enclosing scope as a constant expression.
@@ -271,7 +344,7 @@ pub enum BindingPattern {
 impl BindingPattern {
     /// Visit the names introduced in source order and return the number of
     /// pattern nodes traversed, including wildcards and rest markers.
-    pub(crate) fn visit_names(&self, visit: &mut impl FnMut(&str)) -> usize {
+    pub(crate) fn visit_names<'a>(&'a self, visit: &mut impl FnMut(&'a str)) -> usize {
         let mut nodes = 0;
         let mut pending = Vec::new();
         let mut next = Some(self);
@@ -372,7 +445,8 @@ impl MatchPattern {
 pub struct Function {
     pub name: String,
     pub public: bool,
-    /// Type parameters inferred from data inputs and callback results.
+    /// Type parameters inferred from data inputs, callback results, or the
+    /// expected return type.
     pub type_params: Vec<String>,
     /// Named, compile-time function parameters in declaration order.
     pub callback_params: Vec<CallbackParam>,
@@ -390,8 +464,8 @@ pub struct ParametricBinding {
     pub name: String,
     pub ty: Type,
     pub default: Option<Expr>,
-    /// Position in the declaration's combined list of value and callback
-    /// parameters.
+    /// Position among explicit parameters. A struct counts types and values,
+    /// while functions and blocks count values and callbacks.
     pub index: usize,
 }
 
@@ -536,6 +610,13 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
         base: Option<Box<StructSplat>>,
     },
+    /// A struct literal explicitly applying a mixed type and value declaration.
+    MixedAppliedStruct {
+        name: String,
+        args: Vec<StructArgument>,
+        fields: Vec<(String, Expr)>,
+        base: Option<Box<StructSplat>>,
+    },
     Field {
         value: Box<Expr>,
         name: String,
@@ -608,13 +689,48 @@ pub enum Expr {
     For(Box<ForLoop>),
 }
 
-/// The argument syntax written on a struct constructor.
+/// The argument syntax written on a struct constructor or type application.
 #[derive(Clone, Copy)]
 pub(crate) enum StructLiteralArgs<'a> {
     Omitted,
     Integers(&'a [u32]),
     Expressions(&'a [Expr]),
     Types(&'a [Type]),
+    Mixed(&'a [StructArgument]),
+}
+
+/// One argument borrowed from a homogeneous or mixed struct application.
+pub(crate) enum StructArgumentRef<'a> {
+    Integer(u32),
+    Value(&'a Expr),
+    Type(&'a Type),
+}
+
+impl<'a> StructLiteralArgs<'a> {
+    pub(crate) fn len(self) -> usize {
+        match self {
+            Self::Omitted => 0,
+            Self::Integers(args) => args.len(),
+            Self::Expressions(args) => args.len(),
+            Self::Types(args) => args.len(),
+            Self::Mixed(args) => args.len(),
+        }
+    }
+
+    /// Visit the arguments in source order without copying types or
+    /// expressions.
+    pub(crate) fn iter(self) -> impl Iterator<Item = StructArgumentRef<'a>> {
+        (0..self.len()).map(move |i| match self {
+            Self::Omitted => unreachable!("an omitted argument list is empty"),
+            Self::Integers(args) => StructArgumentRef::Integer(args[i]),
+            Self::Expressions(args) => StructArgumentRef::Value(&args[i]),
+            Self::Types(args) => StructArgumentRef::Type(&args[i]),
+            Self::Mixed(args) => match &args[i] {
+                StructArgument::Value(expr) => StructArgumentRef::Value(expr),
+                StructArgument::Type(ty) => StructArgumentRef::Type(ty),
+            },
+        })
+    }
 }
 
 /// A borrowed view of a struct constructor's arguments, fields, and splat.
@@ -656,6 +772,12 @@ impl Expr {
                 fields,
                 base,
             } => (name, StructLiteralArgs::Types(args), fields, base),
+            Self::MixedAppliedStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => (name, StructLiteralArgs::Mixed(args), fields, base),
             _ => return None,
         };
         Some(StructLiteral {
@@ -757,6 +879,12 @@ pub enum WidthSliceType {
 pub enum Stmt {
     /// Check a Boolean constexpr when elaborating this block.
     ConstAssert(ConstAssert),
+    /// Check a Boolean hardware signal when the enclosing guard is active.
+    Assert {
+        predicate: Expr,
+        label: Option<String>,
+        position: SourcePosition,
+    },
     Reg {
         name: String,
         ty: Type,
@@ -795,6 +923,20 @@ pub enum Stmt {
 pub struct SourcePosition {
     pub line: usize,
     pub column: usize,
+}
+
+impl SourcePosition {
+    /// Include the source basename when available, keeping lowered diagnostics
+    /// portable.
+    pub(crate) fn location(self, source: Option<&SourceFile>) -> String {
+        let file = source
+            .and_then(|file| file.path.as_ref())
+            .and_then(|path| path.file_name());
+        match file {
+            Some(name) => format!("{}:{}:{}", name.to_string_lossy(), self.line, self.column),
+            None => format!("{}:{}", self.line, self.column),
+        }
+    }
 }
 
 /// Function tests evaluate pure expressions. Block tests can drive and clock
@@ -937,6 +1079,13 @@ pub enum OutputCycles<T = u64> {
     Uniform(T),
     /// `-> Ports @(live: 0, saved: 1)` gives each physical port its own stage.
     ByPort(BTreeMap<String, T>),
+    /// `@stage(op)` chooses an expected output stage for each input case.
+    CaseCall {
+        /// A concrete pure BX function returning an unsigned stage number.
+        function: String,
+        /// Block input ports supplied to the function in parameter order.
+        inputs: Vec<String>,
+    },
 }
 
 /// The stage declarations on a single block signature.
@@ -952,8 +1101,8 @@ pub struct Block {
     pub name: String,
     /// Location of the declared name, when parsed from a source file.
     pub name_position: Option<SourcePosition>,
-    /// Source text and ranges for clockless blocks and blocks with deferred
-    /// bindings.
+    /// Source text and ranges for clockless blocks, deferred bindings and
+    /// runtime assertions.
     pub source: Option<BlockSource>,
     /// Warning kinds suppressed for this definition by `#[allow(...)]`.
     pub allowed_warnings: BTreeSet<BxWarningKind>,
@@ -962,7 +1111,7 @@ pub struct Block {
     pub type_params: Vec<String>,
     /// Named callable parameters, in the order supplied at a block call site.
     pub callback_params: Vec<CallbackParam>,
-    /// Explicit compile-time values in declaration order.
+    /// Compile-time values and optional defaults in declaration order.
     pub value_parametrics: Vec<ParametricBinding>,
     /// A leading `clk` declares a clocked block. A clockless block is
     /// combinational.
@@ -984,6 +1133,7 @@ impl Block {
     pub(crate) fn map_stages<T: From<u64>>(
         &self,
         constant: impl Fn(&str) -> Result<T, String>,
+        function: impl Fn(&str) -> Result<String, String>,
     ) -> Result<BlockStages<T>, String> {
         let mut stages = BlockStages {
             inputs: BTreeMap::new(),
@@ -1045,6 +1195,21 @@ impl Block {
                     .map(|(port, value)| Ok((port.clone(), stage(value, &locals)?)))
                     .collect::<Result<_, String>>()?,
             )),
+            Some(OutputCycles::CaseCall {
+                function: name,
+                inputs,
+            }) => {
+                let head = name.split("::").next().unwrap_or(name);
+                if locals.contains(head) {
+                    return Err(format!(
+                        "stage helper '{name}' is shadowed by a block parameter"
+                    ));
+                }
+                Some(OutputCycles::CaseCall {
+                    function: function(name)?,
+                    inputs: inputs.clone(),
+                })
+            }
         };
         Ok(stages)
     }

@@ -7,6 +7,7 @@ mod invariant_trials;
 #[cfg(test)]
 mod mixed_suite_tests;
 mod proof;
+mod proof_bounds;
 mod proof_domain;
 mod prove;
 mod quickcheck;
@@ -473,14 +474,22 @@ enum AssertionTiming {
 }
 
 /// Reports the first linked IR assertion triggered in one evaluation.
-fn check_ir_assertions(failure: &FnEvalFailure) -> Result<(), String> {
+fn check_ir_assertions(failure: &FnEvalFailure) -> Result<(), ExecutionError> {
     if let Some(assertion) = failure.assertion_failures.first() {
-        return Err(format!(
-            "IR assertion '{}' failed: {}",
-            assertion.label, assertion.message
-        ));
+        return Err(ExecutionError::Assertion(ir_assertion_diagnostic(
+            &assertion.label,
+            &assertion.message,
+        )));
     }
     Ok(())
+}
+
+fn ir_assertion_diagnostic(label: &str, message: &str) -> String {
+    if label.is_empty() {
+        format!("IR assertion failed: {message}")
+    } else {
+        format!("IR assertion '{label}' failed: {message}")
+    }
 }
 
 /// An expression's IR dependencies and the harness input ports they read.
@@ -514,7 +523,11 @@ impl TestExpression {
     }
 
     /// Cache the expression's value only after its contracts pass.
-    fn evaluate(&mut self, package: &Package, inputs: &[IrValue]) -> Result<IrValue, String> {
+    fn evaluate(
+        &mut self,
+        package: &Package,
+        inputs: &[IrValue],
+    ) -> Result<IrValue, ExecutionError> {
         let args = self
             .ports
             .iter()
@@ -536,10 +549,10 @@ impl TestExpression {
                         AssumptionFailureKind::ArrayIndexOutOfBounds => "array_index",
                         AssumptionFailureKind::ArrayUpdateOutOfBounds => "array_update",
                     };
-                    return Err(format!(
+                    return Err(ExecutionError::Assertion(format!(
                         "IR {operation} at node {} was out of bounds despite assumed_in_bounds=true",
                         assumption.node_text_id
-                    ));
+                    )));
                 }
                 failure.value
             }
@@ -564,19 +577,19 @@ enum Harness<'a> {
 /// A clocked circuit driven and sampled by the procedural test interpreter.
 trait ClockedHarness {
     fn drive(&mut self, name: &str, value: &IrValue) -> Result<(), String>;
-    fn tick(&mut self) -> Result<(), String>;
-    fn sample(&mut self, index: usize) -> Result<Observed, String>;
+    fn tick(&mut self) -> Result<(), ExecutionError>;
+    fn sample(&mut self, index: usize) -> Result<Observed, ExecutionError>;
 }
 
 impl ClockedHarness for Simulation {
     fn drive(&mut self, name: &str, value: &IrValue) -> Result<(), String> {
         Simulation::drive(self, name, value)
     }
-    fn tick(&mut self) -> Result<(), String> {
+    fn tick(&mut self) -> Result<(), ExecutionError> {
         Simulation::tick(self)
     }
-    fn sample(&mut self, index: usize) -> Result<Observed, String> {
-        self.output_observed(index)
+    fn sample(&mut self, index: usize) -> Result<Observed, ExecutionError> {
+        self.output_observed(index).map_err(ExecutionError::Runtime)
     }
 }
 
@@ -612,7 +625,7 @@ impl Harness<'_> {
                         AssertionTiming::Expression,
                     )?),
                 };
-                Ok(expression.evaluate(package, inputs)?)
+                expression.evaluate(package, inputs)
             }
             Self::Block(sim) => match sim.sample(index)? {
                 Observed::Known(value) => Ok(value),
@@ -631,7 +644,7 @@ struct Failure {
 }
 
 /// Distinguish property outcomes from simulator or linkage errors.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum ExecutionError {
     Runtime(String),
     Assertion(String),
@@ -777,7 +790,7 @@ impl Execution<'_> {
                     if let Some((_, trace)) = &mut self.trace {
                         trace.tick(asserted);
                     }
-                    sim.tick().map_err(|e| at_step(e.into()))?;
+                    sim.tick().map_err(at_step)?;
                     if asserted {
                         sim.drive("rst", &IrValue::bool(self.active_low))
                             .map_err(|e| at_step(e.into()))?;

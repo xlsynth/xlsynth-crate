@@ -18,6 +18,8 @@ mod counted_for;
 mod directed_expr_eval;
 #[path = "support/expr_eval.rs"]
 mod expr_eval;
+#[path = "frontend/function_local_declarations.rs"]
+mod function_local_declarations;
 #[path = "frontend/function_parametrics.rs"]
 mod function_parametrics;
 #[path = "frontend/function_type_parametrics.rs"]
@@ -64,6 +66,7 @@ use xlsynth_bx::{
 };
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
+use xlsynth_pir::block_invoke_inline::inline_block_invokes_in_package;
 use xlsynth_pir::ir::{Block, MemberType, NodePayload, Unop};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
@@ -90,6 +93,7 @@ fn dslx_function_links_into_a_two_stage_pipeline() {
     );
     xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
 
+    let package = inline_block_invokes_in_package(package).unwrap();
     let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
     let pipeline = compile_pipeline_module(&rtl.system_verilog).unwrap();
     let mut runner = FixtureRunner::new(&pipeline).unwrap();

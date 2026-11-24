@@ -9,7 +9,7 @@ use xlsynth_pir::block_transition::lower_block_transition;
 use xlsynth_pir::ir::{Binop, NodePayload, Package};
 use xlsynth_pir::ir_inline::package_with_reachable_callees;
 
-use super::{TestProgram, compile_tests, proof, quickcheck};
+use super::{TestProgram, compile_tests, proof, proof_bounds, quickcheck};
 use crate::{BxWarning, ImportOptions, ResetBehavior};
 
 /// The clocked properties declared in a BX file, in source order.
@@ -27,10 +27,14 @@ pub struct BxProofCase {
 
 /// A Boolean PIR top and the concrete testbench used to replay solver models.
 pub struct BxQuickCheckProof {
+    /// This property's Boolean predicate and reachable callees. The predicate
+    /// checks the bounds of marked array operations alongside BX assertions.
     pub package: Package,
     program: TestProgram,
     domains: Vec<quickcheck::Stimulus>,
-    hardware: Arc<Package>,
+    /// All properties share the original compiled hardware. Replay uses its
+    /// bounds annotations to identify the IR node that failed for the model.
+    replay_hardware: Arc<Package>,
     path: PathBuf,
     active_low: bool,
 }
@@ -42,7 +46,7 @@ impl BxQuickCheckProof {
         quickcheck::replay_counterexample(
             &self.program,
             &self.domains,
-            &self.hardware,
+            &self.replay_hardware,
             &self.path,
             self.active_low,
             inputs,
@@ -70,10 +74,12 @@ pub fn prepare_quickcheck_proofs(
         let prepare = || -> Result<_, String> {
             proof::check_block_expansion(&hardware, &program.harness)?;
             let transition = lower_block_transition(&hardware, &program.harness)?;
-            let callees = package_with_reachable_callees(&hardware, &transition.function)?;
+            let mut callees = package_with_reachable_callees(&hardware, &transition.function)?;
             check_transition_contracts(&callees)?;
             let domains = quickcheck::Stimulus::for_params(params, &transition, &compiled.checked)?;
-            let predicate = proof::lower_property(&program, &transition, &domains, &callees)?;
+            let has_bounds = proof_bounds::instrument(&mut callees)?;
+            let predicate =
+                proof::lower_property(&program, &transition, &domains, &callees, has_bounds)?;
             Ok((
                 package_with_reachable_callees(&callees, &predicate)?,
                 domains,
@@ -102,7 +108,7 @@ pub fn prepare_quickcheck_proofs(
                 package,
                 program,
                 domains,
-                hardware: Arc::clone(&hardware),
+                replay_hardware: Arc::clone(&hardware),
                 path: path.to_owned(),
                 active_low: reset.active_low,
             });
@@ -114,22 +120,16 @@ pub fn prepare_quickcheck_proofs(
     })
 }
 
-/// The transition's returned values do not encode clock-edge assertion events
-/// or array bounds promises. Refuse those until they are part of the predicate.
+/// Reject reachable operations whose behavior the Boolean proof cannot model.
 pub(super) fn check_transition_contracts(package: &Package) -> Result<(), String> {
     for member in &package.members {
         let graph = member.graph();
         for node in &graph.nodes {
             let reason = match &node.payload {
-                NodePayload::Assert { label, .. } => format!("hardware assertion '{label}'"),
-                NodePayload::ArrayIndex {
-                    assumed_in_bounds: true,
-                    ..
+                NodePayload::Assert { label, message, .. } if label.is_empty() => {
+                    format!("hardware assertion with message {message:?}")
                 }
-                | NodePayload::ArrayUpdate {
-                    assumed_in_bounds: true,
-                    ..
-                } => "assumed_in_bounds=true array operation".to_owned(),
+                NodePayload::Assert { label, .. } => format!("hardware assertion '{label}'"),
                 NodePayload::Binop(Binop::Umulp | Binop::Smulp, ..) => {
                     "partial-product multiply".to_owned()
                 }
@@ -150,6 +150,7 @@ mod tests {
     use crate::empty_package;
     use xlsynth_pir::IrBits;
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
+    use xlsynth_pir::ir_parser::parse_xls_ir_package;
 
     #[test]
     fn enum_domain_constrains_stimulus_but_allows_every_initial_register_pattern()
@@ -195,6 +196,60 @@ block store(clk, input: Op) -> Op {
                     proof
                         .replay(&model)?
                         .contains("at tick 0: assertion failed")
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn loop_snapshots_check_bounds_only_on_executed_iterations() -> Result<(), String> {
+        let package = parse_xls_ir_package(
+            r#"package linked
+fn lookup(a: bits[8][3] id=1, i: bits[2] id=2) -> bits[8] {
+  ret selected: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=3)
+}"#,
+        )
+        .map_err(|e| e.to_string())?;
+        let source = r#"extern fn lookup(a: u8[3], i: u2) -> u8;
+const DATA: u8[3] = [u8:7, u8:7, u8:7];
+#[quickcheck] block snapshots(i: u2) -> bool {
+    for _ in u2:0..u2:0 { assert_eq(lookup(DATA, u2:3), u8:7); }
+    for index in [u2:0, i] {
+        let seen = lookup(DATA, index);
+        assert_eq(seen, u8:7);
+    }
+    true
+}"#;
+        let suite = prepare_quickcheck_proofs(
+            source,
+            Path::new("snapshots.bx"),
+            package,
+            ResetBehavior::default(),
+            &ImportOptions::default(),
+            true,
+        )?;
+        let proof = suite.properties.into_iter().next().unwrap().proof?;
+        let predicate = proof.package.get_top_fn().unwrap();
+        for index in 0..4 {
+            let model = [IrValue::make_ubits(2, index).unwrap()];
+            let FnEvalResult::Success(result) =
+                eval_fn_in_package(&proof.package, predicate, &model)
+            else {
+                return Err("bounds predicate failed to evaluate".into());
+            };
+            assert_eq!(result.value, IrValue::bool(index < 3));
+            if index == 3 {
+                assert_eq!(
+                    proof.replay(&model)?.lines().next(),
+                    Some(
+                        "snapshots.bx:6:9: test 'snapshots' at tick 0: IR array_index at node 3 was out of bounds despite assumed_in_bounds=true"
+                    )
+                );
+            } else {
+                assert_eq!(
+                    proof.replay(&model).unwrap_err(),
+                    "solver counterexample passed concrete replay of 'snapshots'"
                 );
             }
         }

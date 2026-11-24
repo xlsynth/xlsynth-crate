@@ -5,31 +5,17 @@ use std::collections::BTreeMap;
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block_eval::{
     BlockAssumptionFailure, BlockEvalError, BlockEvalSite, BlockEvaluator, RegisterInit,
+    test_fixtures,
 };
+use xlsynth_pir::block_inline::{flatten_block_hierarchy, inline_all_blocks_in_package};
+use xlsynth_pir::block_transition::lower_block_transition;
 use xlsynth_pir::ir::NodeRef;
 use xlsynth_pir::ir_eval::{AssumptionFailureKind, EvalObserver, SelectEvent, SelectKind};
 use xlsynth_pir::ir_parser::Parser;
 
-const MIXED_RESET: &str = r#"package design
-
-top block pair(clk: clock, rst_n: bits[1], en_a: bits[1], en_b: bits[1], left: bits[8], right: bits[8]) {
-  #![reset(port="rst_n", asynchronous=false, active_low=true)]
-  reg a(bits[8], reset_value=7)
-  reg b(bits[8])
-  rst_n: bits[1] = input_port(name=rst_n, id=1)
-  en_a: bits[1] = input_port(name=en_a, id=2)
-  en_b: bits[1] = input_port(name=en_b, id=9)
-  qa: bits[8] = register_read(register=a, id=3)
-  qb: bits[8] = register_read(register=b, id=4)
-  wa: () = register_write(qb, register=a, load_enable=en_a, reset=rst_n, id=5)
-  wb: () = register_write(qa, register=b, load_enable=en_b, id=6)
-  left: () = output_port(qa, name=left, id=7)
-  right: () = output_port(qb, name=right, id=8)
-}"#;
-
 #[test]
 fn mixed_reset_is_sampled_on_the_edge_and_writes_read_old_state() {
-    let pkg = Parser::new(MIXED_RESET)
+    let pkg = Parser::new(test_fixtures::MIXED_RESET)
         .parse_and_validate_package()
         .unwrap();
     let evaluator = BlockEvaluator::prepare(&pkg, "pair").unwrap();
@@ -75,20 +61,7 @@ fn mixed_reset_is_sampled_on_the_edge_and_writes_read_old_state() {
 
 #[test]
 fn exclusive_writes_reject_overlap_only_when_reset_is_inactive() {
-    let source = r#"package design
-
-top block dual(clk: clock, reset: bits[1], x: bits[1], y: bits[1]) {
-  #![reset(port="reset", asynchronous=false, active_low=false)]
-  reg r(bits[8], reset_value=9)
-  reset: bits[1] = input_port(name=reset, id=1)
-  x: bits[1] = input_port(name=x, id=2)
-  y: bits[1] = input_port(name=y, id=3)
-  q: bits[8] = register_read(register=r, id=4)
-  one: bits[8] = literal(value=1, id=5)
-  two: bits[8] = literal(value=2, id=6)
-  w1: () = register_write(one, register=r, load_enable=x, reset=reset, id=7)
-  w2: () = register_write(two, register=r, load_enable=y, reset=reset, id=8)
-}"#;
+    let source = test_fixtures::EXCLUSIVE_WRITES;
     let pkg = Parser::new(source).parse_and_validate_package().unwrap();
     let eval = BlockEvaluator::prepare(&pkg, "dual").unwrap();
     let start = eval.initial_state(RegisterInit::AllZeros).unwrap();
@@ -117,15 +90,7 @@ top block dual(clk: clock, reset: bits[1], x: bits[1], y: bits[1]) {
 
 #[test]
 fn aggregate_state_preserves_width_shape_and_random_seed() {
-    let source = r#"package design
-
-top block store(clk: clock, d: (bits[129], bits[3][2], bits[0]), out: (bits[129], bits[3][2], bits[0])) {
-  reg data((bits[129], bits[3][2], bits[0]))
-  d: (bits[129], bits[3][2], bits[0]) = input_port(name=d, id=1)
-  q: (bits[129], bits[3][2], bits[0]) = register_read(register=data, id=2)
-  w: () = register_write(d, register=data, id=3)
-  out: () = output_port(q, name=out, id=4)
-}"#;
+    let source = test_fixtures::AGGREGATE_STATE;
     let pkg = Parser::new(source).parse_and_validate_package().unwrap();
     let eval = BlockEvaluator::prepare(&pkg, "store").unwrap();
     let zeros = eval.initial_state(RegisterInit::AllZeros).unwrap();
@@ -163,26 +128,7 @@ top block store(clk: clock, d: (bits[129], bits[3][2], bits[0]), out: (bits[129]
 
 #[test]
 fn sibling_instances_use_independent_state_and_commit_together() {
-    let source = r#"package design
-
-block leaf(clk: clock, d: bits[32], out: bits[32]) {
-  reg r(bits[32])
-  d: bits[32] = input_port(name=d, id=1)
-  q: bits[32] = register_read(register=r, id=2)
-  w: () = register_write(d, register=r, id=3)
-  out: () = output_port(q, name=out, id=4)
-}
-
-top block pair(clk: clock, x: bits[32], y: bits[32]) {
-  instantiation left(block=leaf, kind=block)
-  instantiation right(block=leaf, kind=block)
-  a: bits[32] = instantiation_output(instantiation=left, port_name=out, id=5)
-  b: bits[32] = instantiation_output(instantiation=right, port_name=out, id=6)
-  w1: () = instantiation_input(b, instantiation=left, port_name=d, id=7)
-  w2: () = instantiation_input(a, instantiation=right, port_name=d, id=8)
-  x: () = output_port(a, name=x, id=9)
-  y: () = output_port(b, name=y, id=10)
-}"#;
+    let source = test_fixtures::SIBLING_STATE;
     let pkg = Parser::new(source).parse_and_validate_package().unwrap();
     let eval = BlockEvaluator::prepare(&pkg, "pair").unwrap();
     assert_eq!(
@@ -231,6 +177,62 @@ top block pair(clk: clock, x: bits[32], y: bits[32]) {
     assert_eq!(restored.next_state.values(), supplied.values());
 }
 
+#[test]
+fn external_block_evaluates_its_model_with_local_clock_and_reset_ports() {
+    let ir = test_fixtures::MODELED_EXTERNAL;
+    let pkg = Parser::new(ir).parse_and_validate_package().unwrap();
+    let evaluator = BlockEvaluator::prepare(&pkg, "top").unwrap();
+    assert_eq!(evaluator.registers()[0].name, "delay.saved");
+
+    let zero = IrValue::make_ubits(8, 0).unwrap();
+    let reset = IrValue::make_ubits(8, 42).unwrap();
+    let data = IrValue::make_ubits(8, 19).unwrap();
+    let start = evaluator.initial_state(RegisterInit::AllZeros).unwrap();
+    let asserted = evaluator
+        .step(&start, &[IrValue::bool(false), data.clone()])
+        .unwrap();
+    assert_eq!(asserted.outputs, [zero]);
+    assert_eq!(asserted.next_state.values(), [reset.clone()]);
+
+    let released = evaluator
+        .step(&asserted.next_state, &[IrValue::bool(true), data.clone()])
+        .unwrap();
+    assert_eq!(released.outputs, [reset]);
+    assert_eq!(released.next_state.values(), [data]);
+}
+
+#[test]
+fn reachable_opaque_instance_reports_qualified_path_before_inout_rejection() {
+    let ir = test_fixtures::OPAQUE_EXTERNAL;
+    let mut package = Parser::new(ir).parse_and_validate_package().unwrap();
+    BlockEvaluator::prepare(&package, "independent").unwrap();
+    flatten_block_hierarchy(&package, "independent").unwrap();
+    lower_block_transition(&package, "independent").unwrap();
+
+    let expected = "opaque external block instance 'wrapper.leaf.black_box' of module 'vendor_io' has no behavioral model";
+    let Err(BlockEvalError::Preparation(actual)) = BlockEvaluator::prepare(&package, "wrapper")
+    else {
+        panic!("expected an opaque instance preparation error");
+    };
+    assert_eq!(actual, expected);
+    assert_eq!(
+        flatten_block_hierarchy(&package, "wrapper").unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        lower_block_transition(&package, "wrapper").unwrap_err(),
+        expected
+    );
+
+    package.set_top_block("wrapper").unwrap();
+    let before = package.to_string();
+    assert_eq!(
+        inline_all_blocks_in_package(&mut package).unwrap_err(),
+        expected
+    );
+    assert_eq!(package.to_string(), before);
+}
+
 /// Original block node identities reported by a prepared evaluator.
 #[derive(Default)]
 struct Observed {
@@ -249,22 +251,7 @@ impl EvalObserver for Observed {
 
 #[test]
 fn observed_nodes_keep_the_original_ids_and_header_order() {
-    let source = r#"package design
-
-fn increment(v: bits[8] id=20) -> bits[8] {
-  one: bits[8] = literal(value=1, id=21)
-  ret sum: bits[8] = add(v, one, id=22)
-}
-
-top block observed(b: bits[8], out: bits[8], s: bits[1], a: bits[8]) {
-  a: bits[8] = input_port(name=a, id=1)
-  b: bits[8] = input_port(name=b, id=2)
-  s: bits[1] = input_port(name=s, id=3)
-  incremented: bits[8] = invoke(b, to_apply=increment, id=4)
-  chosen: bits[8] = sel(s, cases=[a, incremented], id=5)
-  dead: bits[8] = sub(b, a, id=6)
-  out: () = output_port(chosen, name=out, id=7)
-}"#;
+    let source = test_fixtures::CALLED_FUNCTION;
     let pkg = Parser::new(source).parse_and_validate_package().unwrap();
     let block = pkg.get_top_block().unwrap();
     let eval = BlockEvaluator::prepare(&pkg, &block.name).unwrap();
@@ -308,34 +295,14 @@ top block observed(b: bits[8], out: bits[8], s: bits[1], a: bits[8]) {
 
 #[test]
 fn rejects_asynchronous_reset_during_preparation() {
-    let source = MIXED_RESET.replace("asynchronous=false", "asynchronous=true");
+    let source = test_fixtures::MIXED_RESET.replace("asynchronous=false", "asynchronous=true");
     let pkg = Parser::new(&source).parse_and_validate_package().unwrap();
     assert!(BlockEvaluator::prepare(&pkg, "pair").is_err());
 }
 
 #[test]
 fn failed_child_assumption_reports_its_source_site_and_state_can_be_retried() {
-    let source = r#"package design
-
-block lookup(clk: clock, vals: bits[8][2], idx: bits[2], out: bits[8]) {
-  reg r(bits[8])
-  vals: bits[8][2] = input_port(name=vals, id=1)
-  idx: bits[2] = input_port(name=idx, id=2)
-  selected: bits[8] = array_index(vals, indices=[idx], assumed_in_bounds=true, id=3)
-  q: bits[8] = register_read(register=r, id=4)
-  w: () = register_write(selected, register=r, id=5)
-  out: () = output_port(q, name=out, id=6)
-}
-
-top block parent(clk: clock, data: bits[8][2], which: bits[2], result: bits[8]) {
-  instantiation child(block=lookup, kind=block)
-  data: bits[8][2] = input_port(name=data, id=10)
-  which: bits[2] = input_port(name=which, id=11)
-  w1: () = instantiation_input(data, instantiation=child, port_name=vals, id=12)
-  w2: () = instantiation_input(which, instantiation=child, port_name=idx, id=13)
-  out: bits[8] = instantiation_output(instantiation=child, port_name=out, id=14)
-  result: () = output_port(out, name=result, id=15)
-}"#;
+    let source = test_fixtures::CHILD_BOUNDS;
     let pkg = Parser::new(source).parse_and_validate_package().unwrap();
     let eval = BlockEvaluator::prepare(&pkg, "parent").unwrap();
     let state = eval.initial_state(RegisterInit::AllZeros).unwrap();
@@ -367,27 +334,7 @@ top block parent(clk: clock, data: bits[8][2], which: bits[2], result: bits[8]) 
 
 #[test]
 fn outputless_children_execute_each_cover_and_aggregate_function_calls_once() {
-    let source = r#"package design
-
-fn tap(v: bits[1] id=1) -> bits[1] {
-  watched: () = cover(v, label="call", id=2)
-  ret result: bits[1] = identity(v, id=3)
-}
-
-block leaf(x: bits[1]) {
-  x: bits[1] = input_port(name=x, id=4)
-  called: bits[1] = invoke(x, to_apply=tap, id=5)
-  hit: () = cover(called, label="child", id=6)
-}
-
-top block pair(a: bits[1], b: bits[1]) {
-  instantiation left(block=leaf, kind=block)
-  instantiation right(block=leaf, kind=block)
-  a: bits[1] = input_port(name=a, id=7)
-  b: bits[1] = input_port(name=b, id=8)
-  l: () = instantiation_input(a, instantiation=left, port_name=x, id=9)
-  r: () = instantiation_input(b, instantiation=right, port_name=x, id=10)
-}"#;
+    let source = test_fixtures::CALLED_COVER;
     let pkg = Parser::new(source).parse_package().unwrap();
     let eval = BlockEvaluator::prepare(&pkg, "pair").unwrap();
     let state = eval.initial_state(RegisterInit::AllZeros).unwrap();

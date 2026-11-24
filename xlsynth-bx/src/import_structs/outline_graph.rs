@@ -594,6 +594,12 @@ impl OutlineGraph {
         let mut exports = Vec::new();
         for (target, spelling) in &self.exports {
             let decl = &self.modules[&target.subject].outline.declarations[&target.name];
+            if matches!(decl.kind, OutlineKind::Struct { .. }) {
+                // A public struct can expose private nominal types through its
+                // fields.
+                pending.insert(target.clone());
+                continue;
+            }
             let OutlineKind::Alias(annotation) = &decl.kind else {
                 continue;
             };
@@ -813,12 +819,19 @@ mod tests {
         let depot = "a".repeat(260);
         fs::write(
             dir.path().join("leaf.x"),
-            "pub fn inc(x: u8) -> u8 { x + u8:1 }",
+            "pub enum Flag : u1 { On = 1 } pub fn inc(x: u8) -> u8 { x + u8:1 }",
         )?;
         let uses = crate::parse_module(&format!("use {depot}::leaf;"))?.uses;
         let stdlib = xlsynth::default_dslx_stdlib_path();
         let paths = [dir.path()];
-        let source = format!("import {depot}.leaf; fn run(x: u8) -> u8 {{ leaf::inc(x) }}");
+        // The probe retains its own name while its type argument refers to a
+        // nominal declaration in the compacted module.
+        let source = format!(
+            r#"#![feature(generics)]
+import {depot}.leaf;
+fn keep<T: type>(v: T) -> T {{ v }}
+fn run(x: u8) -> u8 {{ leaf::inc(keep((leaf::Flag::On, x)).1) }}"#
+        );
         let mut native = ImportData::new(Some(stdlib), &paths);
         let original =
             parse_and_typecheck(&source, "probe.x", "probe", &mut native)?.to_ir_text()?;

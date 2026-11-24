@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package design
+
+block lookup(clk: clock, vals: bits[8][2], idx: bits[2], out: bits[8]) {
+  reg r(bits[8])
+  vals: bits[8][2] = input_port(name=vals, id=1)
+  idx: bits[2] = input_port(name=idx, id=2)
+  selected: bits[8] = array_index(vals, indices=[idx], assumed_in_bounds=true, id=3)
+  q: bits[8] = register_read(register=r, id=4)
+  w: () = register_write(selected, register=r, id=5)
+  out: () = output_port(q, name=out, id=6)
+}
+
+top block parent(clk: clock, data: bits[8][2], which: bits[2], result: bits[8]) {
+  instantiation child(block=lookup, kind=block)
+  data: bits[8][2] = input_port(name=data, id=10)
+  which: bits[2] = input_port(name=which, id=11)
+  w1: () = instantiation_input(data, instantiation=child, port_name=vals, id=12)
+  w2: () = instantiation_input(which, instantiation=child, port_name=idx, id=13)
+  out: bits[8] = instantiation_output(instantiation=child, port_name=out, id=14)
+  result: () = output_port(out, name=result, id=15)
+}

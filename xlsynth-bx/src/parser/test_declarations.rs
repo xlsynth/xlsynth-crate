@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use super::{Braces, Parser, ValueContext, decode_byte_string, diagnostic, is_identifier};
+use super::{Braces, Parser, ValueContext, diagnostic, is_identifier};
 use crate::ast::{Expr, QuickCheckSignature, TestDecl, TestKind, TestStmt, TestStmtKind, Type};
 
 impl Parser<'_> {
@@ -196,24 +196,7 @@ impl Parser<'_> {
             return Ok(TestStmtKind::Tick { reset });
         }
         if self.eat("assert!") {
-            self.expect("(")?;
-            let predicate = self.expr()?.value;
-            let label = if self.eat(",") {
-                let literal = self.peek(0);
-                if !literal.starts_with('"') {
-                    return Err(self.error("expected a string literal for the assertion label"));
-                }
-                let bytes = decode_byte_string(literal).map_err(|e| self.error(e))?;
-                // An escaped byte outside UTF-8 retains its written spelling in
-                // diagnostics.
-                let label = String::from_utf8(bytes)
-                    .unwrap_or_else(|_| literal[1..literal.len() - 1].to_owned());
-                self.pos += 1;
-                Some(label)
-            } else {
-                None
-            };
-            self.expect(")")?;
+            let (predicate, label) = self.assert_arguments(None)?;
             return Ok(TestStmtKind::Assert { predicate, label });
         }
         if self.eat("assert_eq") {

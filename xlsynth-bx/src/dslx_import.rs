@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember, TypecheckedModule};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{NodePayload, Package};
 use xlsynth_pir::ir_parser;
 
@@ -73,6 +74,14 @@ struct CallInputs {
     parametrics: Vec<BoundParametricValue>,
 }
 
+/// One pure specialization invoked with concrete data arguments during BX
+/// checking.
+#[derive(Eq, Hash, PartialEq)]
+struct ConstantCall {
+    id: usize,
+    args: Vec<IrValue>,
+}
+
 /// Per-check import graph and memoized concrete function signatures.
 pub(crate) struct ImportResolver {
     bindings: BTreeMap<String, UseBinding>,
@@ -86,6 +95,8 @@ pub(crate) struct ImportResolver {
     binding_types: BTreeMap<(String, String), Vec<Type>>,
     context_types: HashMap<value_parametrics::ContextInputs, Vec<Type>>,
     calls: Vec<ImportedCall>,
+    constant_calls: HashMap<ConstantCall, IrValue>,
+    constant_work: usize,
     explicit_count: usize,
     explicit_work: usize,
 }
@@ -164,6 +175,8 @@ impl ImportResolver {
             binding_types: BTreeMap::new(),
             context_types: HashMap::new(),
             calls: Vec::new(),
+            constant_calls: HashMap::new(),
+            constant_work: 0,
             explicit_count: 0,
             explicit_work: 0,
         })
@@ -171,6 +184,80 @@ impl ImportResolver {
 
     pub(crate) fn call_count(&self) -> usize {
         self.calls.len()
+    }
+
+    /// Evaluate a pure call under DSLX constexpr semantics in the checked
+    /// source snapshot.
+    pub(crate) fn evaluate_constant_call(
+        &mut self,
+        id: usize,
+        args: Vec<IrValue>,
+    ) -> Result<IrValue, String> {
+        let key = ConstantCall { id, args };
+        if let Some(value) = self.constant_calls.get(&key) {
+            return Ok(value.clone());
+        }
+        if self.constant_calls.len() >= MAX_SPECIALIZATIONS {
+            return Err(format!(
+                "native DSLX constexpr call limit of {MAX_SPECIALIZATIONS} exceeded"
+            ));
+        }
+        let call = &self.calls[id];
+        let mut imports = ProbeImports::default();
+        let name = imports.specialized_name(
+            &call.module,
+            &call.function,
+            &call.parametrics,
+            &self.structs,
+        )?;
+        let args = call
+            .args
+            .iter()
+            .zip(&key.args)
+            .map(|(ty, value)| imports.render_value(ty, value, &self.structs, false))
+            .collect::<Result<Vec<_>, _>>()?;
+        let witness = TypeWitness {
+            imports: imports.declarations(),
+            params: String::new(),
+            expr: format!("{name}({})", args.join(", ")),
+        };
+        // Each distinct call retains its probe in the native context, its
+        // concrete arguments in the cache key, and its decoded result.
+        let input_work = key
+            .args
+            .iter()
+            .fold(witness.expr.len() + witness.imports.len(), |total, arg| {
+                total.saturating_add(crate::typed::constant_work(arg))
+            });
+        self.reserve_constant_work(input_work)?;
+        let call = &self.calls[id];
+        let result_ty = call.result.clone();
+        let callee = format!("{}::{}", call.module, call.function);
+        let value = self.with_imports(|structs, data| {
+            structs
+                .evaluate_constant_call(&result_ty, &witness, data)
+                .map_err(|error| {
+                    format!(
+                        "constexpr call to '{callee}': {}",
+                        structs.remap_diagnostic(error)
+                    )
+                })
+        })?;
+        self.reserve_constant_work(crate::typed::constant_work(&value))?;
+        self.constant_calls.insert(key, value.clone());
+        Ok(value)
+    }
+
+    /// Bound retained native constexpr probes and concrete arguments across the
+    /// import graph.
+    fn reserve_constant_work(&mut self, work: usize) -> Result<(), String> {
+        self.constant_work = self.constant_work.saturating_add(work);
+        if self.constant_work > MAX_TYPE_SIZE {
+            return Err(format!(
+                "native DSLX constexpr calls exceed the work limit of {MAX_TYPE_SIZE}"
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn has_imports(&self) -> bool {
@@ -651,7 +738,8 @@ fn normalize_import_type(
         }
         Type::Applied { name, .. }
         | Type::ParametricStruct { name, .. }
-        | Type::TypeApplied { name, .. } => {
+        | Type::TypeApplied { name, .. }
+        | Type::MixedApplied { name, .. } => {
             return Err(format!("unresolved struct application '{name}'"));
         }
         Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
@@ -753,7 +841,8 @@ impl ProbeImports {
             Type::Bits { .. } | Type::Bool => Ok(ty.to_string()),
             Type::Applied { name, .. }
             | Type::ParametricStruct { name, .. }
-            | Type::TypeApplied { name, .. } => {
+            | Type::TypeApplied { name, .. }
+            | Type::MixedApplied { name, .. } => {
                 Err(format!("unresolved struct application '{name}'"))
             }
             Type::ParametricBits { .. } | Type::ParametricArray { .. } => Err(format!(
@@ -964,17 +1053,6 @@ fn compile_batch(
     let module = format!("0bx_batch_{index}");
     let checked = structs.check_probe(&source, &module, imports)?;
     let explicit_values = call_ids.iter().any(|&id| !calls[id].parametrics.is_empty());
-    if has_instances {
-        conversion_guard::check(
-            &checked,
-            &structs.effect_sources(),
-            conversion_guard::GuardMode::ConcreteStructs,
-            explicit_values,
-        )?;
-    }
-    // XLS can embed filenames in generated symbols. Restore the logical
-    // names before parsing: a temporary path can contain punctuation that
-    // would otherwise turn a valid original identifier into invalid PIR.
     let type_parameters = structs.import_features(subject).type_parameters;
     // The probe imports the selected subject and the public spellings of
     // nominal arguments, including types nested in arrays and tuples.
@@ -983,12 +1061,13 @@ fn compile_batch(
             .aliases
             .keys()
             .any(|owner| structs.import_features(owner).numeric_enums);
-    let converted = structs.conversion_probe(&checked, &source, &module, enum_specializations)?;
-    if !has_instances && (type_parameters || explicit_values) {
+    if has_instances || type_parameters || explicit_values {
         conversion_guard::check(
-            &converted.checked,
-            &structs.effect_sources_for(converted.files),
-            if enum_specializations {
+            &checked,
+            &structs.effect_sources(),
+            if has_instances {
+                conversion_guard::GuardMode::ConcreteStructs
+            } else if enum_specializations {
                 conversion_guard::GuardMode::NumericEnums
             } else {
                 conversion_guard::GuardMode::TypeBindings
@@ -996,11 +1075,16 @@ fn compile_batch(
             explicit_values,
         )?;
     }
-    let ir = converted
-        .checked
+    let files = structs
+        .files
+        .as_ref()
+        .expect("imported batch has a snapshot");
+    let ir = checked
         .to_ir_text()
-        .map_err(|e| converted.files.remap_diagnostic(e.to_string()))?;
-    let mut ir = converted.files.restore_ir_names(&ir);
+        .map_err(|e| files.remap_diagnostic(e.to_string()))?;
+    // XLS can embed filenames in generated symbols. Restore logical names
+    // before parsing as temporary paths can contain invalid PIR punctuation.
+    let mut ir = files.restore_ir_names(&ir);
     // libxls accepts a numeric initial in a synthetic DSLX module name.
     // Give just the enclosing PIR package a legal initial; the generated
     // function symbols retain their collision-free prefix.
@@ -1017,17 +1101,14 @@ fn compile_batch(
         for node in &mut member.graph_mut().nodes {
             for pos in node.pos.iter_mut().flatten() {
                 if let Some(path) = package.file_table.id_to_path.get(&pos.fileno) {
-                    pos.colno =
-                        converted
-                            .files
-                            .original_column(Path::new(path), pos.lineno, pos.colno);
+                    pos.colno = files.original_column(Path::new(path), pos.lineno, pos.colno);
                 }
             }
         }
     }
     for path in package.file_table.id_to_path.values_mut() {
         let physical = Path::new(path);
-        let logical = converted.files.logical_path(physical).unwrap_or(physical);
+        let logical = files.logical_path(physical).unwrap_or(physical);
         if let Ok(relative) = logical.strip_prefix(stdlib_path) {
             let relative = relative
                 .to_string_lossy()
@@ -1278,7 +1359,7 @@ pub struct Generic<N: u32, T: type = u8> { x: T }
     }
 
     #[test]
-    fn unused_member_uses_resolve_without_exposing_private_types_or_functions()
+    fn private_native_types_and_functions_are_rejected_at_import_or_qualified_use()
     -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         fs::write(
@@ -1289,15 +1370,23 @@ pub struct Generic<N: u32, T: type = u8> { x: T }
             additional_search_paths: vec![dir.path()],
             ..Default::default()
         };
-        let declarations = "use device::{Hidden, hidden};";
-        let unused =
-            crate::parse_module(&format!("{declarations} block b(clk, x: u8) -> u8 {{ x }}"))?;
-        crate::check_module_with_options(&unused, &options)?;
+        for member in ["Hidden", "hidden"] {
+            let unused = crate::parse_module(&format!(
+                "use device::{member}; block b(clk, x: u8) -> u8 {{ x }}"
+            ))?;
+            let error = crate::check_module_with_options(&unused, &options).unwrap_err();
+            assert!(
+                error.contains(&format!(
+                    "Member `{member}` of module `device` is not public"
+                )),
+                "{error}"
+            );
+        }
         for block in [
-            "block b(clk, x: Hidden) -> u8 { x.x }",
-            "block b(clk, x: u8) -> u8 { hidden(x) }",
+            "block b(clk, x: device::Hidden) -> u8 { x.x }",
+            "block b(clk, x: u8) -> u8 { device::hidden(x) }",
         ] {
-            let used = crate::parse_module(&format!("{declarations} {block}"))?;
+            let used = crate::parse_module(&format!("use device; {block}"))?;
             let error = crate::check_module_with_options(&used, &options).unwrap_err();
             assert!(error.contains("public"), "{error}");
         }

@@ -8,7 +8,7 @@ use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_vast::{Expr, GenerateLoop, LiteralFormat, LogicRef};
 
 use crate::BlockCodegenError;
-use crate::block::{BlockEmitter, Value, validate_external_identifier};
+use crate::block::{BlockEmitter, Value, unsupported_invoke, validate_external_identifier};
 
 impl BlockEmitter<'_, '_> {
     /// Lowers one representable combinational or connectivity operation.
@@ -39,14 +39,29 @@ impl BlockEmitter<'_, '_> {
             }
         }
         let result = match &node.payload {
+            NodePayload::ExtInoutDrive {
+                net,
+                drive,
+                output_enable,
+            } => {
+                self.emit_pin_drive(self.inout_nets[net.as_str()].expr, *drive, *output_enable)?;
+                None
+            }
+            NodePayload::ExtInstantiationInout {
+                instantiation,
+                port_name,
+                net,
+            } => {
+                self.connect_instance_port(instantiation, port_name, self.inout_nets[net.as_str()]);
+                None
+            }
             NodePayload::InstantiationInput {
                 instantiation,
                 port_name,
                 arg,
             } => {
                 if let Some(value) = self.values[arg.index] {
-                    self.instance_inputs
-                        .insert((instantiation.clone(), port_name.clone()), value.expr);
+                    self.connect_instance_port(instantiation, port_name, value);
                 }
                 None
             }
@@ -61,9 +76,9 @@ impl BlockEmitter<'_, '_> {
                 let name = self.unique_name(&requested);
                 let ty = self.value_type(&node.ty);
                 let signal = self.file.add_logic(self.module, &name, &ty)?;
-                self.instance_outputs
-                    .insert((instantiation.clone(), port_name.clone()), signal.to_expr());
-                self.values[node_ref.index] = Some(Value::signal(signal).with_type(&node.ty));
+                let value = Value::signal(signal).with_type(&node.ty);
+                self.connect_instance_port(instantiation, port_name, value);
+                self.values[node_ref.index] = Some(value);
                 return Ok(());
             }
             NodePayload::Assert {
@@ -263,8 +278,8 @@ impl BlockEmitter<'_, '_> {
                 let expression = self.file.make_shll(&one, &argument.expr);
                 Some(Value::expression(expression, argument.depth + 1))
             }
-            NodePayload::Invoke { .. } => {
-                unreachable!("invoke nodes are inlined before emission")
+            NodePayload::Invoke { to_apply, .. } => {
+                return Err(unsupported_invoke(self.block, to_apply));
             }
             NodePayload::Map { .. } => unreachable!("map nodes are rejected before emission"),
             NodePayload::CountedFor { .. } => {
@@ -311,7 +326,9 @@ impl BlockEmitter<'_, '_> {
                 let refs = terms.iter().map(|term| term.operand).collect::<Vec<_>>();
                 Some(Value::expression(expression, self.operand_depth(&refs)))
             }
-            NodePayload::InputPort { .. }
+            NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInoutRead { .. }
+            | NodePayload::InputPort { .. }
             | NodePayload::OutputPort { .. }
             | NodePayload::Param
             | NodePayload::RegisterRead { .. } => {
@@ -329,6 +346,31 @@ impl BlockEmitter<'_, '_> {
             };
             self.values[node_ref.index] = Some(value.with_width(node.ty.bit_count()));
         }
+        Ok(())
+    }
+
+    /// Records the expression or wire used in an instance's named connection.
+    fn connect_instance_port(&mut self, instance: &str, port: &str, value: Value) {
+        self.instance_connections
+            .entry(instance.to_owned())
+            .or_default()
+            .insert(port.to_owned(), value);
+    }
+
+    /// Appends a continuous driver that releases the whole pin when disabled.
+    fn emit_pin_drive(
+        &mut self,
+        pin: Expr,
+        drive: NodeRef,
+        enable: NodeRef,
+    ) -> Result<(), BlockCodegenError> {
+        let data = self.required_value(drive)?.expr;
+        let oe = self.required_value(enable)?.expr;
+        let z = self.file.make_unsized_z_literal();
+        let value = self.file.make_ternary(&oe, &data, &z);
+        let assignment = self.file.make_continuous_assignment(&pin, &value);
+        self.file
+            .add_member_continuous_assignment(self.module, assignment);
         Ok(())
     }
 
@@ -1077,7 +1119,7 @@ impl BlockEmitter<'_, '_> {
         Ok(result)
     }
 
-    /// Emits a clocked assertion without altering synthesizable datapath logic.
+    /// Samples assertions on a clock edge or after combinational logic settles.
     fn emit_assertion(
         &mut self,
         predicate: NodeRef,
@@ -1086,7 +1128,8 @@ impl BlockEmitter<'_, '_> {
     ) -> Result<(), BlockCodegenError> {
         let condition = self.required_value(predicate)?.expr;
         let predicate = self.file.emit_expression(&condition);
-        let escaped = escape_sv_string(message);
+        // $error interprets its argument as a format string.
+        let escaped = escape_sv_string(message).replace('%', "%%");
         if !label.is_empty() {
             validate_external_identifier(label, "assertion label")?;
         }
@@ -1095,27 +1138,26 @@ impl BlockEmitter<'_, '_> {
         } else {
             format!("{label}: ")
         };
-        let unknown = format!("$isunknown({predicate})");
+        let clock = self.block.clock_port_name();
+        // Sample unknownness with the predicate. Asynchronous reset stays live.
+        let unknown = if clock.is_some() {
+            format!("$sampled($isunknown({predicate}))")
+        } else {
+            format!("$isunknown({predicate})")
+        };
         let disabled = if let Some(reset) = &self.block.reset {
             let inactive = if reset.active_low { "1'b1" } else { "1'b0" };
-            format!(
-                "{} !== {inactive} || {unknown}",
-                self.block.port_name(reset.port)
-            )
+            let in_reset = format!("{} !== {inactive}", self.block.port_name(reset.port));
+            let in_reset = if clock.is_some() && !reset.asynchronous {
+                format!("$sampled({in_reset})")
+            } else {
+                in_reset
+            };
+            format!("{in_reset} || {unknown}")
         } else {
             unknown
         };
-        let statement = if let Some(clock) = self.block.clock_port_name() {
-            let disabled = if self
-                .block
-                .reset
-                .as_ref()
-                .is_some_and(|reset| reset.asynchronous)
-            {
-                disabled
-            } else {
-                format!("$sampled({disabled})")
-            };
+        let statement = if let Some(clock) = clock {
             format!(
                 "`ifndef SYNTHESIS\n{label_prefix}assert property (@(posedge {clock}) \
                  disable iff ({disabled}) {predicate}) else $error(\"{escaped}\");\n`endif"
@@ -1128,7 +1170,7 @@ impl BlockEmitter<'_, '_> {
             };
             format!(
                 "`ifndef SYNTHESIS\nalways_comb begin{label_suffix}\n  \
-                 if (!({disabled})) assert ({predicate}) \
+                 assert final ({disabled} || ({predicate})) \
                  else $error(\"{escaped}\");\nend\n`endif"
             )
         };
@@ -1260,8 +1302,16 @@ fn verilog_trace_format(
 
 /// Escapes a public diagnostic string for use in a SystemVerilog literal.
 fn escape_sv_string(text: &str) -> String {
-    text.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_ascii_control() => escaped.push_str(&format!("\\{:03o}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }

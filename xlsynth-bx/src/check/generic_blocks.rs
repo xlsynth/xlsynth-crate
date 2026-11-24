@@ -6,12 +6,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
-use crate::ast::{Block, CallbackParam, Expr, FunctionParametricRef, Param, Type};
+use crate::ast::{
+    Block, CallbackParam, Expr, FunctionParametricRef, Param, SourceNode, StructArgument,
+    StructArgumentRef, StructLiteralArgs, Type,
+};
 use crate::parser::{is_identifier, is_use_identifier};
+use crate::typed::BoundParametricValue;
 
+use super::struct_parametrics::BoundStructArgument;
 use super::{
-    BlockCallbackFormal, BlockInterface, BlockTemplate, MAX_ELABORATION_DEPTH, ModuleDimensions,
-    StructTable, TypeResolver, TypeShape, compatible, resolve_type, type_parameter_references,
+    BlockCallbackFormal, BlockInterface, BlockTemplate, BodyChecker, MAX_ELABORATION_DEPTH,
+    ModuleDimensions, StructTable, TypeResolver, TypeShape, compatible, resolve_signature,
+    resolve_type, source_type_nodes, type_parameter_references,
 };
 
 /// A callable argument identifies a function in the caller's lexical scope.
@@ -56,11 +62,6 @@ pub(super) fn validate_declaration(block: &Block) -> Result<(), String> {
         {
             return Err(format!("duplicate block parameter '{name}'"));
         }
-        if parametric.default.is_some() {
-            return Err(format!(
-                "block value parametric '{name}' requires an explicit argument"
-            ));
-        }
         if parametric.index >= explicit_count
             || previous_index.is_some_and(|i| i >= parametric.index)
         {
@@ -86,21 +87,32 @@ pub(super) fn validate_declaration(block: &Block) -> Result<(), String> {
             return Err(format!("port '{name}' collides with a value parametric"));
         }
     }
-    validate_inference_sources(&block.type_params, &block.params, &block.callback_params)
+    validate_inference_sources(
+        &block.type_params,
+        &block.params,
+        &block.callback_params,
+        None,
+    )
 }
 
-/// Every type formal needs evidence from a data argument or the result of a
-/// callback whose inputs have already been inferred.
+/// Type formals must be inferable from data, the expected function result, or
+/// the result of a callback with already inferable inputs.
 pub(super) fn validate_inference_sources(
     types: &[String],
     params: &[Param],
     callbacks: &[CallbackParam],
+    result: Option<&Type>,
 ) -> Result<(), String> {
     let mut type_params: BTreeSet<_> = types.iter().map(String::as_str).collect();
     let mut input_names = Vec::new();
-    for param in params {
-        type_parameter_references(&param.ty, &mut input_names);
+    for ty in params.iter().map(|param| &param.ty).chain(result) {
+        type_parameter_references(ty, &mut input_names);
     }
+    let result_source = if result.is_some() {
+        " or the function result"
+    } else {
+        ""
+    };
     for name in input_names {
         type_params.remove(name);
     }
@@ -114,7 +126,7 @@ pub(super) fn validate_inference_sources(
             .find(|name| type_params.contains(**name))
         {
             return Err(format!(
-                "cannot infer type parameter '{missing}' before callable parameter '{}'; its input types must come from a data input or an earlier callback result",
+                "cannot infer type parameter '{missing}' before callable parameter '{}'; its input types must come from a data input or an earlier callback result{result_source}",
                 callback.name
             ));
         }
@@ -134,52 +146,233 @@ pub(super) fn validate_inference_sources(
             "any data input or callback result"
         };
         return Err(format!(
-            "cannot infer type parameter '{missing}': it does not appear in {source}"
+            "cannot infer type parameter '{missing}': it does not appear in {source}{result_source}"
         ));
     }
     Ok(())
 }
 
+/// The data input and result types of a block signature in its declaration
+/// scope.
+pub(super) struct BlockPortTypes {
+    pub(super) params: Vec<Param>,
+    pub(super) result: Type,
+}
+
+/// Only dimensions supplied by block value formals survive declaration
+/// resolution.
+pub(super) fn has_block_dimension(ty: &Type) -> bool {
+    has_matching_dimension(ty, &|_| true)
+}
+
+/// Find width and length expressions in type operands, including nested
+/// struct applications.
+pub(super) fn has_matching_dimension(ty: &Type, matches: &impl Fn(&Expr) -> bool) -> bool {
+    match ty {
+        Type::ParametricBits { width, .. } => matches(width),
+        Type::ParametricArray { element, size } => {
+            matches(size) || has_matching_dimension(element, matches)
+        }
+        Type::Array { element, .. } => has_matching_dimension(element, matches),
+        Type::Tuple(fields) | Type::TypeApplied { args: fields, .. } => {
+            fields.iter().any(|ty| has_matching_dimension(ty, matches))
+        }
+        Type::MixedApplied { args, .. } => args
+            .iter()
+            .filter_map(StructArgument::as_type)
+            .any(|ty| has_matching_dimension(ty, matches)),
+        _ => false,
+    }
+}
+
+impl BlockPortTypes {
+    /// Compute the minimum layout using written formal occurrences. An alias
+    /// expands to a concrete type, even if a struct in that expansion shares
+    /// a name with a block type formal.
+    fn minimum_layout(&self, block: &Block, formals: &Bindings) -> Self {
+        fn minimum(source: &Type, ty: &Type, formals: &Bindings) -> Type {
+            match (source, ty) {
+                (Type::Named(name), _) if formals.declares(name) => Type::unsigned(1),
+                (_, Type::ParametricBits { .. }) => Type::unsigned(1),
+                (
+                    Type::Array { element: src, .. } | Type::ParametricArray { element: src, .. },
+                    Type::ParametricArray { element, .. },
+                ) => Type::array(minimum(src, element, formals), 1),
+                (
+                    Type::Array { element: src, .. } | Type::ParametricArray { element: src, .. },
+                    Type::Array { element, size },
+                ) => Type::array(minimum(src, element, formals), *size),
+                (Type::Tuple(src), Type::Tuple(fields)) => Type::Tuple(
+                    src.iter()
+                        .zip(fields)
+                        .map(|(src, ty)| minimum(src, ty, formals))
+                        .collect(),
+                ),
+                (Type::TypeApplied { args: src, .. }, Type::TypeApplied { name, args }) => {
+                    Type::TypeApplied {
+                        name: name.clone(),
+                        args: src
+                            .iter()
+                            .zip(args)
+                            .map(|(src, ty)| minimum(src, ty, formals))
+                            .collect(),
+                    }
+                }
+                (Type::MixedApplied { args: src, .. }, Type::MixedApplied { name, args }) => {
+                    Type::MixedApplied {
+                        name: name.clone(),
+                        args: src
+                            .iter()
+                            .zip(args)
+                            .map(|(src, arg)| match arg {
+                                StructArgument::Type(ty) => StructArgument::Type(minimum(
+                                    src.as_type().expect("resolved type argument"),
+                                    ty,
+                                    formals,
+                                )),
+                                StructArgument::Value(_) => arg.clone(),
+                            })
+                            .collect(),
+                    }
+                }
+                _ => ty.clone(),
+            }
+        }
+        Self {
+            params: block
+                .params
+                .iter()
+                .zip(&self.params)
+                .map(|(src, p)| Param {
+                    name: p.name.clone(),
+                    ty: minimum(&src.ty, &p.ty, formals),
+                })
+                .collect(),
+            result: minimum(&block.result, &self.result, formals),
+        }
+    }
+}
+
 impl<'m> BlockTemplate<'m> {
+    /// Revisit a dimension-dependent signature in its definition scope. Only a
+    /// written type formal is substituted, even when a module alias expands to
+    /// a nominal type with the same name.
+    pub(super) fn specialize_dependent_ports(
+        &self,
+        caller: &mut BodyChecker<'_, 'm>,
+        bindings: &Bindings,
+        values: &[BoundParametricValue],
+    ) -> Result<Option<BlockPortTypes>, String> {
+        if self.port_binding_work == 0 {
+            return Ok(None);
+        }
+        let block = self.block;
+        let mut definition = BodyChecker::struct_type_scope(
+            caller.decls.module_dimensions(&block.name),
+            caller.resolver,
+            caller.structs,
+            caller.function_registry.as_deref_mut(),
+        );
+        definition.function_type_bindings = Some(bindings.clone());
+        definition
+            .names
+            .extend(block.clock.iter().chain(&block.reset).cloned());
+        definition
+            .names
+            .extend(block.callback_params.iter().map(|p| p.name.clone()));
+        for (formal, value) in block.value_parametrics.iter().zip(values) {
+            definition.bind_parametric_value(&formal.name, value);
+        }
+        // One binding can be expanded by many ports. Bound all the copied
+        // source type arguments together before retaining the concrete ports.
+        let mut copies = Some(Default::default());
+        let mut resolve = |definition: &mut BodyChecker<'_, 'm>, source: &Type| {
+            let ty = definition.resolve_annotation(source, MAX_ELABORATION_DEPTH, &mut copies)?;
+            definition.structs.update_imports(definition.resolver)?;
+            definition.structs.validate_type(&ty)?;
+            Ok::<_, String>(ty)
+        };
+        let params = block
+            .params
+            .iter()
+            .map(|p| {
+                definition.names.insert(p.name.clone());
+                Ok(Param {
+                    name: p.name.clone(),
+                    ty: resolve(&mut definition, &p.ty)?,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        let result = resolve(&mut definition, &block.result)?;
+        Ok(Some(BlockPortTypes { params, result }))
+    }
+
     /// Resolve module types while retaining the block's symbolic type names
     /// for data inference and callback specialization at each call site.
     pub(super) fn new(
         block: &'m Block,
-        params: Vec<Param>,
-        result: Type,
         bindings: &Bindings,
         dimensions: ModuleDimensions<'_, 'm>,
         types: &mut TypeResolver<'_, 'm>,
     ) -> Result<Self, String> {
-        let dimension_type = super::value_parametrics::dimension_type();
+        let mut value_types = Vec::with_capacity(block.value_parametrics.len());
+        let mut required_arguments = 0;
+        if block.value_parametrics.iter().any(|p| p.default.is_some()) {
+            let mut checker = types.struct_scope(dimensions);
+            checker.function_type_bindings = Some(bindings.clone());
+            checker.check_block_default_names(block)?;
+        }
         let mut preceding = BTreeSet::new();
-        for formal in block.parametric_bindings() {
+        let mut size_formals = BTreeSet::new();
+        for (index, formal) in block.parametric_bindings().enumerate() {
             let name = match formal {
-                FunctionParametricRef::Callback(callback) => &callback.name,
+                FunctionParametricRef::Callback(callback) => {
+                    required_arguments = index + 1;
+                    &callback.name
+                }
                 FunctionParametricRef::Value(value) => {
-                    let is_dimension = if matches!(value.ty, Type::Named(_)) {
-                        resolve_type(
-                            &value.ty,
-                            &|name| preceding.contains(name),
-                            Some(bindings),
-                            dimensions,
-                            types,
-                            MAX_ELABORATION_DEPTH,
-                        )? == dimension_type
-                    } else {
-                        value.ty == dimension_type
-                    };
-                    if !is_dimension {
+                    let ty = resolve_type(
+                        &value.ty,
+                        &|name| preceding.contains(name),
+                        Some(bindings),
+                        dimensions,
+                        types,
+                        MAX_ELABORATION_DEPTH,
+                    )?;
+                    if !matches!(crate::typed::bits(&ty), Some((false, 1 | 32))) {
                         return Err(format!(
-                            "block value parametric '{}' must have type u32",
+                            "block value parametric '{}' must have type u32 or bool",
                             value.name
                         ));
+                    }
+                    if ty == Type::unsigned(32) {
+                        size_formals.insert(value.name.as_str());
+                    }
+                    value_types.push(ty);
+                    if value.default.is_none() {
+                        required_arguments = index + 1;
                     }
                     &value.name
                 }
             };
             preceding.insert(name.as_str());
         }
+        let reserved_ports = block
+            .clock
+            .iter()
+            .chain(&block.reset)
+            .chain(block.callback_params.iter().map(|p| &p.name))
+            .chain(block.value_parametrics.iter().map(|p| &p.name));
+        let mut port_dimensions = dimensions;
+        port_dimensions.block_size_formals = (!size_formals.is_empty()).then_some(&size_formals);
+        let (params, result) = resolve_signature(
+            &block.params,
+            &block.result,
+            reserved_ports,
+            Some(bindings),
+            port_dimensions,
+            types,
+        )?;
         let value_names: BTreeSet<_> = block
             .value_parametrics
             .iter()
@@ -222,22 +415,91 @@ impl<'m> BlockTemplate<'m> {
                     .map_err(|e| format!("callable parameter '{}': {e}", signature.name))?;
             }
         }
+        let port_binding_work = {
+            let types = params.iter().map(|p| &p.ty).chain([&result]);
+            if types.clone().any(has_block_dimension) {
+                types.map(source_type_nodes).sum()
+            } else {
+                0
+            }
+        };
+        let ports = BlockPortTypes { params, result };
+        // Check fixed layout bounds and output names even on unused templates.
+        // One is the minimum layout cost for a symbolic width or array length.
+        let shadows_struct = block
+            .type_params
+            .iter()
+            .any(|p| structs.indices.contains_key(p));
+        let minimum_ports;
+        let (declaration_ports, shape_bindings) = if port_binding_work != 0 || shadows_struct {
+            minimum_ports = ports.minimum_layout(block, bindings);
+            (&minimum_ports, None)
+        } else {
+            (&ports, Some(bindings))
+        };
         BlockInterface::check_ports(
             block.clock.as_deref(),
             block.reset.as_deref(),
-            &params,
-            &result,
+            &declaration_ports.params,
+            if matches!(&block.result, Type::Named(name) if bindings.declares(name)) {
+                None
+            } else {
+                Some(&declaration_ports.result)
+            },
             structs,
-            Some(bindings),
+            shape_bindings,
             None,
         )?;
         Ok(Self {
             block,
             stages: dimensions.block_stages(block)?,
-            params,
-            result,
+            ports,
+            port_binding_work,
             callback_params,
+            value_types,
+            required_arguments,
             callback_indices,
+        })
+    }
+
+    /// Complete the caller's explicit value prefix in the block's own scope.
+    pub(super) fn apply_value_defaults(
+        &self,
+        caller: &mut BodyChecker<'_, 'm>,
+        supplied: Vec<BoundParametricValue>,
+        types: &Bindings,
+    ) -> Result<Vec<BoundParametricValue>, String> {
+        if self
+            .block
+            .value_parametrics
+            .iter()
+            .all(|p| p.default.is_none())
+        {
+            return Ok(supplied);
+        }
+        caller.with_value_definition(&self.block.name, |definition| {
+            definition.function_type_bindings = Some(types.clone());
+            let mut supplied = supplied.iter();
+            let mut bound = Vec::with_capacity(self.value_types.len());
+            for formal in self.block.parametric_bindings() {
+                match formal {
+                    FunctionParametricRef::Callback(callback) => {
+                        definition.names.insert(callback.name.clone());
+                    }
+                    FunctionParametricRef::Value(formal) => {
+                        let ty = self.value_types[bound.len()].clone();
+                        let value = definition.value_or_default(
+                            &self.block.name,
+                            formal,
+                            ty,
+                            supplied.next(),
+                        )?;
+                        definition.bind_parametric_value(&formal.name, &value);
+                        bound.push(value);
+                    }
+                }
+            }
+            Ok(bound)
         })
     }
 }
@@ -295,6 +557,25 @@ enum TypePattern {
     SourceProjection,
 }
 
+/// Type names used by a constexpr expression, including casts and builtins.
+fn value_type_names(expr: &Expr) -> impl Iterator<Item = &str> {
+    let mut pending = vec![SourceNode::Expression(expr)];
+    std::iter::from_fn(move || {
+        while let Some(node) = pending.pop() {
+            let name = match &node {
+                SourceNode::Annotation(Type::Named(name)) => Some(name.as_str()),
+                SourceNode::Expression(expr) => expr.struct_literal().map(|s| s.name),
+                _ => None,
+            };
+            node.push_children(&mut pending);
+            if name.is_some() {
+                return name;
+            }
+        }
+        None
+    })
+}
+
 impl Bindings {
     pub(super) fn new(type_params: &[String]) -> Self {
         Self {
@@ -303,6 +584,11 @@ impl Bindings {
                 .map(|name| (name.clone(), None))
                 .collect(),
         }
+    }
+
+    /// Introduce a type formal for the annotations and defaults that follow it.
+    pub(super) fn declare_type_parameter(&mut self, name: &str) {
+        self.types.insert(name.to_owned(), None);
     }
 
     pub(super) fn get(&self, name: &str) -> Option<&Type> {
@@ -329,6 +615,11 @@ impl Bindings {
         match pattern {
             Type::Named(name) => self.types.get(name).is_some_and(Option::is_none),
             Type::Tuple(fields) => fields.iter().any(|field| self.has_unbound_variable(field)),
+            Type::MixedApplied { args, .. } => args.iter().any(|arg| match arg {
+                StructArgument::Type(ty) => self.has_unbound_variable(ty),
+                StructArgument::Value(expr) => value_type_names(expr)
+                    .any(|name| self.types.get(name).is_some_and(Option::is_none)),
+            }),
             Type::TypeApplied { args, .. } => args.iter().any(|arg| self.has_unbound_variable(arg)),
             Type::Array { element, .. } | Type::ParametricArray { element, .. } => {
                 self.has_unbound_variable(element)
@@ -442,20 +733,28 @@ impl Bindings {
             return Ok(());
         }
         match (formal, actual) {
-            (Type::TypeApplied { name, args }, Type::Named(actual)) => {
-                if let Some(instance) = structs.instances.get(actual)
-                    && instance.template.name == *name
-                    && instance.types.len() == args.len()
-                {
-                    for (formal, actual) in args.iter().zip(&instance.types) {
-                        self.match_pattern(formal, actual, structs, pattern)?;
+            (formal, Type::Named(canonical))
+                if let Some((name, args)) = formal.struct_application()
+                    && let Some(instance) = structs.instances.get(canonical)
+                    && instance.template.name == name
+                    && match args {
+                        StructLiteralArgs::Types(types) => types.len() == instance.args.len(),
+                        StructLiteralArgs::Mixed(_) => true,
+                        _ => false,
+                    } =>
+            {
+                for (arg, bound) in args.iter().zip(&instance.args) {
+                    match (arg, bound) {
+                        (StructArgumentRef::Type(formal), BoundStructArgument::Type(actual)) => {
+                            self.match_pattern(formal, actual, structs, pattern)?;
+                        }
+                        _ if matches!(args, StructLiteralArgs::Types(_)) => {
+                            return Err(format!("expected a type argument for {name}"));
+                        }
+                        _ => { /* Mixed value arguments are checked after type inference. */ }
                     }
-                    Ok(())
-                } else if pattern != TypePattern::Resolved {
-                    Ok(())
-                } else {
-                    Err(format!("expected {formal}, got {actual}"))
                 }
+                Ok(())
             }
             (Type::Tuple(formals), Type::Tuple(actuals)) if formals.len() == actuals.len() => {
                 for (formal, actual) in formals.iter().zip(actuals) {
@@ -516,6 +815,16 @@ impl Bindings {
                 Type::Tuple(fields.iter().map(|field| self.substitute(field)).collect())
             }
             Type::Array { element, size } => Type::array(self.substitute(element), *size),
+            Type::MixedApplied { name, args } => Type::MixedApplied {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| match arg {
+                        StructArgument::Type(ty) => StructArgument::Type(self.substitute(ty)),
+                        StructArgument::Value(_) => arg.clone(),
+                    })
+                    .collect(),
+            },
             Type::TypeApplied { name, args } => Type::TypeApplied {
                 name: name.clone(),
                 args: args.iter().map(|arg| self.substitute(arg)).collect(),
@@ -543,6 +852,25 @@ impl Bindings {
         names.sort_unstable();
         names.dedup();
         names.into_iter().map(str::to_owned).collect()
+    }
+
+    /// Types needed to evaluate constexpr arguments are inputs to
+    /// specialization, even when that value expression cannot infer the type
+    /// from a port.
+    pub(super) fn value_type_dependencies(&self, ty: &Type) -> Vec<String> {
+        let mut names = BTreeSet::new();
+        super::type_dependencies(
+            ty,
+            |_, _| {},
+            |expr| {
+                names.extend(
+                    value_type_names(expr)
+                        .filter(|name| self.declares(name))
+                        .map(str::to_owned),
+                );
+            },
+        );
+        names.into_iter().collect()
     }
 
     /// Before callbacks are resolved, a template's data arguments can leave
@@ -579,6 +907,7 @@ fn canonical_argument(ty: &Type) -> Type {
         | Type::ParametricArray { .. }
         | Type::Applied { .. }
         | Type::ParametricStruct { .. }
+        | Type::MixedApplied { .. }
         | Type::TypeApplied { .. } => ty.clone(),
     }
 }

@@ -8,8 +8,7 @@ use std::sync::Arc;
 
 use crate::IrValue;
 use crate::ir::{
-    Block, Fn, InstantiationKind, Node, NodeGraph, NodePayload, NodeRef, Package, PackageMember,
-    Type, Unop,
+    Block, Fn, Node, NodeGraph, NodePayload, NodeRef, Package, PackageMember, Type, Unop,
 };
 use crate::ir_utils::{compact_and_toposort_with_mapping_in_place, remap_payload_with};
 
@@ -86,7 +85,8 @@ fn qualified(path: &str, segment: &str) -> String {
 }
 
 /// Enumerates reachable instances in declaration preorder, allocating
-/// independent register slots.
+/// independent register slots. External blocks elaborate their behavioral
+/// model.
 fn elaborate<'a>(package: &'a Package, top: &'a Block) -> Result<Vec<Instance<'a>>, String> {
     let blocks: HashMap<_, _> = package
         .members
@@ -101,6 +101,7 @@ fn elaborate<'a>(package: &'a Package, top: &'a Block) -> Result<Vec<Instance<'a
     let mut node_base = 1;
     let mut register_base = 0;
     while let Some((block, path, parent)) = pending.pop() {
+        block.reject_inouts("block evaluation")?;
         let index = instances.len();
         if let Some((parent_index, name)) = parent {
             instances[parent_index].children.insert(name, index);
@@ -114,17 +115,14 @@ fn elaborate<'a>(package: &'a Package, top: &'a Block) -> Result<Vec<Instance<'a
         let clock = block.clock_port_name();
         for inst in block.instantiations.iter().rev() {
             let child_path = qualified(&path, &inst.name);
-            if inst.kind == InstantiationKind::Extern {
-                return Err(format!(
+            let model = inst.referenced_block().ok_or_else(|| {
+                format!(
                     "unsupported extern instance '{child_path}' in block '{}'",
                     block.name
-                ));
-            }
-            let child = blocks.get(inst.block.as_str()).ok_or_else(|| {
-                format!(
-                    "instance '{child_path}' references missing block '{}'",
-                    inst.block
                 )
+            })?;
+            let child = blocks.get(model).ok_or_else(|| {
+                format!("instance '{child_path}' references missing block '{model}'")
             })?;
             if clock.is_none() && child.clock_port_name().is_some() {
                 return Err(format!(
@@ -348,7 +346,22 @@ pub(super) fn prepare(package: &Package, top: &str) -> Result<Prepared, String> 
             .map(|_| RegisterUpdate::default())
             .collect(),
     };
-    let mut graph = NodeGraph::new(top);
+    // A block and a package function can share a name. The projected cycle
+    // function must not shadow an ordinary callee when the backend packages it.
+    let function_name = if package.get_fn(top).is_some() {
+        let names: HashSet<_> = package
+            .members
+            .iter()
+            .map(|m| m.graph().name.as_str())
+            .collect();
+        (0..=names.len())
+            .map(|n| format!("{top}__cycle_{n}"))
+            .find(|name| !names.contains(name.as_str()))
+            .expect("more candidate cycle names than occupied member names")
+    } else {
+        top.to_owned()
+    };
+    let mut graph = NodeGraph::new(function_name);
     let mut origins = vec![None];
     // Projected text IDs must never collide with real function callees, whose
     // observers use their own node-index space and whose cover counters are

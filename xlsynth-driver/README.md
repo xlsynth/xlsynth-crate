@@ -436,7 +436,9 @@ xlsynth-driver gv2block \
 
 Compiles a `.bx` file to an XLS block IR package on stdout. A BX pipeline
 declares the registers between stages and can use blocks and functions from BX
-libraries or call imported DSLX functions for the combinational work. This `mul_inc.bx` captures
+libraries or call imported DSLX functions for the combinational work. The emitted
+blocks inline function calls recursively and preserve block instances and registers.
+This `mul_inc.bx` captures
 a product on one clock edge and the incremented product on the next.
 
 ```text
@@ -533,8 +535,9 @@ checks a counter against a reference using a randomly generated sequence of driv
 
 Proves the `#[quickcheck] block` declarations in a BX file. The command unrolls
 each property's ticks into word-level IR and asks an SMT solver whether any
-legal stimulus and initial DUT register state can fail an assertion or return
-`false`. A property can tick inside a loop over a fixed-size array. Stimulus
+legal stimulus and initial DUT register state can fail an assertion, violate
+an `assumed_in_bounds=true` array access, or return `false`. A property can
+tick inside a loop over a fixed-size array. Stimulus
 can control reset, load enables, and the values sampled at each edge.
 
 ```shell
@@ -573,7 +576,8 @@ data inputs each cycle. The block's trailing Boolean defines the predicate
 for the current cycle. An induction proof establishes that it stays true on
 every legal execution from the specified initialization, for arbitrarily many
 cycles. In BMC mode, a successful result covers the sampled prefix. Both
-modes also check every named `#[lemma]`.
+modes also check every named `#[lemma]` and the bounds of marked array
+accesses in sampled observations and register updates.
 
 ```shell
 xlsynth-driver bx-prove-invariant parity.bx --engine=bitwuzla --max-depth 8
@@ -597,6 +601,22 @@ successfully when every property passes the selected mode and at least one was
 checked. Three runnable examples compare DSLX state machines using the same
 input stream and show the effect of induction depth and a checked helper lemma.
 [Observational equivalence case studies](examples/bx-observational-equivalence/README.md)
+
+### `ir-block-to-lean`: Block IR to Lean
+
+Generate a raw Lean clock-step model for a block in a saved XLS IR package. The model imports the project module `XlsynthLean.IR`.
+Like `ir-fn-to-lean`, this command parses and verifies the input package with PIR.
+The model evaluates outputs and simultaneous register updates from current
+inputs and old register values. Assertions are reported as results.
+
+```shell
+xlsynth-driver ir-block-to-lean counter.ir --top counter --output Generated.lean
+```
+
+- `--top <NAME>` selects a block, overriding the declared package top. Without
+  a top, a package containing exactly one block selects it automatically.
+- `--output <FILE>` writes the model to a file after successful generation.
+  The default is stdout.
 
 ### `bx2gv`: BX to mapped gate-level netlist
 
@@ -674,10 +694,37 @@ xlsynth-driver block2fn \
 
 Emits an XLS block IR package as synthesizable SystemVerilog using the native
 Rust block emitter. Existing registers, resets, load enables, and hierarchy are
-preserved. Each register must have exactly one write node. The emitter inlines
-the function body at each `invoke` node, including nested calls. Use an
+preserved. Each register must have exactly one write node. Before emission,
+the driver inlines ordinary `invoke` nodes throughout the selected block hierarchy,
+including nested calls. It verifies the expanded IR so combinational loop checks
+see the inputs each function actually uses. The Rust emitter requires callers to
+inline invokes in the blocks they pass for emission. Use an
 explicit external instantiation for a function marked `#[ffi_proto]`. Lower
 `map` operations and unroll `counted_for` loops before emission.
+
+For a SystemVerilog module with a block IR behavioral model, use
+`instantiation u(block=model, kind=behavioral_extern_block)`. The RTL module
+name defaults to `model`. Set `module_name=external_rtl` to target a different
+module.
+Define `model` earlier in the package with the external module's port names
+and types. The emitter connects the parent clock to the model's clock port
+when present and emits an instance of the external module. Supply that module
+alongside the generated RTL. Models reached only through external instances
+are omitted from the generated RTL. Use the default `--layout=none` for designs
+that instantiate an external block.
+
+For an opaque RTL module, use `kind=opaque_extern_block` with `module_name=`
+and an inline map such as `ports={clk:clock, data:input bits[8], q:output bits[8]}`.
+`block2sv` uses the declared interface to emit the named connections. Native
+evaluation reports a reachable opaque instance as an error.
+
+Both external block kinds accept `parameters={WIDTH:"42"}` to emit a named
+SystemVerilog parameter override. Use a behavioral model or inline interface
+that matches the external module's elaborated configuration.
+
+Either external block kind can use `input_casts={mode:"pkg::mode_t"}` to
+cast the named input connection to a typedef supplied with the external RTL.
+
 Leading-zero counts, priority encoders, normalization, and
 priority selects use explicit `casez` helper functions. Arithmetic helpers retain
 the original operand widths, and name collisions use `__1`, `__2`, etc.
@@ -685,6 +732,19 @@ Arrays retain descending packed dimensions on ports, signals, and registers;
 for example, `bits[8][3][2]` becomes `logic [1:0][2:0][7:0]`. Tuples remain flat
 packed vectors. Element-zero packing, bounds behavior, and explicit `sv_type`
 port overrides are preserved.
+
+Declare a resolved wire with `ext_inout_net bus(bits[4])`. A public header
+port `pad: bits[4]` connects to that wire through the block node
+`pin: () = ext_inout_port(name=pad, net=bus, id=1)`. Each public port and
+each child inout binds to one whole net of the same PIR type. An optional
+`sv_type` on the public port controls
+its SystemVerilog spelling. `ext_inout_read(net=bus)` samples the wire and
+`ext_inout_drive(tx, oe, net=bus)` adds a whole-wire, active-high driver.
+Multiple child pins can share the net through `ext_instantiation_inout`.
+Each declared net needs at least one connection. A single public or child pin
+satisfies that requirement. Give an otherwise unused pin its own net.
+Use the default `--layout=none` for inout designs.
+See the [PIR extension reference](../xlsynth-pir/docs/extensions.md).
 
 ```shell
 xlsynth-driver block2sv input.block.ir --top=my_block > output.sv
@@ -695,9 +755,10 @@ Flags:
 
 - `--top <BLOCK>` selects a block and overrides the package top. If omitted, the
   package top is used; a package with exactly one block also selects that block.
-- `--layout <none|pipeline>` controls only the emitted source organization. The
-  default is `none`; `pipeline` groups logic and registers by pipeline stage and
-  rejects register graphs that cannot be layered.
+- `--layout <none|pipeline>` selects the emitted source organization. The default
+  is `none`. Pipeline layout requires a feed-forward register graph and rejects
+  external block instances, inout ports, and inout nets in the selected top or
+  its transitive children, including nets used only by a single port.
 - `--module_name <NAME>` overrides the generated top module name.
 - `--array_index_bounds_checking <BOOL>` controls out-of-range array indexing
   (default: `true`).
@@ -2354,8 +2415,6 @@ xlsynth-driver dslx-list-fns --dslx_input_file sample-usage/src/sample.x --forma
 
 Creates a new DSLX module in which every parametric function reachable from a given top function (within the same source file) is specialized for the concrete instantiations observed in the type information. Imported functions are never specialized; invocations targeting them are left untouched.
 
-This subcommand is currently **experimental** and is only available when the `xlsynth-driver` crate is built with the Cargo feature `unstable-dslx-specialize` (disabled by default).
-
 - Required flags:
   - `--dslx_input_file <FILE>` – DSLX source containing the top.
   - `--dslx_top <NAME>` – entry function used as the root for reachability. Parameterized
@@ -2371,8 +2430,8 @@ The specialized module is printed to **stdout**. Diagnostics (parse/type errors,
 Example:
 
 ```shell
-cargo run -p xlsynth-driver --features unstable-dslx-specialize -- dslx-specialize \
-  --dslx_input_file sample-usage/src/parametric.x \
+xlsynth-driver dslx-specialize \
+  --dslx_input_file path/to/parametric.x \
   --dslx_top call
 ```
 
@@ -4629,8 +4688,8 @@ start at zero. Use `stitch-equiv` for a proof covering all permitted traces.
 Stitches the selected DSLX stage functions into a pipeline. By default, the
 command emits a Verilog or SystemVerilog module for each stage and a wrapper
 that connects them. With `--output-format=block-ir`, it emits a textual XLS IR
-package whose top block invokes the stage functions and implements the register
-boundaries. The block has a packed input port named for each parameter of the
+package whose top block contains the inlined stage logic and the registers
+between stages. The block has a packed input port named for each parameter of the
 first stage and drives the packed data output `out`. When a later stage takes
 multiple parameters, its first parameter receives the low bits of the preceding
 result and each successive parameter receives the next slice. Both formats use
@@ -4696,11 +4755,10 @@ at `1`, the direct RTL wrapper's conditional expression writes `X` to the
 first valid register. The default `block2sv` procedural `if (rst)` takes the
 else branch and writes `1`. XLS block IR represents reset as a single bit.
 
-The block IR package retains the stage bodies and their helper functions.
-`block2sv` inlines calls to DSLX function bodies when generating SystemVerilog.
-Its existing operation restrictions also apply to stage bodies. Expand `map`,
-unroll `counted_for`, and lower calls to FFI functions to external instantiations
-before rendering stages that use them.
+The block IR package retains the stage and helper function definitions. The stitcher
+recursively expands ordinary calls in the top block. A call to an FFI function
+requires an explicit external instantiation. Expand `map` and unroll `counted_for`
+before rendering stages that use them with `block2sv`.
 
 Tokens occupy no bits in a packed data port or register. To pack an array
 with data bits, the wrapper uses `array_index`, whose result type must be

@@ -215,6 +215,17 @@ block sample(clk, a: Cycle<1>) -> u8 { a.x }
 }
 
 #[test]
+fn struct_defaults_keep_their_type_formals_when_scheduling_layouts() -> Result<(), String> {
+    let source = r#"
+struct Fill<N: u32, Holder: type, Init: Holder = {zero!<Holder>()}> { data: Holder[N] }
+struct Holder { value: Fill<1, u8> }
+fn read(x: Holder) -> u8 { x.value.data[u32:0] }
+"#;
+    check_module(&parse_module(source)?)?;
+    Ok(())
+}
+
+#[test]
 fn concrete_struct_value_literals_allow_a_forward_layout_dependency() -> Result<(), String> {
     for arg in ["8", "u32:8"] {
         let source = format!(

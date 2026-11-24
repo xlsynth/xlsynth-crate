@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+package typed_scalar_inout
+
+top block typed_scalar_inout(io: bits[8], limit: bits[8], selected: bits[1], below: bits[1]) {
+  ext_inout_net bus(bits[8])
+  io_port: () = ext_inout_port(name=io, net=bus, sv_type="logic signed [1:0][3:0]", id=1)
+  limit: bits[8] = input_port(name=limit, sv_type="logic signed [7:0]", id=2)
+  sample: bits[8] = ext_inout_read(net=bus, id=3)
+  bit_slice.4: bits[1] = bit_slice(sample, start=1, width=1, id=4)
+  ult.5: bits[1] = ult(sample, limit, id=5)
+  selected: () = output_port(bit_slice.4, name=selected, id=6)
+  below: () = output_port(ult.5, name=below, id=7)
+}
+
+// EXPECT-SV: module typed_scalar_inout(
+// EXPECT-SV:   inout wire logic signed [1:0][3:0] io,
+// EXPECT-SV:   input logic signed [7:0] limit,
+// EXPECT-SV:   output logic selected,
+// EXPECT-SV:   output logic below
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] limit__1;
+// EXPECT-SV:   logic [7:0] sample;
+// EXPECT-SV:   assign limit__1 = limit;
+// EXPECT-SV:   assign sample = io;
+// EXPECT-SV:   assign selected = sample[1];
+// EXPECT-SV:   assign below = sample < limit__1;
+// EXPECT-SV: endmodule

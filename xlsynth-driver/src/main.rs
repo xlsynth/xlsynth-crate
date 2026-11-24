@@ -59,7 +59,6 @@ mod dslx_fn_prove_assertions;
 mod dslx_g8r_stats;
 mod dslx_list_fns;
 mod dslx_show;
-#[cfg(feature = "unstable-dslx-specialize")]
 mod dslx_specialize;
 mod dslx_stitch_g8r_pipeline;
 mod dslx_stitch_pipeline;
@@ -99,6 +98,7 @@ mod ir2pipeline;
 mod ir_aig_sharing;
 mod ir_annotate_ranges;
 mod ir_block_eval;
+mod ir_block_to_lean;
 mod ir_bool_cones;
 mod ir_diverse_samples;
 mod ir_equiv;
@@ -1024,6 +1024,13 @@ fn main() {
                         .default_value("jsonl")
                         .action(ArgAction::Set),
                 ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-specialize")
+                .about(
+                    "Specialize parametric DSLX functions reachable from a top function within the current module",
+                )
+                .add_dslx_input_args(true),
         )
         .subcommand(
             clap::Command::new("dslx2sv-types")
@@ -2089,6 +2096,23 @@ fn main() {
                         .help("Comma-separated output port names to drop")
                         .required(false)
                         .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("ir-block-to-lean")
+                .about("Converts an XLS block IR package to Lean without invoking Lean")
+                .arg(Arg::new("input_file").value_name("INPUT_FILE").required(true))
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_name("NAME")
+                        .help("Select a block, overriding the package top"),
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .value_name("FILE")
+                        .help("Write to a file instead of stdout"),
                 ),
         )
         .subcommand(
@@ -4024,19 +4048,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .required(true)
                         .action(clap::ArgAction::Set),
                 )
-        )
-        ;
-
-    #[cfg(feature = "unstable-dslx-specialize")]
-    {
-        cmd = cmd.subcommand(
-            clap::Command::new("dslx-specialize")
-                .about(
-                    "Specialize parametric DSLX functions reachable from a top function within the current module",
-                )
-                .add_dslx_input_args(true),
         );
-    }
 
     let matches = cmd.get_matches();
 
@@ -4113,6 +4125,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                 report_cli_error_and_exit(&format!("{error:#}"), Some("bx2ir"), vec![]);
             }
         }
+        Some(("ir-block-to-lean", subm)) => {
+            if let Err(error) = ir_block_to_lean::handle(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("ir-block-to-lean"), vec![]);
+            }
+        }
         Some(("bx2gv", subm)) => {
             if let Err(error) = bx::bx2gv(subm, &config) {
                 report_cli_error_and_exit(&format!("{error:#}"), Some("bx2gv"), vec![]);
@@ -4141,7 +4158,6 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                 );
             }
         }
-        #[cfg(feature = "unstable-dslx-specialize")]
         Some(("dslx-specialize", subm)) => {
             dslx_specialize::handle_dslx_specialize(subm, &config);
         }

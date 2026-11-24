@@ -14,6 +14,7 @@ use super::{
     source_type_nodes,
 };
 use crate::ast::{CallbackParam, Expr, Function, Type};
+use crate::typed::UNBOUND_CALLBACK;
 
 /// A visible declaration before its DSLX specialization (if any) is known.
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -63,8 +64,21 @@ pub(super) struct BlockCallbackFormal {
 
 impl BlockCallbackFormal {
     pub(super) fn new(signature: CallbackParam, bindings: &Bindings) -> Self {
-        let input_type_params = bindings.referenced_parameters(&signature.params);
+        let mut input_type_params = bindings.referenced_parameters(&signature.params);
         let result_type_params = bindings.referenced_parameters([&signature.result]);
+        for param in &signature.params {
+            input_type_params.extend(bindings.value_type_dependencies(param));
+        }
+        // A callback supplies its result type arguments. Other types used to
+        // compute its result's value arguments must already come from data.
+        input_type_params.extend(
+            bindings
+                .value_type_dependencies(&signature.result)
+                .into_iter()
+                .filter(|name| !result_type_params.contains(name)),
+        );
+        input_type_params.sort_unstable();
+        input_type_params.dedup();
         Self {
             signature,
             input_type_params,
@@ -382,7 +396,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let mut params = Vec::with_capacity(formal.signature.params.len());
         let mut input_nodes = 0usize;
         for param in &formal.signature.params {
-            let ty = self.bound_block_type(param, bindings)?;
+            let ty = self.bound_block_type(key.binding.template, param, bindings)?;
             let shape = self.structs.type_shape(&ty, MAX_ELABORATION_DEPTH)?;
             input_nodes = input_nodes.saturating_add(shape.ir_nodes);
             self.specializations
@@ -393,13 +407,27 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let (target, result) =
             self.callback_result(&params, &key.binding.source, Some(input_nodes))?;
+        let mut result_bindings = Bindings::new(&formal.result_type_params);
+        result_bindings.match_input(&formal.signature.result, &result, self.structs)?;
+        if super::has_mixed_application(&formal.signature.result) {
+            let mut completed = bindings.clone();
+            completed.merge_callback_results(&result_bindings, |work| {
+                self.charge_expansion("callback result matching", work)
+            })?;
+            let expected =
+                self.bound_block_type(key.binding.template, &formal.signature.result, &completed)?;
+            if !super::compatible(&expected, &result) {
+                return Err(format!(
+                    "callback '{}' returns {result}, expected {expected}",
+                    formal.signature.name
+                ));
+            }
+        }
         let registry = self
             .specializations
             .as_mut()
             .expect("block specialization registry");
         registry.charge_callback_storage(source_type_nodes(&result))?;
-        let mut result_bindings = Bindings::new(&formal.result_type_params);
-        result_bindings.match_input(&formal.signature.result, &result, self.structs)?;
         for name in &formal.result_type_params {
             registry.charge_callback_storage(
                 result_bindings
@@ -427,9 +455,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         name: &str,
         parametrics: &[Expr],
         args: &[Expr],
+        expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         if parametrics.is_empty() && !self.decls.function_templates.contains_key(name) {
-            return self.function_call(name, args);
+            return self.function_call(name, args, expected);
         }
         if !self.decls.function_templates.contains_key(name)
             && self.resolver.lookup(name)?.is_some()
@@ -447,7 +476,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             ));
         }
         if template.has_inferred_parametrics() {
-            return self.value_function_call(template, parametrics, args);
+            return self.value_function_call(template, parametrics, args, expected);
         }
         let callbacks = parametrics
             .iter()
@@ -508,7 +537,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             formal.params.iter().map(|ty| (None, ty)),
             dslx_arguments,
         )?;
-        let call = self.callback_call(target, &formal.name, args);
+        let call = self.callback_call(target, args);
         Ok((formal.result.clone(), call))
     }
 
@@ -650,23 +679,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             MapCallee::Builtin(builtin) => {
                 let mut saved = Vec::new();
                 self.bind_scoped_value(&parameter.name, element, None, &mut saved);
-                let result = self.builtin_call(builtin, &[Expr::Name(parameter.name.clone())]);
+                let result =
+                    self.builtin_call(builtin, &[Expr::Name(parameter.name.clone())], None);
                 self.leave_scope(saved);
                 return result.map(|(ty, kind)| TypedExpr { ty, kind });
             }
         };
         Ok(TypedExpr {
             ty,
-            kind: self.callback_call(target, name, vec![element]),
+            kind: self.callback_call(target, vec![element]),
         })
     }
 
-    fn callback_call(
-        &mut self,
-        target: Option<CallbackTarget<'m>>,
-        name: &str,
-        args: Vec<TypedExpr>,
-    ) -> K {
+    fn callback_call(&mut self, target: Option<CallbackTarget<'m>>, args: Vec<TypedExpr>) -> K {
         match target {
             Some(CallbackTarget::Local(name)) => {
                 if self.source_kind == BodyKind::Function {
@@ -683,7 +708,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             },
             Some(CallbackTarget::Imported(id)) => K::ImportedCall { id, args },
             None => K::Call {
-                name: name.to_owned(),
+                name: UNBOUND_CALLBACK.to_owned(),
                 args,
             },
         }

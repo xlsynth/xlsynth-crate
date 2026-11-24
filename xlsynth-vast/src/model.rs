@@ -274,6 +274,9 @@ pub(crate) enum ExprData {
     StringLiteral {
         value: String,
     },
+    InlineVerilog {
+        text: String,
+    },
     Unary {
         op: UnaryOp,
         arg: Expr,
@@ -410,6 +413,12 @@ pub(crate) enum MemberData {
     ContinuousAssignment {
         lhs: Expr,
         rhs: Expr,
+    },
+    Tran {
+        name: String,
+        width: usize,
+        left: LogicRef,
+        right: LogicRef,
     },
     Instantiation(Instantiation),
     Function(VastFunction),

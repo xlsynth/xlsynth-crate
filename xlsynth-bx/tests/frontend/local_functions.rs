@@ -12,6 +12,7 @@ use xlsynth_bx::{
 };
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
+use xlsynth_pir::block_invoke_inline::inline_block_invokes_in_package;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::ir::{MemberType, NodePayload};
 use xlsynth_pir::ir_eval::eval_fn_in_package_value;
@@ -38,6 +39,54 @@ fn block_tuple_patterns_can_rebind_previous_values_in_lexical_order() -> Result<
         actual,
         IrValue::parse_typed("(bits[8]:11,bits[8]:5)").unwrap()
     );
+    Ok(())
+}
+
+#[test]
+fn ordinary_block_lets_capture_previous_bindings_across_type_changes() -> Result<(), Box<dyn Error>>
+{
+    let body = r#"
+        let before = x;
+        let x = x + u8:1;
+        let after = x;
+        let x: bool = x == u8:6;
+        (before, after, x)
+    "#;
+    let result = "(u8, u8, bool)";
+    let bx = format!("block sample(clk, x: u8) -> {result} {{ {body} }}");
+    let dslx = format!("fn sample(x: u8) -> {result} {{ {body} }}");
+    let evaluator = ExpressionEvaluator::compile_block(
+        &bx,
+        &ImportOptions::default(),
+        compile_dslx_module(&dslx, &[]),
+    )?;
+    for (input, expected) in [
+        (5, "(bits[8]:5, bits[8]:6, bits[1]:1)"),
+        (255, "(bits[8]:255, bits[8]:0, bits[1]:0)"),
+    ] {
+        let actual = evaluator.compare(&[IrValue::make_ubits(8, input)?])?;
+        assert_eq!(actual, IrValue::parse_typed(expected)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn guarded_ordinary_let_restores_the_outer_value_and_its_stage() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+        block sample(clk, en: bool, x: u8, late: u8 @1)
+            -> (u8, u8, u8) @(out_0: 0, out_1: 1, out_2: 1) {
+            reg q: u8;
+            let before = x;
+            let x = late + u8:1;
+            if en {
+                let x = before + u8:2;
+                q := x;
+            }
+            (before, x, q)
+        }
+    "#;
+    let package = compile(source, empty_package("stages"), ResetBehavior::default())?;
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
     Ok(())
 }
 
@@ -742,6 +791,7 @@ pub block capture(clk, en: bool, x: u8) -> u8 {
 }"#;
     let package = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
     assert_eq!(package.top, Some(("capture".into(), MemberType::Block)));
+    let package = inline_block_invokes_in_package(package).unwrap();
     let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
     let pipeline = compile_pipeline_module(&rtl.system_verilog)?;
     let mut runner = FixtureRunner::new(&pipeline)?;

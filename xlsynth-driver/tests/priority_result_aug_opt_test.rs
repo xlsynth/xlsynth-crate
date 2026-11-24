@@ -65,7 +65,10 @@ fn dslx_and_codegen_commands_default_priority_fusion_on() {
     let dslx_path = dir.path().join("priority.x");
     std::fs::write(
         &dslx_path,
-        "import std;\npub fn main(x: u32) -> u32 { std::next_pow2(x) }\n",
+        // The explicit shift gives fusion a one-hot result to recognize.
+        r#"import std;
+pub fn main(x: u32) -> u32 { u32:1 << std::clog2(x) }
+"#,
     )
     .unwrap();
     let tool_path = std::env::var("XLSYNTH_TOOLS").expect("XLSYNTH_TOOLS must be set");

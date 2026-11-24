@@ -150,13 +150,16 @@ fn builtin_constant_cache_preserves_its_existing_helper_and_branch_rules() -> Re
         );
         check_module(&parse_module(&source)?)?;
 
-        let source =
-            format!("fn n()->u32 {{ u32:3 }} fn f()->u32 {{ let a=n(); ceillog2(a) }} {assertion}");
-        let error = check_module(&parse_module(&source)?).unwrap_err();
-        assert!(
-            error.contains("'ceillog2' requires a compile-time argument"),
-            "{error}"
-        );
+        for owner in ["fn f()", "#[allow(combinational_block)] block b(clk)"] {
+            let source = format!(
+                "fn n()->u32 {{ u32:3 }} {owner}->u32 {{ let a=n(); ceillog2(a) }} {assertion}"
+            );
+            let error = check_module(&parse_module(&source)?).unwrap_err();
+            assert!(
+                error.contains("'ceillog2' requires a compile-time argument"),
+                "{error}"
+            );
+        }
     }
     Ok(())
 }

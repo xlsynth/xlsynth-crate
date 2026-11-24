@@ -98,6 +98,106 @@ fn independently_proved_lemma_closes_equivalence() -> Result<()> {
 }
 
 #[test]
+fn proves_bounds_inductively_and_replays_a_violation_on_the_last_bounded_edge() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("lookup.ir"),
+        r#"package linked
+fn lookup(i: bits[2] id=1) -> bits[1] {
+  table: bits[1][3] = literal(value=[0, 1, 0], id=2)
+  ret value: bits[1] = array_index(table, indices=[i], assumed_in_bounds=true, id=3)
+}
+"#,
+    )?;
+    let safe = r#"extern fn lookup(i: u2) -> bool;
+#[invariant] block ring(clk, rst) -> bool {
+    reg q: u2 = u2:0;
+    q := if q == u2:2 { u2:0 } else { q + u2:1 };
+    #[lemma] let valid = q < u2:3;
+    lookup(q) == lookup(q)
+}
+"#;
+    let (report, _) = run(
+        dir.path(),
+        safe,
+        "bx-prove-invariant",
+        &["--link-ir=lookup.ir", "--max-depth=1"],
+        true,
+    )?;
+    assert_eq!(
+        report,
+        "invariant ring ... proved at k=1\n1 proved; 0 bounded; 0 disproved; 0 inconclusive; 0 errors\n"
+    );
+
+    let wrapping = r#"extern fn lookup(i: u2) -> bool;
+#[invariant] block wrapping(clk, rst) -> bool {
+    reg q: u2 = u2:0;
+    reg previous: bool;
+    q := q + u2:1;
+    previous := lookup(if rst { u2:0 } else { q });
+    previous == previous
+}
+"#;
+    let flags = ["--link-ir=lookup.ir", "--mode=bmc", "--max-depth=3"];
+    let (report, _) = run(dir.path(), wrapping, "bx-prove-invariant", &flags, true)?;
+    assert_eq!(
+        report,
+        "invariant wrapping ... passed 3 bounded cycles\n0 proved; 1 bounded; 0 disproved; 0 inconclusive; 0 errors\n"
+    );
+    let flags = ["--link-ir=lookup.ir", "--mode=bmc", "--max-depth=4"];
+    let (report, trace) = run(dir.path(), wrapping, "bx-prove-invariant", &flags, false)?;
+    assert_eq!(
+        report,
+        "invariant wrapping ... DISPROVED\n0 proved; 0 bounded; 1 disproved; 0 inconclusive; 0 errors\n"
+    );
+    assert!(
+        trace.contains("IR array_index at node 3 was out of bounds despite assumed_in_bounds=true"),
+        "{trace}"
+    );
+    Ok(())
+}
+
+#[test]
+fn reports_the_helper_lemma_that_sampled_an_out_of_bounds_lookup() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("lookup.ir"),
+        r#"package linked
+fn lookup(i: bits[2] id=1) -> bits[1] {
+  table: bits[1][3] = literal(value=[1, 1, 1], id=2)
+  ret value: bits[1] = array_index(table, indices=[i], assumed_in_bounds=true, id=3)
+}
+"#,
+    )?;
+    let source = r#"extern fn lookup(i: u2) -> bool;
+#[invariant] block reads(clk, i: u2) -> bool {
+    #[lemma] let first = lookup(u2:0);
+    #[lemma]
+    let selected = lookup(i);
+    true
+}
+"#;
+    let (report, trace) = run(
+        dir.path(),
+        source,
+        "bx-prove-invariant",
+        &["--link-ir=lookup.ir", "--mode=bmc", "--max-depth=1"],
+        false,
+    )?;
+    assert_eq!(
+        report,
+        "invariant reads ... DISPROVED\n0 proved; 0 bounded; 1 disproved; 0 inconclusive; 0 errors\n"
+    );
+    assert_eq!(
+        trace.lines().next(),
+        Some(
+            "suite.bx:5:9: invariant 'reads' at cycle 0: lemma 'selected': IR array_index at node 3 was out of bounds despite assumed_in_bounds=true"
+        )
+    );
+    Ok(())
+}
+
+#[test]
 fn reachable_false_helpers_cannot_strengthen_a_proof() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let source = r#"#[invariant]

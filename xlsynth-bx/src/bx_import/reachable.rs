@@ -146,7 +146,10 @@ impl Dependencies {
                         self.named.insert(block.clone());
                     }
                     CheckedStmt::Let { name, .. } if is_constexpr_only_name(name) => continue,
-                    CheckedStmt::Let { value, .. }
+                    CheckedStmt::Assert {
+                        predicate: value, ..
+                    }
+                    | CheckedStmt::Let { value, .. }
                     | CheckedStmt::DriveWire { value, .. }
                     | CheckedStmt::Write { value, .. }
                     | CheckedStmt::Connect { value, .. } => expressions.push(value),
@@ -176,7 +179,7 @@ impl Dependencies {
                     pending.extend(args);
                 }
                 K::Tuple(items) | K::Array(items) => pending.extend(items),
-                K::Index { value, index }
+                K::Index { value, index, .. }
                 | K::WidthSlice {
                     value,
                     start: index,

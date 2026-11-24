@@ -11,7 +11,7 @@ use xlsynth_pir::IrBits;
 use super::{
     BodyChecker, CheckedEnum, Declarations, StructTable, bits, dependency_order, type_dependencies,
 };
-use crate::ast::{EnumDef, Expr, Module, SourceNode, Type};
+use crate::ast::{EnumDef, Expr, Module, ScopedSourceNodes, SourceNode, Type};
 
 impl StructTable<'_> {
     /// Only BX declarations have unqualified keys. Imported enum references
@@ -74,6 +74,7 @@ impl StructTable<'_> {
     pub(super) fn struct_schedule(
         module: &Module,
         position: impl Fn(&str) -> usize,
+        zero_binding: impl Fn(&str) -> String,
     ) -> Result<Vec<(usize, usize)>, String> {
         let type_positions: BTreeMap<_, _> = module
             .enums
@@ -104,12 +105,15 @@ impl StructTable<'_> {
             let mut preferred = Vec::new();
             let mut dimensions = Vec::new();
             let mut has_symbolic_application = false;
+            let mut expression_ready_at = 0;
+            let declared_at = position(&def.name);
             let types = def
                 .value_parametrics
                 .iter()
                 .map(|formal| &formal.ty)
                 .chain(def.fields.iter().map(|field| &field.ty));
-            let mut pending = Vec::new();
+            let mut pending = ScopedSourceNodes::default();
+            let mut zero = None;
             for ty in types {
                 pending.push(SourceNode::Annotation(ty));
                 type_dependencies(
@@ -129,7 +133,7 @@ impl StructTable<'_> {
                                         }
                                 )
                             }),
-                            Type::TypeApplied { .. } => true,
+                            Type::TypeApplied { .. } | Type::MixedApplied { .. } => true,
                             _ => false,
                         };
                     },
@@ -145,19 +149,63 @@ impl StructTable<'_> {
             let mut default_prefixes = BTreeMap::new();
             let mut defaults = Vec::new();
             let mut in_declaration = true;
+            let mut type_params = def.type_params.as_slice();
             let mut optional = false;
-            while let Some(node) = pending.pop().or_else(|| {
-                // Defaults use their own value template's declaration scope.
+            while let Some(node) = pending.next().or_else(|| {
+                let (node, visible_types, preference) = defaults.pop()?;
                 in_declaration = false;
-                defaults.pop().map(|(node, preference)| {
-                    optional = preference;
-                    node
-                })
+                type_params = visible_types;
+                optional = preference;
+                pending.push(node);
+                pending.next()
             }) {
+                // A forward-used layout is ready after the values and helpers
+                // referenced by its dimensions, even if the struct itself is
+                // declared later. Name resolution still uses the struct scope.
+                if in_declaration && let SourceNode::Expression(expr) = node {
+                    let mut record = |name: &str| {
+                        if !pending.is_local(name) {
+                            // A linked declaration can contain "::" in its
+                            // module path. Only separators in the member
+                            // identify a source qualifier, such as an enum or
+                            // DSLX use.
+                            let member = crate::bx_import::library_item(name)
+                                .map_or(name, |(_, member)| member);
+                            let binding = member
+                                .split_once("::")
+                                .map_or(name, |(_, tail)| &name[..name.len() - tail.len() - 2]);
+                            let at = position(binding);
+                            if at <= declared_at {
+                                expression_ready_at = expression_ready_at.max(at);
+                            }
+                        }
+                    };
+                    match expr {
+                        Expr::Name(name)
+                        | Expr::Call { name, .. }
+                        | Expr::ParametricCall { name, .. }
+                        | Expr::MapBeforeUse { name, .. } => record(name),
+                        Expr::Map(map) => record(&map.target),
+                        Expr::NamedMap {
+                            target, callback, ..
+                        } => {
+                            record(target);
+                            record(callback);
+                        }
+                        Expr::Zero(_) if !pending.is_local("zero!") => {
+                            record(zero.get_or_insert_with(|| zero_binding(&def.name)));
+                        }
+                        _ => { /* Other expressions only reference names in their children. */ }
+                    }
+                }
                 let constructor = matches!(node, SourceNode::Expression(_));
                 let application = match node {
                     SourceNode::Annotation(Type::ParametricStruct { name, args })
                     | SourceNode::Expression(Expr::ParametricStruct { name, args, .. }) => {
+                        Some((name, args.len()))
+                    }
+                    SourceNode::Annotation(Type::MixedApplied { name, args })
+                    | SourceNode::Expression(Expr::MixedAppliedStruct { name, args, .. }) => {
                         Some((name, args.len()))
                     }
                     SourceNode::Annotation(Type::TypeApplied { name, args })
@@ -172,9 +220,9 @@ impl StructTable<'_> {
                     }
                     _ => None,
                 };
-                node.push_children(&mut pending);
                 if let Some((name, supplied)) = application
-                    && (!in_declaration || !def.type_params.contains(name))
+                    && !type_params.contains(name)
+                    && !pending.is_local(name)
                 {
                     if optional {
                         preferred.push(name.as_str());
@@ -189,13 +237,24 @@ impl StructTable<'_> {
                         let first = default_prefixes
                             .entry((name.as_str(), preference))
                             .or_insert(formals.len());
+                        let supplied = formals.partition_point(|f| f.index < supplied);
                         if supplied < *first {
-                            defaults.extend(
-                                formals[supplied..*first]
-                                    .iter()
-                                    .filter_map(|formal| formal.default.as_ref())
-                                    .map(|expr| (SourceNode::Expression(expr), preference)),
-                            );
+                            for (value_index, formal) in
+                                formals.iter().enumerate().take(*first).skip(supplied)
+                            {
+                                if let Some(expr) = &formal.default {
+                                    // Earlier type formals occupy the
+                                    // declaration slots before this default
+                                    // that are not taken by values.
+                                    let visible_types =
+                                        &template.type_params[..formal.index - value_index];
+                                    defaults.push((
+                                        SourceNode::Expression(expr),
+                                        visible_types,
+                                        preference,
+                                    ));
+                                }
+                            }
                             *first = supplied;
                         }
                     }
@@ -207,9 +266,9 @@ impl StructTable<'_> {
                 .map(|binding| binding.name.as_str())
                 .collect();
             let mut at = if parametric_names.is_empty() && !has_symbolic_application {
-                0
+                expression_ready_at
             } else {
-                position(&def.name)
+                declared_at
             };
             for dimension in dimensions {
                 if parametric_names.contains(dimension) {
@@ -370,6 +429,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         ))
     }
 
+    /// A local alias fixes its enum identity at the declaration site.
+    fn local_enum_alias(&self, prefix: &str) -> Result<Option<&CheckedEnum>, String> {
+        match self.local_type_aliases.get(prefix).map(|alias| &alias.ty) {
+            Some(Type::Enum { name, .. }) => Ok(self.structs.enums.get(name)),
+            Some(_) => Err(format!("'{prefix}' is not a numeric enum")),
+            None => Ok(None),
+        }
+    }
+
     /// Resolve an enum member name even in a skipped loop without converting
     /// any imported functions or forcing evaluation of the enclosing
     /// expression.
@@ -377,12 +445,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let Some((prefix, member)) = name.rsplit_once("::") else {
             return Ok(false);
         };
-        if let Some(def) = self.structs.enum_subject(prefix, self.decls) {
+        let local = self.local_enum_alias(prefix)?;
+        if let Some(def) = local.or_else(|| self.structs.enum_subject(prefix, self.decls)) {
             crate::parser::validate_dslx_value_path(name)?;
-            self.decls.check_type_name_visibility(
-                prefix,
-                self.function_position.or(self.block_position),
-            )?;
+            if local.is_none() {
+                self.decls.check_type_name_visibility(
+                    prefix,
+                    self.function_position.or(self.block_position),
+                )?;
+            }
             if def.members.contains_key(member) {
                 return Ok(true);
             }
@@ -408,14 +479,22 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return Ok(None);
         };
         let head = prefix.split("::").next().unwrap_or(prefix);
-        if self.names.contains(head) || self.callback_index(head).is_some() {
+        if !self.local_type_aliases.contains_key(prefix)
+            && (self.names.contains(head) || self.callback_index(head).is_some())
+        {
             return Err(format!("'{head}' names a local value here"));
         }
-        self.reject_type_parameter_value(head)?;
-        self.decls
-            .check_type_name_visibility(prefix, self.function_position.or(self.block_position))?;
+        let local = self.local_enum_alias(prefix)?;
+        if local.is_none() {
+            self.reject_type_parameter_value(head)?;
+            self.decls.check_type_name_visibility(
+                prefix,
+                self.function_position.or(self.block_position),
+            )?;
+        }
         let canonical;
-        let def = if let Some(def) = self.structs.enum_subject(prefix, self.decls) {
+        let def = if let Some(def) = local.or_else(|| self.structs.enum_subject(prefix, self.decls))
+        {
             def
         } else if let Some((subject, ty)) = self.resolver.lookup_enum_prefix(prefix)? {
             let Type::Enum { name, .. } = self.resolver.resolve_named(&subject, &ty)? else {

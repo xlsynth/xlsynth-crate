@@ -3,10 +3,10 @@
 //! Replay Liberty selectors over batches of 256 ordered, settled timestamps.
 
 use super::{
-    BoundConditionTerm, ConditionValueSlot, EdgeValue, GvDynamicPowerDiagnostics, InstanceTopology,
+    BoundConditionTerm, ConditionValueSlot, GvDynamicPowerDiagnostics, InstanceTopology,
     InternalEventKey, ObservedActivity, PowerInstance, PowerModelView, PowerSignal, PowerTopology,
-    PowerTransitionKind, ResolvedSource, Signal, SignalId, TimingCauseKey, attribute_candidates,
-    is_sequential_edge_timing_type, simulate_chunk, timing_sense_matches,
+    PowerTransitionKind, ResolvedSource, RiseFall, Signal, SignalId, TimingCauseKey,
+    attribute_candidates, is_sequential_edge_timing_type, simulate_chunk, timing_sense_matches,
     timing_source_drives_output, timing_type_allows_output, transition_table,
 };
 use crate::aig::AigOperand;
@@ -130,7 +130,7 @@ struct SampleBatch<'a> {
     valid: Vec256,
     clock: Option<Samples>,
     gate_latches: &'a GateLatchSamples,
-    active_edges: EdgeValue<Vec256>,
+    active_edges: RiseFall<Vec256>,
 }
 
 impl SampleBatch<'_> {
@@ -548,7 +548,7 @@ pub(super) fn observe(
     topology: &mut PowerTopology,
 ) -> Option<ObservedActivity> {
     let mut result = ObservedActivity::default();
-    let mut edges = vec![EdgeValue::<usize>::default(); topology.signals.len()];
+    let mut edges = vec![RiseFall::<usize>::default(); topology.signals.len()];
     let mut scratch = CellScratch::new();
     let live = vec![true; model.gate_fn.gates.len()];
     let mut carry = vec![false; live.len()];
@@ -558,7 +558,7 @@ pub(super) fn observe(
         let len = (inputs.len() - start).min(256);
         simulate_chunk(model.gate_fn, inputs, start, len, &live, &mut nodes);
         let mut valid = [0u64; 4];
-        let mut active_edges = EdgeValue::<[u64; 4]>::default();
+        let mut active_edges = RiseFall::<[u64; 4]>::default();
         // The first sample of the trace has no predecessor. Padding never
         // enters a request mask, including for complemented signals.
         for i in usize::from(start == 0)..len {
@@ -585,7 +585,7 @@ pub(super) fn observe(
             valid: Vec256::from_words(valid),
             clock: clock.map(|levels| Samples::from_batch(levels, previous_clock)),
             gate_latches: &gate_latches,
-            active_edges: EdgeValue {
+            active_edges: RiseFall {
                 rise: Vec256::from_words(active_edges.rise),
                 fall: Vec256::from_words(active_edges.fall),
             },

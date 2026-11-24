@@ -9,8 +9,8 @@ use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
     ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, InvariantDecl, LetBinding,
     MapExpr, MatchArm, MatchPattern, Module, Param, ParametricBinding, QuickCheckSignature,
-    StageAnnotation, Stmt, StructDef, StructSplat, TestDecl, TestKind, TestStmt, TestStmtKind,
-    Type, TypeAlias, UnrollFor, WidthSliceType,
+    StageAnnotation, Stmt, StructArgument, StructDef, StructParametricRef, StructSplat, TestDecl,
+    TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor, WidthSliceType,
 };
 use crate::ast::{ConstAssert, ScopeStatement};
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
@@ -66,14 +66,15 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
     for def in &module.structs {
         let at = position(&def.name);
         let mut scope = Scope::new(names, at, &def.name);
-        for name in &def.type_params {
-            scope.bind_as(name, Local::Formal);
+        let mut value_parametrics = Vec::with_capacity(def.value_parametrics.len());
+        for formal in def.parametric_bindings() {
+            match formal {
+                StructParametricRef::Type(name) => scope.bind_as(name, Local::Formal),
+                StructParametricRef::Value(value) => {
+                    value_parametrics.push(scope.dslx_value_parametric(value)?);
+                }
+            }
         }
-        let value_parametrics = def
-            .value_parametrics
-            .iter()
-            .map(|value| scope.dslx_value_parametric(value))
-            .collect::<Result<_, _>>()?;
         // A struct field can name a later declaration.
         scope.at = None;
         out.structs.push(StructDef {
@@ -293,6 +294,7 @@ impl<'m> UnlinkedBlockScope<'m> {
 #[derive(Clone, Copy, PartialEq)]
 enum Local {
     Lexical,
+    TypeAlias,
     Hardware,
     Formal,
 }
@@ -354,7 +356,9 @@ impl<'a> Scope<'a> {
         if binding == Local::Formal {
             self.formals.insert(name.to_owned());
         }
-        if (name != "_" || binding == Local::Hardware) && self.locals.get(name) != Some(&binding) {
+        if (name != "_" || matches!(binding, Local::Hardware | Local::TypeAlias))
+            && self.locals.get(name) != Some(&binding)
+        {
             let previous = self.locals.insert(name.to_owned(), binding);
             self.introduced.push((name.to_owned(), previous));
         }
@@ -400,8 +404,12 @@ impl<'a> Scope<'a> {
                 .unresolved(name, format!("invalid source reference '{name}'"));
         }
         if let Some((head, _)) = name.split_once("::")
-            && self.locals.contains_key(head)
+            && let Some(binding) = self.locals.get(head)
         {
+            if *binding == Local::TypeAlias {
+                // The checker resolves enum members against this lexical alias.
+                return Ok(name.to_owned());
+            }
             return self
                 .names
                 .unresolved(name, format!("'{head}' names a local value here"));
@@ -445,7 +453,7 @@ impl<'a> Scope<'a> {
                 self.names
                     .resolve(name, self.at, self.source_owner, ReferenceKind::Name)
             }
-            Some(Local::Lexical | Local::Hardware)
+            Some(Local::Lexical | Local::Hardware | Local::TypeAlias)
                 if site == CallSite::Direct
                     || site == CallSite::Parametric
                         && matches!(self.names.uses.get(name), Some(Binding::Dslx(_))) =>
@@ -455,7 +463,7 @@ impl<'a> Scope<'a> {
                 // it only when an iteration is typechecked.
                 Ok(mark_local_callee(name))
             }
-            Some(Local::Lexical | Local::Hardware) => self
+            Some(Local::Lexical | Local::Hardware | Local::TypeAlias) => self
                 .names
                 .unresolved(name, format!("'{name}' names a local value here")),
             None if site == CallSite::Direct && (name == "map" || is_call_builtin(name)) => {
@@ -545,6 +553,20 @@ impl<'a> Scope<'a> {
                 args: args
                     .iter()
                     .map(|arg| self.type_expression(arg, depth))
+                    .collect::<Result<_, _>>()?,
+            },
+            Type::MixedApplied { name, args } => Type::MixedApplied {
+                name: self.reference(name, self.at)?,
+                args: args
+                    .iter()
+                    .map(|arg| match arg {
+                        StructArgument::Type(ty) => {
+                            self.type_at_depth(ty, depth + 1).map(StructArgument::Type)
+                        }
+                        StructArgument::Value(value) => self
+                            .type_expression(value, depth)
+                            .map(StructArgument::Value),
+                    })
                     .collect::<Result<_, _>>()?,
             },
             Type::TypeApplied { name, args } => Type::TypeApplied {
@@ -749,11 +771,14 @@ impl<'a> Scope<'a> {
     fn block(&mut self, def: &Block) -> Result<Block, String> {
         // A library's `@LATENCY` belongs to the library even if its caller
         // defines a constant with the same spelling.
-        let stages = def.map_stages(|name| {
-            self.names
-                .resolve(name, self.value_at, self.source_owner, ReferenceKind::Value)
-                .map(StageAnnotation::Constant)
-        })?;
+        let stages = def.map_stages(
+            |name| {
+                self.names
+                    .resolve(name, self.value_at, self.source_owner, ReferenceKind::Value)
+                    .map(StageAnnotation::Constant)
+            },
+            |name| self.callee(name, CallSite::Direct),
+        )?;
         for name in &def.type_params {
             self.bind_as(name, Local::Formal);
         }
@@ -814,6 +839,15 @@ impl<'a> Scope<'a> {
     fn statement(&mut self, stmt: &Stmt, local: Local) -> Result<Stmt, String> {
         Ok(match stmt {
             Stmt::ConstAssert(assertion) => Stmt::ConstAssert(self.const_assert(assertion)?),
+            Stmt::Assert {
+                predicate,
+                label,
+                position,
+            } => Stmt::Assert {
+                predicate: self.expr(predicate)?,
+                label: label.clone(),
+                position: *position,
+            },
             Stmt::Reg { name, ty, reset } => {
                 let ty = self.ty(ty)?;
                 self.bind_as(name, local);
@@ -826,9 +860,14 @@ impl<'a> Scope<'a> {
             Stmt::Let { name, ty, value } => {
                 let ty = self.optional_type(ty)?;
                 let value = self.expr(value)?;
-                // Rebinding a tuple-pattern leaf in a block creates another
-                // lexical value, including when the new let has a simple name.
-                if self.locals.get(name) != Some(&Local::Lexical) {
+                // After the initializer, a rebound data name also hides a
+                // same-named structural callee, just like a tuple-pattern leaf.
+                if matches!(
+                    self.locals.get(name),
+                    Some(Local::Hardware | Local::Lexical)
+                ) {
+                    self.bind(name);
+                } else {
                     self.bind_as(name, local);
                 }
                 Stmt::Let {
@@ -960,6 +999,26 @@ impl<'a> Scope<'a> {
                             ScopeStatement::Let(binding) => {
                                 scope.binding(binding).map(ScopeStatement::Let)
                             }
+                            ScopeStatement::Const(def) => {
+                                let ty = scope.optional_type(&def.ty)?;
+                                let value = scope.expr(&def.value)?;
+                                scope.bind(&def.name);
+                                Ok(ScopeStatement::Const(ConstDef {
+                                    name: def.name.clone(),
+                                    public: def.public,
+                                    ty,
+                                    value,
+                                }))
+                            }
+                            ScopeStatement::TypeAlias(alias) => {
+                                let ty = scope.ty(&alias.ty)?;
+                                scope.bind_as(&alias.name, Local::TypeAlias);
+                                Ok(ScopeStatement::TypeAlias(TypeAlias {
+                                    name: alias.name.clone(),
+                                    public: alias.public,
+                                    ty,
+                                }))
+                            }
                             ScopeStatement::ConstAssert(assertion) => scope
                                 .const_assert(assertion)
                                 .map(ScopeStatement::ConstAssert),
@@ -1041,6 +1100,9 @@ impl<'a> Scope<'a> {
             }
             | Expr::TypeAppliedStruct {
                 name, fields, base, ..
+            }
+            | Expr::MixedAppliedStruct {
+                name, fields, base, ..
             } => {
                 let name = self.reference(name, self.at)?;
                 let fields = fields
@@ -1068,6 +1130,20 @@ impl<'a> Scope<'a> {
                     Expr::ParametricStruct { args, .. } => Expr::ParametricStruct {
                         name,
                         args: self.expressions(args)?,
+                        fields,
+                        base,
+                    },
+                    Expr::MixedAppliedStruct { args, .. } => Expr::MixedAppliedStruct {
+                        name,
+                        args: args
+                            .iter()
+                            .map(|arg| match arg {
+                                StructArgument::Type(ty) => self.ty(ty).map(StructArgument::Type),
+                                StructArgument::Value(value) => {
+                                    self.expr(value).map(StructArgument::Value)
+                                }
+                            })
+                            .collect::<Result<_, _>>()?,
                         fields,
                         base,
                     },

@@ -7,16 +7,16 @@ use crate::function_oracle::{DslxExecution, FunctionProgram, compare_bx_program}
 use crate::input_seed;
 
 /// A payload and its structural inputs, with an optional nominal wrapper.
-struct Payload {
-    ty: String,
-    input: String,
-    argument: String,
-    projection: &'static str,
-    declaration: String,
+pub(super) struct Payload {
+    pub(super) ty: String,
+    pub(super) input: String,
+    pub(super) argument: String,
+    pub(super) projection: &'static str,
+    pub(super) declaration: String,
 }
 
 impl Payload {
-    fn new(shape: u8, width: usize, name: &str, input: &str) -> Self {
+    pub(super) fn new(shape: u8, width: usize, name: &str, input: &str) -> Self {
         let scalar = if shape & 1 == 0 {
             format!("uN[{width}]")
         } else {
@@ -45,6 +45,17 @@ impl Payload {
                 input: input_type,
             }
         }
+    }
+
+    /// Wrap each structural input element when the sampled payload is nominal.
+    pub(super) fn array_argument(&self, input: &str, length: usize) -> String {
+        if self.declaration.is_empty() {
+            return input.to_owned();
+        }
+        let elements = (0..length)
+            .map(|i| format!("{} {{ item: {input}[u32:{i}] }}", self.ty))
+            .collect::<Vec<_>>();
+        format!("[{}]", elements.join(", "))
     }
 }
 

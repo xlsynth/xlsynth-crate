@@ -39,7 +39,7 @@ pub(crate) fn emit_file(file: &VastFile) -> String {
 pub(crate) fn emit_expr(file: &VastFile, expr: Expr) -> String {
     match &file.ast.expressions[expr.0.index] {
         ExprData::Name { name, .. } => name.clone(),
-        ExprData::Literal { text, .. } => text.clone(),
+        ExprData::Literal { text, .. } | ExprData::InlineVerilog { text } => text.clone(),
         ExprData::StringLiteral { value } => emit_string_literal(value),
         ExprData::Unary { op, arg } => {
             let operand = emit_expr(file, *arg);
@@ -375,7 +375,9 @@ fn emit_module(file: &VastFile, module: &ModuleData) -> String {
                 ModulePortDirection::Output => "output",
                 ModulePortDirection::InOut => "inout",
             };
-            let kind = if is_user_defined(file, port.data_type) {
+            let kind = if port.direction != ModulePortDirection::InOut
+                && is_user_defined(file, port.data_type)
+            {
                 DataKind::User
             } else {
                 port.kind
@@ -433,6 +435,23 @@ fn emit_member(file: &VastFile, member: &MemberData) -> String {
                 "assign {} = {};",
                 emit_expr(file, *lhs),
                 emit_expr(file, *rhs)
+            )
+        }
+        MemberData::Tran {
+            name,
+            width,
+            left,
+            right,
+        } => {
+            let range = if *width == 1 {
+                String::new()
+            } else {
+                format!("[{}:0]", width - 1)
+            };
+            format!(
+                "tran {name}{range}({}, {});",
+                emit_expr(file, left.to_expr()),
+                emit_expr(file, right.to_expr())
             )
         }
         MemberData::Instantiation(handle) => emit_instantiation(file, *handle),
@@ -823,6 +842,8 @@ fn precedence(file: &VastFile, expr: Expr) -> i8 {
         ExprData::Unary { .. } => 12,
         ExprData::Binary { op, .. } => binary_precedence(*op),
         ExprData::Ternary { .. } => 0,
+        // Inline source may contain any Verilog operator.
+        ExprData::InlineVerilog { .. } => -1,
         _ => 13,
     }
 }
@@ -1042,6 +1063,17 @@ mod tests {
             file.emit(),
             "module tristate(\n  inout wire bus\n);\n\nendmodule\n"
         );
+    }
+
+    #[test]
+    fn inline_verilog_expression_preserves_text_and_precedence() {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let value = file.make_inline_verilog_expression("defaults::WIDTH + 1");
+        assert_eq!(file.emit_expression(&value), "defaults::WIDTH + 1");
+
+        let scale = file.make_unsized_decimal_literal(4);
+        let product = file.make_mul(&scale, &value);
+        assert_eq!(file.emit_expression(&product), "4 * (defaults::WIDTH + 1)");
     }
 
     /// Preserves asymmetric associativity and mandatory reduction parentheses.

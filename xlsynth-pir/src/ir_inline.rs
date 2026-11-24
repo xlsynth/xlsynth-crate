@@ -10,8 +10,9 @@
 
 use crate::ir::{MemberType, NodePayload, Package, PackageMember};
 use crate::ir_parser::Parser;
+use crate::ir_utils::direct_function_references;
 use crate::ir_verify;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -210,74 +211,103 @@ fn residual_counted_for_targets(f: &crate::ir::Fn) -> BTreeSet<String> {
     targets
 }
 
-fn direct_callee_names(f: &crate::ir::Fn) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for node in &f.nodes {
-        match &node.payload {
-            NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
-                names.insert(to_apply.clone());
-            }
-            NodePayload::CountedFor { body, .. } => {
-                names.insert(body.clone());
-            }
-            _ => {}
-        }
-    }
-    names
-}
-
 /// Builds a package for this exact entry function, resolving only its callees
 /// from `pkg`. The entry may be an edited copy of a function in the package.
 pub fn package_with_reachable_callees(
     pkg: &Package,
     entry: &crate::ir::Fn,
 ) -> Result<Package, String> {
-    let mut functions = HashMap::new();
-    for member in &pkg.members {
-        if let PackageMember::Function(f) = member {
-            if functions.insert(f.name.as_str(), f).is_some() {
-                return Err(format!("ambiguous function name {:?} in package", f.name));
-            }
-        }
-    }
-    let mut reachable = BTreeSet::new();
-    let mut worklist: Vec<_> = direct_callee_names(entry).into_iter().collect();
-    while let Some(name) = worklist.pop() {
-        if name == entry.name {
-            return Err(format!(
-                "entry function {name:?} is also reachable as a callee"
-            ));
-        }
-        if !reachable.insert(name.clone()) {
-            continue;
-        }
-        let f = functions
-            .get(name.as_str())
-            .ok_or_else(|| format!("reachable function '{name}' is missing from package"))?;
-        for callee in direct_callee_names(f) {
-            if !reachable.contains(&callee) {
-                worklist.push(callee);
-            }
-        }
-    }
-
-    let mut members = pkg
+    let ordered = ordered_functions(pkg, &[&entry.name], Some(entry))?;
+    let callees: HashSet<_> = ordered.iter().map(|f| f.name.as_str()).collect();
+    // Preserve package order for this API and place the supplied entry last.
+    let mut members: Vec<_> = pkg
         .members
         .iter()
-        .filter_map(|member| match member {
-            PackageMember::Function(f) if reachable.contains(&f.name) => Some(member.clone()),
+        .filter_map(|m| match m {
+            PackageMember::Function(f)
+                if f.name != entry.name && callees.contains(f.name.as_str()) =>
+            {
+                Some(m.clone())
+            }
             _ => None,
         })
-        .collect::<Vec<_>>();
-
+        .collect();
     members.push(PackageMember::Function(entry.clone()));
-
     Ok(Package {
         name: pkg.name.clone(),
         file_table: pkg.file_table.clone(),
         members,
         top: Some((entry.name.clone(), MemberType::Function)),
     })
+}
+
+/// Collects each root and its transitive callees once, callees before callers.
+/// Visits roots in the supplied order and sibling callees in name order.
+/// Includes loop bodies and reports missing functions or recursive calls.
+pub fn reachable_functions_in_dependency_order<'a>(
+    pkg: &'a Package,
+    roots: &[&str],
+) -> Result<Vec<&'a crate::ir::Fn>, String> {
+    ordered_functions(pkg, roots, None)
+}
+
+/// A standalone entry can override its package definition or be absent from it.
+fn ordered_functions<'a>(
+    pkg: &'a Package,
+    roots: &[&str],
+    entry: Option<&'a crate::ir::Fn>,
+) -> Result<Vec<&'a crate::ir::Fn>, String> {
+    let mut functions = HashMap::new();
+    for member in &pkg.members {
+        if let PackageMember::Function(f) = member
+            && functions.insert(f.name.as_str(), f).is_some()
+        {
+            return Err(format!("ambiguous function name {:?} in package", f.name));
+        }
+    }
+    if let Some(entry) = entry {
+        functions.insert(&entry.name, entry);
+    }
+    let lookup = |name: &str| {
+        functions
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("reachable function '{name}' is missing from package"))
+    };
+
+    enum Visit<'a> {
+        Enter(&'a crate::ir::Fn),
+        Emit(&'a crate::ir::Fn),
+    }
+    let mut work = Vec::new();
+    for root in roots.iter().rev() {
+        work.push(Visit::Enter(lookup(root)?));
+    }
+    let mut active = HashSet::new();
+    let mut finished = HashSet::new();
+    let mut ordered = Vec::new();
+    while let Some(visit) = work.pop() {
+        match visit {
+            Visit::Enter(f) => {
+                if finished.contains(f.name.as_str()) {
+                    continue;
+                }
+                if !active.insert(f.name.as_str()) {
+                    return Err(format!("recursive function reference to '{}'", f.name));
+                }
+                work.push(Visit::Emit(f));
+                for callee in direct_function_references(f).into_iter().rev() {
+                    work.push(Visit::Enter(lookup(callee)?));
+                }
+            }
+            Visit::Emit(f) => {
+                active.remove(f.name.as_str());
+                finished.insert(f.name.as_str());
+                ordered.push(f);
+            }
+        }
+    }
+    Ok(ordered)
 }
 
 #[cfg(test)]
@@ -328,6 +358,54 @@ top fn main(x: bits[8] id=30) -> bits[8] {
             residual_counted_for_targets(&f),
             BTreeSet::from(["body".to_string()])
         );
+    }
+
+    #[test]
+    fn dependency_order_follows_loop_bodies_and_deduplicates_roots() {
+        let pkg = Parser::new(
+            r#"package p
+top fn caller(x: bits[8] id=1) -> bits[8] {
+  ret loop: bits[8] = counted_for(x, trip_count=3, stride=1, body=body, id=2)
+}
+fn body(i: bits[8] id=3, x: bits[8] id=4) -> bits[8] {
+  ret sum: bits[8] = add(i, x, id=5)
+}"#,
+        )
+        .parse_and_validate_package()
+        .unwrap();
+        let ordered =
+            reachable_functions_in_dependency_order(&pkg, &["caller", "body", "caller"]).unwrap();
+        assert_eq!(
+            ordered.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["body", "caller"]
+        );
+    }
+
+    #[test]
+    fn dependency_order_rejects_missing_callees_and_cycles() {
+        for (target, error) in [
+            (
+                "absent",
+                "reachable function 'absent' is missing from package",
+            ),
+            ("child", "recursive function reference to 'child'"),
+            ("entry", "recursive function reference to 'entry'"),
+        ] {
+            let ir = format!(
+                r#"package p
+top fn entry(x: bits[8] id=1) -> bits[8] {{
+  ret y: bits[8] = invoke(x, to_apply=child, id=2)
+}}
+fn child(x: bits[8] id=3) -> bits[8] {{
+  ret y: bits[8] = invoke(x, to_apply={target}, id=4)
+}}"#
+            );
+            let pkg = Parser::new(&ir).parse_package().unwrap();
+            assert_eq!(
+                reachable_functions_in_dependency_order(&pkg, &["entry"]).unwrap_err(),
+                error
+            );
+        }
     }
 
     #[test]

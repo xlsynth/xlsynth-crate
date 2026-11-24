@@ -14,20 +14,30 @@ use super::function_specializations::{
 };
 use super::generic_blocks::{Bindings, callback_argument_name, validate_inference_sources};
 use super::generic_inputs::{Input, InputPattern};
+use super::struct_parametrics::{
+    BoundStructArgument, StructApplication, StructLiteralError, struct_field_map,
+};
 use super::{
     BodyChecker, BodyKind, CallbackFormal, CallbackTarget, Declarations, FunctionInterface, K,
-    MAX_ELABORATION_DEPTH, StructTable, TypeResolver, bits, child_type_budget, compatible, declare,
-    literal_copy_work, minimum_type, resolve_type, source_type_nodes,
+    MAX_ELABORATION_DEPTH, StructTable, TypeResolver, TypeShape, bits, child_type_budget,
+    compatible, declare, literal_copy_work, minimum_type, resolve_type, source_type_nodes,
 };
 use crate::ast::{
-    CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding,
-    StructLiteralArgs, Type,
+    CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding, StructArgument,
+    StructArgumentRef, StructLiteralArgs, StructParametricRef, Type,
 };
 use crate::dslx_import::ImportResolver;
 use crate::typed::{BoundParametricValue, TypedExpr};
 
 pub(super) fn dimension_type() -> Type {
     Type::unsigned(32)
+}
+
+/// Total source storage copied from bound type parameters in one annotation.
+#[derive(Default)]
+pub(super) struct TypeArgumentCopies {
+    nodes: usize,
+    name_bytes: usize,
 }
 
 impl<'m> Declarations<'m> {
@@ -45,8 +55,16 @@ impl<'m> Declarations<'m> {
             }
             declare(&mut names, name)?;
         }
-        if !f.type_params.is_empty() {
-            validate_inference_sources(&f.type_params, &f.params, &f.callback_params)?;
+        let needs_result_type = !f.type_params.is_empty()
+            && validate_inference_sources(&f.type_params, &f.params, &f.callback_params, None)
+                .is_err();
+        if needs_result_type {
+            validate_inference_sources(
+                &f.type_params,
+                &f.params,
+                &f.callback_params,
+                Some(&f.result),
+            )?;
         }
         let mut last = None;
         for p in &f.value_parametrics {
@@ -65,6 +83,7 @@ impl<'m> Declarations<'m> {
                 | Type::Named(_)
                 | Type::Applied { .. }
                 | Type::ParametricStruct { .. }
+                | Type::MixedApplied { .. }
                 | Type::TypeApplied { .. } => {
                     // Resolve dependent widths and nominal enum or struct
                     // annotations in the template's declaration scope.
@@ -84,6 +103,36 @@ impl<'m> Declarations<'m> {
         }
         for p in &f.params {
             declare(&mut names, &p.name)?;
+        }
+        if needs_result_type {
+            self.result_context
+                .insert(&f.name, super::ResultContext::TypeParameter);
+        } else if !f.value_parametrics.is_empty() {
+            // The specialization binds missing dimensions from data arguments
+            // before it checks callback signatures.
+            let mut dimensions = BTreeSet::new();
+            for param in &f.params {
+                super::type_dependencies(
+                    &param.ty,
+                    |_, _| {},
+                    |expr| {
+                        if let Expr::Name(name) = expr {
+                            dimensions.insert(name.as_str());
+                        }
+                    },
+                );
+            }
+            if let Some(formal) = f
+                .value_parametrics
+                .iter()
+                .rev()
+                .find(|p| p.default.is_none() && !dimensions.contains(p.name.as_str()))
+            {
+                self.result_context.insert(
+                    &f.name,
+                    super::ResultContext::ExplicitValues(formal.index + 1),
+                );
+            }
         }
         self.value_template_callbacks
             .insert(&f.name, callback_indices);
@@ -226,6 +275,10 @@ impl<'f> InferredBindings<'f> {
             Type::Tuple(fields) | Type::TypeApplied { args: fields, .. } => {
                 fields.iter().any(|f| self.needs_witness(f))
             }
+            Type::MixedApplied { args, .. } => args.iter().any(|arg| match arg {
+                StructArgument::Type(ty) => self.needs_witness(ty),
+                StructArgument::Value(expr) => self.missing(expr).is_some(),
+            }),
             Type::ParametricStruct { args, .. } => {
                 args.iter().any(|arg| self.missing(arg).is_some())
             }
@@ -343,19 +396,39 @@ impl<'f> InferredBindings<'f> {
                     self.infer(field, actual, structs, resolver)?;
                 }
             }
-            (Type::ParametricStruct { name, args }, Type::Named(canonical)) => {
+            (formal, Type::Named(canonical))
+                if let Some((name, args)) = formal.struct_application()
+                    && !matches!(args, StructLiteralArgs::Integers(_)) =>
+            {
                 if let Some(instance) = structs.instances.get(canonical) {
-                    if instance.template.name == *name {
-                        for (arg, bound) in args.iter().zip(&instance.values) {
-                            self.bind_witness(
-                                arg,
-                                &bound.ty,
-                                bound.value.clone(),
-                                WitnessType::Exact,
-                            )?;
+                    if instance.template.name != name {
+                        return Ok(());
+                    }
+                    for (arg, bound) in args.iter().zip(&instance.args) {
+                        match (arg, bound) {
+                            (StructArgumentRef::Type(ty), BoundStructArgument::Type(actual)) => {
+                                self.infer(ty, actual, structs, resolver)?;
+                            }
+                            (StructArgumentRef::Value(expr), BoundStructArgument::Value(bound)) => {
+                                self.bind_witness(
+                                    expr,
+                                    &bound.ty,
+                                    bound.value.clone(),
+                                    WitnessType::Exact,
+                                )?;
+                            }
+                            _ if matches!(args, StructLiteralArgs::Mixed(_)) => {
+                                return Err(format!("argument kind mismatch for struct '{name}'"));
+                            }
+                            _ => {
+                                // Homogeneous lists supply witnesses only for
+                                // their own kind.
+                            }
                         }
                     }
-                } else if let Some(values) = resolver.struct_parametric_values(name, canonical)? {
+                } else if let StructLiteralArgs::Expressions(args) = args
+                    && let Some(values) = resolver.struct_parametric_values(name, canonical)?
+                {
                     for (arg, &value) in args.iter().zip(values) {
                         self.bind_witness(
                             arg,
@@ -366,39 +439,140 @@ impl<'f> InferredBindings<'f> {
                     }
                 }
             }
-            (Type::TypeApplied { name, args }, Type::Named(canonical)) => {
-                if let Some(instance) = structs.instances.get(canonical)
-                    && instance.template.name == *name
-                {
-                    for (arg, actual) in args.iter().zip(&instance.types) {
-                        self.infer(arg, actual, structs, resolver)?;
-                    }
-                }
-            }
             _ => { /* Concrete constraints are checked against the final signature. */ }
         }
         Ok(())
     }
 
-    /// An array literal provides its length even when its element needs the
-    /// formal parameter's width as context. An untyped empty literal needs its
-    /// complete array type from context before it can supply a length.
-    pub(super) fn literal_lengths(&mut self, pattern: &Type, expr: &Expr) -> Result<(), String> {
+    /// Gather array lengths and explicit constructor values while their
+    /// contextual elements or fields await a type witness.
+    pub(super) fn infer_literal_values(
+        &mut self,
+        pattern: &Type,
+        expr: &Expr,
+        checker: &mut BodyChecker<'_, '_>,
+        remaining: usize,
+    ) -> Result<(), String> {
         match (pattern, expr) {
+            (_, Expr::Scope { result, .. }) if !expr.needs_scope_preparation() => {
+                // Discarded operands remain attached for constexpr evaluation.
+                // The captured trailing value supplies the dimension witness.
+                self.infer_literal_values(pattern, result, checker, child_type_budget(remaining)?)?;
+            }
             (Type::ParametricArray { size, element }, Expr::Array(items)) => {
                 if let Some(first) = items.first() {
                     self.bind_size(size, items.len(), WitnessType::Exact)?;
-                    self.literal_lengths(element, first)?;
+                    self.infer_literal_values(
+                        element,
+                        first,
+                        checker,
+                        child_type_budget(remaining)?,
+                    )?;
                 }
             }
             (Type::Array { element, .. }, Expr::Array(items)) => {
                 if let Some(first) = items.first() {
-                    self.literal_lengths(element, first)?;
+                    self.infer_literal_values(
+                        element,
+                        first,
+                        checker,
+                        child_type_budget(remaining)?,
+                    )?;
                 }
             }
             (Type::Tuple(fields), Expr::Tuple(items)) => {
                 for (field, item) in fields.iter().zip(items) {
-                    self.literal_lengths(field, item)?;
+                    self.infer_literal_values(field, item, checker, child_type_budget(remaining)?)?;
+                }
+            }
+            (Type::MixedApplied { name, args }, _) if self.needs_witness(pattern) => {
+                let depth = child_type_budget(remaining)?;
+                match expr {
+                    Expr::If {
+                        then_value,
+                        else_value,
+                        ..
+                    } => {
+                        self.infer_literal_values(pattern, then_value, checker, depth)?;
+                        self.infer_literal_values(pattern, else_value, checker, depth)?;
+                    }
+                    Expr::Match { arms, .. } => {
+                        for arm in arms {
+                            self.infer_literal_values(pattern, &arm.value, checker, depth)?;
+                        }
+                    }
+                    _ => {
+                        let Some(literal) = expr.struct_literal().filter(|s| s.name == name) else {
+                            return Ok(());
+                        };
+                        let Some(template) = checker.structs.template(name) else {
+                            return Ok(());
+                        };
+                        // The length of S { lanes: [1, 2] } supplies N in S<T,
+                        // N> even while T awaits a sibling witness. Do not
+                        // force the unsized elements to adopt a width during
+                        // this pass.
+                        let count = match literal.args {
+                            StructLiteralArgs::Omitted => 0,
+                            StructLiteralArgs::Mixed(args) => args.len(),
+                            _ => return Ok(()),
+                        };
+                        let mut nested =
+                            InferredBindings::for_struct(&template.value_parametrics, count);
+                        let needs_prefix = args.iter().take(count).any(|arg| match arg {
+                            StructArgument::Value(expr) => self.missing(expr).is_some(),
+                            StructArgument::Type(_) => false,
+                        });
+                        if needs_prefix {
+                            // The final constructor check retains assertion
+                            // operands. This pass only needs their constexpr
+                            // values.
+                            let operands = checker.assert_operands.take();
+                            let prefix = checker.struct_prefix_at(
+                                name,
+                                literal.args,
+                                remaining,
+                                checker.function_position,
+                            );
+                            checker.assert_operands = operands;
+                            let values = prefix?.into_iter().filter_map(|arg| match arg {
+                                BoundStructArgument::Value(bound) => Some(bound),
+                                BoundStructArgument::Type(_) => None,
+                            });
+                            for (slot, value) in nested.values.iter_mut().zip(values) {
+                                *slot = Some(value);
+                            }
+                        }
+                        if let Some(base) = literal.base {
+                            self.infer_literal_values(pattern, &base.value, checker, depth)?;
+                        } else {
+                            let fields: BTreeMap<_, _> = literal
+                                .fields
+                                .iter()
+                                .map(|(name, value)| (name.as_str(), value))
+                                .collect();
+                            for field in &template.fields {
+                                if let Some(value) = fields.get(field.name.as_str()) {
+                                    nested
+                                        .infer_literal_values(&field.ty, value, checker, depth)?;
+                                    nested.finish_argument();
+                                }
+                            }
+                        }
+                        for (formal, bound) in template.value_parametrics.iter().zip(nested.values)
+                        {
+                            if let (Some(StructArgument::Value(expr)), Some(bound)) =
+                                (args.get(formal.index), bound)
+                            {
+                                self.bind_witness(
+                                    expr,
+                                    &bound.ty,
+                                    bound.value,
+                                    WitnessType::Exact,
+                                )?;
+                            }
+                        }
+                    }
                 }
             }
             _ => { /* Nonliteral arguments provide their checked type instead. */ }
@@ -408,21 +582,21 @@ impl<'f> InferredBindings<'f> {
 }
 
 /// A data operand may already have a type from inference or from map's element.
-struct DataArgument<'e> {
-    source: Option<&'e Expr>,
-    checked: Option<TypedExpr>,
+enum DataArgument<'e> {
+    Source(&'e Expr),
+    Checked(TypedExpr),
 }
 
 /// Earlier explicit formals stay in declaration scope while the caller
 /// evaluates each constexpr actual with the type of the next formal.
 #[derive(Default)]
 pub(super) struct ExplicitScope {
-    types: Option<Bindings>,
+    pub(super) types: Option<Bindings>,
     names: BTreeSet<String>,
     values: BTreeMap<String, Type>,
     literals: BTreeMap<String, TypedExpr>,
     constexpr_names: BTreeSet<String>,
-    value_parametric_names: BTreeSet<String>,
+    constant_pattern_names: BTreeSet<String>,
 }
 
 impl ExplicitScope {
@@ -435,8 +609,8 @@ impl ExplicitScope {
         std::mem::swap(&mut self.literals, &mut checker.function_values);
         std::mem::swap(&mut self.constexpr_names, &mut checker.constexpr_names);
         std::mem::swap(
-            &mut self.value_parametric_names,
-            &mut checker.value_parametric_names,
+            &mut self.constant_pattern_names,
+            &mut checker.constant_pattern_names,
         );
     }
 
@@ -447,7 +621,7 @@ impl ExplicitScope {
         preceding_value: Option<(&str, &BoundParametricValue)>,
         evaluate: impl FnOnce(&mut BodyChecker<'_, 'm>) -> Result<T, String>,
     ) -> Result<T, String> {
-        caller.with_value_definition(f, |definition| {
+        caller.with_value_definition(&f.name, |definition| {
             self.exchange(definition);
             if let Some((name, value)) = preceding_value {
                 definition.bind_parametric_value(name, value);
@@ -474,7 +648,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     pub(super) fn bind_parametric_value(&mut self, name: &str, bound: &BoundParametricValue) {
         self.names.insert(name.to_owned());
-        self.value_parametric_names.insert(name.to_owned());
+        self.constant_pattern_names.insert(name.to_owned());
         self.values.insert(name.to_owned(), bound.ty.clone());
         self.constexpr_names.insert(name.to_owned());
         self.function_values.insert(
@@ -541,6 +715,26 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         ty: &Type,
         remaining: usize,
     ) -> Result<Type, String> {
+        self.resolve_annotation(ty, remaining, &mut None)
+    }
+
+    /// Substitute each written type parameter once, at its source reference.
+    /// Already concrete names inside an alias or another argument retain their
+    /// original identity even if a formal has the same spelling.
+    pub(super) fn concrete_annotation(&mut self, ty: &Type) -> Result<Type, String> {
+        let mut copies = Some(TypeArgumentCopies::default());
+        self.resolve_annotation(ty, MAX_ELABORATION_DEPTH, &mut copies)
+    }
+
+    /// Resolve dimensions and aliases, keeping formals symbolic when checking
+    /// an inference pattern. Concrete annotations budget all copied formals
+    /// together before cloning their bound types.
+    pub(super) fn resolve_annotation(
+        &mut self,
+        ty: &Type,
+        remaining: usize,
+        copies: &mut Option<TypeArgumentCopies>,
+    ) -> Result<Type, String> {
         let size = |checker: &mut Self, expr: &Expr| {
             if let Some(n) = checker.struct_dimension(expr)? {
                 return Ok(n);
@@ -550,6 +744,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .ok_or_else(|| "dimension does not fit usize".to_owned())
         };
         match ty {
+            Type::Named(name) if self.local_type_aliases.contains_key(name) => {
+                let alias = &self.local_type_aliases[name].ty;
+                self.charge_reference_copy(super::source_type_nodes(alias))?;
+                Ok(alias.clone())
+            }
             Type::TypeApplied { name, args } => {
                 if self.has_local_name(name)
                     || self
@@ -571,17 +770,43 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 let budget = child_type_budget(remaining)?;
                 let args = args
                     .iter()
-                    .map(|arg| self.resolve_dimensions(arg, budget))
+                    .map(|arg| self.resolve_annotation(arg, budget, copies))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.with_type_resolver(|types, dimensions, bindings| {
+                    let bindings = if copies.is_some() { None } else { bindings };
                     types.resolve_struct_type_application(
                         name, args, bindings, dimensions, remaining,
                     )
                 })
             }
+            Type::MixedApplied { name, args } => {
+                if copies.is_none()
+                    && self
+                        .type_bindings()
+                        .is_some_and(|b| b.has_unbound_variable(ty))
+                {
+                    let depth = child_type_budget(remaining)?;
+                    let args = args
+                        .iter()
+                        .map(|arg| match arg {
+                            StructArgument::Type(ty) => self
+                                .resolve_annotation(ty, depth, copies)
+                                .map(StructArgument::Type),
+                            StructArgument::Value(_) => Ok(arg.clone()),
+                        })
+                        .collect::<Result<_, _>>()?;
+                    return Ok(Type::MixedApplied {
+                        name: name.clone(),
+                        args,
+                    });
+                }
+                let args =
+                    self.struct_prefix_at(name, StructLiteralArgs::Mixed(args), remaining, None)?;
+                self.struct_applied_type(name, &args, remaining)
+            }
             Type::ParametricStruct { name, args } => {
-                let args = self.struct_value_prefix(name, StructLiteralArgs::Expressions(args))?;
-                self.struct_value_type(name, &args, remaining)
+                let args = self.struct_prefix(name, StructLiteralArgs::Expressions(args))?;
+                self.struct_applied_type(name, &args, remaining)
             }
             Type::ParametricBits { signed, width } => {
                 let signed = match self.struct_dimension(signed)? {
@@ -602,24 +827,24 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 element,
                 size: expr,
             } => Ok(Type::array(
-                self.resolve_dimensions(element, child_type_budget(remaining)?)?,
+                self.resolve_annotation(element, child_type_budget(remaining)?, copies)?,
                 size(self, expr)?,
             )),
             Type::Array { element, size } => Ok(Type::array(
-                self.resolve_dimensions(element, child_type_budget(remaining)?)?,
+                self.resolve_annotation(element, child_type_budget(remaining)?, copies)?,
                 *size,
             )),
             Type::Tuple(fields) => {
                 let depth = child_type_budget(remaining)?;
                 fields
                     .iter()
-                    .map(|t| self.resolve_dimensions(t, depth))
+                    .map(|t| self.resolve_annotation(t, depth, copies))
                     .collect::<Result<_, _>>()
                     .map(Type::Tuple)
             }
             _ => {
                 let callbacks = self.callback_indices();
-                resolve_type(
+                let resolved = resolve_type(
                     ty,
                     &|name| {
                         self.names.contains(name)
@@ -642,7 +867,21 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         functions: self.function_registry.as_deref_mut(),
                     },
                     remaining,
-                )
+                )?;
+                if let Some(copies) = copies
+                    && let Type::Named(name) = ty
+                    && let Some(bindings) = self.type_bindings()
+                    && let Some(shape) = bindings.shape(name)
+                {
+                    let bound = bindings
+                        .get(name)
+                        .ok_or_else(|| format!("cannot infer type parameter '{name}'"))?;
+                    copies.nodes = copies.nodes.saturating_add(shape.source_nodes);
+                    copies.name_bytes = copies.name_bytes.saturating_add(shape.name_bytes);
+                    TypeShape::check_source_budget(copies.nodes, copies.name_bytes)?;
+                    return Ok(bound.clone());
+                }
+                Ok(resolved)
             }
         }
     }
@@ -652,37 +891,25 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         f: &'m Function,
         actuals: &[Expr],
         args: &[Expr],
+        expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         for arg in args {
             crate::infer_literal::check_argument_array_sizes(arg)?;
         }
-        let instantiate = |checker: &mut Self, args: &[&Expr]| {
-            let args = args
-                .iter()
-                .map(|&expr| DataArgument {
-                    source: Some(expr),
-                    checked: None,
-                })
-                .collect();
-            checker.instantiate_value_function(f, actuals, args)
-        };
         self.with_parametric_context(|checker| {
-            if f.type_params.is_empty() {
-                let sources: Vec<_> = args.iter().collect();
-                return checker.with_scoped_results(&sources, instantiate);
-            }
             checker.with_scope_aliases(|checker| {
-                // Preserve scoped aggregate members and branch results until
-                // both their type evidence and the final context are known.
+                // Keep branch-local and aggregate-member bindings visible
+                // through both witness collection and application of the final
+                // signature.
                 let prepared = args
                     .iter()
                     .map(|expr| checker.prepare_value(expr))
                     .collect::<Result<Vec<_>, _>>()?;
-                let sources = prepared
+                let args = prepared
                     .iter()
-                    .map(|expr| expr.as_ref())
-                    .collect::<Vec<_>>();
-                instantiate(checker, &sources)
+                    .map(|expr| DataArgument::Source(expr.as_ref()))
+                    .collect();
+                checker.instantiate_value_function(f, actuals, args, expected)
             })
         })
     }
@@ -702,10 +929,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let (ty, kind) = self.instantiate_value_function(
             f,
             actuals,
-            vec![DataArgument {
-                source: None,
-                checked: Some(element),
-            }],
+            vec![DataArgument::Checked(element)],
+            None,
         )?;
         Ok(TypedExpr { ty, kind })
     }
@@ -713,33 +938,76 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Evaluate a declaration's annotations and defaults with its own imports
     /// and earlier module declarations, even when called from a different
     /// scope.
-    fn with_value_definition<T>(
+    pub(super) fn with_value_definition<T>(
         &mut self,
-        f: &'m Function,
+        owner: &'m str,
         evaluate: impl FnOnce(&mut BodyChecker<'_, 'm>) -> Result<T, String>,
     ) -> Result<T, String> {
-        let registry = self.function_registry.as_deref_mut().ok_or_else(|| {
-            format!(
-                "cannot specialize function '{}' in this type annotation",
-                f.name
-            )
-        })?;
-        registry.enter(&f.name)?;
+        let registry = self
+            .function_registry
+            .as_deref_mut()
+            .ok_or_else(|| format!("cannot specialize '{owner}' in this type annotation"))?;
+        registry.enter(owner)?;
         let result = stacker::maybe_grow(1024 * 1024, 2 * 1024 * 1024, || {
             let mut definition =
                 BodyChecker::new(self.decls, self.resolver, self.structs, BodyKind::Function);
             definition.function_position = self
                 .decls
                 .positions
-                .get(f.name.as_str())
+                .get(owner)
                 .map(|at| at.saturating_sub(1));
-            definition.warning_owner = Some(&f.name);
-            definition.zero_binding = self.decls.zero_binding(&f.name);
+            definition.warning_owner = Some(owner);
+            definition.zero_binding = self.decls.zero_binding(owner);
             definition.function_registry = Some(registry);
             evaluate(&mut definition)
         });
         registry.leave();
         result
+    }
+
+    /// Check an explicitly supplied value or evaluate its default in the
+    /// declaration scope containing earlier bindings.
+    pub(super) fn value_or_default(
+        &mut self,
+        owner: &str,
+        formal: &ParametricBinding,
+        ty: Type,
+        supplied: Option<&BoundParametricValue>,
+    ) -> Result<BoundParametricValue, String> {
+        self.names.insert(formal.name.clone());
+        Ok(match (supplied, &formal.default) {
+            (Some(bound), default) => {
+                if !compatible(&ty, &bound.ty) {
+                    return Err(format!(
+                        "parametric '{}' expects {ty}, got {}",
+                        formal.name, bound.ty
+                    ));
+                }
+                if let Some(expr) = default {
+                    // An overridden default still has to typecheck. The
+                    // formal has its supplied value inside its own default.
+                    self.bind_parametric_value(&formal.name, bound);
+                    self.with_parametric_context(|c| c.dslx_argument(expr, &ty))
+                        .map_err(|e| format!("default for '{}': {e}", formal.name))?;
+                }
+                BoundParametricValue {
+                    ty,
+                    value: bound.value.clone(),
+                }
+            }
+            (None, Some(expr)) => {
+                let value = self
+                    .parametric_value(expr, &ty)
+                    .map_err(|e| format!("default for '{}': {e}", formal.name))?;
+                BoundParametricValue { ty, value }
+            }
+            (None, None) => {
+                return Err(format!(
+                    "cannot infer value parametric '{}' of '{}'",
+                    formal.name, owner
+                ));
+            }
+        })
     }
 
     /// Bind defaults in declaration order, then resolve each runtime parameter
@@ -795,40 +1063,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             };
             let supplied = &provided[values.len()];
             let ty = self.value_binding_type(formal)?;
-            self.names.insert(formal.name.clone());
-            let bound = match (supplied, &formal.default) {
-                (Some(bound), default) => {
-                    if !compatible(&ty, &bound.ty) {
-                        return Err(format!(
-                            "parametric '{}' expects {ty}, got {}",
-                            formal.name, bound.ty
-                        ));
-                    }
-                    if let Some(expr) = default {
-                        // An overridden default still has to typecheck. The
-                        // formal has its supplied value inside its own default.
-                        self.bind_parametric_value(&formal.name, bound);
-                        self.with_parametric_context(|c| c.dslx_argument(expr, &ty))
-                            .map_err(|e| format!("default for '{}': {e}", formal.name))?;
-                    }
-                    BoundParametricValue {
-                        ty,
-                        value: bound.value.clone(),
-                    }
-                }
-                (None, Some(expr)) => {
-                    let value = self
-                        .parametric_value(expr, &ty)
-                        .map_err(|e| format!("default for '{}': {e}", formal.name))?;
-                    BoundParametricValue { ty, value }
-                }
-                (None, None) => {
-                    return Err(format!(
-                        "cannot infer value parametric '{}' of '{}'",
-                        formal.name, f.name
-                    ));
-                }
-            };
+            let bound = self.value_or_default(&f.name, formal, ty, supplied.as_ref())?;
             charge(self, 1 + literal_copy_work(&bound.value))?;
             self.bind_parametric_value(&formal.name, &bound);
             values.push(bound);
@@ -900,7 +1135,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if let Some(bound) = registry.cached_value_signature(f, &supplied)? {
             return Ok(bound);
         }
-        let signature = self.with_value_definition(f, |definition| {
+        let signature = self.with_value_definition(&f.name, |definition| {
             definition.function_type_bindings = (!f.type_params.is_empty()).then_some(types);
             definition.bound_value_signature(f, &supplied.values)
         })?;
@@ -908,19 +1143,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .as_deref_mut()
             .expect("module function registry")
             .cache_value_signature(f, supplied, signature)
-    }
-
-    /// Preserve DSLX's source-order dimension inference. An unsized scalar
-    /// can wait for later evidence. A constructor supplies the type inferred
-    /// for its members when this argument needs to bind a width.
-    fn infer_dimension_input(
-        &mut self,
-        formal: &Type,
-        expr: &Expr,
-        inferred: &mut InferredBindings<'_>,
-    ) -> Result<Option<TypedExpr>, String> {
-        inferred.literal_lengths(formal, expr)?;
-        self.dimension_witness(formal, expr, inferred, /* tuple_member= */ false)
     }
 
     /// An unsized scalar in a tuple or struct supplies its minimum width.
@@ -982,30 +1204,209 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         self.infer_input(formal, expr, types, InputPattern::Function(witness))
     }
 
-    /// Infer type variables from data and callback results before applying
-    /// the resulting signature to contextual literals and the specialized body.
-    fn instantiate_type_function(
+    /// Gather dimension witnesses from the same field across array rows or
+    /// conditional arms. Other fields receive the completed signature later.
+    fn dimension_input_group<'e>(
         &mut self,
-        f: &'m Function,
-        actuals: &[Expr],
-        mut args: Vec<DataArgument<'_>>,
-    ) -> Result<(Type, K), String> {
-        let mut types = Bindings::new(&f.type_params);
-        let mut inferred = InferredBindings::new(&f.value_parametrics, actuals.len());
-        let mut inputs = Vec::with_capacity(args.len());
-        for (arg, param) in args.iter_mut().zip(&f.params) {
-            let input = match (arg.source, arg.checked.take()) {
-                (Some(expr), _) => {
-                    inferred.literal_lengths(&param.ty, expr)?;
-                    self.infer_type_input(
-                        &param.ty,
+        formal: &Type,
+        exprs: &[&'e Expr],
+        inferred: &mut InferredBindings<'_>,
+        aggregate_member: bool,
+    ) -> Result<Vec<Input<'e>>, String> {
+        if exprs.is_empty() || !inferred.needs_witness(formal) {
+            return Ok(exprs
+                .iter()
+                .map(|&expr| Input::Contextual {
+                    expr,
+                    prepared: None,
+                })
+                .collect());
+        }
+        if exprs
+            .iter()
+            .any(|expr| matches!(expr, Expr::If { .. } | Expr::Match { .. }))
+            && exprs.iter().any(|expr| super::has_aggregate_literal(expr))
+        {
+            let (selectors, branches) = self.result_branches(exprs)?;
+            let mut inputs = self
+                .dimension_input_group(formal, &branches, inferred, aggregate_member)?
+                .into_iter();
+            return Ok(exprs
+                .iter()
+                .zip(selectors)
+                .map(|(&expr, selector)| {
+                    let count = match expr {
+                        Expr::If { .. } => 2,
+                        Expr::Match { arms, .. } => arms.len(),
+                        _ => return inputs.next().expect("one input for an unbranched operand"),
+                    };
+                    Input::Branches {
                         expr,
-                        &mut types,
-                        &mut inferred,
-                        /* tuple_member= */ false,
-                    )?
+                        selector: Some(selector),
+                        results: inputs.by_ref().take(count).collect(),
+                    }
+                })
+                .collect());
+        }
+        if let Type::Tuple(fields) = formal
+            && let Some(rows) = exprs
+                .iter()
+                .map(|expr| match expr {
+                    Expr::Tuple(items) if items.len() == fields.len() => Some(items),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        {
+            let mut members: Vec<Vec<Input>> = rows
+                .iter()
+                .map(|_| Vec::with_capacity(fields.len()))
+                .collect();
+            for (index, field) in fields.iter().enumerate() {
+                let column = rows.iter().map(|row| &row[index]).collect::<Vec<_>>();
+                let inputs = self.dimension_input_group(
+                    field, &column, inferred, /* aggregate_member= */ true,
+                )?;
+                for (row, input) in members.iter_mut().zip(inputs) {
+                    row.push(input);
                 }
-                (None, Some(value)) => {
+            }
+            return Ok(exprs
+                .iter()
+                .zip(members)
+                .map(|(&expr, members)| Input::Aggregate {
+                    expr,
+                    members,
+                    charged_fill: 0,
+                })
+                .collect());
+        }
+        if let Type::Array { element, .. } | Type::ParametricArray { element, .. } = formal
+            && let Some(rows) = exprs
+                .iter()
+                .map(|expr| expr.unannotated_array())
+                .collect::<Option<Vec<_>>>()
+        {
+            if let Type::ParametricArray { size, .. } = formal {
+                for (row, fill) in &rows {
+                    if !fill && !row.is_empty() {
+                        inferred.bind_size(size, row.len(), WitnessType::Exact)?;
+                    }
+                }
+            }
+            let column = rows
+                .iter()
+                .flat_map(|(items, _)| items.iter())
+                .collect::<Vec<_>>();
+            let mut inputs = self
+                .dimension_input_group(
+                    element, &column, inferred, /* aggregate_member= */ true,
+                )?
+                .into_iter();
+            return Ok(exprs
+                .iter()
+                .zip(rows)
+                .map(|(&expr, (row, _))| {
+                    if row.is_empty() {
+                        // The complete element type is needed to materialize an
+                        // empty array.
+                        Input::Contextual {
+                            expr,
+                            prepared: None,
+                        }
+                    } else {
+                        Input::Aggregate {
+                            expr,
+                            members: inputs.by_ref().take(row.len()).collect(),
+                            charged_fill: 0,
+                        }
+                    }
+                })
+                .collect());
+        }
+        let mut needs_sibling = true;
+        for expr in exprs {
+            if !crate::infer_literal::requires_sibling_type(
+                expr,
+                self.common_widths(),
+                &|name, count| self.call_needs_result(name, count),
+            )? {
+                needs_sibling = false;
+                break;
+            }
+        }
+        if needs_sibling {
+            return Ok(exprs
+                .iter()
+                .map(|&expr| Input::Contextual {
+                    expr,
+                    prepared: None,
+                })
+                .collect());
+        }
+        if let [expr] = exprs {
+            let witness = self.dimension_witness(formal, expr, inferred, aggregate_member)?;
+            return Ok(vec![Input::Contextual {
+                expr,
+                prepared: witness,
+            }]);
+        }
+        let witnesses = self.infer_constructors(exprs, /* infer_literal_widths= */ true)?;
+        let mut witnesses = witnesses.into_iter().flatten().peekable();
+        if let Some(value) = witnesses.peek() {
+            // Sibling checking has given the entire column one type.
+            inferred.infer(formal, &value.ty, self.structs, self.resolver)?;
+        }
+        Ok(exprs
+            .iter()
+            .map(|&expr| Input::Contextual {
+                expr,
+                prepared: witnesses.next(),
+            })
+            .collect())
+    }
+
+    /// Check each data argument for witnesses in source order, retaining its
+    /// checked leaves for application of the complete function signature.
+    fn infer_function_inputs<'e>(
+        &mut self,
+        f: &Function,
+        args: Vec<DataArgument<'e>>,
+        types: &mut Bindings,
+        inferred: &mut InferredBindings<'_>,
+    ) -> Result<Vec<Input<'e>>, String> {
+        let mut inputs = Vec::with_capacity(args.len());
+        for (arg, param) in args.into_iter().zip(&f.params) {
+            let input = match arg {
+                DataArgument::Source(expr) => {
+                    inferred.infer_literal_values(&param.ty, expr, self, MAX_ELABORATION_DEPTH)?;
+                    let mut input = self
+                        .dimension_input_group(
+                            &param.ty,
+                            &[expr],
+                            inferred,
+                            /* aggregate_member= */ false,
+                        )?
+                        .pop()
+                        .expect("one input per argument");
+                    if !f.type_params.is_empty() {
+                        // Dimension witnesses share a column; type parameters
+                        // bind in the original order of the caller's rows and
+                        // fields.
+                        input.visit_leaves(&param.ty, &mut |formal, leaf| {
+                            if let Input::Contextual { expr, prepared } = leaf {
+                                *leaf = self.infer_input(
+                                    formal,
+                                    expr,
+                                    types,
+                                    InputPattern::Function(prepared.take()),
+                                )?;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    input
+                }
+                DataArgument::Checked(value) => {
                     types.infer_source_type(
                         &param.ty,
                         &value.ty,
@@ -1015,17 +1416,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     inferred.infer(&param.ty, &value.ty, self.structs, self.resolver)?;
                     Input::Checked { expr: None, value }
                 }
-                (None, None) => unreachable!("map supplies a typed argument"),
             };
             inferred.finish_argument();
             inputs.push(input);
         }
-        self.infer_input_groups(&mut inputs, &f.params, &mut types, &format!("'{}'", f.name))?;
-        let (types, targets) = self.infer_explicit_formals(f, types, actuals, &mut inferred)?;
-        let bound = self.specialized_signature(f, types, inferred.values)?;
+        Ok(inputs)
+    }
+
+    /// Apply the bound signature to remaining operands and reuse the witnesses.
+    fn finish_function_inputs(
+        &mut self,
+        f: &Function,
+        inputs: Vec<Input>,
+        params: &[Param],
+    ) -> Result<Vec<TypedExpr>, String> {
         let mut checked = Vec::with_capacity(inputs.len());
-        for ((input, arg), param) in inputs.into_iter().zip(args).zip(&bound.interface.params) {
-            if let Some(expr) = arg.source {
+        for (input, param) in inputs.into_iter().zip(params) {
+            if let Some(expr) = input.source() {
                 super::check_argument_widths(
                     expr,
                     &param.ty,
@@ -1038,6 +1445,193 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     format!("argument '{}', call to '{}': {e}", param.name, f.name)
                 })?);
         }
+        Ok(checked)
+    }
+
+    /// A contextual constructor can supply a defaulted value once other data
+    /// or callbacks have determined the types used to evaluate that default.
+    pub(super) fn infer_contextual_defaults<'p>(
+        &mut self,
+        inputs: &mut [Input<'_>],
+        params: impl IntoIterator<Item = &'p Param>,
+        owner: &str,
+        types: &Bindings,
+        inferred: &mut InferredBindings<'_>,
+    ) -> Result<(), String> {
+        if inferred.values.iter().all(Option::is_some) {
+            return Ok(());
+        }
+        for (input, param) in inputs.iter_mut().zip(params) {
+            input.visit_leaves(&param.ty, &mut |pattern, leaf| {
+                if let Input::Contextual {
+                    expr,
+                    prepared: None,
+                } = leaf
+                {
+                    self.infer_constructor_default(
+                        pattern,
+                        expr,
+                        owner,
+                        types,
+                        inferred,
+                        MAX_ELABORATION_DEPTH,
+                    )?;
+                }
+                Ok(())
+            })?;
+            inferred.finish_argument();
+        }
+        Ok(())
+    }
+
+    /// Follow the actual's nominal type through a prepared scope, branch, or
+    /// update. Only an omitted default can supply a new value witness here.
+    fn infer_constructor_default(
+        &mut self,
+        pattern: &Type,
+        expr: &Expr,
+        owner: &str,
+        types: &Bindings,
+        inferred: &mut InferredBindings<'_>,
+        remaining: usize,
+    ) -> Result<(), String> {
+        let Type::MixedApplied { name, args } = pattern else {
+            return Ok(());
+        };
+        let depth = child_type_budget(remaining)?;
+        match expr {
+            Expr::Scope { result, .. } if !expr.needs_scope_preparation() => {
+                return self
+                    .infer_constructor_default(pattern, result, owner, types, inferred, depth);
+            }
+            Expr::If {
+                then_value,
+                else_value,
+                ..
+            } => {
+                self.infer_constructor_default(pattern, then_value, owner, types, inferred, depth)?;
+                return self
+                    .infer_constructor_default(pattern, else_value, owner, types, inferred, depth);
+            }
+            Expr::Match { arms, .. } => {
+                for arm in arms {
+                    self.infer_constructor_default(
+                        pattern, &arm.value, owner, types, inferred, depth,
+                    )?;
+                }
+                return Ok(());
+            }
+            _ => { /* A constructor can supply its own specialization. */ }
+        }
+        let Some(literal) = expr.struct_literal().filter(|s| s.name == name) else {
+            return Ok(());
+        };
+        if let Some(base) = literal.base {
+            return self.infer_constructor_default(
+                pattern,
+                &base.value,
+                owner,
+                types,
+                inferred,
+                depth,
+            );
+        }
+        let Some(template) = self.structs.template(name) else {
+            return Ok(());
+        };
+        let count = literal.args.len();
+        let needs_default = template.value_parametrics.iter().any(|param| {
+            param.index >= count
+                && param.default.is_some()
+                && matches!(args.get(param.index), Some(StructArgument::Value(expr)) if inferred.missing(expr).is_some())
+        });
+        if !needs_default {
+            return Ok(());
+        }
+        // The pattern's type arguments belong to the enclosing formal,
+        // including its imports and previously inferred dimensions.
+        let mut child_types = Bindings::new(&template.type_params);
+        {
+            let mut definition = BodyChecker::struct_type_scope(
+                self.decls.module_dimensions(owner),
+                self.resolver,
+                self.structs,
+                self.function_registry.as_deref_mut(),
+            );
+            definition.in_struct_definition = definition.structs.template(owner).is_some();
+            definition.function_type_bindings = Some(types.clone());
+            for (formal, bound) in inferred.formals.iter().zip(&inferred.values) {
+                if let Some(bound) = bound {
+                    definition.bind_parametric_value(&formal.name, bound);
+                }
+            }
+            for (formal, arg) in template.parametric_bindings().zip(args).skip(count) {
+                if let (StructParametricRef::Type(name), StructArgument::Type(ty)) = (formal, arg)
+                    && !types.has_unbound_variable(ty)
+                    && !inferred.needs_witness(ty)
+                {
+                    let actual = definition.source_type(ty)?;
+                    child_types.match_input(
+                        &Type::Named(name.to_owned()),
+                        &actual,
+                        definition.structs,
+                    )?;
+                }
+            }
+        }
+        if count == 0
+            && !template
+                .type_params
+                .iter()
+                .any(|p| child_types.get(p).is_some())
+        {
+            // An earlier unconstrained probe already tried these fields.
+            return Ok(());
+        }
+        // The final field check in the caller keeps its own statements
+        // and assertion operands. Only the nominal type is a witness.
+        let start = self.statements.len();
+        let operands = self.assert_operands.take();
+        let result = (|| {
+            let prefix = self.struct_prefix(name, literal.args)?;
+            let source = StructApplication::Applied(name, &prefix);
+            let row = struct_field_map(source, literal.fields)?;
+            self.infer_struct_rows(source, template, [&row], child_types)
+        })();
+        self.assert_operands = operands;
+        self.discard_temporary_statements(start);
+        match result {
+            Ok((ty, _)) => inferred.infer(pattern, &ty, self.structs, self.resolver),
+            Err(StructLiteralError::Unbound(_)) => Ok(()),
+            Err(error) => Err(error.into_message()),
+        }
+    }
+
+    /// Infer type variables from the result context, data and callbacks before
+    /// checking contextual arguments and the specialized body.
+    fn instantiate_type_function(
+        &mut self,
+        f: &'m Function,
+        actuals: &[Expr],
+        args: Vec<DataArgument<'_>>,
+        expected: Option<&Type>,
+        mut inferred: InferredBindings<'_>,
+    ) -> Result<(Type, K), String> {
+        let mut types = Bindings::new(&f.type_params);
+        if let Some(result) = expected {
+            types.infer_source_type(
+                &f.result,
+                result,
+                self.structs,
+                /* contextual_projection= */ false,
+            )?;
+        }
+        let mut inputs = self.infer_function_inputs(f, args, &mut types, &mut inferred)?;
+        self.infer_input_groups(&mut inputs, &f.params, &mut types, &format!("'{}'", f.name))?;
+        let (types, targets) = self.infer_explicit_formals(f, types, actuals, &mut inferred)?;
+        self.infer_contextual_defaults(&mut inputs, &f.params, &f.name, &types, &mut inferred)?;
+        let bound = self.specialized_signature(f, types, inferred.values)?;
+        let checked = self.finish_function_inputs(f, inputs, &bound.interface.params)?;
         let result = bound.interface.result.clone();
         let name = self.intern_function(f, targets, Some(bound))?;
         Ok((
@@ -1213,6 +1807,25 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .expect("generic function bindings");
         let mut results = Bindings::new(&bindings.referenced_parameters([&pattern]));
         results.match_input(&pattern, &result, self.structs)?;
+        if super::has_mixed_application(&pattern) {
+            let mut completed = bindings.clone();
+            completed.merge_callback_results(&results, |work| {
+                self.function_registry
+                    .as_deref_mut()
+                    .expect("module function registry")
+                    .charge_bindings(work)
+            })?;
+            let previous = self.function_type_bindings.replace(completed);
+            let expected = self.source_type(&callback.result);
+            self.function_type_bindings = previous;
+            let expected = expected?;
+            if !compatible(&expected, &result) {
+                return Err(format!(
+                    "callback '{}' returns {result}, expected {expected}",
+                    callback.name
+                ));
+            }
+        }
         Ok(InferredCallback { target, results })
     }
 
@@ -1222,7 +1835,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         &mut self,
         f: &'m Function,
         actuals: &[Expr],
-        mut args: Vec<DataArgument<'_>>,
+        args: Vec<DataArgument<'_>>,
+        expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         if self.function_registry.is_none() {
             return Err(format!(
@@ -1238,15 +1852,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 args.len()
             ));
         }
-        if !f.type_params.is_empty() {
-            return self.instantiate_type_function(f, actuals, args);
-        }
         let mut inferred = InferredBindings::new(&f.value_parametrics, actuals.len());
+        if let Some(result) = expected {
+            inferred.infer(&f.result, result, self.structs, self.resolver)?;
+            inferred.finish_argument();
+        }
+        if !f.type_params.is_empty() {
+            return self.instantiate_type_function(f, actuals, args, expected, inferred);
+        }
         if !actuals.is_empty() {
             // Check explicit annotations before instantiating the callee.
             // Preceding formals hide module declarations even though none of
             // their values are available yet in this definition scope.
-            let types = self.with_value_definition(f, |definition| {
+            let types = self.with_value_definition(&f.name, |definition| {
                 let mut types = Vec::new();
                 for formal in f.parametric_bindings().take(actuals.len()) {
                     let name = match formal {
@@ -1267,15 +1885,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 inferred.values[i] = Some(BoundParametricValue { ty, value });
             }
         }
-        for (arg, param) in args.iter_mut().zip(&f.params) {
-            if let Some(expr) = arg.source {
-                arg.checked = self.infer_dimension_input(&param.ty, expr, &mut inferred)?;
-            } else if let Some(value) = &arg.checked {
-                inferred.infer(&param.ty, &value.ty, self.structs, self.resolver)?;
-            }
-            inferred.finish_argument();
-        }
-        let bound = self.specialized_signature(f, Bindings::new(&[]), inferred.values)?;
+        let mut types = Bindings::new(&[]);
+        let mut inputs = self.infer_function_inputs(f, args, &mut types, &mut inferred)?;
+        self.infer_contextual_defaults(&mut inputs, &f.params, &f.name, &types, &mut inferred)?;
+        let bound = self.specialized_signature(f, types, inferred.values)?;
         let interface = &bound.interface;
         let mut targets = Vec::new();
         for (i, formal) in f.parametric_bindings().enumerate() {
@@ -1300,30 +1913,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 targets.push(target);
             }
         }
-        let mut checked = Vec::new();
-        for (arg, param) in args.into_iter().zip(&interface.params) {
-            let value = match (arg.source, arg.checked) {
-                (Some(expr), Some(value)) if compatible(&param.ty, &value.ty) => {
-                    super::check_argument_widths(
-                        expr,
-                        &param.ty,
-                        Some(&self.inferred_bindings),
-                        Some(&|| self.zero_calls_function()),
-                    )?;
-                    value
-                }
-                (Some(expr), _) => self.dslx_argument(expr, &param.ty)?,
-                (None, Some(value)) if compatible(&param.ty, &value.ty) => value,
-                (None, Some(value)) => {
-                    return Err(format!(
-                        "argument '{}' expects {}, got {}",
-                        param.name, param.ty, value.ty
-                    ));
-                }
-                (None, None) => unreachable!("map supplies a typed argument"),
-            };
-            checked.push(value);
-        }
+        let checked = self.finish_function_inputs(f, inputs, &interface.params)?;
         let result = interface.result.clone();
         let name = self.intern_function(f, targets, Some(bound))?;
         Ok((
@@ -1384,6 +1974,155 @@ const ANSWER = apply<widen,37,add>(u8:5);
             checked.constants()[0].value,
             IrValue::make_ubits(16, 42).map_err(|e| e.to_string())?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_array_literal_supplies_a_length_while_its_element_type_awaits_context()
+    -> Result<(), String> {
+        let source = r#"
+struct S<T, N:u32> { values:T[N] }
+struct Outer<N:u32,T> { item:S<T,N> }
+fn first<T,N:u32>(outer:Outer<N,T>, other:T)->T { outer.item.values[u32:0] }
+fn sample(x:u8)->u8 { first(Outer { item:S { values:[1] } }, x) }
+const RESULT = sample(u8:42);
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::make_ubits(8, 1).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn partial_struct_prefix_supplies_values_before_a_sibling_binds_the_type() -> Result<(), String>
+    {
+        let source = r#"
+struct S<N:u32,T> { xs:T[N] }
+struct W<N:u32,T> { item:S<N,T>, anchor:T }
+struct Tag<U,N:U,T> { x:T }
+fn read<N:u32,T>(s:S<N,T>, anchor:T)->T { s.xs[u32:1] }
+fn tag_value<V:u8,T>(s:Tag<u8,V,T>, anchor:T)->u8 { V }
+fn sample(t:u8)->(u8,u8,u8,u8) {
+    const NUM = u32:2;
+    let from_prefix = read(S<NUM>{xs:[1,2]}, t);
+    let from_base = read(S{..S<2>{xs:[3,4]}}, t);
+    let outer = W{item:S<2>{xs:[5,6]}, anchor:t};
+    let phantom = tag_value(Tag<u8,7>{x:1}, t);
+    (from_prefix, from_base, outer.item.xs[u32:1], phantom)
+}
+const RESULT = sample(u8:0);
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::parse_typed("(bits[8]:2, bits[8]:4, bits[8]:6, bits[8]:7)")
+                .map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn contextual_constructor_evaluates_a_default_after_other_types_bind() -> Result<(), String> {
+        let source = r#"
+struct S<T, N:u32={bit_count<T>()}> { x:T }
+struct W<T, N:u32> { inner:S<T,N>, witness:T }
+fn read<T, N:u32>(p:S<T,N>, y:T)->u32 { N }
+fn read_reversed<T, N:u32>(y:T, p:S<T,N>)->u32 { N }
+fn read_fixed<N:u32>(p:S<u8,N>)->u32 { N }
+fn outer<T, N:u32>(p:W<T,N>)->u32 { N }
+fn sample(y:u8)->(u32,u32,u32,u32) {
+    let a = read(S{x:1}, y);
+    let b = read_reversed(y, S{..S{x:1}});
+    let c = outer(W{inner:S{x:1}, witness:y});
+    let d = read_fixed(S{x:1});
+    (a,b,c,d)
+}
+const RESULT = sample(u8:42);
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::parse_typed("(bits[32]:8, bits[32]:8, bits[32]:8, bits[32]:8)")
+                .map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_generic_block_type_can_supply_only_a_struct_value_argument() -> Result<(), String> {
+        let source = r#"
+struct Tag<U, N:u32> { data:U }
+fn wrap(x:u8)->Tag<u8,8> { Tag { data:x } }
+#[allow(combinational_block)]
+block unpack<T>(clk, x:T, tag:Tag<u8,{bit_count<T>()}>)->u8 { tag.data }
+#[allow(combinational_block)]
+block call<T, U, F:fn(u8)->Tag<U,{bit_count<T>()}>>(clk, x:T, arg:u8)->U { F(arg).data }
+pub block sample(clk, x:u8, y:u16)->(u8,u8) {
+    let a = unpack(x,wrap(x));
+    let b = call<wrap>(x,x);
+    (a,b)
+}
+"#;
+        check_module(&parse_module(source)?)?;
+        // Reuse the callback with the same data signature. The distinct T
+        // changes the required phantom argument and therefore the cache key.
+        let mismatch = source.replace("(a,b)", "let c = call<wrap>(y,x); (a,c)");
+        let error = check_module(&parse_module(&mismatch)?).unwrap_err();
+        assert!(
+            error.contains("returns Tag<u8, 8>, expected Tag<u8, 16>"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_constructor_siblings_share_the_typed_field() -> Result<(), String> {
+        let source = r#"
+struct S<T,N:u32> { values:T[N] }
+fn sample(x:u8) -> (u8,u8) {
+    let branch = if x == u8:1 { S { values:[x] } } else { S { values:[255] } };
+    let array = [S { values:[x] }, S { values:[255] }];
+    (branch.values[u32:0], array[u32:1].values[u32:0])
+}
+const RESULT = sample(u8:42);
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::parse_typed("(bits[8]:255, bits[8]:255)").map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn callback_result_infers_a_mixed_struct_type_and_checks_its_phantom_value()
+    -> Result<(), String> {
+        let declarations = r#"
+struct Tag<T, N:u32> { data:T }
+fn wrap(x:u8)->Tag<u8,3> { Tag { data:x } }
+"#;
+        for caller in [
+            r#"
+fn apply<T, F:fn(u8)->Tag<T,3>>(x:u8)->T { F(x).data }
+const RESULT = apply<wrap>(u8:42);
+"#,
+            r#"
+#[allow(combinational_block)]
+block apply<T, F:fn(u8)->Tag<T,3>>(clk, x:u8)->T { F(x).data }
+pub block sample(clk, x:u8)->u8 { let result = apply<wrap>(x); result }
+"#,
+        ] {
+            let source = format!("{declarations}{caller}");
+            check_module(&parse_module(&source)?)?;
+            let mismatch = source.replace("Tag<T,3>", "Tag<T,4>");
+            let error = check_module(&parse_module(&mismatch)?).unwrap_err();
+            assert!(
+                error.contains("returns Tag<u8, 3>, expected Tag<u8, 4>"),
+                "{error}"
+            );
+        }
         Ok(())
     }
 

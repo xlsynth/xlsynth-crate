@@ -257,8 +257,9 @@ pub fn check_imported_constants(data: &[u8]) -> Result<(), String> {
             .replace("other::", &format!("{other}::"))
     };
     let mut bx_decls = format!("{bx_imports}\n{}", c.types);
-    // Ordinary DSLX imports enforce public visibility. The pinned experimental
-    // use syntax accepts even a direct import of a private constant.
+    // The reference needs both modules in scope for qualified reads. DSLX
+    // disables import in use_syntax mode and cannot bind an entire module
+    // with a use declaration under type inference v2.
     let mut native_decls = format!(
         "import {module}; import {other};\n{}\n{}",
         c.types,

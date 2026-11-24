@@ -26,6 +26,28 @@ pub(crate) fn parse_outer_attribute(source: &str) -> Result<ir::OuterAttribute, 
     Ok(ir::OuterAttribute::new(kind, source))
 }
 
+/// Decode the last inner provenance attribute, which XLS treats as the block's
+/// origin.
+///
+/// Read the stored attribute text so package verification sees programmatic
+/// edits to the attributes as well as origins parsed from source.
+pub(crate) fn block_provenance(block: &Block) -> Result<Option<ir::BlockProvenance>, ParseError> {
+    for source in block.inner_attrs.iter().rev() {
+        let mut parser = Parser::new(source);
+        if parser.pop_attribute_name(AttributePosition::Inner)? == "provenance" {
+            let provenance = parser.parse_provenance_attribute()?;
+            parser.drop_or_error("]")?;
+            if !parser.at_eof() {
+                return Err(ParseError::new(
+                    "unexpected text after provenance attribute".into(),
+                ));
+            }
+            return Ok(Some(provenance));
+        }
+    }
+    Ok(None)
+}
+
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
     let file_content = std::fs::read_to_string(path)
         .map_err(|e| ParseError::new(format!("failed to read file: {}", e)))?;
@@ -95,6 +117,22 @@ impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ParseError: {}", self.msg)
     }
+}
+
+/// Record a keyword argument and fail the node parse if the keyword was already
+/// supplied.
+fn set_node_attribute<T>(
+    slot: &mut Option<T>,
+    value: T,
+    operator: &str,
+    name: &str,
+) -> Result<(), ParseError> {
+    if slot.replace(value).is_some() {
+        return Err(ParseError::new(format!(
+            "duplicate {operator} {name} attribute"
+        )));
+    }
+    Ok(())
 }
 
 /// Unified error for parse-and-validate helpers.
@@ -1250,6 +1288,17 @@ impl Parser {
         self.peek_is("#")
     }
 
+    /// Consume the attribute opener and name, leaving its arguments and closing
+    /// bracket unread.
+    fn pop_attribute_name(&mut self, position: AttributePosition) -> Result<String, ParseError> {
+        self.drop_or_error("#")?;
+        if matches!(position, AttributePosition::Inner) {
+            self.drop_or_error("!")?;
+        }
+        self.drop_or_error("[")?;
+        self.pop_identifier_or_error("attribute name")
+    }
+
     /// Parses one attribute production, retaining its original spelling.
     fn parse_attribute(
         &mut self,
@@ -1257,12 +1306,7 @@ impl Parser {
     ) -> Result<(ir::OuterAttributeKind, String), ParseError> {
         self.drop_whitespace_and_comments();
         let start = self.offset;
-        self.drop_or_error("#")?;
-        if matches!(position, AttributePosition::Inner) {
-            self.drop_or_error("!")?;
-        }
-        self.drop_or_error("[")?;
-        let name = self.pop_identifier_or_error("attribute name")?;
+        let name = self.pop_attribute_name(position)?;
         let kind = match name.as_str() {
             "non_synth" => ir::OuterAttributeKind::NonSynth,
             "initiation_interval" => {
@@ -1295,7 +1339,7 @@ impl Parser {
             }
             "reset" => ir::OuterAttributeKind::Reset(self.parse_reset_attribute()?),
             "provenance" => {
-                self.validate_provenance_attribute()?;
+                self.parse_provenance_attribute()?;
                 ir::OuterAttributeKind::Provenance
             }
             _ => return Err(ParseError::new(format!("unknown attribute: {name}"))),
@@ -1495,30 +1539,39 @@ impl Parser {
         Ok(reset)
     }
 
-    /// Validates a preserved `provenance` attribute.
-    fn validate_provenance_attribute(&mut self) -> Result<(), ParseError> {
+    /// Decode the source name and kind, requiring each key once in either
+    /// order.
+    fn parse_provenance_attribute(&mut self) -> Result<ir::BlockProvenance, ParseError> {
+        let mut provenance = ir::BlockProvenance {
+            name: String::new(),
+            kind: ir::BlockProvenanceKind::Function,
+        };
         self.validate_attribute_keyword_args("provenance", &["name", "kind"], |key, parser| {
             match key {
                 "name" => {
-                    parser.pop_string_or_error()?;
+                    provenance.name = parser.pop_string_or_error()?;
                     Ok(())
                 }
                 "kind" => {
                     let value = parser.pop_string_or_error()?;
-                    match value.as_str() {
-                        "proc" | "function" => Ok(()),
-                        _ => Err(ParseError::new(format!(
-                            "invalid provenance kind: {}",
-                            value
-                        ))),
-                    }
+                    provenance.kind = match value.as_str() {
+                        "proc" => ir::BlockProvenanceKind::Proc,
+                        "function" => ir::BlockProvenanceKind::Function,
+                        _ => {
+                            return Err(ParseError::new(format!(
+                                "invalid provenance kind: {value}"
+                            )));
+                        }
+                    };
+                    Ok(())
                 }
                 _ => Err(ParseError::new(format!(
                     "unknown provenance attribute key: {}",
                     key
                 ))),
             }
-        })
+        })?;
+        Ok(provenance)
     }
 
     fn pop_number_string_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
@@ -2015,6 +2068,15 @@ impl Parser {
         self.parse_node_ref(node_env, ctx)
     }
 
+    /// Parses a block-local electrical net declaration.
+    fn parse_inout_net(&mut self) -> Result<ir::InoutNet, ParseError> {
+        let name = self.pop_identifier_or_error("inout net name")?;
+        self.drop_or_error("(")?;
+        let ty = self.parse_type()?;
+        self.drop_or_error(")")?;
+        Ok(ir::InoutNet { name, ty })
+    }
+
     fn parse_register_decl(
         &mut self,
         block_name: &str,
@@ -2050,6 +2112,77 @@ impl Parser {
         })
     }
 
+    /// Parses named, quoted SystemVerilog text on an external instance.
+    fn parse_instantiation_string_map(
+        &mut self,
+        entry_kind: &str,
+    ) -> Result<BTreeMap<String, String>, ParseError> {
+        self.drop_or_error("=")?;
+        self.drop_or_error("{")?;
+        let mut entries = BTreeMap::new();
+        let key_context = format!("instantiation {entry_kind} name");
+        while !self.try_drop("}") {
+            let name = self.pop_identifier_or_error(&key_context)?;
+            self.drop_or_error(":")?;
+            let value = self.pop_string_or_error()?;
+            if entries.insert(name.clone(), value).is_some() {
+                return Err(ParseError::new(format!(
+                    "duplicate instantiation {entry_kind} '{name}'"
+                )));
+            }
+            if !self.try_drop(",") {
+                self.drop_or_error("}")?;
+                break;
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Parses an ordered, inline SystemVerilog interface for an opaque
+    /// instance.
+    fn parse_opaque_extern_ports(&mut self) -> Result<Vec<ir::OpaqueExternPort>, ParseError> {
+        self.drop_or_error("=")?;
+        self.drop_or_error("{")?;
+        let mut ports = Vec::new();
+        let mut names = BTreeSet::new();
+        let mut has_clock = false;
+        while !self.try_drop("}") {
+            let name = self.pop_identifier_or_error("opaque extern port name")?;
+            if !names.insert(name.clone()) {
+                return Err(ParseError::new(format!(
+                    "duplicate opaque extern port '{name}'"
+                )));
+            }
+            self.drop_or_error(":")?;
+            let direction = self.pop_identifier_or_error("opaque extern port direction")?;
+            let kind = match direction.as_str() {
+                "clock" => {
+                    if has_clock {
+                        return Err(ParseError::new(
+                            "opaque extern instance can have only one clock port".to_string(),
+                        ));
+                    }
+                    has_clock = true;
+                    ir::OpaqueExternPortKind::Clock
+                }
+                "input" => ir::OpaqueExternPortKind::Input(self.parse_type()?),
+                "output" => ir::OpaqueExternPortKind::Output(self.parse_type()?),
+                "inout" => ir::OpaqueExternPortKind::Inout(self.parse_type()?),
+                _ => {
+                    return Err(ParseError::new(format!(
+                        "invalid direction '{direction}' for opaque extern port '{name}'"
+                    )));
+                }
+            };
+            ports.push(ir::OpaqueExternPort { name, kind });
+            if !self.try_drop(",") {
+                self.drop_or_error("}")?;
+                break;
+            }
+        }
+        Ok(ports)
+    }
+
     fn parse_instantiation_decl(
         &mut self,
         block_name: &str,
@@ -2065,6 +2198,10 @@ impl Parser {
         self.drop_or_error("(")?;
         let mut block_ref: Option<String> = None;
         let mut foreign_function: Option<String> = None;
+        let mut module_name: Option<String> = None;
+        let mut ports = None;
+        let mut parameters = None;
+        let mut input_casts = None;
         let mut kind: Option<String> = None;
         loop {
             self.drop_whitespace_and_comments();
@@ -2085,6 +2222,34 @@ impl Parser {
                     ));
                 }
                 foreign_function = Some(self.parse_identifier_attribute("foreign_function")?);
+            } else if self.peek_is("module_name=") {
+                if module_name.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate instantiation module_name attribute".to_string(),
+                    ));
+                }
+                module_name = Some(self.parse_identifier_attribute("module_name")?);
+            } else if self.try_drop_keyword("ports") {
+                if ports.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate instantiation ports attribute".to_string(),
+                    ));
+                }
+                ports = Some(self.parse_opaque_extern_ports()?);
+            } else if self.try_drop_keyword("parameters") {
+                if parameters.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate instantiation parameters attribute".to_string(),
+                    ));
+                }
+                parameters = Some(self.parse_instantiation_string_map("parameter")?);
+            } else if self.try_drop_keyword("input_casts") {
+                if input_casts.is_some() {
+                    return Err(ParseError::new(
+                        "duplicate instantiation input_casts attribute".to_string(),
+                    ));
+                }
+                input_casts = Some(self.parse_instantiation_string_map("input cast")?);
             } else if self.peek_is("kind=") {
                 if kind.is_some() {
                     return Err(ParseError::new(
@@ -2105,17 +2270,74 @@ impl Parser {
         }
         let kind = kind
             .ok_or_else(|| ParseError::new("instantiation missing kind attribute".to_string()))?;
+        if !matches!(
+            kind.as_str(),
+            "behavioral_extern_block" | "opaque_extern_block"
+        ) {
+            for (attribute, present) in [
+                ("a module_name", module_name.is_some()),
+                ("a parameters", parameters.is_some()),
+                ("an input_casts", input_casts.is_some()),
+            ] {
+                if present {
+                    return Err(ParseError::new(format!(
+                        "{kind} instantiation cannot have {attribute} attribute"
+                    )));
+                }
+            }
+        }
+        if ports.is_some() && kind != "opaque_extern_block" {
+            return Err(ParseError::new(format!(
+                "{kind} instantiation cannot have a ports attribute"
+            )));
+        }
         let (block, kind) = match kind.as_str() {
-            "block" => {
+            "block" | "behavioral_extern_block" => {
                 if foreign_function.is_some() {
-                    return Err(ParseError::new(
-                        "block instantiation cannot have a foreign_function attribute".to_string(),
-                    ));
+                    return Err(ParseError::new(format!(
+                        "{kind} instantiation cannot have a foreign_function attribute"
+                    )));
                 }
                 let block = block_ref.ok_or_else(|| {
                     ParseError::new("instantiation missing block attribute".to_string())
                 })?;
-                (block, ir::InstantiationKind::Block)
+                let kind = if kind == "behavioral_extern_block" {
+                    ir::InstantiationKind::BehavioralExternBlock {
+                        module_name: module_name.unwrap_or_else(|| block.clone()),
+                        parameters: parameters.unwrap_or_default(),
+                        input_casts: input_casts.unwrap_or_default(),
+                    }
+                } else {
+                    ir::InstantiationKind::Block
+                };
+                (block, kind)
+            }
+            "opaque_extern_block" => {
+                if block_ref.is_some() || foreign_function.is_some() {
+                    return Err(ParseError::new(
+                        "opaque_extern_block instantiation uses module_name in place of block or foreign_function"
+                            .to_string(),
+                    ));
+                }
+                let module_name = module_name.ok_or_else(|| {
+                    ParseError::new(
+                        "opaque_extern_block instantiation missing module_name attribute"
+                            .to_string(),
+                    )
+                })?;
+                let ports = ports.ok_or_else(|| {
+                    ParseError::new(
+                        "opaque_extern_block instantiation missing ports attribute".to_string(),
+                    )
+                })?;
+                (
+                    module_name,
+                    ir::InstantiationKind::OpaqueExternBlock {
+                        ports,
+                        parameters: parameters.unwrap_or_default(),
+                        input_casts: input_casts.unwrap_or_default(),
+                    },
+                )
             }
             "extern" => {
                 if block_ref.is_some() {
@@ -2332,6 +2554,11 @@ impl Parser {
         Ok(members)
     }
 
+    /// Pair each operand with its sign and negation flags, requiring one flag
+    /// of each kind per term.
+    ///
+    /// A dotted node name can supply the ID. Only an actual `id=` keyword
+    /// counts toward the limit of one explicit ID per node.
     fn parse_ext_nary_add_op(
         &mut self,
         node_env: &IrNodeEnv,
@@ -2344,6 +2571,7 @@ impl Parser {
         let mut saw_arch = false;
         let mut saw_signed = false;
         let mut saw_negated = false;
+        let mut explicit_id = None;
 
         loop {
             self.drop_whitespace_and_comments();
@@ -2358,7 +2586,8 @@ impl Parser {
             }
 
             if self.peek_is("id=") {
-                *maybe_id = Some(self.parse_id_attribute()?);
+                let value = self.parse_id_attribute()?;
+                set_node_attribute(&mut explicit_id, value, "ext_nary_add", "id")?;
             } else if self.peek_is("arch=") {
                 if saw_arch {
                     return Err(ParseError::new(
@@ -2400,6 +2629,7 @@ impl Parser {
             }
         }
 
+        *maybe_id = explicit_id.or(*maybe_id);
         if maybe_id.is_none() {
             return Err(ParseError::new(format!(
                 "expected id for ext_nary_add; rest: {:?}",
@@ -2439,7 +2669,21 @@ impl Parser {
         Ok((terms, arch))
     }
 
+    /// Parse one node, resolving operand references against the supplied graph
+    /// environment.
+    ///
+    /// A dotted name such as `register_write.3` must agree with the operation
+    /// and any explicit ID. The suffix and one matching `id=3` may coexist.
     fn parse_node(&mut self, node_env: &mut IrNodeEnv) -> Result<ir::Node, ParseError> {
+        self.parse_node_with_block_header(node_env, None)
+    }
+
+    /// Resolves the physical type of an inout port from its block header.
+    fn parse_node_with_block_header(
+        &mut self,
+        node_env: &mut IrNodeEnv,
+        header_ports: Option<&BTreeMap<String, ir::Type>>,
+    ) -> Result<ir::Node, ParseError> {
         log::debug!("parse_node");
         let (name_or_id, dotted_prefix_opt) =
             self.pop_node_name_or_error_with_dotted("node name")?;
@@ -2456,32 +2700,51 @@ impl Parser {
 
         let mut port_pos = None;
         let (payload, id) = match operator.as_str() {
-            "input_port" | "output_port" => {
-                let arg = if operator == "output_port" {
-                    let arg = self.parse_node_ref(node_env, "output_port value")?;
+            "input_port" | "output_port" | "ext_inout_port" | "ext_inout_read" | "ext_inout_drive" => {
+                let has_drive = operator == "ext_inout_drive";
+                let key = if matches!(operator.as_str(), "ext_inout_read" | "ext_inout_drive") { "net" } else { "name" };
+                let drive = if has_drive {
+                    let drive = self.parse_node_ref(node_env, "inout drive")?;
+                    self.drop_or_error(",")?;
+                    Some(drive)
+                } else {
+                    None
+                };
+                let arg = if has_drive || operator == "output_port" {
+                    let role = if has_drive { "inout output enable" } else { "output_port value" };
+                    let arg = self.parse_node_ref(node_env, role)?;
                     self.drop_or_error(",")?;
                     Some(arg)
                 } else {
                     None
                 };
+                let mut bound_net = None;
                 let mut name = None;
                 let mut sv_type = None;
                 let mut saw_id = false;
                 loop {
                     self.drop_whitespace_and_comments();
-                    if self.peek_is("name=") {
+                    if (key == "net" && self.peek_is("net=")) || (key == "name" && self.peek_is("name=")) {
                         if name.is_some() {
-                            return Err(ParseError::new(format!("duplicate {operator} name attribute")));
+                            return Err(ParseError::new(format!("duplicate {operator} {key} attribute")));
                         }
-                        self.drop_or_error("name=")?;
-                        name = Some(self.pop_identifier_or_error("port name")?);
+                        name = Some(self.parse_identifier_attribute(key)?);
+                    } else if operator == "ext_inout_port" && self.peek_is("net=") {
+                        if bound_net.is_some() {
+                            return Err(ParseError::new(
+                                "duplicate ext_inout_port net attribute".to_string(),
+                            ));
+                        }
+                        bound_net = Some(self.parse_identifier_attribute("net")?);
                     } else if self.peek_is("id=") {
                         if saw_id {
                             return Err(ParseError::new(format!("duplicate {operator} id attribute")));
                         }
                         maybe_id = Some(self.parse_id_attribute()?);
                         saw_id = true;
-                    } else if self.peek_is("sv_type=") {
+                    } else if self.peek_is("sv_type=")
+                        && matches!(operator.as_str(), "input_port" | "output_port" | "ext_inout_port")
+                    {
                         if sv_type.is_some() {
                             return Err(ParseError::new(format!("duplicate {operator} sv_type attribute")));
                         }
@@ -2498,14 +2761,38 @@ impl Parser {
                         break;
                     }
                 }
-                let name = name.ok_or_else(|| ParseError::new(format!("{operator} missing name attribute")))?;
+                let name = name.ok_or_else(|| ParseError::new(format!("{operator} missing {key} attribute")))?;
                 let id = maybe_id.ok_or_else(|| ParseError::new(format!("{operator} missing id attribute")))?;
                 if id == 0 {
                     return Err(ParseError::new(format!("{operator} id must be greater than zero")));
                 }
-                let payload = match arg {
-                    Some(arg) => ir::NodePayload::OutputPort { name, arg, sv_type },
-                    None => ir::NodePayload::InputPort { name, sv_type },
+                let payload = match (operator.as_str(), drive, arg) {
+                    ("ext_inout_drive", Some(drive), Some(output_enable)) => ir::NodePayload::ExtInoutDrive { net: name, drive, output_enable },
+                    ("ext_inout_port", None, None) => {
+                        if node_ty != ir::Type::nil() {
+                            return Err(ParseError::new(format!(
+                                "ext_inout_port '{name}' must have () node type, got {node_ty}"
+                            )));
+                        }
+                        let header_ports = header_ports.ok_or_else(|| {
+                            ParseError::new("ext_inout_port requires a block header".to_string())
+                        })?;
+                        let port_type = header_ports.get(&name).ok_or_else(|| {
+                            ParseError::new(format!("port '{name}' not found in block header ports"))
+                        })?;
+                        ir::NodePayload::ExtInoutPort {
+                            name,
+                            port_type: port_type.clone(),
+                            net: bound_net.ok_or_else(|| ParseError::new(
+                                "ext_inout_port requires a net attribute".to_string()
+                            ))?,
+                            sv_type,
+                        }
+                    }
+                    ("ext_inout_read", None, None) => ir::NodePayload::ExtInoutRead { net: name },
+                    ("output_port", None, Some(arg)) => ir::NodePayload::OutputPort { name, arg, sv_type },
+                    ("input_port", None, None) => ir::NodePayload::InputPort { name, sv_type },
+                    _ => unreachable!("port arity is selected by its operator"),
                 };
                 (payload, id)
             }
@@ -2778,7 +3065,8 @@ impl Parser {
                         maybe_id = Some(id_attr);
                         break;
                     } else if self.peek_is("lsb_prio=") {
-                        lsb_prio = Some(self.parse_bool_attribute("lsb_prio")?);
+                        let value = self.parse_bool_attribute("lsb_prio")?;
+                        set_node_attribute(&mut lsb_prio, value, &operator, "lsb_prio")?;
                     } else {
                         return Err(ParseError::new(format!(
                             "unexpected ext_prio_encode attribute; rest_of_line: {:?}",
@@ -3082,48 +3370,40 @@ impl Parser {
                 let mut register: Option<String> = None;
                 let mut load_enable: Option<ir::NodeRef> = None;
                 let mut reset: Option<ir::NodeRef> = None;
-                loop {
-                    self.drop_whitespace_and_comments();
-                    if !self.try_drop(",") {
-                        break;
-                    }
+                let mut explicit_id = None;
+                while self.try_drop(",") {
                     self.drop_whitespace_and_comments();
                     if self.peek_is("register") {
-                        register = Some(self.parse_identifier_attribute("register")?);
-                        continue;
-                    }
-                    if self.peek_is("load_enable") {
-                        load_enable = Some(self.parse_node_ref_attribute(
+                        let value = self.parse_identifier_attribute("register")?;
+                        set_node_attribute(&mut register, value, &operator, "register")?;
+                    } else if self.peek_is("load_enable") {
+                        let value = self.parse_node_ref_attribute(
                             "load_enable",
-                            &node_env,
+                            node_env,
                             "register_write load_enable",
-                        )?);
-                        continue;
+                        )?;
+                        set_node_attribute(&mut load_enable, value, &operator, "load_enable")?;
+                    } else if self.peek_is("reset") {
+                        let value = self.parse_node_ref_attribute(
+                            "reset", node_env, "register_write reset",
+                        )?;
+                        set_node_attribute(&mut reset, value, &operator, "reset")?;
+                    } else if self.peek_is("id=") {
+                        let value = self.parse_id_attribute()?;
+                        set_node_attribute(&mut explicit_id, value, &operator, "id")?;
+                    } else {
+                        break;
                     }
-                    if self.peek_is("reset") {
-                        reset = Some(self.parse_node_ref_attribute(
-                            "reset",
-                            &node_env,
-                            "register_write reset",
-                        )?);
-                        continue;
-                    }
-                    if self.peek_is("id=") {
-                        let id_attr = self.parse_id_attribute()?;
-                        maybe_id = Some(id_attr);
-                        continue;
-                    }
-                    break;
                 }
                 let register = register.ok_or_else(|| {
                     ParseError::new("register_write missing register attribute".to_string())
                 })?;
-                if maybe_id.is_none() {
-                    return Err(ParseError::new(format!(
+                let id = explicit_id.or(maybe_id).ok_or_else(|| {
+                    ParseError::new(format!(
                         "expected id for register_write; rest_of_line: {:?}",
                         self.rest_of_line()
-                    )));
-                }
+                    ))
+                })?;
                 (
                     ir::NodePayload::RegisterWrite {
                         arg,
@@ -3131,104 +3411,99 @@ impl Parser {
                         load_enable,
                         reset,
                     },
-                    maybe_id.unwrap(),
+                    id,
                 )
             }
-            "instantiation_input" => {
-                let arg = self.parse_node_ref(&node_env, "instantiation_input arg")?;
-                let mut instantiation: Option<String> = None;
-                let mut port_name: Option<String> = None;
+            "instantiation_input" | "instantiation_output" => {
+                let arg = if operator == "instantiation_input" {
+                    let value = self.parse_node_ref(node_env, "instantiation_input arg")?;
+                    self.drop_or_error(",")?;
+                    Some(value)
+                } else {
+                    None
+                };
+                let mut instantiation = None;
+                let mut port_name = None;
+                let mut explicit_id = None;
                 loop {
                     self.drop_whitespace_and_comments();
+                    if self.peek_is("instantiation") {
+                        let value = self.parse_identifier_attribute("instantiation")?;
+                        set_node_attribute(&mut instantiation, value, &operator, "instantiation")?;
+                    } else if self.peek_is("port_name") {
+                        let value = self.parse_dotted_identifier_attribute("port_name")?;
+                        set_node_attribute(&mut port_name, value, &operator, "port_name")?;
+                    } else if self.peek_is("id=") {
+                        let value = self.parse_id_attribute()?;
+                        set_node_attribute(&mut explicit_id, value, &operator, "id")?;
+                    } else {
+                        break;
+                    }
                     if !self.try_drop(",") {
                         break;
                     }
-                    self.drop_whitespace_and_comments();
-                    if self.peek_is("instantiation") {
-                        instantiation = Some(self.parse_identifier_attribute("instantiation")?);
-                        continue;
-                    }
-                    if self.peek_is("port_name") {
-                        port_name = Some(self.parse_dotted_identifier_attribute("port_name")?);
-                        continue;
-                    }
-                    if self.peek_is("id=") {
-                        let id_attr = self.parse_id_attribute()?;
-                        maybe_id = Some(id_attr);
-                        continue;
-                    }
-                    break;
                 }
                 let instantiation = instantiation.ok_or_else(|| {
-                    ParseError::new("instantiation_input missing instantiation attribute".to_string())
+                    ParseError::new(format!("{operator} missing instantiation attribute"))
                 })?;
                 let port_name = port_name.ok_or_else(|| {
-                    ParseError::new("instantiation_input missing port_name attribute".to_string())
+                    ParseError::new(format!("{operator} missing port_name attribute"))
                 })?;
-                if maybe_id.is_none() {
-                    return Err(ParseError::new(format!(
-                        "expected id for instantiation_input; rest_of_line: {:?}",
+                let id = explicit_id.or(maybe_id).ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected id for {operator}; rest_of_line: {:?}",
                         self.rest_of_line()
-                    )));
-                }
-                (
-                    ir::NodePayload::InstantiationInput {
+                    ))
+                })?;
+                let payload = match arg {
+                    Some(arg) => ir::NodePayload::InstantiationInput {
                         instantiation,
                         port_name,
                         arg,
                     },
-                    maybe_id.unwrap(),
-                )
-            }
-            "instantiation_output" => {
-                let mut instantiation: Option<String> = None;
-                let mut port_name: Option<String> = None;
-                let mut saw_attr = false;
-                loop {
-                    self.drop_whitespace_and_comments();
-                    if saw_attr {
-                        if !self.try_drop(",") {
-                            break;
-                        }
-                        self.drop_whitespace_and_comments();
-                    } else {
-                        saw_attr = true;
-                    }
-                    self.drop_whitespace_and_comments();
-                    if self.peek_is("instantiation") {
-                        instantiation = Some(self.parse_identifier_attribute("instantiation")?);
-                        continue;
-                    }
-                    if self.peek_is("port_name") {
-                        port_name = Some(self.parse_dotted_identifier_attribute("port_name")?);
-                        continue;
-                    }
-                    if self.peek_is("id=") {
-                        let id_attr = self.parse_id_attribute()?;
-                        maybe_id = Some(id_attr);
-                        continue;
-                    }
-                    break;
-                }
-                let instantiation = instantiation.ok_or_else(|| {
-                    ParseError::new("instantiation_output missing instantiation attribute".to_string())
-                })?;
-                let port_name = port_name.ok_or_else(|| {
-                    ParseError::new("instantiation_output missing port_name attribute".to_string())
-                })?;
-                if maybe_id.is_none() {
-                    return Err(ParseError::new(format!(
-                        "expected id for instantiation_output; rest_of_line: {:?}",
-                        self.rest_of_line()
-                    )));
-                }
-                (
-                    ir::NodePayload::InstantiationOutput {
+                    None => ir::NodePayload::InstantiationOutput {
                         instantiation,
                         port_name,
                     },
-                    maybe_id.unwrap(),
-                )
+                };
+                (payload, id)
+            }
+            "ext_instantiation_inout" => {
+                let mut instantiation = None;
+                let mut port_name = None;
+                let mut net = None;
+                let mut saw_id = false;
+                loop {
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("instantiation=") && instantiation.is_none() {
+                        instantiation = Some(self.parse_identifier_attribute("instantiation")?);
+                    } else if self.peek_is("port_name=") && port_name.is_none() {
+                        port_name = Some(self.parse_identifier_attribute("port_name")?);
+                    } else if self.peek_is("net=") && net.is_none() {
+                        net = Some(self.parse_identifier_attribute("net")?);
+                    } else if self.peek_is("id=") && !saw_id {
+                        maybe_id = Some(self.parse_id_attribute()?);
+                        saw_id = true;
+                    } else if self.peek_is("pos=") && port_pos.is_none() {
+                        port_pos = self.maybe_drop_pos_attribute()?;
+                    } else {
+                        return Err(ParseError::new(format!("unknown or duplicate {operator} attribute")));
+                    }
+                    if !self.try_drop(",") {
+                        break;
+                    }
+                }
+                let required = |field| ParseError::new(format!("{operator} missing {field}"));
+                let id = maybe_id.ok_or_else(|| required("id"))?;
+                if id == 0 {
+                    return Err(ParseError::new(format!("{operator} id must be greater than zero")));
+                }
+                let instantiation = instantiation.ok_or_else(|| required("instantiation"))?;
+                let port_name = port_name.ok_or_else(|| required("port_name"))?;
+                let payload = ir::NodePayload::ExtInstantiationInout {
+                    instantiation, port_name, net: net.ok_or_else(|| required("net"))?,
+                };
+                (payload, id)
             }
             "after_all" => {
                 // This is a variadic operation that puts the variadic node refs at the top
@@ -3743,7 +4018,7 @@ impl Parser {
                             node.text_id
                         ))
                     })?;
-                let existing_node = &nodes[existing.index];
+                let existing_node = &mut nodes[existing.index];
                 if !matches!(existing_node.payload, ir::NodePayload::Param) {
                     return Err(ParseError::new(format!(
                         "param id={} does not reference a signature parameter",
@@ -3755,6 +4030,12 @@ impl Parser {
                         "param id={} type mismatch: header {} vs node {}",
                         node.text_id, existing_node.ty, node.ty
                     )));
+                }
+                // libxls v0.63.0 emits positions on returned parameters during
+                // DSLX conversion, then drops them on an IR text round trip.
+                // PIR keeps those positions on the signature node.
+                if node.pos.is_some() {
+                    existing_node.pos = node.pos;
                 }
                 existing
             } else {
@@ -3886,12 +4167,48 @@ impl Parser {
                 block.inner_attrs.push(source);
             }
         }
+        let mut net_names = BTreeSet::new();
         let mut node_env = IrNodeEnv::new();
         let mut port_nodes = BTreeMap::new();
+        let mut add_port = |name: &str, ty: &ir::Type, port: BlockPort| -> Result<(), ParseError> {
+            let declared_ty = header_ports.get(name).ok_or_else(|| {
+                ParseError::new(format!("port '{}' not found in block header ports", name))
+            })?;
+            if declared_ty != ty {
+                return Err(ParseError::new(format!(
+                    "port '{}' type mismatch: header declares {}, node has {}",
+                    name, declared_ty, ty
+                )));
+            }
+            if port_nodes.insert(name.to_owned(), port).is_some() {
+                return Err(ParseError::new(format!(
+                    "duplicate port node '{}' in block '{}'",
+                    name, block_name
+                )));
+            }
+            Ok(())
+        };
         let mut register_names = std::collections::HashSet::new();
         let mut instantiation_names = std::collections::HashSet::new();
         while !self.try_drop("}") {
             self.drop_whitespace_and_comments();
+            let start = self.offset;
+            if self.try_drop_keyword("ext_inout_net") {
+                self.drop_whitespace_and_comments();
+                if !self.peek_is(":") {
+                    let net = self.parse_inout_net()?;
+                    if !net_names.insert(net.name.clone()) {
+                        return Err(ParseError::new(format!(
+                            "duplicate inout net '{}' in block '{block_name}'",
+                            net.name
+                        )));
+                    }
+                    block.inout_nets.push(net);
+                    continue;
+                }
+                // A declaration keyword can also be an ordinary SSA node name.
+                self.offset = start;
+            }
             if self.try_drop_keyword("reg") {
                 block
                     .registers
@@ -3904,7 +4221,7 @@ impl Parser {
                     .push(self.parse_instantiation_decl(&block_name, &mut instantiation_names)?);
                 continue;
             }
-            let node = self.parse_node(&mut node_env)?;
+            let node = self.parse_node_with_block_header(&mut node_env, Some(&header_ports))?;
             let node_ref = ir::NodeRef {
                 index: block.nodes.len(),
             };
@@ -3934,6 +4251,9 @@ impl Parser {
                 ir::NodePayload::InputPort { name, .. } => {
                     Some((name, &node.ty, BlockPort::Input(node_ref)))
                 }
+                ir::NodePayload::ExtInoutPort {
+                    name, port_type, ..
+                } => Some((name, port_type, BlockPort::Inout(node_ref))),
                 ir::NodePayload::OutputPort { name, arg, .. } => {
                     if node.ty != ir::Type::nil() {
                         return Err(ParseError::new(format!(
@@ -3946,21 +4266,7 @@ impl Parser {
                 _ => None,
             };
             if let Some((name, ty, port)) = port {
-                let declared_ty = header_ports.get(name).ok_or_else(|| {
-                    ParseError::new(format!("port '{}' not found in block header ports", name))
-                })?;
-                if declared_ty != ty {
-                    return Err(ParseError::new(format!(
-                        "port '{}' type mismatch: header declares {}, node has {}",
-                        name, declared_ty, ty
-                    )));
-                }
-                if port_nodes.insert(name.clone(), port).is_some() {
-                    return Err(ParseError::new(format!(
-                        "duplicate port node '{}' in block '{}'",
-                        name, block_name
-                    )));
-                }
+                add_port(name, ty, port)?;
             }
             node_env
                 .add(node.name.clone(), node.text_id, node_ref)
@@ -4128,13 +4434,29 @@ impl Parser {
     }
 }
 
+/// Adds external instantiation maps in canonical attribute order.
+fn append_extern_block_map_attributes(
+    attributes: &mut Vec<String>,
+    parameters: &BTreeMap<String, String>,
+    input_casts: &BTreeMap<String, String>,
+) {
+    for (attribute, entries) in [("parameters", parameters), ("input_casts", input_casts)] {
+        if !entries.is_empty() {
+            attributes.push(format!(
+                "{attribute}={}",
+                ir::format_extern_block_string_map(entries)
+            ));
+        }
+    }
+}
+
 /// Emits a block with its declared port order and ordinary graph-node IDs.
 pub fn emit_block(block: &Block, is_top: bool) -> String {
     let header_parts: Vec<String> = block
         .ports
         .iter()
         .map(|port| match port {
-            BlockPort::Input(nr) | BlockPort::Output(nr) => {
+            BlockPort::Input(nr) | BlockPort::Output(nr) | BlockPort::Inout(nr) => {
                 format!("{}: {}", block.port_name(*nr), block.port_type(*nr))
             }
             BlockPort::Clock(name) => format!("{}: clock", name),
@@ -4153,6 +4475,9 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
             reset.active_low,
         ));
     }
+    for net in &block.inout_nets {
+        lines.push(format!("  ext_inout_net {}({})", net.name, net.ty));
+    }
     for reg in &block.registers {
         if let Some(reset_value) = &reg.reset_value {
             lines.push(format!(
@@ -4166,7 +4491,7 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
         }
     }
     for inst in &block.instantiations {
-        lines.push(match inst.kind {
+        lines.push(match &inst.kind {
             ir::InstantiationKind::Block => format!(
                 "  instantiation {}(block={}, kind=block)",
                 inst.name, inst.block
@@ -4175,6 +4500,45 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
                 "  instantiation {}(foreign_function={}, kind=extern)",
                 inst.name, inst.block
             ),
+            ir::InstantiationKind::BehavioralExternBlock {
+                module_name,
+                parameters,
+                input_casts,
+            } => {
+                let mut attributes = vec![format!("block={}", inst.block)];
+                if module_name != &inst.block {
+                    attributes.push(format!("module_name={module_name}"));
+                }
+                append_extern_block_map_attributes(&mut attributes, parameters, input_casts);
+                attributes.push("kind=behavioral_extern_block".to_string());
+                format!("  instantiation {}({})", inst.name, attributes.join(", "))
+            }
+            ir::InstantiationKind::OpaqueExternBlock {
+                ports,
+                parameters,
+                input_casts,
+            } => {
+                let ports = ports
+                    .iter()
+                    .map(|port| {
+                        let name = &port.name;
+                        match &port.kind {
+                            ir::OpaqueExternPortKind::Clock => format!("{name}:clock"),
+                            ir::OpaqueExternPortKind::Input(ty) => format!("{name}:input {ty}"),
+                            ir::OpaqueExternPortKind::Output(ty) => format!("{name}:output {ty}"),
+                            ir::OpaqueExternPortKind::Inout(ty) => format!("{name}:inout {ty}"),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut attributes = vec![
+                    format!("module_name={}", inst.block),
+                    format!("ports={{{ports}}}"),
+                ];
+                append_extern_block_map_attributes(&mut attributes, parameters, input_casts);
+                attributes.push("kind=opaque_extern_block".to_string());
+                format!("  instantiation {}({})", inst.name, attributes.join(", "))
+            }
         });
     }
     for node in &block.nodes {
@@ -5903,6 +6267,137 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
 "#;
 
     #[test]
+    fn inout_ports_roundtrip_with_private_nets_public_ties_and_open_pins() {
+        let source = r#"package pins
+
+block leaf(pin: bits[3], observed: bits[3]) {
+  ext_inout_net pad(bits[3])
+  physical_pin: () = ext_inout_port(name=pin, net=pad, id=1)
+  sample: bits[3] = ext_inout_read(net=pad, id=2)
+  observed: () = output_port(sample, name=observed, id=3)
+}
+
+top block top_pins(pad_a: (bits[2], bits[4][3]), oe: bits[1], pad_b: (bits[2], bits[4][3]), open_pin: bits[15], seen: bits[3]) {
+  ext_inout_net bus((bits[2], bits[4][3]))
+  ext_inout_net internal(bits[3])
+  ext_inout_net spare(bits[15])
+  instantiation child(block=leaf, kind=block)
+  pad_b: () = ext_inout_port(name=pad_b, net=bus, id=4)
+  oe: bits[1] = input_port(name=oe, id=5)
+  typed: () = ext_inout_port(name=pad_a, net=bus, sv_type="pkg::bus_t", id=6)
+  ext_inout_port.7: () = ext_inout_port(name=open_pin, net=spare, sv_type="pkg::spare_t", id=7, pos=[(0,3,1)])
+  data: bits[3] = literal(value=3, id=8)
+  drive: () = ext_inout_drive(data, oe, net=internal, id=9)
+  bind_pin: () = ext_instantiation_inout(instantiation=child, port_name=pin, net=internal, id=10)
+  observed: bits[3] = instantiation_output(instantiation=child, port_name=observed, id=11)
+  seen: () = output_port(observed, name=seen, id=12)
+}
+"#;
+        let package = Parser::new(source).parse_and_validate_package().unwrap();
+        assert_eq!(package.to_string(), source);
+    }
+
+    #[test]
+    fn port_only_net_roundtrips_and_marks_the_package_as_extended() {
+        let source = r#"package pins
+
+top block pads(io: bits[129]) {
+  ext_inout_net pin(bits[129])
+  exposed: () = ext_inout_port(name=io, net=pin, id=1)
+}
+"#;
+        let package = Parser::new(source).parse_and_validate_package().unwrap();
+        let block = package.get_block("pads").unwrap();
+        let pin = block.get_inout_port("io").unwrap();
+        assert_eq!(block.get_node_ty(pin), &ir::Type::nil());
+        assert_eq!(block.port_type(pin), &ir::Type::Bits(129));
+        assert_eq!(block.port_name(pin), "io");
+        assert!(package.uses_pir_extensions());
+        assert_eq!(package.to_string(), source);
+    }
+
+    #[test]
+    fn public_inout_requires_an_explicit_net_even_if_a_net_matches_its_name() {
+        let source = r#"block pins(pad: bits[8]) {
+  ext_inout_net pad(bits[8])
+  pad: () = ext_inout_port(name=pad, id=1)
+}"#;
+        let error = Parser::new(source).parse_block().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("ext_inout_port requires a net attribute"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn obsolete_inout_syntax_is_rejected() {
+        let prefix = "block dut(d: bits[1], pin: bits[1]) { d: bits[1] = input_port(name=d, id=1)";
+        for declaration in [
+            "ext_inout pin(bits[1])",
+            "ext_inout_net bus(bits[1], ports=[pin])",
+            "s: bits[1] = ext_inout_port(d, d, name=pin, id=2)",
+        ] {
+            let source = format!("{prefix} {declaration} }}");
+            assert!(Parser::new(&source).parse_block().is_err(), "{source}");
+        }
+
+        for attribute in ["ports=[]", r#"sv_type="legacy::net_t""#] {
+            let source = format!("block dut() {{ ext_inout_net bus(bits[1], {attribute}) }}");
+            assert!(Parser::new(&source).parse_block().is_err(), "{source}");
+        }
+
+        for access in [
+            "s: bits[1] = ext_inout_port_input(name=pin, id=2)",
+            "w: () = ext_inout_port_output(d, d, name=pin, id=2)",
+            "w: () = ext_instantiation_inout_input(d, d, instantiation=u, port_name=p, id=2)",
+            "s: bits[1] = ext_instantiation_inout_output(instantiation=u, port_name=p, id=2)",
+            "b: () = ext_instantiation_inout(instantiation=u, port_name=p, parent_port=pin, id=2)",
+        ] {
+            let source = format!(
+                "{prefix} ext_inout_net bus(bits[1]) instantiation u(block=leaf, kind=block) pin: () = ext_inout_port(name=pin, net=bus, id=3) {access} }}"
+            );
+            assert!(Parser::new(&source).parse_block().is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn inout_declaration_keywords_are_still_valid_node_names() {
+        for name in ["ext_inout", "ext_inout_net"] {
+            let input = format!(
+                "block ordinary({name}: bits[1]) {{\n  {name}: bits[1] = input_port(name={name}, id=1)\n}}"
+            );
+            let parsed = Parser::new(&input).parse_block().unwrap();
+            assert_eq!(emit_block(&parsed, false), input);
+        }
+    }
+
+    #[test]
+    fn inout_port_requires_a_unique_matching_header_and_well_formed_attributes() {
+        for body in [
+            "a: () = ext_inout_port(name=other, net=bus, id=1)",
+            "a: () = ext_inout_port(name=pin, net=bus, id=1) b: () = ext_inout_port(name=pin, net=bus, id=2)",
+            "a: () = ext_inout_port(name=pin, net=bus, id=1) b: bits[1] = input_port(name=pin, id=2)",
+            "a: bits[1] = ext_inout_port(name=pin, net=bus, id=1)",
+            "a: () = ext_inout_port(net=bus, id=1)",
+            "a: () = ext_inout_port(name=pin, net=bus, port_type=bits[1], id=1)",
+            "a: () = ext_inout_port(name=pin, net=bus, net=other, id=1)",
+            r#"a: () = ext_inout_port(name=pin, net=bus, sv_type="A", sv_type="B", id=1)"#,
+            "a: () = ext_inout_port(name=pin, net=bus, id=1) x: bits[1] = ext_inout_read(name=pin, id=2)",
+            r#"a: () = ext_inout_port(name=pin, net=bus, id=1) x: bits[1] = ext_inout_read(net=pin, sv_type="A", id=2)"#,
+            "ext_inout_net bus(bits[1]) a: () = ext_inout_port(name=pin, net=bus, id=1)",
+        ] {
+            let block =
+                format!("block example(pin: bits[1]) {{ ext_inout_net bus(bits[1]) {body} }}");
+            assert!(Parser::new(&block).parse_block().is_err(), "{block}");
+        }
+        let function =
+            "fn f(x: bits[1] id=1) -> () { ret a: () = ext_inout_port(name=x, net=bus, id=2) }";
+        assert!(Parser::new(function).parse_fn().is_err());
+    }
+
+    #[test]
     fn test_roundtrip_block_preserves_interleaved_ports_and_systemverilog_types() {
         let block = Parser::new(BLK_INTERLEAVED_PORTS_AND_TYPES)
             .parse_block()
@@ -5911,7 +6406,9 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
             .ports
             .iter()
             .map(|port| match port {
-                BlockPort::Input(nr) | BlockPort::Output(nr) => block.port_name(*nr),
+                BlockPort::Input(nr) | BlockPort::Output(nr) | BlockPort::Inout(nr) => {
+                    block.port_name(*nr)
+                }
                 BlockPort::Clock(name) => name,
             })
             .collect();
@@ -5985,6 +6482,192 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
             error.to_string(),
             "ParseError: block instantiation cannot have a foreign_function attribute"
         );
+    }
+
+    #[test]
+    fn test_external_block_instantiation_attributes() {
+        for (attributes, expected_error) in [
+            (
+                "block=model, module_name=rtl, module_name=other, kind=behavioral_extern_block",
+                "duplicate instantiation module_name attribute",
+            ),
+            (
+                "module_name=rtl, kind=behavioral_extern_block",
+                "instantiation missing block attribute",
+            ),
+            (
+                "block=model, foreign_function=f, module_name=rtl, kind=behavioral_extern_block",
+                "behavioral_extern_block instantiation cannot have a foreign_function attribute",
+            ),
+            (
+                "block=model, module_name=rtl, kind=block",
+                "block instantiation cannot have a module_name attribute",
+            ),
+            (
+                "foreign_function=f, module_name=rtl, kind=extern",
+                "extern instantiation cannot have a module_name attribute",
+            ),
+            (
+                "block=model, parameters={}, parameters={}, kind=behavioral_extern_block",
+                "duplicate instantiation parameters attribute",
+            ),
+            (
+                r#"block=model, parameters={WIDTH:"1", WIDTH:"1"}, kind=behavioral_extern_block"#,
+                "duplicate instantiation parameter 'WIDTH'",
+            ),
+            (
+                "block=model, parameters={}, kind=block",
+                "block instantiation cannot have a parameters attribute",
+            ),
+            (
+                "foreign_function=f, parameters={}, kind=extern",
+                "extern instantiation cannot have a parameters attribute",
+            ),
+            (
+                "block=model, input_casts={}, input_casts={}, kind=behavioral_extern_block",
+                "duplicate instantiation input_casts attribute",
+            ),
+            (
+                r#"module_name=rtl, ports={mode:input bits[2]}, input_casts={mode:"mode_t", mode:"other_t"}, kind=opaque_extern_block"#,
+                "duplicate instantiation input cast 'mode'",
+            ),
+            (
+                "block=model, input_casts={}, kind=block",
+                "block instantiation cannot have an input_casts attribute",
+            ),
+            (
+                "foreign_function=f, input_casts={}, kind=extern",
+                "extern instantiation cannot have an input_casts attribute",
+            ),
+        ] {
+            let text = format!("block invalid() {{ instantiation u({attributes}) }}");
+            let error = Parser::new(&text).parse_block().unwrap_err();
+            assert_eq!(error.to_string(), format!("ParseError: {expected_error}"));
+        }
+    }
+
+    #[test]
+    fn test_external_block_instantiation_parameters_roundtrip() {
+        let source = r#"block wrapper() {
+  instantiation u(kind=behavioral_extern_block, parameters = {WIDTH:"42", MODE:"\"C:\\\\test,FAST\"", BAR:"0", INIT:"{2{4'hf}}"}, module_name=rtl, block=model)
+  instantiation empty(block=model, parameters={}, kind=behavioral_extern_block)
+}"#;
+        let canonical = r#"block wrapper() {
+  instantiation u(block=model, module_name=rtl, parameters={BAR:"0", INIT:"{2{4'hf}}", MODE:"\"C:\\\\test,FAST\"", WIDTH:"42"}, kind=behavioral_extern_block)
+  instantiation empty(block=model, kind=behavioral_extern_block)
+}"#;
+        for source in [source, canonical] {
+            let block = Parser::new(source).parse_block().unwrap();
+            let ir::InstantiationKind::BehavioralExternBlock { parameters, .. } =
+                &block.instantiations[0].kind
+            else {
+                panic!("expected an external block");
+            };
+            assert_eq!(parameters["MODE"], r#""C:\\test,FAST""#);
+            assert_eq!(emit_block(&block, false), canonical);
+        }
+    }
+
+    #[test]
+    fn test_external_block_instantiation_rejects_malformed_parameters() {
+        for parameters in [r#"{WIDTH:42}"#, r#"{9WIDTH:"42"}"#, r#"{WIDTH="42"}"#] {
+            let text = format!(
+                "block wrapper() {{ instantiation u(block=model, parameters={parameters}, kind=behavioral_extern_block) }}"
+            );
+            assert!(Parser::new(&text).parse_block().is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn external_block_instantiation_input_casts_roundtrip() {
+        let source = r#"block wrapper() {
+  instantiation behavioral(input_casts = {mode:"pkg::mode_t", enable:"enable_t"}, kind=behavioral_extern_block, parameters={WIDTH:"2"}, block=model)
+  instantiation opaque(module_name=rtl, input_casts={mode:"pkg::mode_t"}, ports={mode:input bits[2]}, kind=opaque_extern_block)
+  instantiation empty(module_name=empty, ports={}, input_casts={}, kind=opaque_extern_block)
+}"#;
+        let canonical = r#"block wrapper() {
+  instantiation behavioral(block=model, parameters={WIDTH:"2"}, input_casts={enable:"enable_t", mode:"pkg::mode_t"}, kind=behavioral_extern_block)
+  instantiation opaque(module_name=rtl, ports={mode:input bits[2]}, input_casts={mode:"pkg::mode_t"}, kind=opaque_extern_block)
+  instantiation empty(module_name=empty, ports={}, kind=opaque_extern_block)
+}"#;
+        for source in [source, canonical] {
+            let block = Parser::new(source).parse_block().unwrap();
+            assert_eq!(emit_block(&block, false), canonical);
+        }
+    }
+
+    #[test]
+    fn opaque_extern_ports_roundtrip_in_declaration_order() {
+        let source = r#"block wrapper() {
+  instantiation u(
+    kind=opaque_extern_block,
+    ports = {z:output (bits[8], bits[1]), clk:clock, a:input bits[8][2], pad:inout bits[1],},
+    module_name=vendor_cell,
+    parameters={WIDTH:"8", FLAG:"1"}
+  )
+  instantiation empty(module_name=vendor_empty, ports={}, kind=opaque_extern_block)
+}"#;
+        let canonical = r#"block wrapper() {
+  instantiation u(module_name=vendor_cell, ports={z:output (bits[8], bits[1]), clk:clock, a:input bits[8][2], pad:inout bits[1]}, parameters={FLAG:"1", WIDTH:"8"}, kind=opaque_extern_block)
+  instantiation empty(module_name=vendor_empty, ports={}, kind=opaque_extern_block)
+}"#;
+        for source in [source, canonical] {
+            let block = Parser::new(source).parse_block().unwrap();
+            assert_eq!(emit_block(&block, false), canonical);
+        }
+    }
+
+    #[test]
+    fn opaque_extern_parser_rejects_invalid_attributes() {
+        for (attributes, reason) in [
+            (
+                "ports={}, kind=opaque_extern_block",
+                "opaque_extern_block instantiation missing module_name attribute",
+            ),
+            (
+                "module_name=cell, kind=opaque_extern_block",
+                "opaque_extern_block instantiation missing ports attribute",
+            ),
+            (
+                "module_name=cell, ports={}, ports={}, kind=opaque_extern_block",
+                "duplicate instantiation ports attribute",
+            ),
+            (
+                "module_name=cell, ports={a:input bits[1], a:output bits[1]}, kind=opaque_extern_block",
+                "duplicate opaque extern port 'a'",
+            ),
+            (
+                "module_name=cell, ports={clk:clock, clk2:clock}, kind=opaque_extern_block",
+                "opaque extern instance can have only one clock port",
+            ),
+            (
+                "module_name=cell, ports={a:wire bits[1]}, kind=opaque_extern_block",
+                "invalid direction 'wire' for opaque extern port 'a'",
+            ),
+            (
+                "module_name=cell, block=child, ports={}, kind=opaque_extern_block",
+                "opaque_extern_block instantiation uses module_name in place of block or foreign_function",
+            ),
+            (
+                "block=model, ports={}, kind=behavioral_extern_block",
+                "behavioral_extern_block instantiation cannot have a ports attribute",
+            ),
+        ] {
+            let text = format!("block wrapper() {{ instantiation u({attributes}) }}");
+            let error = Parser::new(&text).parse_block().unwrap_err();
+            assert_eq!(error.to_string(), format!("ParseError: {reason}"));
+        }
+    }
+
+    #[test]
+    fn opaque_extern_uses_pir_extensions_without_inouts() {
+        let ir = r#"package opaque
+top block wrapper() {
+  instantiation u(module_name=vendor_cell, ports={}, kind=opaque_extern_block)
+}
+"#;
+        let package = Parser::new(ir).parse_and_verify_package().unwrap();
+        assert!(package.uses_pir_extensions());
     }
 
     #[test]

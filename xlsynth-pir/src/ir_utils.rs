@@ -151,26 +151,27 @@ pub fn fn_node_count(f: &Fn) -> usize {
 /// Scans all stored nodes, including unreachable ones, without traversing the
 /// referenced functions. Each referenced function name appears once.
 pub fn external_function_references(f: &Fn) -> BTreeSet<String> {
-    let mut refs = BTreeSet::new();
-    for node in f.nodes.iter() {
-        match &node.payload {
+    direct_function_references(f)
+        .into_iter()
+        .filter(|&name| name != f.name)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Names referenced by call, map, and loop nodes in this function or block.
+/// Includes all stored nodes and keeps self-references for cycle validation.
+pub fn direct_function_references(graph: &NodeGraph) -> BTreeSet<&str> {
+    graph
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.payload {
             NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
-                if to_apply != &f.name {
-                    refs.insert(to_apply.clone());
-                }
+                Some(to_apply.as_str())
             }
-            NodePayload::CountedFor { body, .. } => {
-                if body != &f.name {
-                    refs.insert(body.clone());
-                }
-            }
-            _ => {
-                // All other node kinds do not reference out-of-function
-                // callees.
-            }
-        }
-    }
-    refs
+            NodePayload::CountedFor { body, .. } => Some(body.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Returns true when `f` references another function via `invoke`, `map`, or
@@ -227,7 +228,15 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     match payload {
         Nil => vec![],
         Param => vec![],
-        InputPort { .. } => vec![],
+        InputPort { .. }
+        | ExtInoutPort { .. }
+        | ExtInoutRead { .. }
+        | ExtInstantiationInout { .. } => vec![],
+        ExtInoutDrive {
+            drive,
+            output_enable,
+            ..
+        } => vec![*drive, *output_enable],
         OutputPort { arg, .. } => vec![*arg],
         Tuple(elems) => elems.clone(),
         Array(elems) => elems.clone(),
@@ -1110,6 +1119,18 @@ where
             name: name.clone(),
             sv_type: sv_type.clone(),
         },
+        NodePayload::ExtInoutDrive {
+            net,
+            drive,
+            output_enable,
+        } => NodePayload::ExtInoutDrive {
+            net: net.clone(),
+            drive: map((0, *drive)),
+            output_enable: map((1, *output_enable)),
+        },
+        NodePayload::ExtInoutPort { .. }
+        | NodePayload::ExtInoutRead { .. }
+        | NodePayload::ExtInstantiationInout { .. } => payload.clone(),
         NodePayload::OutputPort { name, arg, sv_type } => NodePayload::OutputPort {
             name: name.clone(),
             arg: map((0, *arg)),

@@ -4,9 +4,10 @@
 //! Lean.
 //!
 //! The word-level exporter preserves the XLS function signature and is checked
-//! against the PIR evaluator. Word-level proof targets expose each IR node and
-//! check pointwise equivalence over the full signature. Gate proofs use an
-//! evaluator proved equivalent to Lean's stock AIG semantics.
+//! against the PIR evaluator. Word-level proof targets compare the exported
+//! functions over their full signatures. Intermediate values are local
+//! bindings in each function body. Gate proofs use an evaluator proved
+//! equivalent to Lean's stock AIG semantics.
 //!
 //! [`block`] separately exports stateful block models as Lean source text.
 

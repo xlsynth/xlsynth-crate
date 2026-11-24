@@ -5,6 +5,7 @@
 //! Backward dependencies can require an explicitly counted ordering fallback.
 
 use super::*;
+use crate::netlist::electrical::RiseFall;
 use anyhow::ensure;
 use std::collections::BTreeMap;
 
@@ -106,10 +107,10 @@ struct TransactionUndo {
     bits: usize,
     instances: usize,
     changed: BTreeMap<usize, (Instance, usize, Vec<usize>)>,
-    nets: BTreeMap<usize, NetUndo>,
+    nets: BTreeMap<NormalizedBitIndex, NetUndo>,
     known: BTreeMap<usize, HashMap<String, bool>>,
     coverage: BTreeMap<usize, HashMap<String, bool>>,
-    coverage_values: BTreeMap<usize, Option<bool>>,
+    coverage_values: BTreeMap<NormalizedBitIndex, Option<bool>>,
     ranks: Option<Vec<usize>>,
     traversal_dirty: bool,
     timing: Undo,
@@ -141,20 +142,20 @@ impl TransactionUndo {
     }
 
     /// Journals a net once, before its first connectivity mutation.
-    fn net(&mut self, s: &IncrementalSta<'_>, bit: usize) {
+    fn net(&mut self, s: &IncrementalSta<'_>, bit: NormalizedBitIndex) {
         self.nets.entry(bit).or_insert_with(|| NetUndo {
-            driver: s.drivers[bit],
-            loads: s.loads[bit].clone(),
-            consumers: s.consumers[bit].clone(),
-            capacitance: s.capacitances[bit],
-            constant: s.timing_constants[bit],
+            driver: s.drivers[bit.index()],
+            loads: s.loads[bit.index()].clone(),
+            consumers: s.consumers[bit.index()].clone(),
+            capacitance: s.capacitances[bit.index()],
+            constant: s.timing_constants[bit.index()],
         });
     }
 
     /// Restores timings before truncating new IDs, then restores graph records.
     fn restore(self, s: &mut IncrementalSta<'_>) {
         for (bit, values) in self.timing.bits.into_iter().rev() {
-            [s.timing[0][bit], s.timing[1][bit]] = values;
+            [s.timing[0][bit.index()], s.timing[1][bit.index()]] = values;
         }
         for (i, counts) in self.timing.counts.into_iter().rev() {
             s.set_query_counts(i, counts);
@@ -171,17 +172,17 @@ impl TransactionUndo {
             s.orders[i] = order;
         }
         for (bit, old) in self.nets {
-            s.drivers[bit] = old.driver;
-            s.loads[bit] = old.loads;
-            s.consumers[bit] = old.consumers;
-            s.capacitances[bit] = old.capacitance;
-            s.timing_constants[bit] = old.constant;
+            s.drivers[bit.index()] = old.driver;
+            s.loads[bit.index()] = old.loads;
+            s.consumers[bit.index()] = old.consumers;
+            s.capacitances[bit.index()] = old.capacitance;
+            s.timing_constants[bit.index()] = old.constant;
         }
         for (i, old) in self.coverage {
             s.coverage_known[i] = old;
         }
         for (bit, old) in self.coverage_values {
-            s.coverage_values[bit] = old;
+            s.coverage_values[bit.index()] = old;
         }
         s.traversal_dirty = self.traversal_dirty;
         if let Some(ranks) = self.ranks {
@@ -232,27 +233,28 @@ impl IncrementalSta<'_> {
     }
 
     /// Canonical source after resolving the original module's wiring aliases.
-    pub fn canonical_source(&self, bit: usize) -> Option<BitSource> {
-        self.bit_sources.get(bit).copied()
+    pub fn canonical_source(&self, bit: NormalizedBitIndex) -> Option<BitSource> {
+        self.bit_sources.get(bit.index()).copied()
     }
 
     /// PI-launched edge arrival/slew for a normalized bit; aliases resolve to
     /// roots.
-    pub fn timing_for_bit(&self, bit: usize) -> Option<SignalTiming> {
-        match *self.bit_sources.get(bit)? {
-            BitSource::Bit(root) => self.timing[0][root].as_ref()?.as_report_signal_timing(),
+    pub fn timing_for_bit(&self, bit: NormalizedBitIndex) -> Option<SignalTiming> {
+        match *self.bit_sources.get(bit.index())? {
+            BitSource::Bit(root) => self.timing[0][root.index()]
+                .as_ref()?
+                .as_report_signal_timing(),
             BitSource::Literal(_) => self.literal.as_report_signal_timing(),
             BitSource::Unknown => None,
         }
     }
 
     /// Rise/fall capacitance at a canonical bit.
-    pub fn load_for_bit(&self, bit: usize) -> Option<[f64; 2]> {
-        let BitSource::Bit(root) = *self.bit_sources.get(bit)? else {
+    pub fn load_for_bit(&self, bit: NormalizedBitIndex) -> Option<RiseFall<f64>> {
+        let BitSource::Bit(root) = *self.bit_sources.get(bit.index())? else {
             return None;
         };
-        let load = self.capacitances.get(root)?;
-        Some([load.rise, load.fall])
+        self.capacitances.get(root.index()).copied()
     }
 
     /// Current cell delay/slew query diagnostics for a combinational graph.
@@ -294,12 +296,16 @@ impl IncrementalSta<'_> {
             );
             let source = match *source {
                 BitSource::Bit(bit) => {
-                    ensure!(bit < self.bit_count(), "unknown bit {bit}");
+                    ensure!(
+                        bit.index() < self.bit_count(),
+                        "unknown bit {}",
+                        bit.index()
+                    );
                     if pin.direction == PinDirection::Input as i32 {
-                        self.bit_sources[bit]
+                        self.bit_sources[bit.index()]
                     } else {
                         ensure!(
-                            self.bit_sources[bit] == BitSource::Bit(bit),
+                            self.bit_sources[bit.index()] == BitSource::Bit(bit),
                             "cannot drive an alias"
                         );
                         BitSource::Bit(bit)
@@ -349,7 +355,7 @@ impl IncrementalSta<'_> {
                 if let Some([BitSource::Bit(bit)]) =
                     self.instances[i].pins.get(name).map(Vec::as_slice)
                 {
-                    self.coverage_values[*bit] = self
+                    self.coverage_values[bit.index()] = self
                         .lib
                         .constant_function(self.cells[i], pin)
                         .and_then(|f| f.evaluate_partial(&self.coverage_known[i]));
@@ -360,7 +366,13 @@ impl IncrementalSta<'_> {
 
     /// Re-evaluates one cell's least Boolean fixed point. Self-feedback starts
     /// unknown so a prior constant cannot justify itself after a rewire.
-    fn topology_coverage(&self, i: usize) -> (HashMap<String, bool>, Vec<(usize, Option<bool>)>) {
+    fn topology_coverage(
+        &self,
+        i: usize,
+    ) -> (
+        HashMap<String, bool>,
+        Vec<(NormalizedBitIndex, Option<bool>)>,
+    ) {
         let inst = &self.instances[i];
         let mut known: HashMap<_, _> = inst
             .pins
@@ -368,8 +380,8 @@ impl IncrementalSta<'_> {
             .filter_map(|(name, sources)| {
                 let value = match sources.as_slice() {
                     [BitSource::Literal(v)] => Some(*v),
-                    [BitSource::Bit(bit)] if self.drivers[*bit] != Some(i) => {
-                        self.coverage_values[*bit]
+                    [BitSource::Bit(bit)] if self.drivers[bit.index()] != Some(i) => {
+                        self.coverage_values[bit.index()]
                     }
                     _ => None,
                 };
@@ -442,13 +454,13 @@ impl IncrementalSta<'_> {
                 affected.insert(i);
             }
             for (bit, value) in values {
-                if value != self.coverage_values[bit] {
+                if value != self.coverage_values[bit.index()] {
                     undo.coverage_values
                         .entry(bit)
-                        .or_insert(self.coverage_values[bit]);
-                    self.coverage_values[bit] = value;
+                        .or_insert(self.coverage_values[bit.index()]);
+                    self.coverage_values[bit.index()] = value;
                     queue.extend(
-                        self.consumers[bit]
+                        self.consumers[bit.index()]
                             .iter()
                             .filter(|&&j| j != i)
                             .map(|&j| (self.positions[j], j)),
@@ -467,7 +479,7 @@ impl IncrementalSta<'_> {
         let mut added = Vec::new();
         while !pending.is_empty() {
             let ready = pending.iter().copied().find(|&i| self.instances[i].pins.values().flatten()
-                .all(|s| !matches!(s, BitSource::Bit(b) if self.drivers[*b].is_some_and(|d| d != i && pending.contains(&d)))));
+                .all(|s| !matches!(s, BitSource::Bit(b) if self.drivers[b.index()].is_some_and(|d| d != i && pending.contains(&d)))));
             let Some(i) = ready else {
                 break;
             };
@@ -479,7 +491,7 @@ impl IncrementalSta<'_> {
             let bound = self.instances[i]
                 .outputs
                 .iter()
-                .flat_map(|b| self.consumers[*b].iter())
+                .flat_map(|b| self.consumers[b.index()].iter())
                 .filter(|&&j| j != i)
                 .map(|&j| {
                     if j < old {
@@ -504,7 +516,7 @@ impl IncrementalSta<'_> {
                 })
                 .flat_map(|(_, sources)| sources)
                 .filter_map(|s| match s {
-                    BitSource::Bit(b) => self.drivers[*b]
+                    BitSource::Bit(b) => self.drivers[b.index()]
                         .filter(|&d| d != i)
                         .map(|d| self.positions[d]),
                     _ => None,
@@ -515,8 +527,8 @@ impl IncrementalSta<'_> {
             fits &= self.positions[i] < upper[&i];
         }
         fits &= undo.nets.keys().all(|&b| {
-            self.drivers[b].is_none_or(|d| {
-                self.consumers[b]
+            self.drivers[b.index()].is_none_or(|d| {
+                self.consumers[b.index()]
                     .iter()
                     .all(|&j| d == j || self.positions[d] < self.positions[j])
             })
@@ -582,7 +594,8 @@ impl IncrementalSta<'_> {
             .ok_or_else(|| anyhow!("bit count overflow"))?;
         self.bit_names
             .extend((old_bits..n).map(|bit| format!("<timing-bit {bit}>")));
-        self.bit_sources.extend((old_bits..n).map(BitSource::Bit));
+        self.bit_sources
+            .extend((old_bits..n).map(|index| BitSource::Bit(NormalizedBitIndex::new(index))));
         self.external_load_counts.resize(n, 0);
         self.endpoints_by_bit.resize_with(n, Vec::new);
         for timing in &mut self.timing {
@@ -735,11 +748,11 @@ impl IncrementalSta<'_> {
             for sources in inst.pins.values() {
                 for source in sources {
                     if let BitSource::Bit(bit) = *source {
-                        self.loads[bit].retain(|(j, _)| *j != i);
-                        self.consumers[bit].retain(|&j| j != i);
-                        if self.drivers[bit] == Some(i) {
-                            self.drivers[bit] = None;
-                            self.timing_constants[bit] = None;
+                        self.loads[bit.index()].retain(|(j, _)| *j != i);
+                        self.consumers[bit.index()].retain(|&j| j != i);
+                        if self.drivers[bit.index()] == Some(i) {
+                            self.drivers[bit.index()] = None;
+                            self.timing_constants[bit.index()] = None;
                         }
                     }
                 }
@@ -760,17 +773,20 @@ impl IncrementalSta<'_> {
                 if let BitSource::Bit(bit) = source {
                     undo.net(self, bit);
                     if direction == PinDirection::Input as i32 {
-                        self.loads[bit].push((i, name));
+                        self.loads[bit.index()].push((i, name));
                     } else if direction == PinDirection::Output as i32 {
                         ensure!(
                             !self.primary_inputs.contains(&bit),
                             "cell drives a primary input"
                         );
-                        ensure!(self.drivers[bit].replace(i).is_none(), "multiple drivers");
+                        ensure!(
+                            self.drivers[bit.index()].replace(i).is_none(),
+                            "multiple drivers"
+                        );
                         self.instances[i].outputs.push(bit);
                         let pin = self.lib.pin(self.cells[i], &name).expect("validated pin");
                         if pin.timing_arcs.is_empty() {
-                            self.timing_constants[bit] = self.lib.timing_constant(
+                            self.timing_constants[bit.index()] = self.lib.timing_constant(
                                 self.cells[i],
                                 self.lib
                                     .pin_index(self.cells[i], &name)
@@ -784,7 +800,7 @@ impl IncrementalSta<'_> {
         let mut known_changed = changed.clone();
         let mut coverage_changed = changed.clone();
         for (&bit, old) in &undo.nets {
-            self.loads[bit].sort_by_key(|(i, p)| {
+            self.loads[bit.index()].sort_by_key(|(i, p)| {
                 (
                     *i,
                     self.instances[*i]
@@ -794,41 +810,46 @@ impl IncrementalSta<'_> {
                         .expect("validated pin"),
                 )
             });
-            self.consumers[bit] = self.loads[bit].iter().map(|(i, _)| *i).collect();
-            self.consumers[bit].dedup();
+            self.consumers[bit.index()] = self.loads[bit.index()].iter().map(|(i, _)| *i).collect();
+            self.consumers[bit.index()].dedup();
             ensure!(
-                self.drivers[bit].is_some()
+                self.drivers[bit.index()].is_some()
                     || self.primary_inputs.contains(&bit)
-                    || (self.loads[bit].is_empty() && self.endpoints_by_bit[bit].is_empty()),
-                "undriven bit {bit}"
+                    || (self.loads[bit.index()].is_empty()
+                        && self.endpoints_by_bit[bit.index()].is_empty()),
+                "undriven bit {}",
+                bit.index()
             );
-            if self.timing_constants[bit] != old.constant {
-                known_changed.extend(self.consumers[bit].iter().copied());
+            if self.timing_constants[bit.index()] != old.constant {
+                known_changed.extend(self.consumers[bit.index()].iter().copied());
             }
-            if self.drivers[bit] != old.driver {
-                coverage_changed.extend(self.consumers[bit].iter().copied());
-                if let Some(i) = self.drivers[bit] {
+            if self.drivers[bit.index()] != old.driver {
+                coverage_changed.extend(self.consumers[bit.index()].iter().copied());
+                if let Some(i) = self.drivers[bit.index()] {
                     changed.insert(i);
                 } else {
                     undo.timing.bits.push((
                         bit,
-                        [self.timing[0][bit].clone(), self.timing[1][bit].clone()],
+                        [
+                            self.timing[0][bit.index()].clone(),
+                            self.timing[1][bit.index()].clone(),
+                        ],
                     ));
-                    self.timing[0][bit] = None;
-                    self.timing[1][bit] = None;
+                    self.timing[0][bit.index()] = None;
+                    self.timing[1][bit.index()] = None;
                     undo.coverage_values
                         .entry(bit)
-                        .or_insert(self.coverage_values[bit]);
-                    self.coverage_values[bit] = None;
+                        .or_insert(self.coverage_values[bit.index()]);
+                    self.coverage_values[bit.index()] = None;
                 }
             }
             let load = self.compute_load(bit)?;
             if load != old.capacitance {
-                if let Some(i) = self.drivers[bit] {
+                if let Some(i) = self.drivers[bit.index()] {
                     changed.insert(i);
                 }
             }
-            self.capacitances[bit] = load;
+            self.capacitances[bit.index()] = load;
         }
         for i in known_changed {
             let known: HashMap<_, _> = self.instances[i]
@@ -843,7 +864,7 @@ impl IncrementalSta<'_> {
                                 .pin(self.cells[i], name)
                                 .is_some_and(|p| p.direction == PinDirection::Input as i32) =>
                         {
-                            self.timing_constants[*b]
+                            self.timing_constants[b.index()]
                         }
                         _ => None,
                     };
@@ -866,7 +887,7 @@ impl IncrementalSta<'_> {
         let mut affected = changed.clone();
         for (&bit, old) in &undo.nets {
             affected.extend(old.driver);
-            affected.extend(self.drivers[bit]);
+            affected.extend(self.drivers[bit.index()]);
         }
         let queue = changed
             .into_iter()
@@ -976,14 +997,14 @@ impl IncrementalSta<'_> {
         let mut queue = BTreeSet::from([(self.positions[i], i)]);
         let mut affected = BTreeSet::from([i]);
         for bit in changed_loads {
-            if let Some(driver) = self.drivers[bit] {
+            if let Some(driver) = self.drivers[bit.index()] {
                 affected.insert(driver);
             }
             let load = self.compute_load(bit)?;
-            if load != self.capacitances[bit] {
+            if load != self.capacitances[bit.index()] {
                 undo.net(self, bit);
-                self.capacitances[bit] = load;
-                if let Some(driver) = self.drivers[bit] {
+                self.capacitances[bit.index()] = load;
+                if let Some(driver) = self.drivers[bit.index()] {
                     queue.insert((self.positions[driver], driver));
                 }
             }

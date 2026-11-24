@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth::dslx::{Function, FunctionCallGraph, MatchableModuleMember, Module, ModuleMember};
 
+use super::ImportedStructs;
 use super::outline_graph::{OutlineGraph, SourceModule};
-use super::{ImportedStructs, NativeSourceFiles};
 use crate::effect_diagnostic::{EffectLocation, const_assert_replacement};
 use crate::parser::outline::{DslxFunctionTokens, dslx_function_tokens};
 use crate::parser::source_bytes::{decode_dslx_source, native_display_tokens_source};
@@ -68,10 +68,6 @@ impl ImportedStructs {
             .files
             .as_ref()
             .expect("DSLX imports have a source snapshot");
-        self.effect_sources_for(files)
-    }
-
-    pub(crate) fn effect_sources_for(&self, files: &NativeSourceFiles) -> EffectSources<'_> {
         EffectSources {
             graph: &self.graph,
             modules: self

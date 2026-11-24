@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Typed XLS IR nodes, graphs, and package members shared by the parser and
+//! verifier.
+
 #![allow(unused)]
 
-use std::collections::{HashMap, hash_map::OccupiedError};
+use std::collections::{BTreeMap, HashMap, hash_map::OccupiedError};
 
 use crate::{IrFormatPreference, IrValue};
 
 use crate::{ir, ir_parser, ir_utils::operands};
 
-pub use crate::ir_block::{Block, BlockPort, BlockReset};
+pub use crate::ir_block::{Block, BlockPort, BlockReset, InoutNet};
 
 pub use xlsynth_ir_value::{ArrayTypeData, StartAndLimit, Type};
 
@@ -316,6 +319,29 @@ pub enum NodePayload {
         start: NodeRef,
         update_value: NodeRef,
     },
+    /// Declares a public bidirectional port bound to a whole local net.
+    ExtInoutPort {
+        name: String,
+        port_type: Type,
+        net: String,
+        sv_type: Option<String>,
+    },
+    /// Samples the resolved value of a declared electrical net.
+    ExtInoutRead {
+        net: String,
+    },
+    /// Drives the named net while the whole-net enable is asserted.
+    ExtInoutDrive {
+        net: String,
+        drive: NodeRef,
+        output_enable: NodeRef,
+    },
+    /// Connects a child inout port to a net in this block.
+    ExtInstantiationInout {
+        instantiation: String,
+        port_name: String,
+        net: String,
+    },
     /// Extension (non-upstream) op: carry-out bit of addition.
     ///
     /// Semantics: for `lhs, rhs: bits[w]` and `c_in: bits[1]`, returns
@@ -473,7 +499,11 @@ impl NodePayload {
     pub fn is_extension_op(&self) -> bool {
         matches!(
             self,
-            NodePayload::ExtCarryOut { .. }
+            NodePayload::ExtInoutPort { .. }
+                | NodePayload::ExtInoutRead { .. }
+                | NodePayload::ExtInoutDrive { .. }
+                | NodePayload::ExtInstantiationInout { .. }
+                | NodePayload::ExtCarryOut { .. }
                 | NodePayload::ExtPrioEncode { .. }
                 | NodePayload::ExtClz { .. }
                 | NodePayload::ExtNormalizeLeft { .. }
@@ -486,6 +516,10 @@ impl NodePayload {
         match self {
             NodePayload::Nil => "nil",
             NodePayload::Param => "param",
+            NodePayload::ExtInoutPort { .. } => "ext_inout_port",
+            NodePayload::ExtInoutRead { .. } => "ext_inout_read",
+            NodePayload::ExtInoutDrive { .. } => "ext_inout_drive",
+            NodePayload::ExtInstantiationInout { .. } => "ext_instantiation_inout",
             NodePayload::InputPort { .. } => "input_port",
             NodePayload::OutputPort { .. } => "output_port",
             NodePayload::Tuple(_) => "tuple",
@@ -617,13 +651,36 @@ impl NodePayload {
                 .collect()
         };
         let result = match self {
-            NodePayload::InputPort { name, sv_type } => {
+            NodePayload::InputPort { name, sv_type }
+            | NodePayload::ExtInoutPort { name, sv_type, .. } => {
                 let mut parts = vec![format!("name={name}")];
+                if let NodePayload::ExtInoutPort { net, .. } = self {
+                    parts.push(format!("net={net}"));
+                }
                 if let Some(sv_type) = sv_type {
                     parts.push(format!("sv_type=\"{}\"", escape_xls_ir_string(sv_type)));
                 }
                 parts
             }
+            NodePayload::ExtInoutRead { net } => vec![format!("net={net}")],
+            NodePayload::ExtInoutDrive {
+                net,
+                drive,
+                output_enable,
+            } => vec![
+                format_operand(*drive),
+                format_operand(*output_enable),
+                format!("net={net}"),
+            ],
+            NodePayload::ExtInstantiationInout {
+                instantiation,
+                port_name,
+                net,
+            } => vec![
+                format!("instantiation={instantiation}"),
+                format!("port_name={port_name}"),
+                format!("net={net}"),
+            ],
             NodePayload::OutputPort { name, arg, sv_type } => {
                 let mut parts = vec![format_operand(*arg), format!("name={name}")];
                 if let Some(sv_type) = sv_type {
@@ -1012,12 +1069,22 @@ impl Node {
         f: &NodeGraph,
         opts: &NodeRenderOptions,
     ) -> Option<String> {
+        let components = self.payload.to_string_components(f, opts)?;
+        Some(self.render_with_components(components, opts))
+    }
+
+    /// Renders the opcode arguments together with the node's ID and source
+    /// positions.
+    fn render_with_components(
+        &self,
+        mut components: Vec<String>,
+        opts: &NodeRenderOptions,
+    ) -> String {
         let name_str = if let Some(name) = &self.name {
             format!("{}", name)
         } else {
             format!("{}.{}", self.payload.get_operator(), self.text_id)
         };
-        let mut components = self.payload.to_string_components(f, opts)?;
         if opts.include_id {
             components.push(format!("id={}", self.text_id));
         }
@@ -1036,7 +1103,7 @@ impl Node {
             }
         }
         let payload_str = format!("{}({})", self.payload.get_operator(), components.join(", "));
-        Some(format!("{}: {} = {}", name_str, self.ty, payload_str))
+        format!("{}: {} = {}", name_str, self.ty, payload_str)
     }
 
     pub fn to_signature_string(&self, f: &NodeGraph) -> String {
@@ -1103,6 +1170,23 @@ pub struct ResetAttribute {
     pub port_name: String,
     pub asynchronous: bool,
     pub active_low: bool,
+}
+
+/// The original proc or function from which a block was lowered.
+///
+/// Package verification compares the decoded name and kind together. A proc
+/// and a function with the same name identify different origins.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BlockProvenance {
+    pub name: String,
+    pub kind: BlockProvenanceKind,
+}
+
+/// The kind of XLS source member named by a block's provenance attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockProvenanceKind {
+    Proc,
+    Function,
 }
 
 /// The decoded XLS foreign function metadata used for external implementations.
@@ -1175,6 +1259,27 @@ pub struct NodeGraph {
 }
 
 impl NodeGraph {
+    /// Rejects resolved pin operations before a consumer projects the graph to
+    /// two-state values.
+    pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
+        for node in &self.nodes {
+            let pin = match &node.payload {
+                NodePayload::ExtInoutPort { name, .. } => name,
+                NodePayload::ExtInoutRead { net }
+                | NodePayload::ExtInoutDrive { net, .. }
+                | NodePayload::ExtInstantiationInout { net, .. } => net,
+                _ => continue,
+            };
+            return Err(format!(
+                "{backend}: {} '{}' in '{}' requires block-to-Verilog codegen",
+                node.payload.get_operator(),
+                pin,
+                self.name
+            ));
+        }
+        Ok(())
+    }
+
     /// Returns the last `ffi_proto` declaration, which is the one XLS uses.
     pub fn ffi_proto(&self) -> Option<&ForeignFunctionData> {
         self.outer_attrs
@@ -1324,50 +1429,36 @@ fn append_emitted_node_line(
     comment: Option<String>,
 ) {
     let node = func.get_node(node_ref);
-    let is_ret = if let Some(ret_node_ref) = func.ret_node_ref {
-        ret_node_ref == node_ref
-    } else {
-        false
-    };
-
-    match &node.payload {
-        NodePayload::Param if is_ret => {
-            let name = node
-                .name
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("<unnamed>");
-            let mut line = String::new();
-            line.push_str("  ret ");
-            line.push_str(&format!(
-                "{}: {} = param(name={}, id={})",
-                name, node.ty, name, node.text_id
-            ));
-            if let Some(comment) = comment {
-                line.push_str("  // ");
-                line.push_str(&comment);
+    let is_ret = func.ret_node_ref == Some(node_ref);
+    let node_str = match &node.payload {
+        NodePayload::Param => {
+            // The signature alone represents a parameter unless the body must
+            // carry its return marker or source positions.
+            if !is_ret && node.pos.as_deref().unwrap_or_default().is_empty() {
+                return;
             }
-            out.push_str(&line);
-            out.push('\n');
+            node.render_with_components(
+                vec![format!("name={}", node.param_name())],
+                &NodeRenderOptions::default(),
+            )
         }
         _ => {
             let Some(node_str) = node.to_string(func) else {
                 return;
             };
-            let mut line = String::new();
-            line.push_str("  ");
-            if is_ret {
-                line.push_str("ret ");
-            }
-            line.push_str(&node_str);
-            if let Some(comment) = comment {
-                line.push_str("  // ");
-                line.push_str(&comment);
-            }
-            out.push_str(&line);
-            out.push('\n');
+            node_str
         }
+    };
+    out.push_str("  ");
+    if is_ret {
+        out.push_str("ret ");
     }
+    out.push_str(&node_str);
+    if let Some(comment) = comment {
+        out.push_str("  // ");
+        out.push_str(&comment);
+    }
+    out.push('\n');
 }
 
 /// Emits a function as text, including outer/inner attributes and body.
@@ -1659,6 +1750,14 @@ pub enum PackageMember {
 }
 
 impl PackageMember {
+    /// Rejects four-state nets before handing a member to a two-state backend.
+    pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
+        match self {
+            Self::Function(f) => f.reject_inouts(backend),
+            Self::Block(block) => block.reject_inouts(backend),
+        }
+    }
+
     /// Returns the shared graph without treating blocks as functions.
     pub fn graph(&self) -> &NodeGraph {
         match self {
@@ -1683,22 +1782,167 @@ pub struct Register {
     pub reset_value: Option<IrValue>,
 }
 
-/// Distinguishes a child block from a foreign-function instantiation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A named port on an external module whose implementation is opaque to PIR.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpaqueExternPort {
+    pub name: String,
+    pub kind: OpaqueExternPortKind,
+}
+
+/// The role and, for data ports, the PIR type of an opaque external pin.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum OpaqueExternPortKind {
+    Clock,
+    Input(Type),
+    Output(Type),
+    Inout(Type),
+}
+
+/// Describes how a block instance is modeled and emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InstantiationKind {
     Block,
     Extern,
+    /// Uses a package block for behavior and an external module for RTL.
+    BehavioralExternBlock {
+        module_name: String,
+        /// Named overrides as decoded SystemVerilog expression text.
+        parameters: BTreeMap<String, String>,
+        /// Named input connections to cast to SystemVerilog typedefs.
+        input_casts: BTreeMap<String, String>,
+    },
+    /// Supplies an inline interface to a separately implemented RTL module.
+    OpaqueExternBlock {
+        ports: Vec<OpaqueExternPort>,
+        /// Named overrides as decoded SystemVerilog expression text.
+        parameters: BTreeMap<String, String>,
+        /// Named input connections to cast to SystemVerilog typedefs.
+        input_casts: BTreeMap<String, String>,
+    },
 }
 
+/// Checks parameter names and nonempty expressions without interpreting HDL.
+pub(crate) fn validate_extern_block_parameters(
+    instance_name: &str,
+    parameters: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (name, value) in parameters {
+        if !crate::ir_utils::is_valid_identifier_name(name) {
+            return Err(format!(
+                "extern block instance '{instance_name}' has an invalid parameter name '{name}'"
+            ));
+        }
+        if value.trim().is_empty() {
+            return Err(format!(
+                "extern block instance '{instance_name}' requires a nonempty SystemVerilog expression for parameter '{name}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Checks that an external input can supply an expression for a named SV cast.
+pub(crate) fn validate_extern_block_input_cast(
+    instance_name: &str,
+    port_name: &str,
+    input_type: &Type,
+    sv_type: &str,
+) -> Result<(), String> {
+    if input_type.checked_bit_count() == Some(0) {
+        return Err(format!(
+            "extern block instance '{instance_name}' cannot cast zero-width input '{port_name}'"
+        ));
+    }
+    let valid_identifier = xlsynth_vast::is_system_verilog_simple_identifier;
+    let valid_type = match sv_type.split_once("::") {
+        Some((package, name)) => valid_identifier(package) && valid_identifier(name),
+        None => valid_identifier(sv_type),
+    };
+    if !valid_type {
+        return Err(format!(
+            "extern block instance '{instance_name}' input cast for port '{port_name}' requires a SystemVerilog type name, got '{sv_type}'"
+        ));
+    }
+    Ok(())
+}
+
+/// Prints named strings using PIR string escaping and lexical key order.
+pub(crate) fn format_extern_block_string_map(values: &BTreeMap<String, String>) -> String {
+    let entries = values
+        .iter()
+        .map(|(name, value)| format!("{name}:\"{}\"", escape_xls_ir_string(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{entries}}}")
+}
+
+impl InstantiationKind {
+    /// Returns whether the instance references a block in the package.
+    pub fn is_block(&self) -> bool {
+        matches!(self, Self::Block | Self::BehavioralExternBlock { .. })
+    }
+
+    /// Returns whether the instance emits a separately supplied RTL module.
+    pub fn is_external_block(&self) -> bool {
+        matches!(
+            self,
+            Self::BehavioralExternBlock { .. } | Self::OpaqueExternBlock { .. }
+        )
+    }
+}
+
+/// A named hardware instance scoped to its parent block.
 #[derive(Debug, Clone)]
 pub struct Instantiation {
     pub name: String,
-    /// Child block name, or foreign-function name for an external instance.
+    /// Referenced block or foreign function, or the module name of an opaque
+    /// extern.
     pub block: String,
     pub kind: InstantiationKind,
 }
 
+impl Instantiation {
+    /// Returns the package block expanded by graph-based analysis.
+    pub fn referenced_block(&self) -> Option<&str> {
+        self.kind.is_block().then_some(self.block.as_str())
+    }
+
+    /// Returns the module name used for an ordinary or external block instance.
+    pub fn rtl_module_name(&self) -> Option<&str> {
+        match &self.kind {
+            InstantiationKind::Block | InstantiationKind::OpaqueExternBlock { .. } => {
+                Some(self.block.as_str())
+            }
+            InstantiationKind::BehavioralExternBlock { module_name, .. } => Some(module_name),
+            InstantiationKind::Extern => None,
+        }
+    }
+}
+
 impl Package {
+    /// Reports PIR-only operations and declarations that upstream XLS cannot
+    /// parse.
+    pub fn uses_pir_extensions(&self) -> bool {
+        self.members.iter().any(|member| {
+            let block_uses_extensions = match member {
+                PackageMember::Block(block) => {
+                    !block.inout_nets.is_empty()
+                        || block
+                            .instantiations
+                            .iter()
+                            .any(|instance| instance.kind.is_external_block())
+                }
+                PackageMember::Function(_) => false,
+            };
+            block_uses_extensions
+                || member
+                    .graph()
+                    .nodes
+                    .iter()
+                    .any(|node| node.payload.is_extension_op())
+        })
+    }
+
     /// Gets the explicitly named function, reporting an error if it is absent.
     pub fn get_named_or_top_or_sole_fn(&self, name: &str) -> Result<&Fn, String> {
         self.get_fn(name)
@@ -1942,6 +2186,29 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
+    fn modeled_extern_block_uses_pir_extensions_without_inouts() {
+        let ir = r#"package modeled_extern
+
+block model() {
+}
+
+top block wrapper() {
+  instantiation u(block=model, kind=behavioral_extern_block)
+}
+"#;
+        let external = ir_parser::Parser::new(ir)
+            .parse_and_validate_package()
+            .unwrap();
+        assert!(external.uses_pir_extensions());
+
+        let ordinary_ir = ir.replace("kind=behavioral_extern_block", "kind=block");
+        let ordinary = ir_parser::Parser::new(&ordinary_ir)
+            .parse_and_validate_package()
+            .unwrap();
+        assert!(!ordinary.uses_pir_extensions());
+    }
+
+    #[test]
     fn package_function_lookup_respects_name_and_unambiguous_default() {
         let source = r#"package choices
 
@@ -2094,6 +2361,29 @@ fn second(y: bits[1] id=3) -> bits[1] { ret second_result: bits[1] = not(y, id=4
         assert!(matches!(ret_node.payload, NodePayload::Param));
 
         assert_eq!(ir_fn.to_string(), ir_text);
+    }
+
+    #[test]
+    fn body_parameter_positions_round_trip() {
+        let ir_text = r#"fn select_pair(x: bits[8] id=1, pair: (bits[4], bits[8][2]) id=2) -> (bits[4], bits[8][2]) {
+  x: bits[8] = param(name=x, id=1, pos=[(0,0,5)])
+  ret pair: (bits[4], bits[8][2]) = param(name=pair, id=2, pos=[(0,0,8), (1,3,4)])
+}"#;
+        assert_round_trip_fn(ir_text);
+        let without_pos = ir_parser::Parser::new_with_options(
+            ir_text,
+            ir_parser::ParseOptions {
+                retain_pos_data: false,
+            },
+        )
+        .parse_fn()
+        .unwrap();
+        assert_eq!(
+            without_pos.to_string(),
+            r#"fn select_pair(x: bits[8] id=1, pair: (bits[4], bits[8][2]) id=2) -> (bits[4], bits[8][2]) {
+  ret pair: (bits[4], bits[8][2]) = param(name=pair, id=2)
+}"#
+        );
     }
 
     #[test]

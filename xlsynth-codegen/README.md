@@ -7,10 +7,11 @@ and supported foreign-function instantiations.
 
 ## Rust API
 
-Parse and verify a package with `xlsynth-pir`, then emit its selected block:
+Parse a package with `xlsynth-pir`, inline function calls in the selected
+block hierarchy, and emit SystemVerilog:
 
 ```rust
-use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
+use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog, inline_invokes_for_codegen};
 use xlsynth_pir::ir_parser::Parser;
 
 let source = r#"package public_example
@@ -21,9 +22,10 @@ top block identity(data: bits[8], result: bits[8]) {
 }
 "#;
 
-let package = Parser::new(source).parse_and_verify_package().unwrap();
-let generated = emit_system_verilog(&package, &BlockCodegenOptions::default())
-    .unwrap();
+let options = BlockCodegenOptions::default();
+let package = Parser::new(source).parse_package().unwrap();
+let package = inline_invokes_for_codegen(package, options.top.as_deref()).unwrap();
+let generated = emit_system_verilog(&package, &options).unwrap();
 assert!(generated.system_verilog.contains("module identity("));
 assert!(generated.system_verilog.contains("assign result = data;"));
 ```
@@ -56,6 +58,16 @@ struct field ordering policies are exported from the same module.
 - Synchronous and asynchronous active-high or active-low resets, load enables,
   state feedback, and optional register-generation templates.
 - Transitive block hierarchy and existing foreign-function instantiations.
+- A declared inout net supports any number of child pin connections and one local
+  driver, emitted as `assign pad = oe ? drive : 'z;`. A private net gets one
+  module-local wire. Each public `ext_inout_port` binds to a whole net of the
+  same PIR type and carries an optional `sv_type`. Its net uses the first
+  connected port in header order as its wire. A net connected only to one
+  public port therefore emits just the interface declaration. Additional
+  aliases connect through bidirectional Verilog `tran` primitives. The emitted RTL
+  preserves four-state resolution across aliases. Synthesis support depends on the tool. See the
+  [shared bus](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir) and
+  [private request/reply](tests/goldens/block2sv/hierarchy/private_request_reply.golden.ir) examples.
 - Width-specific automatic SystemVerilog helpers for mixed-width multiplication,
   partial products, and division/modulo, using original-width operands.
 - Priority selects lowered to compact `unique casez` helpers with disjoint
@@ -84,9 +96,10 @@ precede statements in flat layout; pipeline layout groups declarations before
 the statements within each stage, retaining the register sections.
 `Layout::Pipeline` reconstructs
 feed-forward pipeline stages from the existing registers and adds stage and
-register comments without changing their timing. Designs containing register
-feedback or inconsistent stage dependencies are rejected in pipeline layout;
-they remain supported by `Layout::None`.
+register comments without changing their timing. Pipeline layout requires
+consistent stage dependencies and rejects register feedback. A selected top
+or instantiated child with an inout port or net requires `Layout::None`, including
+a block containing only a public pin on its own net or a private net used only by a child pin.
 Literals and pure constant-only expressions can be shared across stages without
 extra registers. They are emitted before their earliest consumer and are not
 required to have the same stage number as every consuming register write.
@@ -112,15 +125,38 @@ resizing requires part-selects.
 
 Block instances are checked for combinational cycles across hierarchical
 boundaries. Register-delimited feedback remains valid, and independently timed
-child outputs are analyzed separately. Each declared register must have exactly
+child outputs are analyzed separately. Each emitted register must have exactly
 one `register_read` and one `register_write`; multiple write nodes are rejected
 instead of silently dropping an update.
 
-The emitter inlines the function body at each `invoke` node, including nested
-calls and their assertion, coverage, and trace operations. Register
-boundaries are preserved. Use an explicit external instantiation for a function
-marked `#[ffi_proto]`. Lower `map` operations and unroll `counted_for` loops
-before emission.
+`instantiation u(block=model, kind=behavioral_extern_block)` emits an instance of
+the external SystemVerilog module `model`. Set `module_name=external_rtl` to target a
+different module. The package block `model` supplies the named ports and the
+dependencies used for cycle checks.
+The child clock connects to the parent clock, and reset is connected as an
+ordinary named input. Use `Layout::None` for designs that instantiate an external
+block. Models reached only through external instances are omitted from the
+generated SystemVerilog.
+
+An `opaque_extern_block` uses a required `module_name=` and an inline typed
+`ports=` map. It emits named associations in the declared port order. The
+emitter checks wrapper wiring and treats the external RTL as a dependency
+boundary. Flat layout supports both external block kinds.
+
+Both kinds accept `parameters={WIDTH:"42"}` to emit the named SystemVerilog
+override `#(.WIDTH(42))`. The decoded value is a parameter expression. Use
+the behavioral model or opaque port interface for the chosen configuration.
+
+Use `input_casts={mode:"pkg::mode_t"}` on either external block kind to emit
+`.mode(pkg::mode_t'(signal))` when `mode` is connected to `signal`.
+
+The emitter requires the selected block, its instantiated children, and
+behavioral models to be free of `invoke` nodes. The `block2sv` CLI runs
+`inline_invokes_for_codegen` before emission. Rust callers can run the same
+stage to inline nested calls, including their assertions, coverage, and traces,
+while preserving register boundaries. Use an explicit external instantiation
+for a function marked `#[ffi_proto]`. Lower `map` operations and unroll
+`counted_for` loops before emission.
 
 Name collisions use double-underscore suffixes such as `add_3__1`.
 Emitted ports (including clocks), instance names, and assertion/coverage labels

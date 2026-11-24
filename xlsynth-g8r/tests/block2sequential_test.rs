@@ -5,7 +5,7 @@ use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r::block2sequential::{
     block_ir_to_sequential_gate_fn, block_ir_to_sequential_gate_fn_with_controls,
-    optimize_and_lower_bx_block,
+    block_package_to_sequential_gate_fn, optimize_and_lower_bx_block,
 };
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_pir::IrBits;
@@ -14,6 +14,37 @@ use xlsynth_pir::ir_parser::{Parser, parse_xls_ir_package};
 fn lower(block_ir: &str) -> xlsynth_g8r::aig::SequentialGateFn {
     block_ir_to_sequential_gate_fn(block_ir, GatifyOptions::all_opts_disabled())
         .expect("block lowering should succeed")
+}
+
+#[test]
+fn gate_lowering_rejects_open_ports_and_single_child_connections() {
+    let source = r#"package pads
+block cell(io: bits[1]) {
+  ext_inout_net isolated(bits[1])
+  contact: () = ext_inout_port(name=io, net=isolated, id=2)
+}
+block wrapper() {
+  ext_inout_net bus(bits[1])
+  instantiation u(block=cell, kind=block)
+  bind: () = ext_instantiation_inout(instantiation=u, port_name=io, net=bus, id=1)
+}
+"#;
+    let mut package = Parser::new(source).parse_and_validate_package().unwrap();
+    for (name, resource) in [
+        ("cell", "ext_inout_net 'isolated'"),
+        ("wrapper", "ext_inout_net 'bus'"),
+    ] {
+        package.set_top_block(name).unwrap();
+        let error =
+            block_package_to_sequential_gate_fn(&package, GatifyOptions::all_opts_disabled())
+                .unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "block2sequential: block inlining failed: block inlining: {resource} in '{name}' requires block-to-Verilog codegen"
+            )
+        );
+    }
 }
 
 #[test]
@@ -374,6 +405,85 @@ top block top(clk: clock, data: bits[1], out: bits[1]) {
     assert_eq!(
         sequential.transition.outputs[1].name,
         "s0__state__d".to_string()
+    );
+}
+
+#[test]
+fn simulates_the_behavioral_model_for_an_external_block() {
+    let block_ir = r#"package external_delay
+
+block delay_model(clk: clock, rst: bits[1], data: bits[8], out: bits[8]) {
+  #![reset(port="rst", asynchronous=false, active_low=true)]
+  reg state(bits[8], reset_value=42)
+  rst: bits[1] = input_port(name=rst, id=1)
+  data: bits[8] = input_port(name=data, id=2)
+  q: bits[8] = register_read(register=state, id=3)
+  d: () = register_write(data, register=state, reset=rst, id=4)
+  out: () = output_port(q, name=out, id=5)
+}
+
+top block top(clk: clock, rst: bits[1], data: bits[8], out: bits[8]) {
+  #![reset(port="rst", asynchronous=false, active_low=true)]
+  instantiation delay(block=delay_model, module_name=external_delay_cell, kind=behavioral_extern_block)
+  rst: bits[1] = input_port(name=rst, id=11)
+  data: bits[8] = input_port(name=data, id=12)
+  delay_rst: () = instantiation_input(rst, instantiation=delay, port_name=rst, id=13)
+  delay_data: () = instantiation_input(data, instantiation=delay, port_name=data, id=14)
+  delay_out: bits[8] = instantiation_output(instantiation=delay, port_name=out, id=15)
+  out: () = output_port(delay_out, name=out, id=16)
+}
+"#;
+
+    let design =
+        block_ir_to_sequential_gate_fn_with_controls(block_ir, GatifyOptions::all_opts_disabled())
+            .unwrap();
+    let byte = |value| IrBits::make_ubits(8, value).unwrap();
+    let inputs = [
+        vec![IrBits::bool(true), byte(2)],
+        vec![IrBits::bool(false), byte(3)],
+        vec![IrBits::bool(true), byte(5)],
+    ];
+    let state = SequentialState::from_register_values(&design, vec![byte(255)]).unwrap();
+    let trace = sequential::simulate(&design, &inputs, state).unwrap();
+
+    assert_eq!(
+        trace.external_outputs(),
+        &[vec![byte(255)], vec![byte(2)], vec![byte(42)]]
+    );
+    assert_eq!(trace.final_state().values(), &[byte(5)]);
+}
+
+#[test]
+fn sequential_lowering_rejects_only_reachable_opaque_instances() {
+    let source = r#"package opaque_lowering
+
+block opaque_child() {
+  instantiation leaf(module_name=vendor_cell, ports={}, kind=opaque_extern_block)
+}
+
+block wrapper() {
+  instantiation child(block=opaque_child, kind=block)
+}
+
+top block independent(data: bits[1], out: bits[1]) {
+  data: bits[1] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+"#;
+    let mut package = Parser::new(source).parse_and_validate_package().unwrap();
+    let options = GatifyOptions::all_opts_disabled();
+    block_package_to_sequential_gate_fn(&package, options.clone()).unwrap();
+    optimize_and_lower_bx_block(&package, options.clone()).unwrap();
+
+    package.set_top_block("wrapper").unwrap();
+    let expected = "opaque external block instance 'wrapper.child.leaf' of module 'vendor_cell' has no behavioral model";
+    assert_eq!(
+        block_package_to_sequential_gate_fn(&package, options.clone()).unwrap_err(),
+        format!("block2sequential: {expected}")
+    );
+    assert_eq!(
+        optimize_and_lower_bx_block(&package, options).unwrap_err(),
+        expected
     );
 }
 

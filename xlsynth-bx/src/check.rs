@@ -14,8 +14,8 @@ use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, BlockStages, CallbackParam, Expr, ExternBlock, ExternFn, Function,
     FunctionParametricRef, InvariantDecl, InvariantLemma, LetBinding, MatchArm, MatchPattern,
-    Module, Param, SourceSpan, Stmt, StructDef, StructLiteralArgs, StructSplat, Type, UnaryOp,
-    WidthSliceType,
+    Module, Param, SourcePosition, SourceSpan, Stmt, StructArgument, StructDef, StructLiteralArgs,
+    StructSplat, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -43,7 +43,7 @@ mod module_constants;
 mod scope;
 mod source_patterns;
 mod struct_parametrics;
-use struct_parametrics::StructApplication;
+use struct_parametrics::{BoundStructArgument, StructApplication, StructArguments};
 mod test_program;
 mod timing;
 mod tuple_match;
@@ -53,8 +53,8 @@ mod value_parametrics;
 pub use crate::builtin::BuiltinOp;
 pub use crate::typed::TypedMatchPattern as ScalarPattern;
 use crate::typed::{
-    BoundParametricValue, ConstantBinding, ConstantFailure, ConstantFunctions, ConstantUse,
-    TypedExprKind as K, bits, repr_bits,
+    BoundParametricValue, ConstantBinding, ConstantCallees, ConstantFailure, ConstantFunctions,
+    ConstantUse, TypedExprKind as K, bits, repr_bits,
 };
 pub use crate::typed::{
     CheckedBinding, CheckedBlock, CheckedConstant, CheckedEnum, CheckedFunction, CheckedModule,
@@ -63,8 +63,10 @@ pub use crate::typed::{
 };
 use callables::{BlockCallbackBinding, BlockCallbackFormal, BoundCallback};
 use counted_for::CarryContext;
-use function_specializations::{CallbackTarget, FunctionSpecialization, FunctionSpecializations};
-use generic_blocks::{Bindings, TypeArgument};
+use function_specializations::{
+    CallbackTarget, FunctionSpecialization, FunctionSpecializations, PendingFunction,
+};
+use generic_blocks::{Bindings, BlockPortTypes, TypeArgument};
 use module_constants::ModuleDimensions;
 
 /// Render the common DSLX expressions used in a symbolic type annotation.
@@ -96,6 +98,31 @@ impl fmt::Display for Dimension<'_> {
     }
 }
 
+impl fmt::Display for StructArgument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Type(ty) => ty.fmt(f),
+            Self::Value(value) => Dimension(value).fmt(f),
+        }
+    }
+}
+
+/// Display the arguments of a struct in declaration order.
+fn display_application(
+    f: &mut fmt::Formatter<'_>,
+    name: &str,
+    args: impl IntoIterator<Item = impl fmt::Display>,
+) -> fmt::Result {
+    write!(f, "{name}<")?;
+    for (i, arg) in args.into_iter().enumerate() {
+        if i != 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "{arg}")?;
+    }
+    f.write_str(">")
+}
+
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -109,36 +136,12 @@ impl fmt::Display for Type {
             }
             Type::Bool => write!(f, "bool"),
             Type::Named(name) | Type::Enum { name, .. } => write!(f, "{name}"),
-            Type::Applied { name, args } => {
-                write!(f, "{name}<")?;
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{arg}")?;
-                }
-                write!(f, ">")
-            }
+            Type::Applied { name, args } => display_application(f, name, args),
             Type::ParametricStruct { name, args } => {
-                write!(f, "{name}<")?;
-                for (i, arg) in args.iter().enumerate() {
-                    if i != 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{}", Dimension(arg))?;
-                }
-                f.write_str(">")
+                display_application(f, name, args.iter().map(Dimension))
             }
-            Type::TypeApplied { name, args } => {
-                write!(f, "{name}<")?;
-                for (index, arg) in args.iter().enumerate() {
-                    if index != 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{arg}")?;
-                }
-                f.write_str(">")
-            }
+            Type::TypeApplied { name, args } => display_application(f, name, args),
+            Type::MixedApplied { name, args } => display_application(f, name, args),
             Type::Array { element, size } => write!(f, "{element}[{size}]"),
             Type::ParametricBits { signed, width } => match &**signed {
                 Expr::Bool(false) => write!(f, "uN[{}]", Dimension(width)),
@@ -269,7 +272,7 @@ enum BranchSelector {
 fn match_operands<'e>(
     subject: &'e Expr,
     arms: &'e [MatchArm],
-    is_named_pattern: impl Fn(&str) -> Result<bool, String>,
+    mut is_named_pattern: impl FnMut(&str) -> Result<bool, String>,
 ) -> Result<Vec<&'e Expr>, String> {
     if arms.is_empty() || arms.iter().any(|arm| arm.patterns.is_empty()) {
         return Err("match requires at least one arm and a pattern for each arm".into());
@@ -342,8 +345,16 @@ struct BlockTemplate<'m> {
     block: &'m Block,
     /// Module constants give every specialization the same local port stages.
     stages: BlockStages<u64>,
-    params: Vec<Param>,
-    result: Type,
+    ports: BlockPortTypes,
+    /// Source nodes visited when specializing a dimension-dependent signature,
+    /// including phantom struct arguments. Fixed signatures skip this pass.
+    port_binding_work: usize,
+    /// Concrete annotation for each value formal, resolved in declaration
+    /// scope.
+    value_types: Vec<Type>,
+    /// Position after the last required value or callback in the explicit
+    /// prefix.
+    required_arguments: usize,
     callback_params: Vec<BlockCallbackFormal>,
     callback_indices: BTreeMap<String, usize>,
 }
@@ -399,14 +410,42 @@ struct ConstantContext<'a> {
     /// values outside loops as well as in their bodies.
     charge_values: bool,
     functions: Option<&'a mut ConstantFunctions>,
-    assertion_cache: Option<&'a mut AssertionCache>,
+    imports: &'a mut ImportResolver,
+    temporary_bindings: Option<&'a mut TemporaryConstantBindings>,
+    deferred_callback_declaration: Option<&'a mut bool>,
 }
 
-/// Save changes to outer bindings while an assertion temporarily enables
-/// helper execution. Ordinary BX expressions keep their original cache state.
-struct AssertionCache {
+/// Outer bindings to restore after a constexpr expression temporarily enables
+/// helper execution.
+struct TemporaryConstantBindings {
     first_local: usize,
     saved: Vec<(String, ConstantBinding)>,
+    start: SaveBindingReplays,
+}
+
+/// Ordinary replay results remain reusable until an evaluation needs a
+/// capability specific to its constexpr consumer.
+enum SaveBindingReplays {
+    All,
+    AfterHelperCall(usize),
+    AfterResetOnlyBinding,
+}
+
+impl TemporaryConstantBindings {
+    fn new(first_local: usize) -> Self {
+        Self {
+            first_local,
+            saved: Vec::new(),
+            start: SaveBindingReplays::All,
+        }
+    }
+
+    /// Restore the bindings visible to ordinary BX expressions.
+    fn restore(self, names: &mut BTreeMap<String, ConstantBinding>) {
+        for (name, binding) in self.saved.into_iter().rev() {
+            names.insert(name, binding);
+        }
+    }
 }
 
 impl ConstantContext<'_> {
@@ -415,11 +454,29 @@ impl ConstantContext<'_> {
             Some(binding) => self.names.insert(name.to_owned(), binding),
             None => self.names.remove(name),
         };
-        if let Some(cache) = &mut self.assertion_cache
+        if let Some(cache) = &mut self.temporary_bindings
             && definition < cache.first_local
             && let Some(previous) = previous
         {
-            cache.saved.push((name.to_owned(), previous));
+            let save = match cache.start {
+                SaveBindingReplays::All => true,
+                SaveBindingReplays::AfterHelperCall(before) => self
+                    .functions
+                    .as_ref()
+                    .is_some_and(|functions| functions.calls > before),
+                SaveBindingReplays::AfterResetOnlyBinding => matches!(
+                    previous,
+                    ConstantBinding::DeferredCall {
+                        parametric_inputs: false,
+                        ..
+                    }
+                ),
+            };
+            if save {
+                // Subsequent replays may read the temporarily available value.
+                cache.start = SaveBindingReplays::All;
+                cache.saved.push((name.to_owned(), previous));
+            }
         }
     }
 }
@@ -473,6 +530,7 @@ impl<'m> BlockSpecializations<'m> {
     fn intern(
         &mut self,
         template: &BlockTemplate<'m>,
+        concrete_ports: Option<BlockPortTypes>,
         arguments: BlockParametricArguments<'m>,
         path: &[&'m str],
         dimensions: ModuleDimensions<'_, 'm>,
@@ -517,16 +575,14 @@ impl<'m> BlockSpecializations<'m> {
         let charge_signature = !callbacks.is_empty() || !parametric_values.is_empty();
         if charge_signature {
             self.expansion_work = self.expansion_work.saturating_add(parametric_values.len());
-            for ty in template
-                .params
-                .iter()
-                .map(|p| &p.ty)
-                .chain([&template.result])
-            {
-                let shape =
-                    types
-                        .structs
-                        .formal_shape(ty, MAX_ELABORATION_DEPTH, Some(&bindings))?;
+            let (ports, parameters) = match &concrete_ports {
+                Some(ports) => (ports, None),
+                None => (&template.ports, Some(&bindings)),
+            };
+            for ty in ports.params.iter().map(|p| &p.ty).chain([&ports.result]) {
+                let shape = types
+                    .structs
+                    .formal_shape(ty, MAX_ELABORATION_DEPTH, parameters)?;
                 formal_nodes += shape.ir_nodes;
                 self.expansion_work = self.expansion_work.saturating_add(shape.ir_nodes);
                 if self.expansion_work > MAX_TYPE_SIZE {
@@ -536,25 +592,33 @@ impl<'m> BlockSpecializations<'m> {
                 }
             }
         }
-        let params: Vec<Param> = template
-            .params
-            .iter()
-            .map(|p| {
-                Ok(Param {
-                    name: p.name.clone(),
-                    ty: types.materialize_type_applications(
-                        bindings.concrete_type(&p.ty)?,
-                        dimensions,
-                        MAX_ELABORATION_DEPTH,
-                    )?,
+        let BlockPortTypes { params, result } = if let Some(ports) = concrete_ports {
+            ports
+        } else {
+            let params: Vec<Param> = template
+                .ports
+                .params
+                .iter()
+                .map(|p| {
+                    Ok(Param {
+                        name: p.name.clone(),
+                        ty: types.materialize_type_applications(
+                            bindings.concrete_type(&p.ty)?,
+                            Some(&bindings),
+                            dimensions,
+                            MAX_ELABORATION_DEPTH,
+                        )?,
+                    })
                 })
-            })
-            .collect::<Result<_, String>>()?;
-        let result = types.materialize_type_applications(
-            bindings.concrete_type(&template.result)?,
-            dimensions,
-            MAX_ELABORATION_DEPTH,
-        )?;
+                .collect::<Result<_, String>>()?;
+            let result = types.materialize_type_applications(
+                bindings.concrete_type(&template.ports.result)?,
+                Some(&bindings),
+                dimensions,
+                MAX_ELABORATION_DEPTH,
+            )?;
+            BlockPortTypes { params, result }
+        };
         let interface = BlockInterface::new(
             block.clock.as_deref(),
             block.reset.as_deref(),
@@ -627,6 +691,12 @@ pub(crate) fn source_type_nodes(ty: &Type) -> usize {
         Type::Applied { args, .. } => 1 + args.len(),
         Type::ParametricStruct { args, .. } => 1 + args.len(),
         Type::TypeApplied { args, .. } => 1 + args.iter().map(source_type_nodes).sum::<usize>(),
+        Type::MixedApplied { args, .. } => {
+            1 + args
+                .iter()
+                .map(|a| a.as_type().map_or(1, source_type_nodes))
+                .sum::<usize>()
+        }
         Type::Named(_) | Type::Enum { .. } | Type::Bool | Type::Bits { .. } => 1,
     }
 }
@@ -661,12 +731,12 @@ struct Declarations<'a> {
     /// Pure tests observe IR contracts in evaluated but discarded tuple fields.
     evaluate_discarded_tuple_fields: bool,
     has_test_discards: Cell<bool>,
-    /// A module with assertions may execute any visible pure helper at compile
-    /// time.
-    has_const_assert: bool,
-    /// At least one callee was instantiated while evaluating an erased
-    /// assertion.
-    assertion_instantiated_callee: Cell<bool>,
+    /// A local declaration or assertion may need the constexpr operands of
+    /// any visible pure helper.
+    has_constexpr_declaration: bool,
+    /// A compile-time declaration or register reset instantiated a callee
+    /// whose body may have no hardware users.
+    constexpr_instantiated_callee: Cell<bool>,
     /// Clock requirements of all defined and external blocks, including
     /// templates.
     block_clocks: BTreeMap<&'a str, bool>,
@@ -679,12 +749,21 @@ struct Declarations<'a> {
     constants: BTreeMap<&'a str, CheckedConstant>,
     functions: BTreeMap<&'a str, FunctionInterface>,
     function_templates: BTreeMap<&'a str, &'a Function>,
+    /// Factories whose arguments alone cannot determine a specialization.
+    result_context: BTreeMap<&'a str, ResultContext>,
     /// Value-template source types are borrowed from function_templates until
     /// instantiation. Only their callable lookup table is needed beforehand.
     value_template_callbacks: BTreeMap<&'a str, BTreeMap<String, usize>>,
     has_block_value_parametrics: bool,
     blocks: BTreeMap<&'a str, BlockInterface>,
     templates: BTreeMap<&'a str, BlockTemplate<'a>>,
+}
+
+/// Which calls to a function need a sibling or enclosing result type.
+enum ResultContext {
+    TypeParameter,
+    /// Supplying this many explicit arguments binds every result-only value.
+    ExplicitValues(usize),
 }
 
 /// A transparent alias and the cost of copying its expanded type at a use site.
@@ -735,7 +814,7 @@ impl Declarations<'_> {
         &self,
         ty: &Type,
         at: Option<usize>,
-        bindings: Option<&Bindings>,
+        is_bound: impl Fn(&str) -> bool,
     ) -> Result<(), String> {
         if at.is_none() {
             return Ok(());
@@ -743,13 +822,17 @@ impl Declarations<'_> {
         let mut pending = vec![ty];
         while let Some(ty) = pending.pop() {
             match ty {
-                Type::Named(name) if bindings.is_some_and(|b| b.declares(name)) => {
-                    // The template introduces this name in its own scope.
+                Type::Named(name) if is_bound(name) => {
+                    // The enclosing scope already resolved this name.
                 }
                 Type::Named(name)
                 | Type::Applied { name, .. }
                 | Type::ParametricStruct { name, .. } => {
                     self.check_type_name_visibility(name, at)?
+                }
+                Type::MixedApplied { name, args } => {
+                    self.check_type_name_visibility(name, at)?;
+                    pending.extend(args.iter().rev().filter_map(StructArgument::as_type));
                 }
                 Type::TypeApplied { name, args } => {
                     self.check_type_name_visibility(name, at)?;
@@ -836,12 +919,71 @@ fn resolve_type<'m>(
                 .collect::<Result<Vec<_>, _>>()?;
             types.resolve_struct_type_application(name, args, bindings, dimensions, remaining)
         }
+        Type::MixedApplied { name, args } => {
+            if is_local(name) {
+                return Err(format!("'{name}' names a local value here"));
+            }
+            dimensions
+                .decls
+                .check_type_name_visibility(name, dimensions.position)?;
+            if let Some(bindings) = bindings {
+                bindings.reject_value(name)?;
+                if bindings.has_unbound_variable(ty)
+                    || (dimensions.block_size_formals.is_some()
+                        && generic_blocks::has_matching_dimension(ty, &|expr| {
+                            dimensions.is_block_size_formal(expr)
+                        }))
+                {
+                    let template = types
+                        .structs
+                        .template(name)
+                        .ok_or_else(|| format!("unknown parametric struct '{name}'"))?;
+                    struct_parametrics::check_arity(template, args.len())?;
+                    if template.parametric_bindings().skip(args.len()).any(|formal|
+                        !matches!(formal, crate::ast::StructParametricRef::Value(p) if p.default.is_some())
+                    ) {
+                        return Err(format!("missing required argument in type '{ty}'"));
+                    }
+                    let depth = child_type_budget(remaining)?;
+                    let resolved_args = args
+                        .iter()
+                        .map(|arg| match arg {
+                            StructArgument::Type(ty) => {
+                                resolve_type(ty, is_local, Some(bindings), dimensions, types, depth)
+                                    .map(StructArgument::Type)
+                            }
+                            StructArgument::Value(_) => Ok(arg.clone()),
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    types.structs.update_imports(types.resolver)?;
+                    let mut checker = types.struct_scope(dimensions);
+                    checker.enclosing_type_locals = Some(is_local);
+                    checker.function_type_bindings = Some(bindings.clone());
+                    checker.check_deferred_struct_arguments(
+                        template,
+                        args,
+                        &resolved_args,
+                        bindings,
+                    )?;
+                    return Ok(Type::MixedApplied {
+                        name: name.clone(),
+                        args: resolved_args,
+                    });
+                }
+            }
+            let mut checker = types.struct_scope(dimensions);
+            checker.enclosing_type_locals = Some(is_local);
+            checker.function_type_bindings = bindings.cloned();
+            let args =
+                checker.struct_prefix_at(name, StructLiteralArgs::Mixed(args), remaining, None)?;
+            checker.struct_applied_type(name, &args, remaining)
+        }
         Type::ParametricStruct { name, args } => {
             let mut checker = types.struct_scope(dimensions);
             checker.enclosing_type_locals = Some(is_local);
             checker.function_type_bindings = bindings.cloned();
-            let args = checker.struct_value_prefix(name, StructLiteralArgs::Expressions(args))?;
-            checker.struct_value_type(name, &args, remaining)
+            let args = checker.struct_prefix(name, StructLiteralArgs::Expressions(args))?;
+            checker.struct_applied_type(name, &args, remaining)
         }
         Type::Named(name) | Type::Applied { name, .. } => {
             if is_local(name) {
@@ -892,12 +1034,12 @@ fn resolve_type<'m>(
                     _ => &[],
                 };
                 let mut checker = types.struct_scope(dimensions);
-                let args = checker.struct_value_prefix(name, StructLiteralArgs::Integers(args))?;
+                let args = checker.struct_prefix(name, StructLiteralArgs::Integers(args))?;
                 checker.specialize_struct(
                     template,
-                    struct_parametrics::StructArguments::Values {
+                    StructArguments {
                         explicit: &args,
-                        inferred: None,
+                        ..Default::default()
                     },
                     remaining,
                 )
@@ -952,21 +1094,41 @@ fn resolve_type<'m>(
                 ))
             }
         }
-        Type::ParametricBits { signed, width } => Ok(Type::Bits {
-            signed: dimensions.signed(signed, is_local, bindings, types.resolver)?,
-            width: dimensions.size(width, is_local, bindings, types.resolver)?,
-        }),
-        Type::ParametricArray { element, size } => Ok(Type::array(
-            resolve_type(
+        Type::ParametricBits { signed, width } => {
+            let signed = dimensions.signed(signed, is_local, bindings, types)?;
+            if dimensions.is_block_size_formal(width) {
+                Ok(Type::ParametricBits {
+                    signed: Box::new(Expr::Bool(signed)),
+                    width: width.clone(),
+                })
+            } else {
+                Ok(Type::Bits {
+                    signed,
+                    width: dimensions.size(width, is_local, bindings, types)?,
+                })
+            }
+        }
+        Type::ParametricArray { element, size } => {
+            let element = resolve_type(
                 element,
                 is_local,
                 bindings,
                 dimensions,
                 types,
                 child_type_budget(remaining)?,
-            )?,
-            dimensions.size(size, is_local, bindings, types.resolver)?,
-        )),
+            )?;
+            if dimensions.is_block_size_formal(size) {
+                Ok(Type::ParametricArray {
+                    element: Box::new(element),
+                    size: size.clone(),
+                })
+            } else {
+                Ok(Type::array(
+                    element,
+                    dimensions.size(size, is_local, bindings, types)?,
+                ))
+            }
+        }
         Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
     }
 }
@@ -994,13 +1156,17 @@ impl<'m> TypeResolver<'_, 'm> {
             args,
         };
         let ty = match bindings {
-            Some(bindings) if bindings.has_unbound_variable(&application) => {
+            Some(bindings)
+                if bindings.has_unbound_variable(&application)
+                    || (dimensions.block_size_formals.is_some()
+                        && generic_blocks::has_block_dimension(&application)) =>
+            {
                 return Ok(application);
             }
             Some(bindings) => bindings.concrete_type(&application)?,
             None => application,
         };
-        self.materialize_type_applications(ty, dimensions, remaining)
+        self.materialize_type_applications(ty, bindings, dimensions, remaining)
     }
 
     /// Resolve struct applications whose arguments have already been resolved
@@ -1008,6 +1174,7 @@ impl<'m> TypeResolver<'_, 'm> {
     fn materialize_type_applications(
         &mut self,
         ty: Type,
+        bindings: Option<&Bindings>,
         dimensions: ModuleDimensions<'_, 'm>,
         remaining: usize,
     ) -> Result<Type, String> {
@@ -1020,26 +1187,61 @@ impl<'m> TypeResolver<'_, 'm> {
                 let budget = child_type_budget(remaining)?;
                 let args = args
                     .into_iter()
-                    .map(|arg| self.materialize_type_applications(arg, dimensions, budget))
+                    .map(|arg| {
+                        self.materialize_type_applications(arg, bindings, dimensions, budget)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 self.structs.update_imports(self.resolver)?;
                 self.struct_scope(dimensions).specialize_struct(
                     template,
-                    struct_parametrics::StructArguments::Types(&args),
+                    StructArguments {
+                        explicit: &args
+                            .into_iter()
+                            .map(BoundStructArgument::Type)
+                            .collect::<Vec<_>>(),
+                        ..Default::default()
+                    },
                     remaining,
                 )
+            }
+            Type::MixedApplied { name, args } => {
+                let budget = child_type_budget(remaining)?;
+                let args = args
+                    .into_iter()
+                    .map(|arg| match arg {
+                        StructArgument::Type(ty) => self
+                            .materialize_type_applications(ty, bindings, dimensions, budget)
+                            .map(StructArgument::Type),
+                        StructArgument::Value(_) => Ok(arg),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.structs.update_imports(self.resolver)?;
+                let mut checker = self.struct_scope(dimensions);
+                // Values may use a type formal in a cast or an annotated
+                // literal. Type arguments already carry the concrete caller
+                // identity.
+                checker.function_type_bindings = bindings.cloned();
+                let args = checker.struct_prefix_with_types(
+                    &name,
+                    StructLiteralArgs::Mixed(&args),
+                    |_, ty| Ok(ty.clone()),
+                )?;
+                checker.struct_applied_type(&name, &args, remaining)
             }
             Type::Tuple(fields) => {
                 let budget = child_type_budget(remaining)?;
                 fields
                     .into_iter()
-                    .map(|field| self.materialize_type_applications(field, dimensions, budget))
+                    .map(|field| {
+                        self.materialize_type_applications(field, bindings, dimensions, budget)
+                    })
                     .collect::<Result<_, _>>()
                     .map(Type::Tuple)
             }
             Type::Array { element, size } => Ok(Type::array(
                 self.materialize_type_applications(
                     *element,
+                    bindings,
                     dimensions,
                     child_type_budget(remaining)?,
                 )?,
@@ -1178,7 +1380,6 @@ pub(crate) fn is_dslx_builtin_value(name: &str) -> bool {
         || matches!(
             name,
             "all_ones!"
-                | "zero!"
                 | "map"
                 | "decode"
                 | "bit_count"
@@ -1219,6 +1420,18 @@ fn type_parameter_references<'a>(ty: &'a Type, result: &mut Vec<&'a str>) {
     );
 }
 
+/// A symbolic mixed application retains constexpr arguments until its type
+/// arguments bind.
+fn has_mixed_application(ty: &Type) -> bool {
+    let mut mixed = false;
+    type_dependencies(
+        ty,
+        |ty, _| mixed |= matches!(ty, Type::MixedApplied { .. }),
+        |_| {},
+    );
+    mixed
+}
+
 /// Walk nominal dependencies and the expressions supplying dimensions without
 /// recursively copying potentially nested source types.
 fn type_dependencies<'a>(
@@ -1237,6 +1450,15 @@ fn type_dependencies<'a>(
                 if let Type::ParametricStruct { args, .. } = ty {
                     for arg in args {
                         dimension(arg);
+                    }
+                }
+            }
+            Type::MixedApplied { name, args } => {
+                nominal(ty, name);
+                for arg in args.iter().rev() {
+                    match arg {
+                        StructArgument::Type(arg) => pending.push(arg),
+                        StructArgument::Value(arg) => dimension(arg),
                     }
                 }
             }
@@ -1308,7 +1530,7 @@ impl<'a> Declarations<'a> {
             for callback in &function.callback_params {
                 declare(&mut names, &callback.name)?;
                 let mut resolve = |ty: &Type| {
-                    self.check_type_visibility(ty, dimensions.position, None)?;
+                    self.check_type_visibility(ty, dimensions.position, |_| false)?;
                     resolve_type(
                         ty,
                         &|name| names.contains(name),
@@ -1417,7 +1639,7 @@ impl BlockInterface {
             clock,
             reset,
             &params,
-            &result,
+            Some(&result),
             structs,
             None,
             private_outputs,
@@ -1436,7 +1658,7 @@ impl BlockInterface {
         clock: Option<&str>,
         reset: Option<&str>,
         params: &[Param],
-        result: &Type,
+        result: Option<&Type>,
         structs: &StructTable,
         parameters: Option<&Bindings>,
         private_outputs: Option<&BTreeSet<String>>,
@@ -1453,25 +1675,29 @@ impl BlockInterface {
                 .map_err(|e| format!("input '{}': {e}", p.name))?;
             type_nodes = type_nodes.saturating_add(shape.ir_nodes);
         }
+        let Some(result) = result else {
+            // An unbound result formal has a one-node minimum layout. Its
+            // concrete type determines both the number and the names of
+            // outputs.
+            return Ok(BlockPortLayout {
+                outputs: Vec::new(),
+                type_nodes: type_nodes.saturating_add(TypeShape::LEAF.ir_nodes),
+            });
+        };
         let shape = structs
             .formal_shape(result, MAX_ELABORATION_DEPTH, parameters)
             .map_err(|e| format!("result: {e}"))?;
         type_nodes = type_nodes.saturating_add(shape.ir_nodes);
-        if matches!(result, Type::Named(name) if parameters.is_some_and(|p| p.declares(name))) {
-            return Ok(BlockPortLayout {
-                outputs: Vec::new(),
-                type_nodes,
-            });
-        }
-        let mut outputs = if let Type::TypeApplied { name, .. } = result {
-            structs
-                .template(name)
-                .ok_or_else(|| unknown_declaration("struct", name))?
-                .fields
-                .clone()
-        } else {
-            output_ports(result, &structs.definitions)?
-        };
+        let mut outputs =
+            if let Type::TypeApplied { name, .. } | Type::MixedApplied { name, .. } = result {
+                structs
+                    .template(name)
+                    .ok_or_else(|| unknown_declaration("struct", name))?
+                    .fields
+                    .clone()
+            } else {
+                output_ports(result, &structs.definitions)?
+            };
         for output in &mut outputs {
             if let Some(reserved) = private_outputs {
                 while reserved.contains(&output.name) {
@@ -1622,21 +1848,11 @@ impl TypeShape {
             // the checker validates its full layout after resolution.
             Type::Applied { .. } | Type::ParametricStruct { .. } => Self::LEAF,
             Type::TypeApplied { name, args } => {
-                // Type arguments can be phantom. Count their syntax for
-                // substitution and validate the physical fields at interning.
-                let budget = child_type_budget(remaining)?;
-                let mut shape = Self {
-                    depth: 1,
-                    name_bytes: name.len(),
-                    ..Self::LEAF
-                };
-                for arg in args {
-                    let arg = Self::for_type(arg, budget, named_shape)?;
-                    shape.depth = shape.depth.max(arg.depth + 1);
-                    shape.source_nodes = shape.source_nodes.saturating_add(arg.source_nodes);
-                    shape.name_bytes = shape.name_bytes.saturating_add(arg.name_bytes);
-                }
-                shape
+                Self::application(name, args.iter(), args.len(), remaining, named_shape)?
+            }
+            Type::MixedApplied { name, args } => {
+                let types = args.iter().filter_map(StructArgument::as_type);
+                Self::application(name, types, args.len(), remaining, named_shape)?
             }
             Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
                 return Err("unresolved value-parametric dimension".into());
@@ -1652,7 +1868,32 @@ impl TypeShape {
                 "type {ty} exceeds maximum concrete type size {MAX_TYPE_SIZE}"
             ));
         }
-        shape.check_source_budget()?;
+        Self::check_source_budget(shape.source_nodes, shape.name_bytes)?;
+        Ok(shape)
+    }
+
+    /// Count the source arguments of a symbolic application, including phantom
+    /// arguments. The concrete fields determine its IR layout after interning.
+    fn application<'t>(
+        name: &str,
+        types: impl Iterator<Item = &'t Type>,
+        argument_count: usize,
+        remaining: usize,
+        named_shape: &impl Fn(&str) -> Result<Self, String>,
+    ) -> Result<Self, String> {
+        let budget = child_type_budget(remaining)?;
+        let mut shape = Self {
+            depth: 1,
+            name_bytes: name.len(),
+            source_nodes: 1 + argument_count,
+            ..Self::LEAF
+        };
+        for arg in types {
+            let arg = Self::for_type(arg, budget, named_shape)?;
+            shape.depth = shape.depth.max(arg.depth + 1);
+            shape.source_nodes = shape.source_nodes.saturating_add(arg.source_nodes - 1);
+            shape.name_bytes = shape.name_bytes.saturating_add(arg.name_bytes);
+        }
         Ok(shape)
     }
 
@@ -1678,18 +1919,18 @@ impl TypeShape {
                     "aggregate exceeds maximum concrete type size {MAX_TYPE_SIZE}"
                 ));
             }
-            shape.check_source_budget()?;
+            Self::check_source_budget(shape.source_nodes, shape.name_bytes)?;
         }
         Ok(shape)
     }
 
-    fn check_source_budget(&self) -> Result<(), String> {
-        if self.source_nodes > MAX_TYPE_SIZE {
+    fn check_source_budget(source_nodes: usize, name_bytes: usize) -> Result<(), String> {
+        if source_nodes > MAX_TYPE_SIZE {
             return Err(format!(
                 "type syntax exceeds the limit of {MAX_TYPE_SIZE} nodes"
             ));
         }
-        if self.name_bytes > MAX_TYPE_SIZE {
+        if name_bytes > MAX_TYPE_SIZE {
             return Err(format!(
                 "type names exceed the limit of {MAX_TYPE_SIZE} bytes"
             ));
@@ -1897,7 +2138,10 @@ pub(crate) fn check_sources_with_tests(
         });
     }
     let mut declarations = Declarations {
-        has_const_assert: source_patterns::has_const_assert(module, tests.is_some()),
+        has_constexpr_declaration: source_patterns::has_constexpr_declaration(
+            module,
+            tests.is_some(),
+        ),
         evaluate_discarded_tuple_fields: tests.is_some()
             && module
                 .tests
@@ -2039,40 +2283,30 @@ pub(crate) fn check_sources_with_tests(
                 ));
             }
         }
-        let reserved_ports = b
-            .clock
-            .iter()
-            .chain(&b.reset)
-            .chain(b.callback_params.iter().map(|p| &p.name))
-            .chain(b.value_parametrics.iter().map(|p| &p.name));
-        let symbolic = if !b.is_parametric() {
-            None
-        } else {
-            generic_blocks::validate_declaration(b)
-                .map_err(|e| format!("block '{}': {e}", b.name))?;
-            Some(Bindings::new(&b.type_params))
-        };
         let dimensions = declarations.module_dimensions(&b.name);
         let mut types = TypeResolver {
             resolver: &mut resolver,
             structs: &mut structs,
             functions: Some(&mut function_registry),
         };
-        let (params, result) = resolve_signature(
-            &b.params,
-            &b.result,
-            reserved_ports,
-            symbolic.as_ref(),
-            dimensions,
-            &mut types,
-        )?;
-        if let Some(bindings) = &symbolic {
-            let template = BlockTemplate::new(b, params, result, bindings, dimensions, &mut types)
+        if b.is_parametric() {
+            generic_blocks::validate_declaration(b)
+                .map_err(|e| format!("block '{}': {e}", b.name))?;
+            let bindings = Bindings::new(&b.type_params);
+            let template = BlockTemplate::new(b, &bindings, dimensions, &mut types)
                 .map_err(|e| format!("block '{}': {e}", b.name))?;
             declarations.has_block_value_parametrics |= !b.value_parametrics.is_empty();
             declarations.templates.insert(&b.name, template);
             continue;
         }
+        let (params, result) = resolve_signature(
+            &b.params,
+            &b.result,
+            b.clock.iter().chain(&b.reset),
+            None,
+            dimensions,
+            &mut types,
+        )?;
         structs.update_imports(&resolver)?;
         declarations
             .add_block(
@@ -2138,7 +2372,7 @@ pub(crate) fn check_sources_with_tests(
         declarations
             .warnings
             .borrow_mut()
-            .record_block(&block.name, body.requires_hardware);
+            .record_block(&block.name, body.has_block_only_behavior);
         checked.push(body.block);
     }
     let mut test_functions = Vec::new();
@@ -2233,12 +2467,10 @@ pub(crate) fn check_sources_with_tests(
         declarations
             .warnings
             .borrow_mut()
-            .record_block(&spec.block.name, block.requires_hardware);
+            .record_block(&spec.block.name, block.has_block_only_behavior);
         specialized_blocks.insert(spec.name.clone());
         checked.push(block.block);
     }
-    let mut functions = function_registry.finish(function_bodies)?;
-    functions.extend(test_functions);
     let mut graph = Vec::new();
     for block in &checked {
         let children = block
@@ -2265,10 +2497,17 @@ pub(crate) fn check_sources_with_tests(
         .flat_map(|suite| &suite.invariants)
         .map(|invariant| invariant.harness.as_str())
         .collect();
-    infer_block_resets(&mut blocks, &extern_blocks, &invariant_harnesses)?;
+    check_block_names_and_infer_resets(&mut blocks, &extern_blocks, &invariant_harnesses)?;
     // A parent may call a generic child defined later in the file. At this
     // point its concrete specialization appears before the parent in `blocks`.
-    timing::check_blocks(&mut blocks, &structs, &invariant_harnesses)?;
+    timing::check_blocks(
+        &mut blocks,
+        &structs,
+        &invariant_harnesses,
+        &function_registry.available,
+    )?;
+    let mut functions = function_registry.finish(function_bodies)?;
+    functions.extend(test_functions);
     let warnings =
         declarations
             .warnings
@@ -2316,7 +2555,10 @@ pub(crate) fn check_sources_with_tests(
             .collect();
         checked.resolve_pure_test_dependencies(harnesses);
     }
-    checked.imports = if linked.is_some() || declarations.assertion_instantiated_callee.get() {
+    checked.imports = if linked.is_some()
+        || declarations.constexpr_instantiated_callee.get()
+        || resolver.call_count() != 0
+    {
         let calls = checked.retain_reachable_dependencies();
         if linked.is_some() {
             checked.restore_extern_names();
@@ -2328,9 +2570,9 @@ pub(crate) fn check_sources_with_tests(
     Ok(checked)
 }
 
-/// Propagate reset demand in child-first order, after specialization and
-/// structural unrolling determine which instances actually exist.
-fn infer_block_resets(
+/// Check labels against the elaborated hardware and propagate reset demand
+/// in child-first order, allocating each inferred port a free name.
+fn check_block_names_and_infer_resets(
     blocks: &mut [CheckedBlock],
     externs: &[ExternBlock],
     invariant_harnesses: &BTreeSet<&str>,
@@ -2341,6 +2583,19 @@ fn infer_block_resets(
         .map(|b| (b.name.as_str(), b.name.as_str()))
         .collect();
     for block in blocks {
+        let mut labels = BTreeMap::new();
+        collect_assertion_labels(&block.statements, &mut labels)
+            .map_err(|e| format!("block '{}': {e}", block.source_name))?;
+        if !labels.is_empty()
+            && let Some((name, kind, position)) = fixed_hardware_names(block)
+                .find_map(|(name, kind)| labels.get(name).map(|position| (name, kind, position)))
+        {
+            return Err(format!(
+                "block '{}': {}: assertion label '{name}' collides with a {kind}",
+                block.source_name,
+                position.location(block.source.as_ref())
+            ));
+        }
         if block.reset.is_none() {
             for stmt in &block.statements {
                 match stmt {
@@ -2375,7 +2630,10 @@ fn infer_block_resets(
                     // demand.
                     _ => continue,
                 }
-                block.reset = Some(inferred_reset_port(block));
+                let names = fixed_hardware_names(block)
+                    .map(|(name, _)| name)
+                    .chain(labels.keys().copied());
+                block.reset = Some(inferred_reset_port(names));
                 break;
             }
         }
@@ -2386,13 +2644,39 @@ fn infer_block_resets(
     Ok(())
 }
 
-/// Keep source port, register, and instance names when introducing a reset
-/// into a block whose author could use `rst` as an ordinary name.
-fn inferred_reset_port(block: &CheckedBlock) -> String {
-    let names = block
+/// Named assertions under any statement guard occupy the same module scope.
+fn collect_assertion_labels<'a>(
+    statements: &'a [CheckedStmt],
+    labels: &mut BTreeMap<&'a str, SourcePosition>,
+) -> Result<(), String> {
+    for stmt in statements {
+        match stmt {
+            CheckedStmt::Assert {
+                label: Some(label),
+                position,
+                ..
+            } => {
+                // check_module also accepts ASTs built directly by its callers.
+                let duplicate = labels.insert(label, *position).is_some();
+                crate::parser::validate_block_assertion_label(label, duplicate)?;
+            }
+            CheckedStmt::If { body, .. } => collect_assertion_labels(body, labels)?,
+            _ => { /* Other statements introduce no assertion label. */ }
+        }
+    }
+    Ok(())
+}
+
+/// Port, register and instance names reserved in the block's hardware
+/// namespace.
+fn fixed_hardware_names(
+    block: &CheckedBlock,
+) -> impl Iterator<Item = (&str, &'static str)> + Clone {
+    block
         .clock
         .as_deref()
         .into_iter()
+        .chain(block.reset.as_deref())
         .chain(
             block
                 .params
@@ -2400,10 +2684,16 @@ fn inferred_reset_port(block: &CheckedBlock) -> String {
                 .chain(&block.output_ports)
                 .map(|p| p.name.as_str()),
         )
+        .map(|name| (name, "port"))
         .chain(block.statements.iter().filter_map(|s| match s {
-            CheckedStmt::Reg { name, .. } | CheckedStmt::Inst { name, .. } => Some(name.as_str()),
+            CheckedStmt::Reg { name, .. } => Some((name.as_str(), "register")),
+            CheckedStmt::Inst { name, .. } => Some((name.as_str(), "block instance")),
             _ => None,
-        }));
+        }))
+}
+
+/// Keep all fixed hardware names when adding an inferred reset port.
+fn inferred_reset_port<'a>(names: impl Iterator<Item = &'a str> + Clone) -> String {
     if !names.clone().any(|name| name == "rst") {
         return "rst".into();
     }
@@ -2418,8 +2708,8 @@ fn inferred_reset_port(block: &CheckedBlock) -> String {
     }
 }
 
-/// Reserve source bindings before allocating instance or observation port
-/// names.
+/// Reserve source bindings and assertion labels before allocating instance
+/// or observation port names.
 fn block_binding_names(block: &Block) -> BTreeSet<String> {
     let mut names: BTreeSet<_> = block
         .clock
@@ -2431,7 +2721,12 @@ fn block_binding_names(block: &Block) -> BTreeSet<String> {
     let mut pending: Vec<_> = block.statements.iter().collect();
     while let Some(statement) = pending.pop() {
         match statement {
-            Stmt::Reg { name, .. } | Stmt::Let { name, .. } | Stmt::Wire { name, .. } => {
+            Stmt::Reg { name, .. }
+            | Stmt::Let { name, .. }
+            | Stmt::Wire { name, .. }
+            | Stmt::Assert {
+                label: Some(name), ..
+            } => {
                 names.insert(name.clone());
             }
             Stmt::LetPattern(binding) => {
@@ -2440,7 +2735,7 @@ fn block_binding_names(block: &Block) -> BTreeSet<String> {
                 });
             }
             Stmt::If { body, .. } => pending.extend(body),
-            _ => { /* Drivers and assertions introduce no local bindings. */ }
+            _ => { /* Other statements introduce no names to reserve. */ }
         }
     }
     names
@@ -2464,7 +2759,7 @@ struct MapScope {
 /// references resolved inside structural iterations that were skipped.
 struct BlockBody {
     block: CheckedBlock,
-    requires_hardware: bool,
+    has_block_only_behavior: bool,
 }
 
 /// Lexical values, loop elaboration, and any hardware declared in one body.
@@ -2475,7 +2770,7 @@ struct BodyChecker<'a, 'm> {
     /// Runtime names that shadow module declarations in a type annotation.
     enclosing_type_locals: Option<&'a dyn Fn(&str) -> bool>,
     kind: BodyKind,
-    uses_child: Cell<bool>,
+    has_block_only_behavior: Cell<bool>,
     /// A clockless source block requires every hardware operation to be
     /// combinational.
     clockless_block: Option<&'m Block>,
@@ -2486,11 +2781,14 @@ struct BodyChecker<'a, 'm> {
     specialization: Option<&'a BlockSpecialization<'m>>,
     function_registry: Option<&'a mut FunctionSpecializations<'m>>,
     function_spec: Option<&'a FunctionSpecialization<'m>>,
+    pending_functions: Vec<PendingFunction<'m>>,
     /// Type arguments in the function's declaration scope, including partial
     /// bindings while checking a callback signature.
     function_type_bindings: Option<Bindings>,
     /// The enclosing template's signature for abstract or concrete checking.
     source_template: Option<&'a FunctionInterface>,
+    /// A required value depends on an abstract callback's implementation.
+    deferred_callback_declaration: bool,
     /// Callable names available during lexical checking of a value template.
     template_callbacks: Option<&'a BTreeMap<String, usize>>,
     /// Bound recursive type and expression walks over programmatically supplied
@@ -2503,7 +2801,7 @@ struct BodyChecker<'a, 'm> {
     /// Evaluate constexpr builtins and parametric actuals under the current
     /// predicate's rules when they occur inside an assertion.
     dslx_constant_use: ConstantUse,
-    assertion_cache: Option<AssertionCache>,
+    assertion_cache: Option<TemporaryConstantBindings>,
     /// Type and specialization operands erased from the current expression.
     assert_operands: Option<Vec<TypedExpr>>,
     /// Materialize only constexpr bindings while checking an erased
@@ -2529,9 +2827,11 @@ struct BodyChecker<'a, 'm> {
     block_position: Option<usize>,
     local_callees: BTreeSet<String>,
     names: BTreeSet<String>,
-    /// Visible function value parametrics, which can appear as named match
+    /// Lexical constants and value parametrics eligible as named match
     /// patterns.
-    value_parametric_names: BTreeSet<String>,
+    constant_pattern_names: BTreeSet<String>,
+    /// Concrete alias targets, resolved in the scope of each declaration.
+    local_type_aliases: BTreeMap<String, scope::LocalTypeAlias>,
     /// Bare dimension bindings in a struct declaration can have any integer
     /// type.
     in_struct_definition: bool,
@@ -2541,6 +2841,9 @@ struct BodyChecker<'a, 'm> {
     constants: BTreeMap<String, ConstantBinding>,
     /// Earlier local functions available to a module constant initializer.
     constant_functions: Option<ConstantFunctions>,
+    /// Share pure call results across register initializers without enabling
+    /// helper evaluation for ordinary expressions in the block.
+    reset_functions: Option<ConstantFunctions>,
     /// Bindings whose entire initializer depends only on compile-time inputs.
     constexpr_names: BTreeSet<String>,
     /// Minimum widths of unannotated bindings and their aggregate members.
@@ -2592,7 +2895,22 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Generated bodies share their registry's evaluation budget. Ordinary
     /// source bodies own independent budgets as they do for unrolling.
-    fn constant_context(&mut self) -> ConstantContext<'_> {
+    fn constant_context(&mut self, register_reset: bool) -> ConstantContext<'_> {
+        let charge_values = self.constant_functions.is_some() || self.function_spec.is_some();
+        let functions =
+            if register_reset && let Some(registry) = &self.function_registry {
+                if let Some(active) = self.constant_functions.as_mut() {
+                    // A constexpr builtin may have enabled ordinary calls since
+                    // an earlier reset populated the block's reset cache.
+                    Some(self.reset_functions.as_mut().unwrap_or(active))
+                } else {
+                    Some(self.reset_functions.get_or_insert_with(|| {
+                        ConstantFunctions::new(Rc::clone(&registry.available))
+                    }))
+                }
+            } else {
+                self.constant_functions.as_mut()
+            };
         let budgets = match (
             &mut self.function_registry,
             self.function_spec,
@@ -2614,9 +2932,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 || self.decls.has_block_value_parametrics,
             statements: &self.statements,
             budgets,
-            charge_values: self.constant_functions.is_some() || self.function_spec.is_some(),
-            functions: self.constant_functions.as_mut(),
-            assertion_cache: self.assertion_cache.as_mut(),
+            charge_values,
+            functions,
+            imports: self.resolver,
+            temporary_bindings: self.assertion_cache.as_mut(),
+            deferred_callback_declaration: Some(&mut self.deferred_callback_declaration),
         }
     }
 
@@ -2628,8 +2948,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Option<ConstantBinding> {
         let assertion_inputs = constexpr_inputs
             && (!self.preserve_assert_inputs || !value.needs_dslx_inputs(&self.constants));
+        // A block may later use this let in a register's constant initializer.
+        let may_initialize_register = self.kind == BodyKind::Block;
         let preserve_assert_inputs = self.preserve_assert_inputs;
-        let mut ctx = self.constant_context();
+        let mut ctx = self.constant_context(/* register_reset= */ false);
         let parametric_ready = constexpr_inputs || !ctx.check_parametric_inputs;
         let deferred = ConstantBinding::Deferred(ctx.statements.len());
         // A projected wide scalar owns its limbs in the speculative cache.
@@ -2646,7 +2968,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             &mut ctx.budgets.speculative,
             ctx.charge_values,
             ConstantUse::Bx,
-            ctx.functions.as_deref_mut(),
+            ConstantCallees {
+                local: ctx.functions.as_deref_mut(),
+                imports: None,
+            },
             ctx.enums,
         ) {
             Ok(Some(result)) if !ctx.charge_values => {
@@ -2676,9 +3001,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     assertion_inputs && !v.needs_dslx_replay,
                 )
             }),
-            Err(ConstantFailure::NeedsFunctions) if !ctx.check_parametric_inputs => {
-                preserve_assert_inputs
-                    .then_some(ConstantBinding::AssertionDeferred(ctx.statements.len()))
+            Err(ConstantFailure::NeedsFunctions) => {
+                (ctx.check_parametric_inputs || may_initialize_register || preserve_assert_inputs)
+                    .then_some(ConstantBinding::DeferredCall {
+                        definition: ctx.statements.len(),
+                        parametric_inputs: ctx.check_parametric_inputs,
+                    })
             }
             Err(_) => Some(deferred),
         }
@@ -2689,14 +3017,52 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         self.checked_constant_for(value, ConstantUse::Bx)
     }
 
-    /// Replay required lets on an explicit stack and cache which uses the
-    /// evaluated definition satisfies.
     fn checked_constant_for(
         &mut self,
         value: &TypedExpr,
         usage: ConstantUse,
     ) -> Result<Option<IrValue>, String> {
-        let mut ctx = self.constant_context();
+        loop {
+            let mut requested = None;
+            let value = Self::fold_required_constant(
+                self.constant_context(/* register_reset= */ false),
+                value,
+                usage,
+                &mut requested,
+            )?;
+            let Some(index) = requested else {
+                return Ok(value);
+            };
+            self.materialize_pending_function(index)?;
+        }
+    }
+
+    /// Evaluate a reset with its block's pure-call cache while preserving the
+    /// ordinary constant bindings used to check subsequent runtime expressions.
+    fn checked_reset_constant(&mut self, value: &TypedExpr) -> Result<Option<IrValue>, String> {
+        let mut saved = TemporaryConstantBindings::new(self.statements.len());
+        let temporary_helpers = self.constant_functions.is_none();
+        let mut ctx = self.constant_context(/* register_reset= */ true);
+        saved.start = if temporary_helpers {
+            SaveBindingReplays::AfterHelperCall(ctx.functions.as_ref().map_or(0, |f| f.calls))
+        } else {
+            SaveBindingReplays::AfterResetOnlyBinding
+        };
+        ctx.temporary_bindings = Some(&mut saved);
+        let result =
+            Self::fold_required_constant(ctx, value, ConstantUse::RegisterReset, &mut None);
+        saved.restore(&mut self.constants);
+        result
+    }
+
+    /// Replay required lets on an explicit stack and cache which uses the
+    /// evaluated definition satisfies.
+    fn fold_required_constant(
+        mut ctx: ConstantContext<'_>,
+        value: &TypedExpr,
+        usage: ConstantUse,
+        requested: &mut Option<usize>,
+    ) -> Result<Option<IrValue>, String> {
         let mut charge_values = ctx.charge_values;
         let mut pending: Vec<usize> = Vec::new();
         loop {
@@ -2708,7 +3074,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 if ctx
                     .names
                     .get(name)
-                    .and_then(|b| b.deferred_definition(usage))
+                    .and_then(|b| b.deferred_definition(usage, ctx.functions.is_some()))
                     != Some(index)
                 {
                     pending.pop();
@@ -2723,7 +3089,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 &mut ctx.budgets.required,
                 charge_values,
                 usage,
-                ctx.functions.as_deref_mut(),
+                ConstantCallees {
+                    local: ctx.functions.as_deref_mut(),
+                    imports: Some(ctx.imports),
+                },
                 ctx.enums,
             ) {
                 Ok(result) => {
@@ -2733,24 +3102,27 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     if let Some(result) = result {
                         let definition = definition.expect("replayed let");
                         let binding = match usage {
-                            ConstantUse::Assertion => ConstantBinding::Known(result.value),
+                            ConstantUse::Declaration => ConstantBinding::Known(result.value),
                             ConstantUse::Dslx => ConstantBinding::folded(
                                 result.value,
                                 definition,
                                 true,
                                 !result.needs_dslx_replay && !expr.needs_dslx_inputs(ctx.names),
                             ),
-                            ConstantUse::Bx => ConstantBinding::folded(
-                                result.value,
-                                definition,
-                                !ctx.check_parametric_inputs || ctx.constexpr_names.contains(name),
-                                !result.needs_dslx_replay
-                                    && ctx.constexpr_names.contains(name)
-                                    && !expr.needs_dslx_inputs(ctx.names),
-                            ),
+                            ConstantUse::Bx | ConstantUse::RegisterReset => {
+                                ConstantBinding::folded(
+                                    result.value,
+                                    definition,
+                                    !ctx.check_parametric_inputs
+                                        || ctx.constexpr_names.contains(name),
+                                    !result.needs_dslx_replay
+                                        && ctx.constexpr_names.contains(name)
+                                        && !expr.needs_dslx_inputs(ctx.names),
+                                )
+                            }
                         };
                         ctx.cache_replay(name, definition, Some(binding));
-                    } else if usage != ConstantUse::Bx {
+                    } else if !usage.is_bx() {
                         // The ordinary BX constant may still have a value.
                         return Ok(None);
                     } else {
@@ -2760,7 +3132,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
                 Err(ConstantFailure::Deferred(mut earlier)) => {
                     charge_values = true;
-                    expr.deferred_inputs(ctx.names, &mut earlier, usage);
+                    expr.deferred_inputs(ctx.names, &mut earlier, usage, ctx.functions.is_some());
                     debug_assert!(
                         earlier
                             .last()
@@ -2770,11 +3142,57 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
                 // A later constexpr actual may replay the same definition
                 // with its callees available.
-                Err(ConstantFailure::NeedsFunctions) => return Ok(None),
+                Err(ConstantFailure::NeedsFunctions) => {
+                    // A speculative pass may have exhausted its budget before
+                    // reaching this helper. Remember the requirement for later
+                    // runtime uses of the same definition.
+                    if ctx.functions.is_none()
+                        && let (Some(index), Some(name)) = (definition, name)
+                    {
+                        ctx.cache_replay(
+                            name,
+                            index,
+                            Some(ConstantBinding::DeferredCall {
+                                definition: index,
+                                // This code path replayed a previously
+                                // unrestricted deferred let. Its other
+                                // consumers can still replay it.
+                                parametric_inputs: true,
+                            }),
+                        );
+                    }
+                    return Ok(None);
+                }
+                Err(ConstantFailure::PendingFunction(index)) => {
+                    *requested = Some(index);
+                    return Ok(None);
+                }
+                Err(ConstantFailure::ImportedCall(error)) => return Err(error),
+                Err(ConstantFailure::NeedsImport) => unreachable!("required folds provide imports"),
                 Err(ConstantFailure::InvalidEnumCast(name)) => {
                     return Err(format!(
                         "constant cast to enum '{name}' requires bits of its declared width encoding a member"
                     ));
+                }
+                Err(ConstantFailure::UnboundCallback) if usage != ConstantUse::Declaration => {
+                    return Ok(None);
+                }
+                Err(ConstantFailure::UnboundCallback | ConstantFailure::DeferredCallbackValue) => {
+                    if usage == ConstantUse::Declaration
+                        && let (Some(index), Some(name)) = (definition, name)
+                    {
+                        // Replay the enclosing expression with this let marked
+                        // as callback-dependent so its other eager operands
+                        // still receive their constexpr checks.
+                        ctx.cache_replay(name, index, Some(ConstantBinding::CallbackDependent));
+                        pending.pop();
+                        continue;
+                    }
+                    if let Some(deferred) = ctx.deferred_callback_declaration {
+                        *deferred = true;
+                        return Err("declaration requires a specialized callback".into());
+                    }
+                    return Ok(None);
                 }
                 Err(ConstantFailure::WorkLimit) => {
                     return Err(format!(
@@ -2799,19 +3217,21 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             resolver,
             enclosing_type_locals: None,
             kind,
-            uses_child: Cell::new(false),
+            has_block_only_behavior: Cell::new(false),
             clockless_block: None,
             source_kind: kind,
             specializations: None,
             specialization: None,
             function_registry: None,
             function_spec: None,
+            pending_functions: Vec::new(),
             function_type_bindings: None,
             source_template: None,
+            deferred_callback_declaration: false,
             template_callbacks: None,
             template_name_depth: None,
             dslx_value_context: false,
-            preserve_assert_inputs: decls.has_const_assert,
+            preserve_assert_inputs: decls.has_constexpr_declaration,
             dslx_constant_use: ConstantUse::Dslx,
             assertion_cache: None,
             assert_operands: None,
@@ -2825,13 +3245,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             block_position: None,
             local_callees: BTreeSet::new(),
             names: BTreeSet::new(),
-            value_parametric_names: BTreeSet::new(),
+            constant_pattern_names: BTreeSet::new(),
+            local_type_aliases: BTreeMap::new(),
             in_struct_definition: false,
             outputs: BTreeSet::new(),
             reserved_hardware_names: BTreeSet::new(),
             values: BTreeMap::new(),
             constants: BTreeMap::new(),
             constant_functions: None,
+            reset_functions: None,
             constexpr_names: BTreeSet::new(),
             inferred_bindings: BTreeMap::new(),
             regs: BTreeMap::new(),
@@ -3020,7 +3442,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         } else {
             main
         };
-        let requires_hardware = !c.regs.is_empty() || c.uses_child.get();
+        let has_block_only_behavior = c.has_block_only_behavior.get();
         let block = CheckedBlock {
             name: specialization.map_or(&block.name, |s| &s.name).clone(),
             source_name: block.name.clone(),
@@ -3039,7 +3461,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         };
         Ok(BlockBody {
             block,
-            requires_hardware,
+            has_block_only_behavior,
         })
     }
 
@@ -3053,22 +3475,31 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve a source annotation and register its concrete fields.
     fn source_type(&mut self, source: &Type) -> Result<Type, String> {
         self.decls
-            .check_type_visibility(source, self.function_position, self.type_bindings())?;
-        let ty = self.resolve_dimensions(source, MAX_ELABORATION_DEPTH)?;
-        let ty = match self.type_bindings() {
-            Some(bindings) => bindings.concrete_type(&ty)?,
-            None => ty,
-        };
+            .check_type_visibility(source, self.function_position, |name| {
+                self.local_type_aliases.contains_key(name)
+                    || self.type_bindings().is_some_and(|b| b.declares(name))
+            })?;
+        let ty = self.concrete_annotation(source)?;
         self.structs.update_imports(self.resolver)?;
         self.structs.validate_type(&ty)?;
         Ok(ty)
     }
 
     /// Instantiate a type from a resolved block signature at a call site.
-    fn bound_block_type(&mut self, ty: &Type, bindings: &Bindings) -> Result<Type, String> {
+    fn bound_block_type(
+        &mut self,
+        owner: &str,
+        ty: &Type,
+        bindings: &Bindings,
+    ) -> Result<Type, String> {
         let ty = bindings.concrete_type(ty)?;
         self.with_type_resolver(|types, dimensions, _| {
-            types.materialize_type_applications(ty, dimensions, MAX_ELABORATION_DEPTH)
+            types.materialize_type_applications(
+                ty,
+                Some(bindings),
+                dimensions.decls.module_dimensions(owner),
+                MAX_ELABORATION_DEPTH,
+            )
         })
     }
 
@@ -3135,15 +3566,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Result<TypedExpr, String> {
         let mut prepared = None;
         let spec;
-        let (symbol, child) = if let Some(template) = self.decls.templates.get(target) {
+        let template = self.decls.templates.get(target);
+        let (symbol, child) = if let Some(template) = template {
             let mut values = Vec::with_capacity(template.block.value_parametrics.len());
             let mut callbacks = Vec::with_capacity(template.callback_params.len());
             for (formal, actual) in template.block.parametric_bindings().zip(parametrics) {
                 match formal {
                     FunctionParametricRef::Value(formal) => {
-                        // Block template validation resolves each value formal
-                        // to u32.
-                        let ty = value_parametrics::dimension_type();
+                        let ty = template.value_types[values.len()].clone();
                         let value = self.parametric_value(actual, &ty).map_err(|e| {
                             format!(
                                 "value parametric '{}' of block '{target}': {e}",
@@ -3157,7 +3587,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     }
                 }
             }
-            let call = self.generic_inputs(template, args, &callbacks)?;
+            let call = self.generic_inputs(template, args, &callbacks, values)?;
             let path = self.specialization.map_or(&[][..], |s| s.path.as_slice());
             spec = self
                 .specializations
@@ -3165,11 +3595,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .expect("block elaboration")
                 .intern(
                     template,
-                    BlockParametricArguments {
-                        bindings: call.bindings,
-                        values,
-                        callbacks: call.callbacks,
-                    },
+                    call.concrete_ports,
+                    call.parametrics,
                     path,
                     self.decls.module_dimensions(target),
                     &mut TypeResolver {
@@ -3179,16 +3606,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     },
                 )
                 .map_err(|e| format!("call to block '{target}': {e}"))?;
-            prepared = Some(call.values.into_iter());
+            prepared = Some(call.inputs.into_iter());
             (spec.name.as_str(), &spec.interface)
         } else {
             (target, &self.decls.blocks[target])
         };
-        // Charge for each instance's ports, even when the definition is shared.
-        if self.replaying_body() || !parametrics.is_empty() {
+        // Charge for each instance's ports, including calls that use defaults.
+        if self.replaying_body()
+            || template.is_some_and(|t| !t.value_types.is_empty() || !t.callback_params.is_empty())
+        {
             self.charge_expansion("child block wiring", child.port_type_nodes)?;
         }
-        self.uses_child.set(true);
+        self.has_block_only_behavior.set(true);
         if let Some(ty) = expected
             && !compatible(ty, &child.result)
         {
@@ -3230,7 +3659,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         match child.result {
             Type::ParametricBits { .. }
             | Type::ParametricArray { .. }
-            | Type::TypeApplied { .. } => Err("unresolved block result dimension".into()),
+            | Type::TypeApplied { .. }
+            | Type::MixedApplied { .. } => Err("unresolved block result dimension".into()),
             Type::Tuple(_)
             | Type::Named(_)
             | Type::Applied { .. }
@@ -3265,14 +3695,24 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 format!("clockless block cannot call clocked block '{target}'; add `clk` to the parent signature"),
             ));
         }
-        let (values, callbacks) = self.decls.templates.get(target).map_or((0, 0), |template| {
-            (
-                template.block.value_parametrics.len(),
-                template.callback_params.len(),
-            )
-        });
-        let expected = values + callbacks;
-        if expected != count {
+        let (values, callbacks, required) =
+            self.decls
+                .templates
+                .get(target)
+                .map_or((0, 0, 0), |template| {
+                    (
+                        template.value_types.len(),
+                        template.callback_params.len(),
+                        template.required_arguments,
+                    )
+                });
+        let maximum = values + callbacks;
+        if !(required..=maximum).contains(&count) {
+            let expected = if required == maximum {
+                maximum.to_string()
+            } else {
+                format!("{required} to {maximum}")
+            };
             let kind = if values == 0 {
                 "callable"
             } else {
@@ -3316,7 +3756,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         conditional: bool,
     ) -> Result<(), String> {
         let mut locals = Vec::new();
-        let mut pattern_bindings = Vec::new();
+        let mut lexical_bindings = Vec::new();
         for (index, stmt) in statements.iter().enumerate() {
             if !conditional {
                 self.statement_span = block
@@ -3326,6 +3766,24 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .copied();
             }
             let checked = match stmt {
+                Stmt::Assert {
+                    predicate,
+                    label,
+                    position,
+                } => {
+                    let predicate = self.expr(predicate, Some(&Type::Bool)).map_err(|err| {
+                        format!(
+                            "{}:{}: assert! predicate: {err}",
+                            position.line, position.column
+                        )
+                    })?;
+                    self.has_block_only_behavior.set(true);
+                    CheckedStmt::Assert {
+                        predicate,
+                        position: *position,
+                        label: label.clone(),
+                    }
+                }
                 Stmt::ConstAssert(assertion) => {
                     if conditional {
                         return Err(format!(
@@ -3337,6 +3795,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     continue;
                 }
                 Stmt::Reg { name, ty, reset } => {
+                    self.has_block_only_behavior.set(true);
                     if block.clock.is_none() {
                         return Err(self.clock_error(block, format!(
                             "clockless block cannot declare register '{name}'; add `clk` to the block signature"
@@ -3350,10 +3809,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     let reset = match reset {
                         None => None,
                         Some(expr) => {
+                            let prior_callees = self.callee_specialization_count();
                             let value = self
                                 .expr(expr, Some(&ty))
                                 .map_err(|e| format!("reset of register '{name}': {e}"))?;
-                            Some(self.checked_constant(&value)?.ok_or_else(|| {
+                            if self.callee_specialization_count() > prior_callees {
+                                self.decls.constexpr_instantiated_callee.set(true);
+                            }
+                            // A reset may call a pure BX factory specialized
+                            // while checking this initializer.
+                            Some(self.checked_reset_constant(&value)?.ok_or_else(|| {
                                 format!(
                                     "reset of register '{name}' must be a compile-time constant"
                                 )
@@ -3410,16 +3875,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     ty,
                     value: initializer,
                 } => {
-                    if self.function_values.contains_key(name) {
-                        // Rebinding a pattern leaf uses the previous lexical
-                        // value in the initializer and gives a child its own
-                        // name.
-                        let init =
-                            self.block_initializer(None, ty.as_ref(), initializer, !conditional)?;
+                    if self.names.contains(name) {
+                        if self.is_fixed_block_name(block, name) {
+                            return Err(format!("duplicate name '{name}'"));
+                        }
+                        // The previous producer keeps its checked name. A
+                        // direct child call also needs its own instance name.
+                        let init = self
+                            .block_initializer(None, ty.as_ref(), initializer, !conditional)
+                            .map_err(|e| format!("let '{name}': {e}"))?;
                         let value = self.share_scoped_value(init.value);
-                        self.bind_scoped_value(name, value, init.widths, &mut pattern_bindings);
+                        self.bind_scoped_value(name, value, init.widths, &mut lexical_bindings);
                         if !conditional {
-                            pattern_bindings.clear();
+                            lexical_bindings.clear();
                         }
                         continue;
                     }
@@ -3432,11 +3900,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     let init = self.pattern_initializer(binding, !conditional)?;
                     let mut collision = None;
                     binding.pattern.visit_names(&mut |name| {
-                        if block.clock.as_deref() == Some(name)
-                            || block.reset.as_deref() == Some(name)
-                            || self.regs.contains_key(name)
-                            || self.wires.contains_key(name)
-                        {
+                        if self.is_fixed_block_name(block, name) {
                             collision = Some(name.to_owned());
                         }
                     });
@@ -3447,12 +3911,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         &binding.pattern,
                         init.value,
                         init.widths,
-                        &mut pattern_bindings,
+                        &mut lexical_bindings,
                     )?;
                     if !conditional {
                         // A top-level rebinding stays visible in the block
                         // result.
-                        pattern_bindings.clear();
+                        lexical_bindings.clear();
                     }
                     continue;
                 }
@@ -3490,7 +3954,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             };
             self.statements.push(checked);
         }
-        self.leave_scope(pattern_bindings);
+        self.leave_scope(lexical_bindings);
         for name in locals {
             self.names.remove(name);
             self.values.remove(name);
@@ -3499,6 +3963,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             self.inferred_bindings.remove(name);
         }
         Ok(())
+    }
+
+    /// Clock, reset, register, and deferred-wire names denote hardware in the
+    /// block.
+    fn is_fixed_block_name(&self, block: &Block, name: &str) -> bool {
+        block.clock.as_deref() == Some(name)
+            || block.reset.as_deref() == Some(name)
+            || self.regs.contains_key(name)
+            || self.wires.contains_key(name)
     }
 
     /// Resolve an initializer against the previous scope before installing
@@ -3656,23 +4129,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Struct { .. }
             | Expr::AppliedStruct { .. }
             | Expr::ParametricStruct { .. }
-            | Expr::TypeAppliedStruct { .. } => {
+            | Expr::TypeAppliedStruct { .. }
+            | Expr::MixedAppliedStruct { .. } => {
                 let literal = expr.struct_literal().expect("struct literal");
-                let values;
-                let application = match literal.args {
-                    StructLiteralArgs::Omitted => StructApplication::Named(literal.name),
-                    StructLiteralArgs::Types(types) => {
-                        StructApplication::Types(literal.name, types)
-                    }
-                    _ => {
-                        values = self.struct_value_prefix(literal.name, literal.args)?;
-                        StructApplication::Values(literal.name, &values)
-                    }
+                let args;
+                let application = if matches!(literal.args, StructLiteralArgs::Omitted) {
+                    StructApplication::Named(literal.name)
+                } else {
+                    args = self.struct_prefix(literal.name, literal.args)?;
+                    StructApplication::Applied(literal.name, &args)
                 };
-                self.struct_literal(application, literal.fields, literal.base, expected)
+                self.with_prepared_value(expr, |checker, expr| {
+                    let literal = expr.struct_literal().expect("prepared struct constructor");
+                    checker.struct_literal(application, literal.fields, literal.base, expected)
+                })
             }
             Expr::Field { value, name } => self.project_field(value, name),
-            Expr::Call { name, args } => self.function_call(name, args),
+            Expr::Call { name, args } => self.function_call(name, args, expected),
             Expr::MapBeforeUse {
                 name,
                 args,
@@ -3684,7 +4157,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         .ok_or("invalid operand syntax for the built-in map")?;
                     self.with_dslx_value_context(|checker| checker.named_array_map(args))
                 } else {
-                    self.function_call(name, args)
+                    self.function_call(name, args, expected)
                 }
             }
             Expr::ParametricCall {
@@ -3700,7 +4173,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     )?;
                     return Err(self.block_in_value_error(name));
                 }
-                self.parametric_call(name, parametrics, args)
+                self.parametric_call(name, parametrics, args, expected)
             }
             Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
                 let selector = checker.match_selector(subject, arms)?;
@@ -3733,6 +4206,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn named_value(&mut self, name: &str) -> Result<(Type, K), String> {
         if name == "_" && (self.kind == BodyKind::Function || self.in_loop_scope()) {
             return Err("cannot read the wildcard binding '_'".into());
+        }
+        if self.local_type_aliases.contains_key(name) {
+            return Err(format!("'{name}' names a local type, expected a value"));
         }
         if let Some(value) = self.lexical_value(name) {
             let literal = match &value.kind {
@@ -3841,7 +4317,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn zero_value(&mut self, ty: &Type) -> Result<(Type, K), String> {
         let ty = self.source_type(ty)?;
         if self.zero_calls_function()? {
-            self.function_call(&self.zero_binding.clone(), &[])
+            self.function_call(&self.zero_binding.clone(), &[], Some(&ty))
         } else {
             let zero = self.intrinsic_zero(&ty)?;
             Ok((ty, zero))
@@ -3871,6 +4347,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             | Type::Applied { .. }
             | Type::ParametricStruct { .. }
             | Type::TypeApplied { .. }
+            | Type::MixedApplied { .. }
             | Type::ParametricBits { .. }),
         ) = annotation
         {
@@ -4015,21 +4492,29 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return Err("cannot index an empty array".into());
         }
         let index = self.unsigned_index(index, Some(32))?;
-        if index.has_constant_inputs(&self.constexpr_names)
-            && let Some(value) = self.checked_constant(&index)?
-            && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
-                .is_none_or(|i| i >= *size)
-        {
-            return Err(format!(
-                "constant index {value} out of bounds for {}",
-                array.ty
-            ));
+        let constant_index = index.has_constant_inputs(&self.constexpr_names);
+        if constant_index {
+            let mut ctx = self.constant_context(false);
+            // Bounds can be checked after specialization while the array's
+            // element type is already available to the abstract callback body.
+            ctx.deferred_callback_declaration = None;
+            if let Some(value) =
+                Self::fold_required_constant(ctx, &index, ConstantUse::Bx, &mut None)?
+                && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
+                    .is_none_or(|i| i >= *size)
+            {
+                return Err(format!(
+                    "constant index {value} out of bounds for {}",
+                    array.ty
+                ));
+            }
         }
         Ok((
             element.as_ref().clone(),
             K::Index {
                 value: Box::new(array),
                 index: Box::new(index),
+                constant_index,
             },
         ))
     }
@@ -4104,12 +4589,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         base: Option<(&StructSplat, TypedExpr)>,
         expected: Option<&Type>,
     ) -> Result<(Type, K), struct_parametrics::StructLiteralError> {
-        let mut supplied = BTreeMap::new();
-        for (field, value) in fields {
-            if supplied.insert(field.as_str(), value).is_some() {
-                return Err(format!("duplicate field '{source}.{field}'").into());
-            }
-        }
+        let mut supplied = struct_parametrics::struct_field_map(source, fields)?;
         let (ty, mut inputs, base) = if let Some((splat, base)) = base {
             self.check_struct_splat_type(source, &base.ty)?;
             if let Some(owner) = self.warning_owner
@@ -4506,9 +4986,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::UnrollFor(fold) if fold.annotation.is_none() => {
                 self.contains_inferred_aggregate(&fold.seed)
             }
-            Expr::Struct { .. } | Expr::AppliedStruct { .. } | Expr::ParametricStruct { .. } => {
-                self.contextual_struct_constructor(expr).is_some()
-            }
+            Expr::Struct { .. }
+            | Expr::AppliedStruct { .. }
+            | Expr::ParametricStruct { .. }
+            | Expr::MixedAppliedStruct { .. } => self.contextual_struct_constructor(expr).is_some(),
             Expr::Tuple(items) | Expr::Array(items) => items
                 .iter()
                 .any(|item| self.contains_inferred_aggregate(item)),
@@ -4538,6 +5019,33 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
     }
 
+    /// Defer an invocation only when its result needs contextual evidence.
+    fn call_needs_result(&self, name: &str, explicit: usize) -> Result<bool, String> {
+        if name.strip_prefix(BUILTIN_PREFIX) == Some("zero!") {
+            return Ok(true);
+        }
+        if self.callback_index(name).is_some() {
+            return Ok(false);
+        }
+        if name == "zero!"
+            && (!self.decls.visible(name, self.function_position)
+                || !self.decls.declares_function(name) && self.resolver.lookup(name)?.is_none())
+        {
+            return Ok(true);
+        }
+        Ok(match self.decls.result_context.get(name) {
+            Some(ResultContext::TypeParameter) => true,
+            Some(ResultContext::ExplicitValues(minimum)) => explicit < *minimum,
+            None => false,
+        })
+    }
+
+    fn has_concrete_element_type(&self, expr: &Expr) -> Result<bool, String> {
+        has_concrete_element_type(expr, self.common_widths(), &|name, explicit| {
+            self.call_needs_result(name, explicit)
+        })
+    }
+
     fn common_hint(&self, items: &[&Expr]) -> Result<CommonTypeHint, String> {
         if items
             .iter()
@@ -4545,13 +5053,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         {
             for (i, item) in items.iter().enumerate() {
                 if !self.contains_inferred_aggregate(item)
-                    && has_concrete_element_type(item, self.common_widths())?
+                    && self.has_concrete_element_type(item)?
                 {
                     return Ok(CommonTypeHint::FromExpr(i));
                 }
             }
         }
-        common_type_hint(items, self.common_widths())
+        common_type_hint(items, self.common_widths(), &|name, explicit| {
+            self.call_needs_result(name, explicit)
+        })
     }
 
     /// Infer corresponding signed leaves across already evaluated aggregate
@@ -4733,7 +5243,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .collect();
         }
         let first_has_type = !self.contains_inferred_aggregate(items[0])
-            && has_concrete_element_type(items[0], self.common_widths())?;
+            && self.has_concrete_element_type(items[0])?;
         if !first_has_type
             && items
                 .iter()
@@ -5002,10 +5512,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             checker.with_prepared_value(subject, |checker, subject| {
                 let operands = match_operands(subject, arms, |name| {
                     let head = name.split_once("::").map_or(name, |(head, _)| head);
-                    Ok(checker.value_parametric_names.contains(name)
-                        || (!checker.names.contains(head)
-                            && checker.callback_index(head).is_none()
-                            && checker.is_constant_pattern(name)?))
+                    if checker.names.contains(head) {
+                        if let Some(TypedExpr {
+                            kind: K::Call { name: target, .. },
+                            ..
+                        }) = checker.lexical_value(name)
+                            && target == crate::typed::DEFERRED_CALLBACK_VALUE
+                        {
+                            checker.deferred_callback_declaration = true;
+                            return Err("match pattern requires a specialized callback".into());
+                        }
+                        return Ok(checker.constant_pattern_names.contains(name)
+                            || (head != name
+                                && checker.local_type_aliases.contains_key(head)
+                                && checker.is_enum_member_name(name)?));
+                    }
+                    Ok(checker.callback_index(head).is_none()
+                        && checker.is_constant_pattern(name)?)
                 })?;
                 if arms
                     .iter()
@@ -5114,7 +5637,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Resolve a local or extern signature or infer an imported DSLX
     /// specialization.
-    fn function_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
+    fn function_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), String> {
         let name = self.qualified_extern(name).unwrap_or(name);
         let local = crate::bx_import::local_callee_name(name);
         let binding = local.unwrap_or(name);
@@ -5145,12 +5673,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if let Some(builtin) = name.strip_prefix(BUILTIN_PREFIX)
             && is_call_builtin(builtin)
         {
-            return self.builtin_call(builtin, args);
+            return self.builtin_call(builtin, args, expected);
         }
         let visible = self.decls.visible(name, self.function_position);
         if !visible {
             if is_call_builtin(name) && !self.has_local_name(name) {
-                return self.builtin_call(name, args);
+                return self.builtin_call(name, args, expected);
             }
             return Err(format!("function '{name}' is declared later in the module"));
         }
@@ -5164,7 +5692,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         {
             if is_call_builtin(spelling) && self.resolver.has_public_type(&subject, &function) {
                 if !visible_value {
-                    return self.builtin_call(spelling, args);
+                    return self.builtin_call(spelling, args, expected);
                 }
                 let kind = if self.resolver.is_enum_type(&subject, &function) {
                     "enum"
@@ -5214,10 +5742,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             if self.has_local_name(name) {
                 return Err(format!("'{name}' names a local value here"));
             }
-            return self.builtin_call(name, args);
+            return self.builtin_call(name, args, expected);
         }
         if self.decls.value_template_callbacks.contains_key(name) {
-            return self.parametric_call(name, &[], args);
+            return self.parametric_call(name, &[], args, expected);
         }
         let (&callee, f) = self
             .decls
@@ -5586,6 +6114,77 @@ mod tests {
 
     fn check_bx(source: &str) -> Result<CheckedModule, String> {
         check_module(&parse_module(source)?)
+    }
+
+    #[test]
+    fn runtime_assertions_check_boolean_predicates_outside_the_timed_output_cone()
+    -> Result<(), String> {
+        let source = r#"block hold(clk, input: u8 @0, enable: bool @0) -> u8 @1 {
+    reg saved: u8;
+    saved := input;
+    if enable {
+        let old_matches = saved == input;
+        assert!(old_matches, "value_changed");
+    }
+    saved
+}"#;
+        check_bx(source)?;
+        let error = check_bx(&source.replace("assert!(old_matches", "assert!(saved")).unwrap_err();
+        assert_eq!(
+            error,
+            "block 'hold': 6:9: assert! predicate: expected bool, got u8"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn block_assertion_labels_share_the_hardware_namespace() -> Result<(), String> {
+        let child = "block child(clk, x: bool) -> bool { x }";
+        for (label, kind) in [
+            ("clk", "port"),
+            ("rst", "port"),
+            ("x", "port"),
+            ("out", "port"),
+            ("q", "register"),
+            ("u", "block instance"),
+        ] {
+            let check = format!(r#"if x {{ assert!(x, "{label}"); }}"#);
+            let hardware = "reg q: bool; q := x; let u = child(q);";
+            for (body, line) in [
+                (format!("{check}\n{hardware}"), 4),
+                (format!("{hardware}\n{check}"), 5),
+            ] {
+                let source = format!(
+                    "#![allow(block_reset_signal)]\n{child}\nblock top(clk, rst, x: bool) -> bool {{\n{body}\nu }}"
+                );
+                assert_eq!(
+                    check_bx(&source).unwrap_err(),
+                    format!(
+                        "block 'top': {line}:8: assertion label '{label}' collides with a {kind}"
+                    )
+                );
+            }
+        }
+        let source = r#"block child(clk, x: bool) -> bool { assert!(x, "same"); x }
+block top(clk, x: bool) -> bool {
+    reg q: bool = false;
+    q := x;
+    let same = x;
+    assert!(same, "same");
+    if same { assert!(q, "rst"); }
+    let out = child(x);
+    assert!(out, "out_inst");
+    out
+}"#;
+        let checked = check_bx(source)?;
+        let top = checked.blocks().iter().find(|b| b.name == "top").unwrap();
+        assert_eq!(top.reset.as_deref(), Some("rst_1"));
+        assert!(
+            top.statements
+                .iter()
+                .any(|stmt| matches!(stmt, CheckedStmt::Inst { name, .. } if name == "out_inst_1"))
+        );
+        Ok(())
     }
 
     #[test]
@@ -6618,6 +7217,33 @@ block child<T>(clk, x: T) -> T { reg q: T; q := x; q }"#;
                 check_module(&parse_module(source).unwrap()).is_err(),
                 "{source}"
             );
+        }
+    }
+
+    #[test]
+    fn block_let_initializer_errors_identify_fresh_and_shadowing_bindings() {
+        for name in ["fresh", "x"] {
+            let source = format!("block b(x: u8) -> u8 {{ let {name}: bool = x; x }}");
+            assert_eq!(
+                check_bx(&source).unwrap_err(),
+                format!("block 'b': let '{name}': expected bool, got u8")
+            );
+        }
+    }
+
+    #[test]
+    fn block_lets_reject_shadowing_hardware_names() {
+        for name in ["clk", "rst", "q", "w"] {
+            for binding in [format!("let {name} = w;"), format!("let ({name},) = (w,);")] {
+                let source = format!(
+                    r#"#![allow(block_reset_signal)]
+block b(clk, rst) -> u8 {{ reg q: u8; let w: u8; w = u8:1; q := w; {binding} q }}"#
+                );
+                assert_eq!(
+                    check_bx(&source).unwrap_err(),
+                    format!("block 'b': duplicate name '{name}'")
+                );
+            }
         }
     }
 

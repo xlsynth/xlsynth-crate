@@ -947,7 +947,12 @@ fn translate_nodes<'ir, S: Solver>(
                     bitvec: BitVec::ZeroWidth,
                 }
             }
-            NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } => {
+            NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInoutRead { .. }
+            | NodePayload::ExtInoutDrive { .. }
+            | NodePayload::ExtInstantiationInout { .. }
+            | NodePayload::InputPort { .. }
+            | NodePayload::OutputPort { .. } => {
                 panic!("Block ports must be lowered before function prover translation");
             }
             NodePayload::InstantiationInput { .. } => {

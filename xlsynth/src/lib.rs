@@ -26,6 +26,7 @@ pub use ir_analysis::{Interval, IntervalSet, IrAnalysis, IrAnalysisLevel, KnownB
 pub use ir_package::IrFunction;
 pub use ir_package::IrFunctionJit;
 pub use ir_package::IrPackage;
+pub use ir_package::IrProcRuntime;
 pub use ir_package::IrType;
 pub use ir_package::RunResult;
 pub use ir_package::TraceMessage;
@@ -479,7 +480,7 @@ mod tests {
 file_number 0 \"/memfile/test_mod.x\"
 
 fn __test_mod__f(x: bits[32] id=1) -> bits[32] {
-  ret x: bits[32] = param(name=x, id=1)
+  ret x: bits[32] = param(name=x, id=1, pos=[(0,0,5)])
 }
 "
         );

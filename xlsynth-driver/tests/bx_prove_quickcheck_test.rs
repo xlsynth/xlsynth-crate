@@ -301,12 +301,12 @@ fn bounds_block_instance_expansion_before_flattening_only_the_selected_hierarchy
 }
 
 #[test]
-fn rejects_reachable_linked_contracts_including_counted_loop_bodies() -> Result<()> {
+fn checks_linked_array_bounds_and_rejects_hardware_assertions_in_loop_bodies() -> Result<()> {
     let dir = tempfile::tempdir()?;
     fs::write(
         dir.path().join("linked.ir"),
         r#"package linked
-fn lookup(a: bits[8][2] id=1, i: bits[8] id=2) -> bits[8] {
+fn lookup(a: bits[8][3] id=1, i: bits[2] id=2) -> bits[8] {
   ret selected: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=3)
 }
 fn step(i: bits[2] id=4, acc: bits[8] id=5) -> bits[8] {
@@ -322,16 +322,30 @@ block through_loop(clk: clock, x: bits[8], out: bits[8]) {
 }
 "#,
     )?;
-    let source = r#"extern fn lookup(a: u8[2], i: u8) -> u8;
+    let source = r#"extern fn lookup(a: u8[3], i: u2) -> u8;
+const DATA: u8[3] = [u8:1, u8:2, u8:3];
 #[quickcheck]
-block lookup_contract(i: u8) -> bool {
-    let a = [u8:1, u8:2];
-    lookup(a, i) == lookup(a, i)
+block guarded_lookup(i: u2) -> bool {
+    if i < u2:3 { assert_eq(lookup(DATA, i), lookup(DATA, i)); }
+    true
+}
+#[quickcheck]
+block lookup_contract(i: u2) -> bool {
+    lookup(DATA, i) == lookup(DATA, i)
 }
 "#;
-    let (_, diagnostics) = prove(dir.path(), source, &["--link-ir=linked.ir"], false)?;
+    let (report, diagnostics) = prove(dir.path(), source, &["--link-ir=linked.ir"], false)?;
+    assert_eq!(
+        report,
+        "quickcheck guarded_lookup ... proved\nquickcheck lookup_contract ... DISPROVED\n1 proved; 1 disproved; 0 inconclusive; 0 errors\n"
+    );
     assert!(
-        diagnostics.contains("lookup_contract") && diagnostics.contains("assumed_in_bounds=true"),
+        diagnostics
+            .contains("IR array_index at node 3 was out of bounds despite assumed_in_bounds=true"),
+        "{diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("inputs: [i=bits[2]:3]"),
         "{diagnostics}"
     );
 
@@ -355,5 +369,55 @@ block loop_contract(x: u8) -> bool {
         &["--link-ir=linked.ir"],
         true,
     )?;
+    Ok(())
+}
+
+#[test]
+fn checks_each_mapped_loop_iteration_and_each_dimension_of_a_discarded_update() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("updates.ir"),
+        r#"package updates
+fn step(k: bits[129] id=1, acc: bits[2] id=2, key: bits[2] id=3) -> bits[2] {
+  wide: bits[129] = zero_ext(key, new_bit_count=129, id=4)
+  col: bits[129] = add(k, wide, id=5)
+  row: bits[1] = literal(value=1, id=6)
+  table: bits[1][3][2] = literal(value=[[0, 0, 0], [0, 0, 0]], id=7)
+  unused: bits[1][3][2] = array_update(table, row, indices=[row, col], assumed_in_bounds=true, id=8)
+  ret result: bits[2] = identity(acc, id=9)
+}
+fn walk(key: bits[2] id=10) -> bits[2] {
+  ret result: bits[2] = counted_for(key, trip_count=2, stride=1, body=step, invariant_args=[key], id=11)
+}
+fn sweep(keys: bits[2][2] id=12) -> bits[2][2] {
+  ret result: bits[2][2] = map(keys, to_apply=walk, id=13)
+}
+fn zero_trip(key: bits[2] id=14) -> bits[2] {
+  ret result: bits[2] = counted_for(key, trip_count=0, stride=1, body=step, invariant_args=[key], id=15)
+}
+"#,
+    )?;
+    let source = r#"extern fn sweep(keys: u2[2]) -> u2[2];
+extern fn zero_trip(key: u2) -> u2;
+#[quickcheck] block bounded(key: u2) -> bool {
+    let keys = [key & u2:1, u2:1];
+    sweep(keys) == keys
+}
+#[quickcheck] block empty_loop(key: u2) -> bool { zero_trip(key) == key }
+#[quickcheck] block last_iteration() -> bool {
+    let keys = [u2:0, u2:2];
+    sweep(keys) == keys
+}
+"#;
+    let (report, witness) = prove(dir.path(), source, &["--link-ir=updates.ir"], false)?;
+    assert_eq!(
+        report,
+        "quickcheck bounded ... proved\nquickcheck empty_loop ... proved\nquickcheck last_iteration ... DISPROVED\n2 proved; 1 disproved; 0 inconclusive; 0 errors\n"
+    );
+    assert!(
+        witness
+            .contains("IR array_update at node 8 was out of bounds despite assumed_in_bounds=true"),
+        "{witness}"
+    );
     Ok(())
 }

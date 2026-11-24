@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generate Lean models from verified XLS block IR.
-//!
-//! [`emit`] preserves physical values and clock-step behavior.
-//! Emission returns text; it does not invoke Lean or check the generated
-//! proofs.
+//! Emit Lean from verified XLS block IR.
 
 use anyhow::{Context, Result, bail, ensure};
 use std::borrow::Cow;
 use xlsynth_pir::desugar_extensions::desugar_extensions_in_graph;
 use xlsynth_pir::ir::{self, MemberType, PackageMember};
+use xlsynth_pir::ir_inline::reachable_functions_in_dependency_order;
+use xlsynth_pir::ir_utils::direct_function_references;
 
+pub(crate) mod library_notation;
 mod raw;
+mod segments;
+
 pub use raw::{emit, write_to};
 
 /// The block and its package-level context used during emission.
@@ -20,9 +21,13 @@ pub(crate) struct BlockContext<'a> {
     pub(crate) file_table: &'a ir::FileTable,
     pub(crate) graph: Cow<'a, ir::Block>,
     source_block: &'a ir::Block,
+    /// Reachable functions, each listed once after its callees.
+    pub(crate) helpers: Vec<&'a ir::Fn>,
 }
 
 impl<'a> BlockContext<'a> {
+    /// Lower block extensions and resolve calls in the package that owns the
+    /// block.
     pub(crate) fn new(package: &'a ir::Package, graph: &'a ir::Block) -> Result<Self> {
         ensure!(
             package
@@ -32,6 +37,9 @@ impl<'a> BlockContext<'a> {
             graph.name,
             package.name
         );
+        graph
+            .reject_inouts("Lean block emission")
+            .map_err(anyhow::Error::msg)?;
         let normalized = if graph
             .nodes
             .iter()
@@ -44,11 +52,16 @@ impl<'a> BlockContext<'a> {
         } else {
             Cow::Borrowed(graph)
         };
+        let roots: Vec<_> = direct_function_references(graph).into_iter().collect();
+        let helpers = reachable_functions_in_dependency_order(package, &roots)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("resolving helpers of block {}", graph.name))?;
         Ok(Self {
             package_name: &package.name,
             file_table: &package.file_table,
             graph: normalized,
             source_block: graph,
+            helpers,
         })
     }
 

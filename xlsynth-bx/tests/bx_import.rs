@@ -35,6 +35,91 @@ fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, 
 }
 
 #[test]
+fn imported_block_specializes_its_dslx_reset_helper_by_boolean_parameter()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "config.x",
+        r#"
+pub fn width() -> u32 { u32:13 }
+pub fn widen(n: u32) -> u32 { n + u32:1 }
+pub fn reset_value(split: bool) -> u13 {
+    if split { u13:0x123 } else { u13:0x456 }
+}
+"#,
+    )?;
+    write_module(
+        dir.path(),
+        "stages.bx",
+        r#"
+use config;
+const WIDTH = config::width();
+pub block stage<SPLIT: bool = {false}>(clk, x: uN[WIDTH]) -> uN[WIDTH] {
+    reg q: uN[WIDTH] = config::reset_value(SPLIT);
+    q := x;
+    q
+}
+"#,
+    )?;
+    let source = r#"
+use stages::stage;
+use config;
+const PAYLOAD_BITS = u32:12;
+struct Input { data: uN[config::widen(PAYLOAD_BITS)] }
+pub block pipeline(clk, x: Input) -> (uN[config::width()], u13, u13) {
+    let default_stage = stage(x.data);
+    let unsplit_stage = stage<false>(x.data);
+    let split_stage = stage<true>(x.data);
+    (default_stage, unsplit_stage, split_stage)
+}
+"#;
+    let package = compile_design(source, &search_paths(&[dir.path()]))?;
+    let top = package.get_top_block().ok_or("missing pipeline")?;
+    let [default, unsplit, split] = top.instantiations.as_slice() else {
+        return Err("expected three stage instances".into());
+    };
+    assert_eq!(default.block, unsplit.block);
+    for (instance, expected) in [(default, 0x456), (split, 0x123)] {
+        let stage = package.get_block(&instance.block).ok_or("missing stage")?;
+        let [register] = stage.registers.as_slice() else {
+            return Err("expected one stage register".into());
+        };
+        assert_eq!(
+            register.reset_value,
+            Some(IrValue::make_ubits(13, expected)?)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn struct_width_uses_the_zero_override_imported_by_its_module() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "ip/widths.bx",
+        "const WIDTH = u32:7; pub fn zero!() -> u32 { WIDTH }",
+    )?;
+    write_module(
+        dir.path(),
+        "format.bx",
+        r#"
+use ip::widths::zero!;
+pub struct Packet { code: uN[zero!<u32>()] }
+"#,
+    )?;
+    let source = r#"
+use format::Packet;
+fn zero!() -> u32 { u32:9 }
+#[allow(combinational_block)]
+pub block circuit(p: Packet) -> u7 { p.code }
+"#;
+    compile_design(source, &search_paths(&[dir.path()]))?;
+    Ok(())
+}
+
+#[test]
 fn imported_block_uses_stage_constants_from_its_defining_module() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     write_module(
@@ -139,6 +224,60 @@ block circuit(clk, x: u8) -> u8 { flags::decode(x) }
     let package = compile_design(source, &options)?;
     assert_eq!(run(package.clone(), 73)?, IrValue::make_ubits(8, 1)?);
     assert_eq!(run(package, 74)?, IrValue::make_ubits(8, 0)?);
+    Ok(())
+}
+
+#[test]
+fn imported_function_local_declarations_resolve_private_dependencies() -> Result<(), Box<dyn Error>>
+{
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "sizes.bx",
+        "pub type Count = u32; pub const WIDTH = u32:4;",
+    )?;
+    write_module(
+        dir.path(),
+        "codec.bx",
+        r#"
+use sizes;
+type Count = sizes::Count;
+const EXTRA = u32:1;
+fn bias(x: u8) -> u8 { x + u8:1 }
+pub fn encode(x: u8) -> u8 {
+    const WIDTH: Count = sizes::WIDTH + EXTRA;
+    type Packed = uN[WIDTH];
+    const STEP = bias(Packed:31 as u8);
+    const MARKER: Packed = 1;
+    let low: Packed = x as Packed;
+    match low {
+        MARKER => STEP,
+        _ => (low as u8) + (WIDTH as u8),
+    }
+}
+"#,
+    )?;
+    let caller = r#"
+use codec::encode;
+type Count = u16;
+type Packed = u2;
+const WIDTH = u32:2;
+const EXTRA = u32:9;
+fn bias(x: u8) -> u8 { x }
+#[allow(combinational_block)]
+block circuit(x: u8) -> u8 { encode(x) }
+"#;
+    let options = search_paths(&[dir.path()]);
+    let package = compile_design(caller, &options)?;
+    assert_eq!(run(package.clone(), 33)?, IrValue::make_ubits(8, 32)?);
+    assert_eq!(run(package, 63)?, IrValue::make_ubits(8, 36)?);
+    for private in ["codec::WIDTH", "codec::Packed:0 as u8"] {
+        let source = format!("use codec; fn sample() -> u8 {{ {private} as u8 }}");
+        assert!(
+            check_source_with_options(&source, &options).is_err(),
+            "{source}"
+        );
+    }
     Ok(())
 }
 
@@ -1362,24 +1501,35 @@ pub block circuit(clk, data: u8) -> u8 { let y = device::stage(data); y }
 }
 
 #[test]
-fn a_simple_block_let_rebinding_a_tuple_pattern_still_shadows_an_extern()
--> Result<(), Box<dyn Error>> {
+fn block_let_rebindings_shadow_externs_in_roots_and_libraries() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    write_module(
-        dir.path(),
-        "device.bx",
-        r#"
+    let options = search_paths(&[dir.path()]);
+    for (input, bindings) in [
+        ("chip", "let chip = chip(chip);"),
+        ("x", "let chip = x; let chip = chip(chip);"),
+        ("x", "let (chip, _) = (x, x); let chip = x;"),
+    ] {
+        let library = format!(
+            r#"
 extern fn chip(x: u8) -> u8;
-pub block stage(clk, x: u8) -> u8 {
-    let (chip, _) = (x, x);
-    let chip = x;
+pub block stage(clk, {input}: u8) -> u8 {{
+    {bindings}
     chip(chip)
-}
-"#,
-    )?;
-    let module = parse_module("use device;")?;
-    let error = check_module_with_options(&module, &search_paths(&[dir.path()])).unwrap_err();
-    assert!(error.contains("'chip' names a local value here"), "{error}");
+}}
+"#
+        );
+        write_module(dir.path(), "device.bx", &library)?;
+        for (source, stage) in [
+            (library.as_str(), "stage"),
+            ("use device;", "device::stage"),
+        ] {
+            let error = check_source_with_options(source, &options).unwrap_err();
+            assert_eq!(
+                error,
+                format!("block '{stage}': result: 'chip' names a local value here")
+            );
+        }
+    }
     Ok(())
 }
 
