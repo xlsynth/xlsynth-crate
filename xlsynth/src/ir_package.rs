@@ -376,9 +376,11 @@ impl IrFunctionJit {
     }
 }
 
-/// A stateful interpreter for the procs in an IR package.
+/// A stateful runtime for the procs in an IR package.
 ///
-/// The runtime owns the package because the interpreter borrows its IR.
+/// [`Self::new`] interprets the procs. [`Self::new_jit`] compiles them at
+/// construction so subsequent ticks execute native code.
+/// The runtime owns the package because both backends borrow its IR.
 /// For proc-scoped channels, select the top proc before constructing the
 /// runtime. Channel names then refer to the top proc's boundary channels.
 ///
@@ -386,7 +388,7 @@ impl IrFunctionJit {
 /// use xlsynth::{IrPackage, IrProcRuntime, XlsIrValue, XlsynthError};
 ///
 /// fn run_one(package: IrPackage, input: &XlsIrValue) -> Result<Option<XlsIrValue>, XlsynthError> {
-///     let mut runtime = IrProcRuntime::new(package)?;
+///     let mut runtime = IrProcRuntime::new_jit(package)?;
 ///     runtime.write("in", input)?;
 ///     runtime.tick()?;
 ///     runtime.try_read("out")
@@ -400,10 +402,22 @@ pub struct IrProcRuntime {
 impl IrProcRuntime {
     /// Creates an interpreter with fresh proc state and channel queues.
     pub fn new(package: IrPackage) -> Result<Self, XlsynthError> {
+        Self::create(package, false)
+    }
+
+    /// JIT-compiles the procs and creates fresh proc state and channel queues.
+    pub fn new_jit(package: IrPackage) -> Result<Self, XlsynthError> {
+        Self::create(package, true)
+    }
+
+    fn create(package: IrPackage, use_jit: bool) -> Result<Self, XlsynthError> {
+        let create_runtime = if use_jit {
+            xlsynth_sys::xls_proc_runtime_create_jit
+        } else {
+            xlsynth_sys::xls_proc_runtime_create
+        };
         let mut ptr = std::ptr::null_mut();
-        package.with_write(
-            |guard| xls_ffi_call!(xlsynth_sys::xls_proc_runtime_create, guard.mut_c_ptr(); ptr),
-        )?;
+        package.with_write(|guard| xls_ffi_call!(create_runtime, guard.mut_c_ptr(); ptr))?;
         Ok(Self { package, ptr })
     }
 

@@ -783,6 +783,13 @@ unsafe extern "C" {
         error_out: *mut *mut std::os::raw::c_char,
         runtime_out: *mut *mut CIrProcRuntime,
     ) -> bool;
+    /// Compiles the procs at creation. The package lifetime and ownership
+    /// requirements are the same as for `xls_proc_runtime_create`.
+    pub fn xls_proc_runtime_create_jit(
+        package: *mut CIrPackage,
+        error_out: *mut *mut std::os::raw::c_char,
+        runtime_out: *mut *mut CIrProcRuntime,
+    ) -> bool;
     pub fn xls_proc_runtime_free(runtime: *mut CIrProcRuntime);
     pub fn xls_proc_runtime_tick(
         runtime: *mut CIrProcRuntime,

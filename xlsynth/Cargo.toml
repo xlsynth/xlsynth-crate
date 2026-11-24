@@ -57,3 +57,7 @@ harness = false
 [[bench]]
 name = "ir_value_bench"
 harness = false
+
+[[bench]]
+name = "proc_runtime"
+harness = false
