@@ -65,6 +65,8 @@ macro_rules! xls_ffi_call_noreturn {
     }};
 }
 
+pub(crate) use {xls_ffi_call, xls_ffi_call_noreturn};
+
 pub(crate) fn xls_package_to_string(p: *const CIrPackage) -> Result<String, XlsynthError> {
     unsafe {
         let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -704,7 +706,7 @@ pub struct RunResult {
 
 // Helper that converts the trace messages to Rust objects and deallocates the C
 // value.
-unsafe fn trace_messages_to_rust(
+pub(crate) unsafe fn trace_messages_to_rust(
     c_trace_messages: *mut CTraceMessage,
     count: usize,
 ) -> Vec<TraceMessage> {

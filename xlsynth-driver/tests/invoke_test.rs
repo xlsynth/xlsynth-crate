@@ -9335,7 +9335,7 @@ fn add1(x: u8) -> u8 { x + u8:1 }
 
 #[quickcheck] fn qc_increment_changes(x: u8) -> bool {
   let y = add1(x);
-  assert!(y != x, "increment differs");
+  assert!(y != x, "increment_differs");
   (y > x) || (x == u8:255)
 }
 "#;
@@ -9970,7 +9970,7 @@ fn test_dslx_equiv_default_semantics_matches_toolchain(solver: &str) {
 
     let lhs_dslx = r#"
 fn main(x: u32) -> u32 {
-  assert!(false, "lhs failure");
+  assert!(false, "lhs_failure");
   x
 }
 "#;
@@ -10028,7 +10028,7 @@ fn test_prove_quickcheck_default_semantics_matches_toolchain(solver: &str) {
 
     let dslx_source = r#"
 fn always_fail() -> bool {
-  assert!(false, "lhs failure");
+  assert!(false, "lhs_failure");
   true
 }
 

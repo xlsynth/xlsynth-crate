@@ -1053,17 +1053,6 @@ fn compile_batch(
     let module = format!("0bx_batch_{index}");
     let checked = structs.check_probe(&source, &module, imports)?;
     let explicit_values = call_ids.iter().any(|&id| !calls[id].parametrics.is_empty());
-    if has_instances {
-        conversion_guard::check(
-            &checked,
-            &structs.effect_sources(),
-            conversion_guard::GuardMode::ConcreteStructs,
-            explicit_values,
-        )?;
-    }
-    // XLS can embed filenames in generated symbols. Restore the logical
-    // names before parsing: a temporary path can contain punctuation that
-    // would otherwise turn a valid original identifier into invalid PIR.
     let type_parameters = structs.import_features(subject).type_parameters;
     // The probe imports the selected subject and the public spellings of
     // nominal arguments, including types nested in arrays and tuples.
@@ -1072,12 +1061,13 @@ fn compile_batch(
             .aliases
             .keys()
             .any(|owner| structs.import_features(owner).numeric_enums);
-    let converted = structs.conversion_probe(&checked, &source, &module, enum_specializations)?;
-    if !has_instances && (type_parameters || explicit_values) {
+    if has_instances || type_parameters || explicit_values {
         conversion_guard::check(
-            &converted.checked,
-            &structs.effect_sources_for(converted.files),
-            if enum_specializations {
+            &checked,
+            &structs.effect_sources(),
+            if has_instances {
+                conversion_guard::GuardMode::ConcreteStructs
+            } else if enum_specializations {
                 conversion_guard::GuardMode::NumericEnums
             } else {
                 conversion_guard::GuardMode::TypeBindings
@@ -1085,11 +1075,16 @@ fn compile_batch(
             explicit_values,
         )?;
     }
-    let ir = converted
-        .checked
+    let files = structs
+        .files
+        .as_ref()
+        .expect("imported batch has a snapshot");
+    let ir = checked
         .to_ir_text()
-        .map_err(|e| converted.files.remap_diagnostic(e.to_string()))?;
-    let mut ir = converted.files.restore_ir_names(&ir);
+        .map_err(|e| files.remap_diagnostic(e.to_string()))?;
+    // XLS can embed filenames in generated symbols. Restore logical names
+    // before parsing as temporary paths can contain invalid PIR punctuation.
+    let mut ir = files.restore_ir_names(&ir);
     // libxls accepts a numeric initial in a synthetic DSLX module name.
     // Give just the enclosing PIR package a legal initial; the generated
     // function symbols retain their collision-free prefix.
@@ -1106,17 +1101,14 @@ fn compile_batch(
         for node in &mut member.graph_mut().nodes {
             for pos in node.pos.iter_mut().flatten() {
                 if let Some(path) = package.file_table.id_to_path.get(&pos.fileno) {
-                    pos.colno =
-                        converted
-                            .files
-                            .original_column(Path::new(path), pos.lineno, pos.colno);
+                    pos.colno = files.original_column(Path::new(path), pos.lineno, pos.colno);
                 }
             }
         }
     }
     for path in package.file_table.id_to_path.values_mut() {
         let physical = Path::new(path);
-        let logical = converted.files.logical_path(physical).unwrap_or(physical);
+        let logical = files.logical_path(physical).unwrap_or(physical);
         if let Ok(relative) = logical.strip_prefix(stdlib_path) {
             let relative = relative
                 .to_string_lossy()

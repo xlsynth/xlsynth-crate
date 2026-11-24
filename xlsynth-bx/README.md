@@ -1169,23 +1169,21 @@ also return a new instance by naming the public template or a concrete alias
 in its DSLX result type. BX recovers the instance's `u32` bindings from the
 checked value, including parameters that do not appear in any field.
 
-The pinned DSLX converter can emit invalid IR or dispatch to the wrong helper
-when a type-valued parameter such as `T: type` is bound to a struct. When a
-BX call passes or returns a concrete parametric struct, its imported DSLX
-functions can use bits and arrays of bits as type-valued arguments. BX
-diagnoses unsupported aggregate bindings, ambiguous
+When a BX call passes or returns a concrete parametric struct, its imported
+DSLX functions can bind a type parameter such as `T: type` to bits or an
+array of bits. BX diagnoses unsupported aggregate bindings, ambiguous
 native symbols, and method dispatches whose specialization the converter API
 cannot verify. DSLX `map` callbacks and indirect calls are outside this subset.
 Functions such as `apfloat::add` specialize on ordinary value parameters.
 
 For imports that enable DSLX generics, BX checks the native symbols of the
 selected specializations. Distinct numeric enums can specialize the same
-helper even when their source names match. The pinned mangler can give nested
-tuples such as `(E, (u8, u8), u8)` and `(E, (u8, u8, u8))` the same symbol.
-BX diagnoses that collision when both specializations occur in one conversion
-batch. When the batch can specialize a numeric enum, BX also reports an
-import error if the native call graph omits a method or indirect call target
-inside a specialized function and BX cannot verify its symbols.
+helper even when their source names match. Nested tuple types such as
+`(E, (u8, u8), u8)` and `(E, (u8, u8, u8))` produce separate specializations
+and can occur in the same conversion batch. When the batch can specialize a
+numeric enum, BX reports an import error if the native call graph omits a
+method or indirect call target inside a specialized function and BX cannot
+verify its symbols.
 
 If an imported function requires an implicit token, BX reports the DSLX call path and highlights the effectful operation when it can locate it in the original source. For example, a runtime `assert!(N >= u32:2, "min_width")` in a helper makes its caller effectful. When `N` is a width parametric, `const_assert!(N >= u32:2)` checks the invariant during DSLX typechecking and keeps the helper pure.
 

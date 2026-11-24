@@ -14,8 +14,8 @@ use crate::OutlineShape;
 use crate::ast::Type;
 use crate::dslx_import::{ProbeCapture, TypeWitness};
 use crate::parser::outline::argument_identity;
+use crate::parser::parse_value_type;
 use crate::parser::source_bytes::decode_dslx_source;
-use crate::parser::{parse_value_type, source_bytes::RelocatedSource};
 
 /// Allocate witness declaration names outside the source's existing
 /// identifiers.
@@ -193,13 +193,7 @@ impl ImportedStructs {
         subject: &str,
         bytes: Vec<u8>,
     ) -> Result<(Self, ImportData), String> {
-        let overrides = BTreeMap::from([(
-            subject.to_owned(),
-            RelocatedSource {
-                bytes,
-                columns: Default::default(),
-            },
-        )]);
+        let overrides = BTreeMap::from([(subject.to_owned(), bytes)]);
         let files = NativeSourceFiles::capture_with_overrides(&self.graph, overrides)?;
         let isolated = files.import_data();
         Ok((
