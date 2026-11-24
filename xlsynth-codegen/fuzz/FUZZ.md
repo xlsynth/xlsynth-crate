@@ -374,6 +374,37 @@ aggregate operations. It compares every flattened output against the PIR
 evaluator. Failures expose aggregate packing order, indexing, updates, slices,
 selection, or out-of-bounds semantic differences.
 
+## `fuzz_codegen_port_type_semantics`
+
+Generates block IR and independent, equal-width DSLX types for its ports, converts
+the types through the DSLX-to-SystemVerilog bridge, and simulates the annotated
+RTL in Icarus against the PIR evaluator on independently generated inputs. Type
+choices include unsigned and signed bits, packed arrays, structs, enums, arrays
+of structs and enums, nested arrays, and structs containing signed or enum
+fields. Failures expose different packed dimensions, signedness, layout, or conversion
+semantics at module boundaries. Deterministic seeded cases also run in the fuzz
+library tests, including a live multi-operation chain. Its cumulative
+`port-type-coverage` JSON separates generated, checked, and output-live
+operations, checked adjacent producer-consumer pairs, longest output dependency
+chains, observed behaviors, and checked input/output type families. Boundary counters identify direct live
+consumers of each input type and immediate drivers of each output type. These
+are structural coverage counters, not proof that a stimulus sensitized a path.
+
+```sh
+cd xlsynth-codegen
+cargo fuzz run --sanitizer none fuzz_codegen_port_type_semantics
+```
+
+For a final checked coverage census, replay this target’s raw corpus or generate
+reproducible samples with the existing coverage example. Larger inputs provide
+enough graph entropy to generate multi-operation chains:
+
+```sh
+cd xlsynth-codegen/fuzz
+cargo run --example coverage -- --port-types --check --corpus /path/to/corpus
+cargo run --example coverage -- --port-types --check --samples 100 --seed 1323 --bytes 2048
+```
+
 ## `fuzz_codegen_partial_products`
 
 Generates signed and unsigned partial-product blocks with independently chosen

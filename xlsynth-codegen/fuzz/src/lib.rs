@@ -3,8 +3,11 @@
 //! Shared public block generators and independent codegen reference oracles.
 
 pub mod coverage;
+mod dslx_types;
 pub mod input;
 pub mod iverilog;
+pub mod port_type_coverage;
+pub mod port_types;
 pub mod preflight;
 pub mod references;
 pub mod semantics;
