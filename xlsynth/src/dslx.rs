@@ -3382,7 +3382,10 @@ fn plain_fn(x: u32) -> u32 { x }
     #[test]
     fn test_owner_module_and_type_info_for_imported_entity() {
         // Create a temporary directory for the imported and main module files.
-        let tmpdir = xlsynth_test_helpers::make_test_tmpdir("xlsynth_dslx_test");
+        let tmpdir = tempfile::Builder::new()
+            .prefix("xlsynth_dslx_test")
+            .tempdir()
+            .expect("create temporary DSLX test directory");
         let tmpdir = tmpdir.path().to_path_buf();
 
         // Write the imported module file to disk so ImportData can resolve it
