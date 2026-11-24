@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
+
 use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
 
 use crate::ast::{Block, BlockStages, ConstDef, Expr, Type};
@@ -15,6 +17,7 @@ pub(super) struct ModuleDimensions<'a, 'm> {
     pub(super) position: Option<usize>,
     pub(super) warning_owner: Option<&'m str>,
     zero_binding: ZeroBinding<'a>,
+    pub(super) block_size_formals: Option<&'a BTreeSet<&'m str>>,
 }
 
 /// The declaration that owns the lexical `zero!` binding, or a binding
@@ -32,6 +35,7 @@ impl<'m> Declarations<'m> {
             position: self.positions.get(owner).copied(),
             warning_owner: self.positions.get_key_value(owner).map(|(&name, _)| name),
             zero_binding: ZeroBinding::Owner(owner),
+            block_size_formals: None,
         }
     }
 
@@ -46,11 +50,22 @@ impl<'m> Declarations<'m> {
             position,
             warning_owner,
             zero_binding: ZeroBinding::Resolved(zero_binding),
+            block_size_formals: None,
         }
     }
 }
 
 impl<'m> ModuleDimensions<'_, 'm> {
+    /// Data port widths and lengths can refer directly to a block's u32
+    /// formals.
+    pub(super) fn is_block_size_formal(&self, expr: &Expr) -> bool {
+        let Expr::Name(name) = expr else {
+            return false;
+        };
+        self.block_size_formals
+            .is_some_and(|names| names.contains(name.as_str()))
+    }
+
     /// Module constants already hold evaluated values. Stage inference needs
     /// only the unsigned stage number that the name denotes.
     pub(super) fn block_stages(&self, block: &Block) -> Result<BlockStages<u64>, String> {

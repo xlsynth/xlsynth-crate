@@ -9,13 +9,14 @@ use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
 use crate::ast::{
-    Expr, Param, StructArgumentRef, StructDef, StructLiteralArgs, StructParametricRef, Type,
+    Expr, Param, ScopedSourceNodes, SourceNode, StructArgument, StructArgumentRef, StructDef,
+    StructLiteralArgs, StructParametricRef, Type,
 };
 use crate::builtin::BuiltinOp;
 use crate::typed::{BoundParametricValue, TypedExpr, bits};
 
 use super::counted_for::CarryContext;
-use super::generic_blocks::Bindings;
+use super::generic_blocks::{Bindings, has_block_dimension};
 use super::generic_inputs::Input;
 use super::value_parametrics::{
     ExplicitScope, InferredBindings, TypeArgumentCopies, dimension_type,
@@ -427,6 +428,104 @@ impl<'m> BodyChecker<'_, 'm> {
             result.push(argument);
         }
         Ok(result)
+    }
+
+    /// Check concrete operands and omitted defaults of a mixed application
+    /// whose full layout depends on caller type or size arguments.
+    pub(super) fn check_deferred_struct_arguments(
+        &mut self,
+        template: &'m StructDef,
+        source_args: &[StructArgument],
+        args: &[StructArgument],
+        caller_bindings: &Bindings,
+    ) -> Result<(), String> {
+        let name = &template.name;
+        let mut scope = ExplicitScope::default();
+        let mut pending_value = None;
+        let mut unresolved = BTreeSet::new();
+        for ((formal, arg), source) in template.parametric_bindings().zip(args).zip(source_args) {
+            match (formal, arg) {
+                (StructParametricRef::Type(param), StructArgument::Type(ty)) => {
+                    // A module alias may resolve to a nominal type sharing a
+                    // formal's name.
+                    let source_ty = source.as_type().expect("resolved type argument");
+                    if caller_bindings.has_unbound_variable(source_ty) || has_block_dimension(ty) {
+                        unresolved.insert(param);
+                    } else {
+                        let bindings = scope.types.get_or_insert_with(|| Bindings::new(&[]));
+                        bindings.declare_type_parameter(param);
+                        bindings.match_input(&Type::Named(param.to_owned()), ty, self.structs)?;
+                    }
+                }
+                (StructParametricRef::Value(formal), StructArgument::Value(expr)) => {
+                    self.check_deferred_expr_names(expr)?;
+                    if references_formal(SourceNode::Annotation(&formal.ty), |n| {
+                        unresolved.contains(n)
+                    }) || references_formal(SourceNode::Expression(expr), |n| {
+                        caller_bindings.declares(n) && caller_bindings.get(n).is_none()
+                    }) {
+                        unresolved.insert(formal.name.as_str());
+                        continue;
+                    }
+                    let ty = self.in_struct_definition(template, |definition| {
+                        scope.exchange(definition);
+                        if let Some((name, bound)) = pending_value.take() {
+                            definition.bind_parametric_value(name, &bound);
+                        }
+                        let ty = definition.source_type(&formal.ty);
+                        scope.exchange(definition);
+                        ty
+                    })?;
+                    let value = self.struct_argument_value(expr, &ty).map_err(|e| {
+                        format!("struct '{name}' parametric '{}': {e}", formal.name)
+                    })?;
+                    pending_value =
+                        Some((formal.name.as_str(), BoundParametricValue { ty, value }));
+                }
+                (StructParametricRef::Type(param), _) => {
+                    return Err(format!(
+                        "struct '{name}' requires type arguments for '{param}'"
+                    ));
+                }
+                (StructParametricRef::Value(formal), _) => {
+                    return Err(format!(
+                        "struct '{name}' requires a value argument for '{}'",
+                        formal.name
+                    ));
+                }
+            }
+        }
+        let values = &template.value_parametrics;
+        let first_default = values.partition_point(|formal| formal.index < args.len());
+        if first_default == values.len() {
+            return Ok(());
+        }
+        self.in_struct_definition(template, |definition| {
+            scope.exchange(definition);
+            if let Some((name, bound)) = pending_value {
+                definition.bind_parametric_value(name, &bound);
+            }
+            for (index, formal) in values.iter().enumerate().skip(first_default) {
+                // Arity checking requires every omitted formal to have a
+                // default.
+                let default = formal
+                    .default
+                    .as_ref()
+                    .expect("checked omitted struct argument");
+                let is_unresolved = |n: &str| unresolved.contains(n);
+                if references_formal(SourceNode::Annotation(&formal.ty), is_unresolved)
+                    || references_formal(SourceNode::Expression(default), is_unresolved)
+                {
+                    unresolved.insert(formal.name.as_str());
+                    continue;
+                }
+                let bound = definition
+                    .inferred_struct_value(template, formal, index, None)
+                    .map_err(|e| format!("struct '{name}' default for '{}': {e}", formal.name))?;
+                definition.bind_parametric_value(&formal.name, &bound);
+            }
+            Ok(())
+        })
     }
 
     /// Resolve an explicit application after evaluating its prefix.
@@ -1391,8 +1490,30 @@ pub(super) fn struct_field_map<'e>(
     Ok(supplied)
 }
 
+/// Check whether a type annotation or constexpr expression refers to an
+/// enclosing formal, accounting for names rebound in local expressions.
+fn references_formal(node: SourceNode<'_>, is_formal: impl Fn(&str) -> bool) -> bool {
+    let mut nodes = ScopedSourceNodes::default();
+    nodes.push(node);
+    while let Some(node) = nodes.next() {
+        let name = match node {
+            SourceNode::Annotation(Type::Named(name))
+            | SourceNode::Expression(Expr::Name(name)) => Some(name.as_str()),
+            SourceNode::Expression(expr) => expr.struct_literal().map(|literal| literal.name),
+            _ => None,
+        };
+        if let Some(name) = name
+            && !nodes.is_local(name)
+            && is_formal(name.split_once("::").map_or(name, |(head, _)| head))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// An application can supply at most one argument per formal in source order.
-fn check_arity(template: &StructDef, count: usize) -> Result<(), String> {
+pub(super) fn check_arity(template: &StructDef, count: usize) -> Result<(), String> {
     let arity = template.type_params.len() + template.value_parametrics.len();
     if count > arity {
         let kind = if template.type_params.is_empty() {

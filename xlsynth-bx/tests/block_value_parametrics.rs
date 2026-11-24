@@ -17,8 +17,102 @@ use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
+use xlsynth_pir::ir::Type;
 use xlsynth_pir::ir_eval::eval_fn_in_package_value;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
+
+#[test]
+fn mixed_struct_port_types_bind_dimensions_inside_the_type_argument() -> Result<(), Box<dyn Error>>
+{
+    let source = r#"
+struct Tagged<T, Tag: u32> { data: T }
+
+block stage<W: u32, N: u32>(clk, input: Tagged<bits[W][N], 7>) -> Tagged<bits[W][N], 7> {
+    reg q: bits[W][N];
+    q := input.data;
+    Tagged { data: q }
+}
+
+pub block capture(clk, words: Tagged<u12[3], 7>) -> u12[3] {
+    let saved = stage<12, 3>(words);
+    saved.data
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let capture = package.get_top_block().ok_or("missing capture")?;
+    let [instance] = capture.instantiations.as_slice() else {
+        panic!("expected one stage instance");
+    };
+    let stage = package.get_block(&instance.block).ok_or("missing stage")?;
+    let data = stage.get_output_port("data").ok_or("missing data field")?;
+    assert_eq!(stage.port_type(data), &Type::new_array(Type::Bits(12), 3));
+    Ok(())
+}
+
+#[test]
+fn unused_dimension_dependent_ports_check_independent_struct_arguments() -> Result<(), String> {
+    for (formals, arguments, expected) in [
+        ("T, Tag: u32", "u8, true", "u32"),
+        ("T, Tag: u32", "bits[W], true", "u32"),
+        ("T, U, Tag: U", "bits[W], u8, true", "u8"),
+        ("T, N: u32, Tag: bits[N]", "bits[W], 8, true", "u8"),
+    ] {
+        let source = format!(
+            r#"
+struct Tagged<{formals}> {{ data: T }}
+block stage<W: u32>(clk, x: Tagged<{arguments}>) -> bool {{ true }}
+pub block top(clk, x: bool) -> bool {{ x }}
+"#,
+        );
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "block 'stage': struct 'Tagged' parametric 'Tag': expected {expected}, got bool"
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn unused_dimension_dependent_ports_check_concrete_struct_defaults() -> Result<(), String> {
+    for (formals, expected) in [
+        ("T, Tag: u32 = {true}", "u32"),
+        ("T, N: u32 = {8}, Tag: bits[N] = {true}", "u8"),
+        ("T, N: u32 = {bit_count<T>()}, Tag: u32 = {true}", "u32"),
+    ] {
+        let source = format!(
+            r#"
+struct Tagged<{formals}> {{ data: T }}
+block stage<W: u32>(clk, x: Tagged<bits[W]>) -> bool {{ true }}
+pub block top(clk, x: bool) -> bool {{ x }}
+"#,
+        );
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "block 'stage': struct 'Tagged' default for 'Tag': expected {expected}, got bool"
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn mixed_struct_value_type_can_depend_on_a_block_port_dimension() -> Result<(), String> {
+    let source = r#"
+struct Stamp<T, Init: T, Width: u32 = {bit_count<T>()}> { data: T }
+block stage<W: u32>(clk, x: Stamp<bits[W], u8:1>) -> bits[W] { x.data }
+pub block top(clk, x: Stamp<u8, u8:1, 8>) -> u8 {
+    let result = stage<8>(x);
+    result
+}
+"#;
+    check_module(&parse_module(source)?)?;
+    Ok(())
+}
 
 #[test]
 fn imported_delay_specializes_by_depth_and_matches_dslx_cycles() -> Result<(), Box<dyn Error>> {
@@ -458,5 +552,186 @@ pub block pipeline(clk, x: u8) -> u8 {
 "#,
     )?;
     check_module_with_options(&module, &search_paths(&[directory.path()]))?;
+    Ok(())
+}
+
+#[test]
+fn block_value_parametrics_determine_port_and_register_shapes() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    fs::write(
+        directory.path().join("banks.bx"),
+        r#"
+const W = u32:31;
+const N = u32:7;
+
+pub block storage<W: u32, N: u32>(clk, data: bits[W][N]) -> bits[W][N] {
+    reg q: bits[W][N] = zero!<bits[W][N]>();
+    q := data;
+    q
+}
+
+pub block bank<T, N: u32>(clk, data: T[N]) -> T[N] {
+    reg q: T[N];
+    q := data;
+    q
+}
+"#,
+    )?;
+    let source = r#"
+use banks;
+const W = u32:5;
+const N = u32:3;
+
+pub block circuit(clk, small: u5[3], large: u13[2]) -> (u5[3], u13[2], u13[2]) {
+    let a = banks::storage<W, N>(small);
+    let b = banks::storage<13, 2>(large);
+    let c = banks::bank<2>(b);
+    (a, b, c)
+}
+"#;
+    let package = compile_with_options(
+        source,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &search_paths(&[directory.path()]),
+    )?;
+    let top = package.get_top_block().ok_or("missing circuit")?;
+    let [small, large, bank] = top.instantiations.as_slice() else {
+        panic!("expected three storage instances");
+    };
+    for (instance, width, depth) in [(small, 5, 3), (large, 13, 2), (bank, 13, 2)] {
+        let child = package.get_block(&instance.block).ok_or("missing child")?;
+        let shape = Type::new_array(Type::Bits(width), depth);
+        let data = child.get_input_port("data").ok_or("missing data port")?;
+        let out = child.get_output_port("out").ok_or("missing out port")?;
+        assert_eq!(child.port_type(data), &shape);
+        assert_eq!(child.port_type(out), &shape);
+        let [q] = child.registers.as_slice() else {
+            panic!("expected one array register");
+        };
+        assert_eq!(q.ty, shape);
+    }
+    Ok(())
+}
+
+#[test]
+fn block_port_dimensions_specialize_nested_struct_arguments() -> Result<(), String> {
+    let source = r#"
+struct Bank<T> { words: T }
+
+block save<W: u32, N: u32>(clk, bank: Bank<bits[W][N]>) -> Bank<bits[W][N]> {
+    reg q: Bank<bits[W][N]>;
+    q := bank;
+    q
+}
+
+block circuit(clk, bank: Bank<u9[4]>) -> Bank<u9[4]> {
+    let saved = save<9, 4>(bank);
+    saved
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let top = package.get_top_block().ok_or("missing circuit")?;
+    let output = top.get_output_port("words").ok_or("missing words port")?;
+    assert_eq!(top.port_type(output), &Type::new_array(Type::Bits(9), 4));
+    Ok(())
+}
+
+#[test]
+fn dimension_dependent_ports_preserve_the_nominal_type_behind_an_alias() -> Result<(), String> {
+    let source = r#"
+struct Record { byte: u8 }
+type Saved = Record;
+struct Wrap<U, Tag: u32> { data: U }
+block stage<Record, L: u32>(clk, t: Record, w: Wrap<Saved[L], 7>) -> u8 {
+    w.data[u32:0].byte
+}
+pub block circuit(clk, x: u16, w: Wrap<Saved[1], 7>) -> u8 {
+    let q = stage<1>(x, w);
+    q
+}
+"#;
+    check_module(&parse_module(source)?)?;
+    Ok(())
+}
+
+#[test]
+fn unused_block_checks_output_names_from_a_shadowed_struct_alias() -> Result<(), String> {
+    let source = r#"
+struct Record { byte: u8 }
+type Saved = Record;
+block stage<Record, W: u32>(clk, t: Record, x: bits[W], byte: u8) -> Saved {
+    Saved { byte }
+}
+pub block top(clk, x: u8) -> u8 { x }
+"#;
+    let error = check_module(&parse_module(source)?).unwrap_err();
+    assert_eq!(error, "block 'stage': duplicate name 'byte'");
+    Ok(())
+}
+
+#[test]
+fn block_value_parametric_ports_require_the_specialized_input_shape() -> Result<(), String> {
+    for (width, depth) in [(4, 3), (5, 2)] {
+        let source = format!(
+            r#"
+block storage<W: u32, N: u32>(clk, data: bits[W][N]) -> bits[W][N] {{
+    reg q: bits[W][N];
+    q := data;
+    q
+}}
+pub block circuit(clk, data: u{width}[{depth}]) -> u5[3] {{
+    let q = storage<5, 3>(data);
+    q
+}}
+"#,
+        );
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "block 'circuit': let 'q': input 'data', call to block 'storage': expected u5[3], got u{width}[{depth}]"
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn block_port_length_defaults_can_use_the_inferred_element_type() -> Result<(), String> {
+    let source = r#"
+type Dim = u32;
+block bank<T, N: Dim = {bit_count<T>()}>(clk, data: T[N]) -> T[N] {
+    reg q: T[N];
+    q := data;
+    q
+}
+block circuit(clk, a: u3[3], b: u3[2]) -> (u3[3], u3[2]) {
+    let from_type = bank(a);
+    let explicit = bank<2>(b);
+    (from_type, explicit)
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let circuit = package.get_top_block().ok_or("missing circuit")?;
+    assert_eq!(circuit.instantiations.len(), 2);
+    for (instance, length) in circuit.instantiations.iter().zip([3, 2]) {
+        let bank = package.get_block(&instance.block).ok_or("missing bank")?;
+        assert_eq!(bank.registers[0].ty, Type::new_array(Type::Bits(3), length));
+    }
+    Ok(())
+}
+
+#[test]
+fn boolean_block_parameters_cannot_supply_port_sizes() -> Result<(), String> {
+    for ty in ["bits[FLAG]", "u8[FLAG]"] {
+        let source =
+            format!("type Flag = bool; block bank<FLAG: Flag>(clk, x: {ty}) -> {ty} {{ x }}");
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert_eq!(
+            error,
+            "block 'bank': 'FLAG' names a local value in this type dimension"
+        );
+    }
     Ok(())
 }

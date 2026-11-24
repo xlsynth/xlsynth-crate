@@ -1410,7 +1410,24 @@ in its body. For a block declared as `route<SPLIT: bool = {false}>`,
 `route(data)` binds `SPLIT` to `false` and `route<true>(data)` binds it to
 `true`. Omitted trailing value arguments use their braced defaults, evaluated
 in the block's declaration scope with preceding value parameters in scope.
-BX infers type parameters from the data inputs.
+A `u32` parameter can supply the bit width or array length of an input port,
+result, or register. BX infers type parameters from the data inputs,
+including the element type of a port declared as `T[N]`.
+
+```text
+block storage<W: u32, N: u32>(clk, data: bits[W][N]) -> bits[W][N] {
+    reg q: bits[W][N];
+    q := data;
+    q
+}
+
+block samples(clk, data: u12[4]) -> u12[4] {
+    let previous = storage<12, 4>(data);
+    previous
+}
+```
+
+Here the input, output, and register each hold four 12-bit words.
 
 ```text
 block stage<T>(clk, data: T) -> T {

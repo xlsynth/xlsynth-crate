@@ -11,12 +11,13 @@ use crate::ast::{
     StructArgumentRef, StructLiteralArgs, Type,
 };
 use crate::parser::{is_identifier, is_use_identifier};
+use crate::typed::BoundParametricValue;
 
 use super::struct_parametrics::BoundStructArgument;
 use super::{
-    BlockCallbackFormal, BlockInterface, BlockTemplate, BodyChecker, BoundParametricValue,
-    MAX_ELABORATION_DEPTH, ModuleDimensions, StructTable, TypeResolver, TypeShape, compatible,
-    resolve_type, type_parameter_references,
+    BlockCallbackFormal, BlockInterface, BlockTemplate, BodyChecker, MAX_ELABORATION_DEPTH,
+    ModuleDimensions, StructTable, TypeResolver, TypeShape, compatible, resolve_signature,
+    resolve_type, source_type_nodes, type_parameter_references,
 };
 
 /// A callable argument identifies a function in the caller's lexical scope.
@@ -151,13 +152,165 @@ pub(super) fn validate_inference_sources(
     Ok(())
 }
 
+/// The data input and result types of a block signature in its declaration
+/// scope.
+pub(super) struct BlockPortTypes {
+    pub(super) params: Vec<Param>,
+    pub(super) result: Type,
+}
+
+/// Only dimensions supplied by block value formals survive declaration
+/// resolution.
+pub(super) fn has_block_dimension(ty: &Type) -> bool {
+    has_matching_dimension(ty, &|_| true)
+}
+
+/// Find width and length expressions in type operands, including nested
+/// struct applications.
+pub(super) fn has_matching_dimension(ty: &Type, matches: &impl Fn(&Expr) -> bool) -> bool {
+    match ty {
+        Type::ParametricBits { width, .. } => matches(width),
+        Type::ParametricArray { element, size } => {
+            matches(size) || has_matching_dimension(element, matches)
+        }
+        Type::Array { element, .. } => has_matching_dimension(element, matches),
+        Type::Tuple(fields) | Type::TypeApplied { args: fields, .. } => {
+            fields.iter().any(|ty| has_matching_dimension(ty, matches))
+        }
+        Type::MixedApplied { args, .. } => args
+            .iter()
+            .filter_map(StructArgument::as_type)
+            .any(|ty| has_matching_dimension(ty, matches)),
+        _ => false,
+    }
+}
+
+impl BlockPortTypes {
+    /// Compute the minimum layout using written formal occurrences. An alias
+    /// expands to a concrete type, even if a struct in that expansion shares
+    /// a name with a block type formal.
+    fn minimum_layout(&self, block: &Block, formals: &Bindings) -> Self {
+        fn minimum(source: &Type, ty: &Type, formals: &Bindings) -> Type {
+            match (source, ty) {
+                (Type::Named(name), _) if formals.declares(name) => Type::unsigned(1),
+                (_, Type::ParametricBits { .. }) => Type::unsigned(1),
+                (
+                    Type::Array { element: src, .. } | Type::ParametricArray { element: src, .. },
+                    Type::ParametricArray { element, .. },
+                ) => Type::array(minimum(src, element, formals), 1),
+                (
+                    Type::Array { element: src, .. } | Type::ParametricArray { element: src, .. },
+                    Type::Array { element, size },
+                ) => Type::array(minimum(src, element, formals), *size),
+                (Type::Tuple(src), Type::Tuple(fields)) => Type::Tuple(
+                    src.iter()
+                        .zip(fields)
+                        .map(|(src, ty)| minimum(src, ty, formals))
+                        .collect(),
+                ),
+                (Type::TypeApplied { args: src, .. }, Type::TypeApplied { name, args }) => {
+                    Type::TypeApplied {
+                        name: name.clone(),
+                        args: src
+                            .iter()
+                            .zip(args)
+                            .map(|(src, ty)| minimum(src, ty, formals))
+                            .collect(),
+                    }
+                }
+                (Type::MixedApplied { args: src, .. }, Type::MixedApplied { name, args }) => {
+                    Type::MixedApplied {
+                        name: name.clone(),
+                        args: src
+                            .iter()
+                            .zip(args)
+                            .map(|(src, arg)| match arg {
+                                StructArgument::Type(ty) => StructArgument::Type(minimum(
+                                    src.as_type().expect("resolved type argument"),
+                                    ty,
+                                    formals,
+                                )),
+                                StructArgument::Value(_) => arg.clone(),
+                            })
+                            .collect(),
+                    }
+                }
+                _ => ty.clone(),
+            }
+        }
+        Self {
+            params: block
+                .params
+                .iter()
+                .zip(&self.params)
+                .map(|(src, p)| Param {
+                    name: p.name.clone(),
+                    ty: minimum(&src.ty, &p.ty, formals),
+                })
+                .collect(),
+            result: minimum(&block.result, &self.result, formals),
+        }
+    }
+}
+
 impl<'m> BlockTemplate<'m> {
+    /// Revisit a dimension-dependent signature in its definition scope. Only a
+    /// written type formal is substituted, even when a module alias expands to
+    /// a nominal type with the same name.
+    pub(super) fn specialize_dependent_ports(
+        &self,
+        caller: &mut BodyChecker<'_, 'm>,
+        bindings: &Bindings,
+        values: &[BoundParametricValue],
+    ) -> Result<Option<BlockPortTypes>, String> {
+        if self.port_binding_work == 0 {
+            return Ok(None);
+        }
+        let block = self.block;
+        let mut definition = BodyChecker::struct_type_scope(
+            caller.decls.module_dimensions(&block.name),
+            caller.resolver,
+            caller.structs,
+            caller.function_registry.as_deref_mut(),
+        );
+        definition.function_type_bindings = Some(bindings.clone());
+        definition
+            .names
+            .extend(block.clock.iter().chain(&block.reset).cloned());
+        definition
+            .names
+            .extend(block.callback_params.iter().map(|p| p.name.clone()));
+        for (formal, value) in block.value_parametrics.iter().zip(values) {
+            definition.bind_parametric_value(&formal.name, value);
+        }
+        // One binding can be expanded by many ports. Bound all the copied
+        // source type arguments together before retaining the concrete ports.
+        let mut copies = Some(Default::default());
+        let mut resolve = |definition: &mut BodyChecker<'_, 'm>, source: &Type| {
+            let ty = definition.resolve_annotation(source, MAX_ELABORATION_DEPTH, &mut copies)?;
+            definition.structs.update_imports(definition.resolver)?;
+            definition.structs.validate_type(&ty)?;
+            Ok::<_, String>(ty)
+        };
+        let params = block
+            .params
+            .iter()
+            .map(|p| {
+                definition.names.insert(p.name.clone());
+                Ok(Param {
+                    name: p.name.clone(),
+                    ty: resolve(&mut definition, &p.ty)?,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        let result = resolve(&mut definition, &block.result)?;
+        Ok(Some(BlockPortTypes { params, result }))
+    }
+
     /// Resolve module types while retaining the block's symbolic type names
     /// for data inference and callback specialization at each call site.
     pub(super) fn new(
         block: &'m Block,
-        params: Vec<Param>,
-        result: Type,
         bindings: &Bindings,
         dimensions: ModuleDimensions<'_, 'm>,
         types: &mut TypeResolver<'_, 'm>,
@@ -170,6 +323,7 @@ impl<'m> BlockTemplate<'m> {
             checker.check_block_default_names(block)?;
         }
         let mut preceding = BTreeSet::new();
+        let mut size_formals = BTreeSet::new();
         for (index, formal) in block.parametric_bindings().enumerate() {
             let name = match formal {
                 FunctionParametricRef::Callback(callback) => {
@@ -191,6 +345,9 @@ impl<'m> BlockTemplate<'m> {
                             value.name
                         ));
                     }
+                    if ty == Type::unsigned(32) {
+                        size_formals.insert(value.name.as_str());
+                    }
                     value_types.push(ty);
                     if value.default.is_none() {
                         required_arguments = index + 1;
@@ -200,6 +357,22 @@ impl<'m> BlockTemplate<'m> {
             };
             preceding.insert(name.as_str());
         }
+        let reserved_ports = block
+            .clock
+            .iter()
+            .chain(&block.reset)
+            .chain(block.callback_params.iter().map(|p| &p.name))
+            .chain(block.value_parametrics.iter().map(|p| &p.name));
+        let mut port_dimensions = dimensions;
+        port_dimensions.block_size_formals = (!size_formals.is_empty()).then_some(&size_formals);
+        let (params, result) = resolve_signature(
+            &block.params,
+            &block.result,
+            reserved_ports,
+            Some(bindings),
+            port_dimensions,
+            types,
+        )?;
         let value_names: BTreeSet<_> = block
             .value_parametrics
             .iter()
@@ -242,20 +415,46 @@ impl<'m> BlockTemplate<'m> {
                     .map_err(|e| format!("callable parameter '{}': {e}", signature.name))?;
             }
         }
+        let port_binding_work = {
+            let types = params.iter().map(|p| &p.ty).chain([&result]);
+            if types.clone().any(has_block_dimension) {
+                types.map(source_type_nodes).sum()
+            } else {
+                0
+            }
+        };
+        let ports = BlockPortTypes { params, result };
+        // Check fixed layout bounds and output names even on unused templates.
+        // One is the minimum layout cost for a symbolic width or array length.
+        let shadows_struct = block
+            .type_params
+            .iter()
+            .any(|p| structs.indices.contains_key(p));
+        let minimum_ports;
+        let (declaration_ports, shape_bindings) = if port_binding_work != 0 || shadows_struct {
+            minimum_ports = ports.minimum_layout(block, bindings);
+            (&minimum_ports, None)
+        } else {
+            (&ports, Some(bindings))
+        };
         BlockInterface::check_ports(
             block.clock.as_deref(),
             block.reset.as_deref(),
-            &params,
-            &result,
+            &declaration_ports.params,
+            if matches!(&block.result, Type::Named(name) if bindings.declares(name)) {
+                None
+            } else {
+                Some(&declaration_ports.result)
+            },
             structs,
-            Some(bindings),
+            shape_bindings,
             None,
         )?;
         Ok(Self {
             block,
             stages: dimensions.block_stages(block)?,
-            params,
-            result,
+            ports,
+            port_binding_work,
             callback_params,
             value_types,
             required_arguments,

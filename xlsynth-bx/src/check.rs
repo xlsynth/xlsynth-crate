@@ -66,7 +66,7 @@ use counted_for::CarryContext;
 use function_specializations::{
     CallbackTarget, FunctionSpecialization, FunctionSpecializations, PendingFunction,
 };
-use generic_blocks::{Bindings, TypeArgument};
+use generic_blocks::{Bindings, BlockPortTypes, TypeArgument};
 use module_constants::ModuleDimensions;
 
 /// Render the common DSLX expressions used in a symbolic type annotation.
@@ -345,8 +345,10 @@ struct BlockTemplate<'m> {
     block: &'m Block,
     /// Module constants give every specialization the same local port stages.
     stages: BlockStages<u64>,
-    params: Vec<Param>,
-    result: Type,
+    ports: BlockPortTypes,
+    /// Source nodes visited when specializing a dimension-dependent signature,
+    /// including phantom struct arguments. Fixed signatures skip this pass.
+    port_binding_work: usize,
     /// Concrete annotation for each value formal, resolved in declaration
     /// scope.
     value_types: Vec<Type>,
@@ -528,6 +530,7 @@ impl<'m> BlockSpecializations<'m> {
     fn intern(
         &mut self,
         template: &BlockTemplate<'m>,
+        concrete_ports: Option<BlockPortTypes>,
         arguments: BlockParametricArguments<'m>,
         path: &[&'m str],
         dimensions: ModuleDimensions<'_, 'm>,
@@ -572,16 +575,14 @@ impl<'m> BlockSpecializations<'m> {
         let charge_signature = !callbacks.is_empty() || !parametric_values.is_empty();
         if charge_signature {
             self.expansion_work = self.expansion_work.saturating_add(parametric_values.len());
-            for ty in template
-                .params
-                .iter()
-                .map(|p| &p.ty)
-                .chain([&template.result])
-            {
-                let shape =
-                    types
-                        .structs
-                        .formal_shape(ty, MAX_ELABORATION_DEPTH, Some(&bindings))?;
+            let (ports, parameters) = match &concrete_ports {
+                Some(ports) => (ports, None),
+                None => (&template.ports, Some(&bindings)),
+            };
+            for ty in ports.params.iter().map(|p| &p.ty).chain([&ports.result]) {
+                let shape = types
+                    .structs
+                    .formal_shape(ty, MAX_ELABORATION_DEPTH, parameters)?;
                 formal_nodes += shape.ir_nodes;
                 self.expansion_work = self.expansion_work.saturating_add(shape.ir_nodes);
                 if self.expansion_work > MAX_TYPE_SIZE {
@@ -591,27 +592,33 @@ impl<'m> BlockSpecializations<'m> {
                 }
             }
         }
-        let params: Vec<Param> = template
-            .params
-            .iter()
-            .map(|p| {
-                Ok(Param {
-                    name: p.name.clone(),
-                    ty: types.materialize_type_applications(
-                        bindings.concrete_type(&p.ty)?,
-                        Some(&bindings),
-                        dimensions,
-                        MAX_ELABORATION_DEPTH,
-                    )?,
+        let BlockPortTypes { params, result } = if let Some(ports) = concrete_ports {
+            ports
+        } else {
+            let params: Vec<Param> = template
+                .ports
+                .params
+                .iter()
+                .map(|p| {
+                    Ok(Param {
+                        name: p.name.clone(),
+                        ty: types.materialize_type_applications(
+                            bindings.concrete_type(&p.ty)?,
+                            Some(&bindings),
+                            dimensions,
+                            MAX_ELABORATION_DEPTH,
+                        )?,
+                    })
                 })
-            })
-            .collect::<Result<_, String>>()?;
-        let result = types.materialize_type_applications(
-            bindings.concrete_type(&template.result)?,
-            Some(&bindings),
-            dimensions,
-            MAX_ELABORATION_DEPTH,
-        )?;
+                .collect::<Result<_, String>>()?;
+            let result = types.materialize_type_applications(
+                bindings.concrete_type(&template.ports.result)?,
+                Some(&bindings),
+                dimensions,
+                MAX_ELABORATION_DEPTH,
+            )?;
+            BlockPortTypes { params, result }
+        };
         let interface = BlockInterface::new(
             block.clock.as_deref(),
             block.reset.as_deref(),
@@ -921,36 +928,46 @@ fn resolve_type<'m>(
                 .check_type_name_visibility(name, dimensions.position)?;
             if let Some(bindings) = bindings {
                 bindings.reject_value(name)?;
-                if bindings.has_unbound_variable(ty) {
+                if bindings.has_unbound_variable(ty)
+                    || (dimensions.block_size_formals.is_some()
+                        && generic_blocks::has_matching_dimension(ty, &|expr| {
+                            dimensions.is_block_size_formal(expr)
+                        }))
+                {
                     let template = types
                         .structs
                         .template(name)
                         .ok_or_else(|| format!("unknown parametric struct '{name}'"))?;
+                    struct_parametrics::check_arity(template, args.len())?;
                     if template.parametric_bindings().skip(args.len()).any(|formal|
                         !matches!(formal, crate::ast::StructParametricRef::Value(p) if p.default.is_some())
                     ) {
                         return Err(format!("missing required argument in type '{ty}'"));
                     }
                     let depth = child_type_budget(remaining)?;
-                    let args = args
+                    let resolved_args = args
                         .iter()
                         .map(|arg| match arg {
                             StructArgument::Type(ty) => {
                                 resolve_type(ty, is_local, Some(bindings), dimensions, types, depth)
                                     .map(StructArgument::Type)
                             }
-                            StructArgument::Value(value) => {
-                                let mut checker = types.struct_scope(dimensions);
-                                checker.enclosing_type_locals = Some(is_local);
-                                checker.function_type_bindings = Some(bindings.clone());
-                                checker.check_deferred_expr_names(value)?;
-                                Ok(arg.clone())
-                            }
+                            StructArgument::Value(_) => Ok(arg.clone()),
                         })
-                        .collect::<Result<_, String>>()?;
+                        .collect::<Result<Vec<_>, String>>()?;
+                    types.structs.update_imports(types.resolver)?;
+                    let mut checker = types.struct_scope(dimensions);
+                    checker.enclosing_type_locals = Some(is_local);
+                    checker.function_type_bindings = Some(bindings.clone());
+                    checker.check_deferred_struct_arguments(
+                        template,
+                        args,
+                        &resolved_args,
+                        bindings,
+                    )?;
                     return Ok(Type::MixedApplied {
                         name: name.clone(),
-                        args,
+                        args: resolved_args,
                     });
                 }
             }
@@ -1077,21 +1094,41 @@ fn resolve_type<'m>(
                 ))
             }
         }
-        Type::ParametricBits { signed, width } => Ok(Type::Bits {
-            signed: dimensions.signed(signed, is_local, bindings, types)?,
-            width: dimensions.size(width, is_local, bindings, types)?,
-        }),
-        Type::ParametricArray { element, size } => Ok(Type::array(
-            resolve_type(
+        Type::ParametricBits { signed, width } => {
+            let signed = dimensions.signed(signed, is_local, bindings, types)?;
+            if dimensions.is_block_size_formal(width) {
+                Ok(Type::ParametricBits {
+                    signed: Box::new(Expr::Bool(signed)),
+                    width: width.clone(),
+                })
+            } else {
+                Ok(Type::Bits {
+                    signed,
+                    width: dimensions.size(width, is_local, bindings, types)?,
+                })
+            }
+        }
+        Type::ParametricArray { element, size } => {
+            let element = resolve_type(
                 element,
                 is_local,
                 bindings,
                 dimensions,
                 types,
                 child_type_budget(remaining)?,
-            )?,
-            dimensions.size(size, is_local, bindings, types)?,
-        )),
+            )?;
+            if dimensions.is_block_size_formal(size) {
+                Ok(Type::ParametricArray {
+                    element: Box::new(element),
+                    size: size.clone(),
+                })
+            } else {
+                Ok(Type::array(
+                    element,
+                    dimensions.size(size, is_local, bindings, types)?,
+                ))
+            }
+        }
         Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
     }
 }
@@ -1119,7 +1156,11 @@ impl<'m> TypeResolver<'_, 'm> {
             args,
         };
         let ty = match bindings {
-            Some(bindings) if bindings.has_unbound_variable(&application) => {
+            Some(bindings)
+                if bindings.has_unbound_variable(&application)
+                    || (dimensions.block_size_formals.is_some()
+                        && generic_blocks::has_block_dimension(&application)) =>
+            {
                 return Ok(application);
             }
             Some(bindings) => bindings.concrete_type(&application)?,
@@ -1598,7 +1639,7 @@ impl BlockInterface {
             clock,
             reset,
             &params,
-            &result,
+            Some(&result),
             structs,
             None,
             private_outputs,
@@ -1617,7 +1658,7 @@ impl BlockInterface {
         clock: Option<&str>,
         reset: Option<&str>,
         params: &[Param],
-        result: &Type,
+        result: Option<&Type>,
         structs: &StructTable,
         parameters: Option<&Bindings>,
         private_outputs: Option<&BTreeSet<String>>,
@@ -1634,16 +1675,19 @@ impl BlockInterface {
                 .map_err(|e| format!("input '{}': {e}", p.name))?;
             type_nodes = type_nodes.saturating_add(shape.ir_nodes);
         }
+        let Some(result) = result else {
+            // An unbound result formal has a one-node minimum layout. Its
+            // concrete type determines both the number and the names of
+            // outputs.
+            return Ok(BlockPortLayout {
+                outputs: Vec::new(),
+                type_nodes: type_nodes.saturating_add(TypeShape::LEAF.ir_nodes),
+            });
+        };
         let shape = structs
             .formal_shape(result, MAX_ELABORATION_DEPTH, parameters)
             .map_err(|e| format!("result: {e}"))?;
         type_nodes = type_nodes.saturating_add(shape.ir_nodes);
-        if matches!(result, Type::Named(name) if parameters.is_some_and(|p| p.declares(name))) {
-            return Ok(BlockPortLayout {
-                outputs: Vec::new(),
-                type_nodes,
-            });
-        }
         let mut outputs =
             if let Type::TypeApplied { name, .. } | Type::MixedApplied { name, .. } = result {
                 structs
@@ -2239,40 +2283,30 @@ pub(crate) fn check_sources_with_tests(
                 ));
             }
         }
-        let reserved_ports = b
-            .clock
-            .iter()
-            .chain(&b.reset)
-            .chain(b.callback_params.iter().map(|p| &p.name))
-            .chain(b.value_parametrics.iter().map(|p| &p.name));
-        let symbolic = if !b.is_parametric() {
-            None
-        } else {
-            generic_blocks::validate_declaration(b)
-                .map_err(|e| format!("block '{}': {e}", b.name))?;
-            Some(Bindings::new(&b.type_params))
-        };
         let dimensions = declarations.module_dimensions(&b.name);
         let mut types = TypeResolver {
             resolver: &mut resolver,
             structs: &mut structs,
             functions: Some(&mut function_registry),
         };
-        let (params, result) = resolve_signature(
-            &b.params,
-            &b.result,
-            reserved_ports,
-            symbolic.as_ref(),
-            dimensions,
-            &mut types,
-        )?;
-        if let Some(bindings) = &symbolic {
-            let template = BlockTemplate::new(b, params, result, bindings, dimensions, &mut types)
+        if b.is_parametric() {
+            generic_blocks::validate_declaration(b)
+                .map_err(|e| format!("block '{}': {e}", b.name))?;
+            let bindings = Bindings::new(&b.type_params);
+            let template = BlockTemplate::new(b, &bindings, dimensions, &mut types)
                 .map_err(|e| format!("block '{}': {e}", b.name))?;
             declarations.has_block_value_parametrics |= !b.value_parametrics.is_empty();
             declarations.templates.insert(&b.name, template);
             continue;
         }
+        let (params, result) = resolve_signature(
+            &b.params,
+            &b.result,
+            b.clock.iter().chain(&b.reset),
+            None,
+            dimensions,
+            &mut types,
+        )?;
         structs.update_imports(&resolver)?;
         declarations
             .add_block(
@@ -3548,8 +3582,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     }
                 }
             }
-            let call = self.generic_inputs(template, args, &callbacks)?;
-            let values = template.apply_value_defaults(self, values, &call.bindings)?;
+            let call = self.generic_inputs(template, args, &callbacks, values)?;
             let path = self.specialization.map_or(&[][..], |s| s.path.as_slice());
             spec = self
                 .specializations
@@ -3557,11 +3590,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .expect("block elaboration")
                 .intern(
                     template,
-                    BlockParametricArguments {
-                        bindings: call.bindings,
-                        values,
-                        callbacks: call.callbacks,
-                    },
+                    call.concrete_ports,
+                    call.parametrics,
                     path,
                     self.decls.module_dimensions(target),
                     &mut TypeResolver {
@@ -3571,7 +3601,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     },
                 )
                 .map_err(|e| format!("call to block '{target}': {e}"))?;
-            prepared = Some(call.values.into_iter());
+            prepared = Some(call.inputs.into_iter());
             (spec.name.as_str(), &spec.interface)
         } else {
             (target, &self.decls.blocks[target])
