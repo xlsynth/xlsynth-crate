@@ -37,11 +37,15 @@ fn block2sv_generated_fixtures_parse_with_yosys() {
         let support_types = custom_port_types(&path);
         fs::write(&verilog_path, format!("{support_types}{output}"))
             .expect("write generated SystemVerilog");
-        if let Err(error) = yosys.run_script(
-            temporary_directory.path(),
-            "read_verilog -sv -DSYNTHESIS generated.sv",
-            Duration::from_secs(120),
-        ) {
+        let script = if path.ends_with("structure/inline_enum_output.golden.ir") {
+            // Native Yosys rejects anonymous enum ports.
+            "plugin -i slang; read_slang -DSYNTHESIS generated.sv --top inline_enum_output"
+        } else {
+            "read_verilog -sv -DSYNTHESIS generated.sv"
+        };
+        if let Err(error) =
+            yosys.run_script(temporary_directory.path(), script, Duration::from_secs(120))
+        {
             failures.push(format!("{}: {error}", path.display()));
         }
     }
