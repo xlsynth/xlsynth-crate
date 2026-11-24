@@ -406,23 +406,64 @@ pub fn is_observable_effect_root(payload: &NodePayload) -> bool {
     )
 }
 
-/// Orders every stored node after its operands using iterative DFS.
-fn topo_from_nodes(nodes: &[Node]) -> Vec<NodeRef> {
+/// Why a graph cannot be put in dependency order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopologicalSortError {
+    /// A node depends on a node outside the graph.
+    InvalidDependency { node: NodeRef, dependency: NodeRef },
+    /// Following dependencies led back to a node still being visited.
+    Cycle { node: NodeRef, dependency: NodeRef },
+}
+
+impl std::fmt::Display for TopologicalSortError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidDependency { node, dependency } => write!(
+                f,
+                "node {} references missing node {}",
+                node.index, dependency.index
+            ),
+            Self::Cycle { node, dependency } => write!(
+                f,
+                "Cycle detected in IR graph; topological order impossible (node {} depends on {})",
+                node.index, dependency.index
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TopologicalSortError {}
+
+/// Orders every stored node after its operands and any extra dependencies.
+fn try_topo_from_nodes<I>(
+    nodes: &[Node],
+    mut extra_dependencies: impl FnMut(NodeRef) -> I,
+) -> Result<Vec<NodeRef>, TopologicalSortError>
+where
+    I: IntoIterator<Item = NodeRef>,
+{
     // Non-recursive DFS that preserves prior postorder semantics.
     let n = nodes.len();
     let mut visited: Vec<bool> = vec![false; n];
     let mut in_stack: Vec<bool> = vec![false; n];
     let mut order: Vec<NodeRef> = Vec::with_capacity(n);
 
-    // Precompute dependency indices per node to avoid repeated operand walks
+    // Build each node's dependency list once. Extra edges affect this analysis
+    // only; the actual IR graph is unchanged.
     let mut deps: Vec<Vec<usize>> = Vec::with_capacity(n);
-    for node in nodes.iter() {
-        deps.push(
-            operands(&node.payload)
-                .into_iter()
-                .map(|r| r.index)
-                .collect(),
-        );
+    for (index, node) in nodes.iter().enumerate() {
+        let node_ref = NodeRef { index };
+        let mut dependencies = operands(&node.payload);
+        dependencies.extend(extra_dependencies(node_ref));
+        for &dependency in &dependencies {
+            if dependency.index >= n {
+                return Err(TopologicalSortError::InvalidDependency {
+                    node: node_ref,
+                    dependency,
+                });
+            }
+        }
+        deps.push(dependencies.into_iter().map(|r| r.index).collect());
     }
 
     for start in 0..n {
@@ -442,10 +483,12 @@ fn topo_from_nodes(nodes: &[Node]) -> Vec<NodeRef> {
                 let next_child = deps[node_idx][child_pos];
                 stack.push((node_idx, child_pos + 1));
                 if !visited[next_child] {
-                    assert!(
-                        !in_stack[next_child],
-                        "Cycle detected in IR graph; topological order impossible"
-                    );
+                    if in_stack[next_child] {
+                        return Err(TopologicalSortError::Cycle {
+                            node: NodeRef { index: node_idx },
+                            dependency: NodeRef { index: next_child },
+                        });
+                    }
                     stack.push((next_child, 0));
                     in_stack[next_child] = true;
                 }
@@ -460,7 +503,15 @@ fn topo_from_nodes(nodes: &[Node]) -> Vec<NodeRef> {
         order.len() == n,
         "Topological sort did not include all nodes"
     );
-    order
+    Ok(order)
+}
+
+/// Preserves the existing panic-on-invalid-IR API and ordering.
+fn topo_from_nodes(nodes: &[Node]) -> Vec<NodeRef> {
+    // TODO(psivaraj): 2026-11-24 Migrate get_topological and
+    // get_topological_nodes callers to fallible sorting, then remove this
+    // panic wrapper in a breaking release.
+    try_topo_from_nodes(nodes, |_| None).unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Returns every stored node once, with operands before their users.
@@ -469,6 +520,20 @@ fn topo_from_nodes(nodes: &[Node]) -> Vec<NodeRef> {
 /// or an invalid operand reference.
 pub fn get_topological(f: &NodeGraph) -> Vec<NodeRef> {
     topo_from_nodes(&f.nodes)
+}
+
+/// Orders nodes after their operands and caller-supplied dependencies, without
+/// modifying the graph. For example, a timing analysis can make a register
+/// read depend on the data captured by its write. Returns an error if the
+/// combined dependencies contain a cycle or an invalid node reference.
+pub fn get_topological_with_extra_dependencies<I>(
+    f: &NodeGraph,
+    extra_dependencies: impl FnMut(NodeRef) -> I,
+) -> Result<Vec<NodeRef>, TopologicalSortError>
+where
+    I: IntoIterator<Item = NodeRef>,
+{
+    try_topo_from_nodes(&f.nodes, extra_dependencies)
 }
 
 /// Applies [`get_topological`]'s ordering to a standalone node list.
@@ -1684,6 +1749,66 @@ fn main(x: bits[8] id=1) -> bits[8] {
         let order = get_topological(&f);
         assert_eq!(order.len(), f.nodes.len());
         verify_topo_property(&f, &order);
+    }
+
+    #[test]
+    fn topo_extra_dependencies_reorder_nodes_without_changing_the_graph() {
+        let f = parse_fn(
+            r#"fn f() -> bits[1] {
+  early: bits[1] = literal(value=0, id=1)
+  late: bits[1] = literal(value=1, id=2)
+  ret result: bits[1] = identity(early, id=3)
+}"#,
+        );
+        let early = NodeRef { index: 1 };
+        let late = NodeRef { index: 2 };
+        let original = get_topological(&f);
+        let mut calls = 0;
+
+        let order = get_topological_with_extra_dependencies(&f, |node| {
+            calls += 1;
+            (node == early).then_some(late)
+        })
+        .unwrap();
+
+        assert_eq!(calls, f.nodes.len());
+        assert_eq!(
+            order,
+            vec![NodeRef { index: 0 }, late, early, NodeRef { index: 3 }]
+        );
+        verify_topo_property(&f, &order);
+        assert_eq!(get_topological(&f), original);
+    }
+
+    #[test]
+    fn topo_extra_dependencies_report_feedback_and_missing_nodes() {
+        let f = parse_fn(
+            r#"fn f() -> bits[1] {
+  early: bits[1] = literal(value=0, id=1)
+  ret late: bits[1] = identity(early, id=2)
+}"#,
+        );
+        let early = NodeRef { index: 1 };
+        let late = NodeRef { index: 2 };
+
+        assert_eq!(
+            get_topological_with_extra_dependencies(&f, |node| (node == early).then_some(late)),
+            Err(TopologicalSortError::Cycle {
+                node: late,
+                dependency: early,
+            })
+        );
+
+        let missing = NodeRef {
+            index: f.nodes.len(),
+        };
+        assert_eq!(
+            get_topological_with_extra_dependencies(&f, |node| (node == early).then_some(missing)),
+            Err(TopologicalSortError::InvalidDependency {
+                node: early,
+                dependency: missing,
+            })
+        );
     }
 
     #[test]
