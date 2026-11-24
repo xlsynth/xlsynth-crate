@@ -204,6 +204,46 @@ fn time_scale_cannot_follow_a_body_declaration() {
     assert_eq!(file.emit(), before);
 }
 
+/// Repeated matching declarations remain legal after ordinary scope items, but
+/// a first or conflicting declaration cannot be introduced there.
+#[test]
+fn repeated_time_scales_can_follow_members_but_new_or_conflicting_scales_cannot() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let leaf = file.add_module("Leaf");
+    let unit = TimeScaleValue {
+        magnitude: TimeScaleMagnitude::One,
+        unit: TimeUnit::Nanoseconds,
+    };
+    let precision = TimeScaleValue {
+        magnitude: TimeScaleMagnitude::One,
+        unit: TimeUnit::Picoseconds,
+    };
+    file.add_timeunit(leaf, unit).unwrap();
+    file.add_timeprecision(leaf, precision).unwrap();
+    let scalar = file.make_scalar_type();
+    file.add_wire(leaf, "w", &scalar).unwrap();
+    file.add_timeunit(leaf, unit).unwrap();
+    file.add_timeprecision(leaf, precision).unwrap();
+    assert!(file.emit().contains(
+        "timeunit 1ns;\n  timeprecision 1ps;\n  wire w;\n  timeunit 1ns;\n  timeprecision 1ps;"
+    ));
+
+    let before = file.emit();
+    let conflicting = TimeScaleValue {
+        magnitude: TimeScaleMagnitude::Ten,
+        unit: TimeUnit::Nanoseconds,
+    };
+    assert!(file.add_timeunit(leaf, conflicting).is_err());
+    assert_eq!(file.emit(), before);
+
+    let late = file.add_module("LatePrecision");
+    file.add_timeunit(late, unit).unwrap();
+    file.add_wire(late, "w", &scalar).unwrap();
+    let before = file.emit();
+    assert!(file.add_timeprecision(late, precision).is_err());
+    assert_eq!(file.emit(), before);
+}
+
 #[test]
 fn hoisting_signal_declarations_keeps_time_scale_first() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);

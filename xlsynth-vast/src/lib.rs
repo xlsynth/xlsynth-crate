@@ -654,8 +654,8 @@ impl VastFile {
     /// Moves signal declarations ahead of statements in the suffix starting at
     /// `start`, preserving order within both groups and leaving nested scopes
     /// and earlier members untouched. Declarations stay on their original side
-    /// of imports, parameter declarations, and timescales, preserving their
-    /// scope and order.
+    /// of imports, parameter declarations, timescales, inline statements, and
+    /// macros, preserving dependencies that those members may introduce.
     pub fn hoist_module_declarations(&mut self, module: VastModule, start: usize) {
         let module_index = self.check(module.0);
         for section in self.ast.modules[module_index].members[start..].split_mut(|member| {
@@ -666,6 +666,8 @@ impl VastFile {
                     | MemberData::TypeParameter { .. }
                     | MemberData::TimeUnit(_)
                     | MemberData::TimePrecision(_)
+                    | MemberData::Inline(_)
+                    | MemberData::Macro { .. }
             )
         }) {
             section.sort_by_key(|member| !matches!(member, MemberData::Declaration { .. }));
@@ -2324,7 +2326,7 @@ impl VastFile {
     }
 
     /// Constructs a named module instantiation with value parameters and ports,
-    /// returning an error for mismatched argument lists.
+    /// returning an error for mismatched argument lists or duplicate names.
     pub fn make_instantiation(
         &mut self,
         module_name: &str,
@@ -2347,7 +2349,7 @@ impl VastFile {
     }
 
     /// Constructs a module instantiation, returning an error for mismatched
-    /// argument lists or unsupported types.
+    /// argument lists, duplicate names, or unsupported types.
     pub fn make_instantiation_with_arguments(
         &mut self,
         module_name: &str,
@@ -2386,6 +2388,16 @@ impl VastFile {
             return Err(VastError(
                 "module-instantiation port names and values must have equal lengths".into(),
             ));
+        }
+        for (kind, names) in [("parameter", parameter_names), ("port", connection_names)] {
+            let mut seen = HashSet::with_capacity(names.len());
+            for name in names {
+                if !seen.insert(*name) {
+                    return Err(VastError(format!(
+                        "duplicate module-instantiation {kind} name: {name}"
+                    )));
+                }
+            }
         }
         let parameters = parameter_names
             .iter()
@@ -2558,8 +2570,9 @@ impl VastFile {
     }
 
     /// Appends a legal `timeunit` declaration to the module body.
-    /// Returns an error if it follows other scope items or conflicts with a
-    /// local time scale.
+    /// The first declaration must precede other scope items; an identical
+    /// declaration may be repeated later. Conflicting local time scales return
+    /// an error.
     pub fn add_timeunit(
         &mut self,
         module: VastModule,
@@ -2569,8 +2582,9 @@ impl VastFile {
     }
 
     /// Appends a legal `timeprecision` declaration to the module body.
-    /// Returns an error if it follows other scope items or is coarser than the
-    /// local time unit.
+    /// The first declaration must precede other scope items; an identical
+    /// declaration may be repeated later. A precision coarser than the local
+    /// time unit returns an error.
     pub fn add_timeprecision(
         &mut self,
         module: VastModule,
@@ -2588,6 +2602,8 @@ impl VastFile {
     ) -> Result<(), VastError> {
         let module_index = self.check(module.0);
         let members = &self.ast.modules[module_index].members;
+        let mut repeated = false;
+        let mut follows_scope_item = false;
         for member in members {
             match (member, &declaration) {
                 (MemberData::TimeUnit(existing), MemberData::TimeUnit(value))
@@ -2595,6 +2611,7 @@ impl VastFile {
                     if existing != value {
                         return Err(VastError("conflicting time-scale declarations".into()));
                     }
+                    repeated = true;
                 }
                 (MemberData::TimeUnit(unit), MemberData::TimePrecision(precision))
                 | (MemberData::TimePrecision(precision), MemberData::TimeUnit(unit)) => {
@@ -2607,12 +2624,13 @@ impl VastFile {
                 (MemberData::Comment(_) | MemberData::BlankLine, _) => {
                     // Comments and whitespace do not declare scope items.
                 }
-                _ => {
-                    return Err(VastError(
-                        "time-scale declarations must precede other module members".into(),
-                    ));
-                }
+                _ => follows_scope_item = true,
             }
+        }
+        if follows_scope_item && !repeated {
+            return Err(VastError(
+                "time-scale declarations must precede other module members".into(),
+            ));
         }
         self.push_member(module, declaration);
         Ok(())

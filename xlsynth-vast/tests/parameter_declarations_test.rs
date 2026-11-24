@@ -208,6 +208,49 @@ endmodule
     );
 }
 
+/// Opaque statements may introduce types, so declarations must stay on their
+/// original side while still hoisting within each unambiguous section.
+#[test]
+fn declaration_hoisting_does_not_cross_inline_or_macro_statements() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let module = file.add_module("Opaque");
+    let logic = file.make_scalar_type();
+    let before = file.make_comment("before inline");
+    file.add_member_comment(module, before);
+    file.add_logic(module, "pre", &logic).unwrap();
+
+    let inline = file.make_inline_verilog_statement("typedef logic T;");
+    file.add_member_inline_statement(module, inline);
+    let after_inline = file.make_comment("after inline");
+    file.add_member_comment(module, after_inline);
+    let t = file.make_extern_type("T");
+    file.add_logic(module, "typed", &t).unwrap();
+
+    let macro_ref = file.make_macro_ref("DECLARE_U");
+    let statement = file.make_macro_statement(&macro_ref, false);
+    file.add_member_macro_statement(module, statement);
+    let after_macro = file.make_comment("after macro");
+    file.add_member_comment(module, after_macro);
+    let u = file.make_extern_type("U");
+    file.add_logic(module, "from_macro", &u).unwrap();
+
+    file.hoist_module_declarations(module, 0);
+    assert_eq!(
+        file.emit(),
+        r#"module Opaque;
+  logic pre;
+  // before inline
+  typedef logic T;
+  T typed;
+  // after inline
+  `DECLARE_U
+  U from_macro;
+  // after macro
+endmodule
+"#
+    );
+}
+
 #[test]
 fn local_parameter_without_a_default_is_rejected() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);

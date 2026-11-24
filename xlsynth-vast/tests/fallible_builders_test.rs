@@ -2,7 +2,7 @@
 
 //! Recoverable validation for VAST builders.
 
-use xlsynth_vast::{VastFile, VastFileType};
+use xlsynth_vast::{SvArgument, VastFile, VastFileType};
 
 #[test]
 fn invalid_net_types_do_not_mutate_the_module_or_reserve_the_name() {
@@ -86,5 +86,72 @@ fn all_port_builders_report_name_collisions_without_mutation() {
             )
         );
         assert_eq!(file.emit(), before);
+    }
+}
+
+#[test]
+fn instantiation_builders_reject_duplicate_named_arguments_separately() {
+    for typed_arguments in [false, true] {
+        let mut file = VastFile::new(VastFileType::SystemVerilog);
+        let module = file.add_module("Assembly");
+        let one = file.make_unsized_decimal_literal(1);
+        let bit = file.make_bit_type();
+        let before = file.emit();
+
+        let parameter_error = if typed_arguments {
+            file.make_instantiation_with_arguments(
+                "Leaf",
+                "u",
+                &["W", "W"],
+                &[SvArgument::Value(one), SvArgument::Type(bit)],
+                &[],
+                &[],
+            )
+        } else {
+            file.make_instantiation("Leaf", "u", &["W", "W"], &[&one, &one], &[], &[])
+        }
+        .unwrap_err();
+        assert_eq!(
+            parameter_error.to_string(),
+            "duplicate module-instantiation parameter name: W"
+        );
+        assert_eq!(file.emit(), before);
+
+        let port_error = if typed_arguments {
+            file.make_instantiation_with_arguments(
+                "Leaf",
+                "u",
+                &[],
+                &[],
+                &["q", "q"],
+                &[Some(&one), None],
+            )
+        } else {
+            file.make_instantiation("Leaf", "u", &[], &[], &["q", "q"], &[Some(&one), None])
+        }
+        .unwrap_err();
+        assert_eq!(
+            port_error.to_string(),
+            "duplicate module-instantiation port name: q"
+        );
+        assert_eq!(file.emit(), before);
+
+        let corrected = if typed_arguments {
+            file.make_instantiation_with_arguments(
+                "Leaf",
+                "u",
+                &["W"],
+                &[SvArgument::Value(one)],
+                &["W"],
+                &[None],
+            )
+        } else {
+            file.make_instantiation("Leaf", "u", &["W"], &[&one], &["W"], &[None])
+        }
+        .unwrap();
+        file.add_member_instantiation(module, corrected).unwrap();
+        let output = file.emit();
+        assert!(output.contains(".W(1)"));
+        assert!(output.contains(".W()"));
     }
 }
