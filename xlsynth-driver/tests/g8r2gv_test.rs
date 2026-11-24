@@ -598,3 +598,6 @@ fn defaults_resolve_independently_and_invalid_options_fail_cleanly() {
     assert!(rejected.stdout.is_empty());
     assert_eq!(std::fs::read(diagnostics).unwrap(), b"original diagnostics");
 }
+
+#[path = "g8r2gv/adaptive.rs"]
+mod adaptive;

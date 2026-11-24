@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Independent library-specific input-driver and output-capacitance defaults.
+//! Library-specific I/O defaults and unit conversions.
 
 use std::collections::HashMap;
 
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty_model::{Library, Pin, PinDirection};
+use crate::liberty_proto::LibraryUnits;
 
 /// Finds the input of a usable, ordinary, one-input/one-output buffer.
 pub fn buffer_input_pin<'a>(library: &'a Library, name: &str) -> Result<&'a Pin, String> {
@@ -98,26 +99,76 @@ pub fn load_ff_in_library_units(library: &Library, ff: f64) -> Result<f64, Strin
     Ok(load)
 }
 
-/// Converts a Liberty capacitance unit to femtofarads; omitted scales mean one.
+/// Express a resolved input transition and output load in a second timing
+/// view's units. Legacy views that both omit a unit share the same numerical
+/// convention. Differing declarations require known physical units.
+pub fn convert_io_constraints(
+    from: &Library,
+    to: &Library,
+    input_transition: f64,
+    output_load: f64,
+) -> Result<(f64, f64), String> {
+    let unspecified = LibraryUnits::default();
+    let from = from.units.as_ref().unwrap_or(&unspecified);
+    let to = to.units.as_ref().unwrap_or(&unspecified);
+    let transition = convert_units(input_transition, &from.time_unit, &to.time_unit, |unit| {
+        unit_scale(unit, 's', "time")
+    })?;
+    let load = convert_units(
+        output_load,
+        &from.capacitance_unit,
+        &to.capacitance_unit,
+        capacitance_unit_in_ff,
+    )?;
+    Ok((transition, load))
+}
+
+fn convert_units(
+    value: f64,
+    from: &str,
+    to: &str,
+    scale: fn(&str) -> Result<f64, String>,
+) -> Result<f64, String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err("I/O constraints must be finite and nonnegative".into());
+    }
+    if value == 0.0 || from.trim().eq_ignore_ascii_case(to.trim()) {
+        return Ok(value);
+    }
+    let converted = value * (scale(from)? / scale(to)?);
+    if !converted.is_finite() || converted == 0.0 {
+        return Err(format!(
+            "cannot represent {value} '{from}' in units of '{to}'"
+        ));
+    }
+    Ok(converted)
+}
+
+/// Converts a Liberty capacitance unit to femtofarads. Omitted scales mean one.
 pub(crate) fn capacitance_unit_in_ff(unit: &str) -> Result<f64, String> {
+    unit_scale(unit, 'f', "capacitance")
+}
+
+/// Scale in femtofarads or femtoseconds, including any numeric coefficient.
+fn unit_scale(unit: &str, symbol: char, quantity: &str) -> Result<f64, String> {
     let normalized = unit.trim().to_ascii_lowercase();
+    let invalid = || format!("invalid Liberty {quantity} unit '{unit}'");
+    let normalized = normalized.strip_suffix(symbol).ok_or_else(invalid)?;
     for (suffix, scale) in [
-        ("af", 1e-3),
-        ("ff", 1.0),
-        ("pf", 1e3),
-        ("nf", 1e6),
-        ("uf", 1e9),
-        ("mf", 1e12),
-        ("f", 1e15),
+        ("a", 1e-3),
+        ("f", 1.0),
+        ("p", 1e3),
+        ("n", 1e6),
+        ("u", 1e9),
+        ("m", 1e12),
+        ("", 1e15),
     ] {
         if let Some(coefficient) = normalized.strip_suffix(suffix) {
             let coefficient = coefficient.trim();
             let magnitude = if coefficient.is_empty() {
                 1.0
             } else {
-                coefficient
-                    .parse::<f64>()
-                    .map_err(|_| format!("invalid Liberty capacitance unit '{unit}'"))?
+                coefficient.parse::<f64>().map_err(|_| invalid())?
             };
             let value = magnitude * scale;
             if value.is_finite() && value > 0.0 {
@@ -126,7 +177,7 @@ pub(crate) fn capacitance_unit_in_ff(unit: &str) -> Result<f64, String> {
             break;
         }
     }
-    Err(format!("invalid Liberty capacitance unit '{unit}'"))
+    Err(invalid())
 }
 
 #[cfg(test)]
@@ -134,7 +185,6 @@ mod tests {
     use super::*;
     use crate::liberty::model::{library_from_proto, library_to_proto};
     use crate::liberty::test_utils::make_test_library;
-    use crate::liberty_proto::LibraryUnits;
 
     fn library() -> Library {
         let mut lib = make_test_library();
@@ -146,6 +196,26 @@ mod tests {
         });
         lib.cells[1].pins[0].capacitance = Some(0.0005);
         lib
+    }
+
+    #[test]
+    fn matching_unspecified_io_units_need_no_conversion() {
+        let mut from = library();
+        from.units = None;
+        let mut to = library();
+        to.units = Some(LibraryUnits::default());
+        assert_eq!(
+            convert_io_constraints(&from, &to, 0.01, 0.004).unwrap(),
+            (0.01, 0.004)
+        );
+        // A physical value in a declared unit cannot be inferred from an
+        // unspecified unit, except that a zero constraint scales to zero.
+        to.units.as_mut().unwrap().time_unit = "1ps".into();
+        assert!(convert_io_constraints(&from, &to, 0.01, 0.004).is_err());
+        assert_eq!(
+            convert_io_constraints(&from, &to, 0.0, 0.004).unwrap(),
+            (0.0, 0.004)
+        );
     }
 
     #[test]

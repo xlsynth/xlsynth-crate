@@ -116,6 +116,8 @@ pub struct BoundaryDelays {
 }
 
 impl BoundaryDelays {
+    /// Delays indexed as input-to-output, input-to-register,
+    /// register-to-output, and register-to-register.
     pub(crate) fn values(self) -> [f64; 4] {
         [
             self.input_to_output,
@@ -123,6 +125,17 @@ impl BoundaryDelays {
             self.register_to_output,
             self.register_to_register,
         ]
+    }
+
+    /// Keep the tightest observed limit for each path class across recovery
+    /// windows.
+    pub(crate) fn tightened_with(self, observed: Self) -> Self {
+        Self {
+            input_to_output: self.input_to_output.min(observed.input_to_output),
+            input_to_register: self.input_to_register.min(observed.input_to_register),
+            register_to_output: self.register_to_output.min(observed.register_to_output),
+            register_to_register: self.register_to_register.min(observed.register_to_register),
+        }
     }
 
     pub(crate) fn within(self, limits: Self) -> bool {
@@ -291,12 +304,6 @@ impl<'lib> IncrementalSta<'lib> {
     /// Retains prepared Liberty metadata for the final full timing check.
     pub(crate) fn into_prepared_library(self) -> Arc<PreparedStaLibrary<'lib>> {
         self.lib
-    }
-
-    /// Exposes the retained session to coverage-reuse regression tests.
-    #[cfg(test)]
-    pub(super) fn prepared_library(&self) -> &PreparedStaLibrary<'lib> {
-        &self.lib
     }
 
     /// Prepares stable connectivity and initializes both independent launch
@@ -983,6 +990,24 @@ impl<'lib> IncrementalSta<'lib> {
     /// and interrupted trials.
     pub fn propagated_instances(&self) -> usize {
         self.propagated
+    }
+
+    /// Existing library tables used to price electrically diverse cell trials.
+    pub(crate) fn prepared_library(&self) -> &PreparedStaLibrary<'lib> {
+        &self.lib
+    }
+
+    /// Worst transition-specific load on a single-output combinational site.
+    pub(crate) fn single_output_load(&self, instance: usize) -> Option<f64> {
+        let inst = &self.instances[instance];
+        let &[output] = inst.outputs.as_slice() else {
+            return None;
+        };
+        if inst.sequential {
+            return None;
+        }
+        let cap = self.capacitances[output.index()];
+        Some(cap.rise.max(cap.fall))
     }
 
     /// Stable current cell selections, indexed by instance ID.

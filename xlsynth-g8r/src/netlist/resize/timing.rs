@@ -85,23 +85,37 @@ pub(super) trait ResizeTimingPolicy {
 }
 
 impl ResizeTimingPolicy for IncrementalSta<'_> {
-    /// Prioritizes register-to-register timing when present, otherwise worst
-    /// IO.
+    /// Selects register-to-register timing when reachable. Otherwise the
+    /// longest currently reachable path determines the boundary.
     fn objective(&self) -> usize {
-        if self.endpoint_arrivals(3).next_back().is_some() {
+        if self.endpoint_maximum_count(3) > 0 {
             3
         } else {
-            (0..4)
-                .filter(|i| self.endpoint_arrivals(*i).next_back().is_some())
-                .max_by(|a, b| self.score().values()[*a].total_cmp(&self.score().values()[*b]))
+            let delays = self.score().values();
+            (0..3)
+                .filter(|i| self.endpoint_maximum_count(*i) > 0)
+                .max_by(|a, b| delays[*a].total_cmp(&delays[*b]))
                 .unwrap_or(0)
         }
     }
 
     /// Breaks delay ties without losing progress on large critical plateaus.
     fn secondary(&self, objective: usize) -> TimingTieBreak {
+        // When a registered path is absent, tied critical endpoints can lie in
+        // different boundary classes. Count them together so resolving one
+        // tied class remains a useful step toward lowering the maximum.
+        let worst_count = if objective == 3 {
+            self.endpoint_maximum_count(3)
+        } else {
+            let delays = self.score().values();
+            let worst = delays[self.objective()];
+            (0..3)
+                .filter(|&i| delays[i] == worst)
+                .map(|i| self.endpoint_maximum_count(i))
+                .sum()
+        };
         TimingTieBreak {
-            worst_count: self.endpoint_maximum_count(objective),
+            worst_count,
             near_sum: self
                 .endpoint_arrivals(objective)
                 .rev()
