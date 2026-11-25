@@ -120,9 +120,13 @@ impl ObservationFixture {
                     owner: if index % 3 == 2 {
                         SignalOwner::CellOutput {
                             instance: index / 3,
+                            pin: 2,
                         }
                     } else {
-                        SignalOwner::ModuleInput
+                        SignalOwner::ModuleInput {
+                            port: index / 3,
+                            bit: index % 3,
+                        }
                     },
                     load: EdgeLoadCapacitance::default(),
                     edges: RiseFall::default(),

@@ -2341,6 +2341,22 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
+                    Arg::new("timed_stimulus_json")
+                        .long("timed-stimulus-json")
+                        .value_name("PATH")
+                        .help("Combinational timed stimulus JSON with initial inputs, timestamped edges, and duration")
+                        .requires("timed_output_json")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("timed_output_json")
+                        .long("timed-output-json")
+                        .value_name("PATH")
+                        .help("Write timed transitions, dynamic energy, and average dynamic power over the stimulus window")
+                        .requires("timed_stimulus_json")
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("initial_state_all_zeros")
                         .long("initial-state-all-zeros")
                         .help("Initialize every mapped sequential register to all zeros")
@@ -2406,8 +2422,8 @@ fn main() {
                         .help("External capacitive load added to every module-output bit")
                         .action(ArgAction::Set),
                 )
-                .arg(Arg::new("wire-capacitance-constant-ff").long("wire-capacitance-constant-ff").requires("power_output_json").default_value("0").value_parser(clap::value_parser!(f64)).help("Fixed wire capacitance per used cell-driven net, in fF (default: disabled)"))
-                .arg(Arg::new("wire-capacitance-per-sink-ff").long("wire-capacitance-per-sink-ff").requires("power_output_json").default_value("0").value_parser(clap::value_parser!(f64)).help("Additional wire capacitance per sink pin, in fF; no empirical fanout cutoff"))
+                .arg(Arg::new("wire-capacitance-constant-ff").long("wire-capacitance-constant-ff").requires("gv_eval_power_report").default_value("0").value_parser(clap::value_parser!(f64)).help("Fixed wire capacitance per used cell-driven net, in fF (default: disabled)"))
+                .arg(Arg::new("wire-capacitance-per-sink-ff").long("wire-capacitance-per-sink-ff").requires("gv_eval_power_report").default_value("0").value_parser(clap::value_parser!(f64)).help("Additional wire capacitance per sink pin, in fF; no empirical fanout cutoff"))
                 .arg(
                     Arg::new("cycle_time")
                         .long("cycle-time")
@@ -2418,9 +2434,35 @@ fn main() {
                 )
                 .group(
                     clap::ArgGroup::new("gv_eval_input")
-                        .args(["arg_tuple", "input_irvals"])
+                        .args(["arg_tuple", "input_irvals", "timed_stimulus_json"])
                         .required(true)
                         .multiple(false),
+                )
+                .group(
+                    clap::ArgGroup::new("gv_eval_power_report")
+                        .args(["power_output_json", "timed_output_json"])
+                        .multiple(false),
+                )
+                // Clap waives a requirement if the required argument conflicts
+                // with a supplied one. Apply mode conflicts to both timed flags.
+                .group(
+                    clap::ArgGroup::new("gv_eval_timed")
+                        .args(["timed_stimulus_json", "timed_output_json"])
+                        .multiple(true)
+                        .conflicts_with_all([
+                            "arg_tuple",
+                            "input_irvals",
+                            "sequential",
+                            "clock_port_name",
+                            "initial_state_all_zeros",
+                            "initial_state_file",
+                            "final_state_irvals",
+                            "toggle_output_json",
+                            "power_output_json",
+                            "primary_input_transition",
+                            "clock_transition",
+                            "cycle_time",
+                        ]),
                 )
                 .group(
                     clap::ArgGroup::new("gv_eval_initial_state")

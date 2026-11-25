@@ -3,6 +3,7 @@
 //! Sample-driven dynamic-power estimation for labeled gate-level netlists.
 
 mod packed;
+pub mod timed;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -21,7 +22,8 @@ use crate::liberty::lut::{
     power_lut_input_transition_range, timing_lut_input_transition_range,
 };
 use crate::liberty_model::{
-    Cell, Library, Pin, PinDirection, PowerTransition, StringId, TimingTable,
+    Cell, InternalPower, Library, Pin, PinDirection, PowerTable, PowerTransition, StringId,
+    TimingTable,
 };
 use crate::liberty_proto::TimingTableKind;
 use crate::netlist::electrical::RiseFall;
@@ -214,9 +216,9 @@ struct SignalId(usize);
 
 #[derive(Clone, Copy, Debug)]
 enum SignalOwner {
-    ModuleInput,
+    ModuleInput { port: usize, bit: usize },
     Clock,
-    CellOutput { instance: usize },
+    CellOutput { instance: usize, pin: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -321,6 +323,22 @@ impl PreparedPowerBinding {
 struct PreparedCondition {
     expression: StringId,
     term: Result<BoundConditionTerm, String>,
+}
+
+impl PreparedCondition {
+    /// Resolves a Liberty selector against one pin assignment.
+    fn evaluate(&self, library: &Library, values: ConditionValues<'_>) -> Result<bool, String> {
+        self.term
+            .as_ref()
+            .map_err(Clone::clone)?
+            .evaluate_partial(values)
+            .ok_or_else(|| {
+                format!(
+                    "Liberty when '{}' could not be evaluated from cell pin values",
+                    library.resolve_string(&self.expression)
+                )
+            })
+    }
 }
 
 /// An indexed leaf in the pin and already-complemented state-alias arrays.
@@ -843,6 +861,7 @@ pub fn analyze_dynamic_power_bits(
         options.module_output_load,
         options.wire_load,
         &HashMap::new(),
+        DriverFallback::EquivalentOperand,
     )?;
     let mut activity = observe_activity(&power_model, library, batch_inputs, &mut topology)?;
     let buckets = build_slew_buckets(library, &[options.primary_input_transition])?;
@@ -883,9 +902,9 @@ pub fn analyze_dynamic_power_bits(
     for signal in &topology.signals {
         let energy = switching_energy(signal, voltage_squared);
         match signal.owner {
-            SignalOwner::ModuleInput => primary_input_switching_energy += energy,
+            SignalOwner::ModuleInput { .. } => primary_input_switching_energy += energy,
             SignalOwner::Clock => unreachable!("combinational power view has no clock signal"),
-            SignalOwner::CellOutput { instance } => {
+            SignalOwner::CellOutput { instance, .. } => {
                 cell_output_switching_energy += energy;
                 instance_switching[instance] += energy;
             }
@@ -1005,6 +1024,7 @@ pub fn analyze_sequential_dynamic_power(
         options.module_output_load,
         options.wire_load,
         &model.wire_aliases,
+        DriverFallback::EquivalentOperand,
     )?;
     let mut activity = observe_ordered_activity(
         &power_model,
@@ -1056,9 +1076,9 @@ pub fn analyze_sequential_dynamic_power(
     for signal in &topology.signals {
         let energy = switching_energy(signal, voltage_squared);
         match signal.owner {
-            SignalOwner::ModuleInput => primary_input_switching_energy += energy,
+            SignalOwner::ModuleInput { .. } => primary_input_switching_energy += energy,
             SignalOwner::Clock => clock_switching_energy += energy,
-            SignalOwner::CellOutput { instance } => {
+            SignalOwner::CellOutput { instance, .. } => {
                 cell_output_switching_energy += energy;
                 instance_switching[instance] += energy;
             }
@@ -1269,12 +1289,29 @@ fn build_instance_reports(
         .collect()
 }
 
+/// Determines whether a missing named driver may be inferred from a Boolean
+/// operand.
+#[derive(Clone, Copy)]
+enum DriverFallback {
+    EquivalentOperand,
+    VerifiedWiring,
+}
+
+/// Physical and logical driver indices are valid for one mapped topology.
+struct DriverIndices<'a> {
+    nets: &'a HashMap<(String, u32), SignalId>,
+    operands: &'a HashMap<AigOperand, Vec<SignalId>>,
+    clock: Option<SignalId>,
+    fallback: DriverFallback,
+}
+
 fn build_topology(
     model: &PowerModelView<'_>,
     library: &Library,
     module_output_load: f64,
     wire_load: WireLoadModel,
     wire_aliases: &HashMap<(String, u32), (String, u32)>,
+    fallback: DriverFallback,
 ) -> Result<PowerTopology, String> {
     let cell_by_name: HashMap<_, _> = library
         .cells
@@ -1286,11 +1323,11 @@ fn build_topology(
     let mut net_drivers = HashMap::new();
     let mut operand_sources: HashMap<AigOperand, Vec<SignalId>> = HashMap::new();
     let mut clock_signal = None;
-    for port in &model.module_ports {
+    for (port_index, port) in model.module_ports.iter().enumerate() {
         if port.direction != PortDirection::Input {
             continue;
         }
-        for bit in &port.bits_lsb_to_msb {
+        for (bit_index, bit) in port.bits_lsb_to_msb.iter().enumerate() {
             let signal_id = add_signal(
                 &mut signals,
                 &mut operand_sources,
@@ -1299,7 +1336,10 @@ fn build_topology(
                 if matches!(bit.signal, PowerSignal::Clock) {
                     SignalOwner::Clock
                 } else {
-                    SignalOwner::ModuleInput
+                    SignalOwner::ModuleInput {
+                        port: port_index,
+                        bit: bit_index,
+                    }
                 },
             );
             insert_net_driver(
@@ -1353,6 +1393,7 @@ fn build_topology(
                     pin.signal,
                     SignalOwner::CellOutput {
                         instance: instance_index,
+                        pin: binding_pin_index,
                     },
                 );
                 output_signals[binding_pin_index] = Some(signal_id);
@@ -1409,6 +1450,12 @@ fn build_topology(
             net_drivers.insert(alias.clone(), driver);
         }
     }
+    let drivers = DriverIndices {
+        nets: &net_drivers,
+        operands: &operand_sources,
+        clock: clock_signal,
+        fallback,
+    };
     for (instance_index, instance) in model.instances.iter().enumerate() {
         for (pin_index, pin) in instance.pins.iter().enumerate() {
             if let Some(signal_id) = instances[instance_index].output_signals[pin_index] {
@@ -1420,9 +1467,7 @@ fn build_topology(
                 model,
                 &pin.connection,
                 pin.signal,
-                &net_drivers,
-                &operand_sources,
-                clock_signal,
+                &drivers,
                 &format!(
                     "instance '{}' pin '{}'",
                     instance.instance_name, pin.pin_name
@@ -1454,9 +1499,7 @@ fn build_topology(
                 model,
                 &connection,
                 bit.signal,
-                &net_drivers,
-                &operand_sources,
-                clock_signal,
+                &drivers,
                 &format!("module output '{}[{}]'", port.name, bit.bit_number),
             )? {
                 drives_output[signal_id.0] = true;
@@ -1771,9 +1814,7 @@ fn resolve_source(
     model: &PowerModelView<'_>,
     connection: &PinConnection,
     signal: PowerSignal,
-    net_drivers: &HashMap<(String, u32), SignalId>,
-    operand_sources: &HashMap<AigOperand, Vec<SignalId>>,
-    clock_signal: Option<SignalId>,
+    drivers: &DriverIndices<'_>,
     context: &str,
 ) -> Result<ResolvedSource, String> {
     if matches!(
@@ -1786,12 +1827,23 @@ fn resolve_source(
         net_name,
         bit_number,
     } = connection
-        && let Some(signal_id) = net_drivers.get(&(net_name.clone(), *bit_number))
+        && let Some(signal_id) = drivers.nets.get(&(net_name.clone(), *bit_number))
     {
         return Ok(ResolvedSource::Signal(*signal_id));
     }
+    if matches!(drivers.fallback, DriverFallback::VerifiedWiring) {
+        if let PowerSignal::Operand(operand) = signal
+            && matches!(model.gate_fn.get(operand.node), AigNode::Literal { .. })
+        {
+            return Ok(ResolvedSource::Literal);
+        }
+        return Err(format!(
+            "{context}: no physical driver; timed evaluation requires resolved wire aliases"
+        ));
+    }
     match signal {
-        PowerSignal::Clock => clock_signal
+        PowerSignal::Clock => drivers
+            .clock
             .map(ResolvedSource::Signal)
             .ok_or_else(|| format!("{context}: selected clock has no physical driver")),
         PowerSignal::GatedClock(_) => {
@@ -1801,7 +1853,8 @@ fn resolve_source(
             Err(format!("{context}: private ICG state cannot drive a net"))
         }
         PowerSignal::Operand(operand) => {
-            match operand_sources
+            match drivers
+                .operands
                 .get(&operand)
                 .map(Vec::as_slice)
                 .unwrap_or(&[])
@@ -1857,7 +1910,7 @@ fn topological_instance_order(
                     if !clock_driven || signals[signal_id.0].source.is_clock() =>
                 {
                     match signals[signal_id.0].owner {
-                        SignalOwner::CellOutput { instance } if instance != consumer => {
+                        SignalOwner::CellOutput { instance, .. } if instance != consumer => {
                             Some(instance)
                         }
                         _ => None,
@@ -2363,18 +2416,9 @@ fn when_is_true(
             ConditionStates::Rows(previous, current) => (previous[index], current[index]),
             ConditionStates::Slots(previous, current) => {
                 let condition = &conditions[index];
-                let term = condition.term.as_ref().map_err(Clone::clone)?;
-                let missing_values = || {
-                    format!(
-                        "Liberty when '{}' could not be evaluated from cell pin values",
-                        library.resolve_string(&condition.expression)
-                    )
-                };
-                let previous = term.evaluate_partial(previous).ok_or_else(missing_values)?;
-                // A false predecessor still requires current-state validation.
-                // Errors leave the entry unevaluated and do not
-                // count as successful requests.
-                let current = term.evaluate_partial(current).ok_or_else(missing_values)?;
+                let previous = condition.evaluate(library, previous)?;
+                // Validate the second assignment even when the first was false.
+                let current = condition.evaluate(library, current)?;
                 (previous, current)
             }
         };
@@ -2545,7 +2589,7 @@ fn seed_root_histograms(
         signal.histogram.rise = vec![0.0; buckets.len()];
         signal.histogram.fall = vec![0.0; buckets.len()];
         let bucket = match signal.owner {
-            SignalOwner::ModuleInput => Some(primary_input_bucket),
+            SignalOwner::ModuleInput { .. } => Some(primary_input_bucket),
             SignalOwner::Clock => Some(clock_bucket),
             SignalOwner::CellOutput { .. } => None,
         };
@@ -2576,7 +2620,7 @@ fn output_fallback_transition(
     clock_transition: f64,
 ) -> f64 {
     match topology.signals[output.0].owner {
-        SignalOwner::CellOutput { instance } if model.instances[instance].is_sequential => {
+        SignalOwner::CellOutput { instance, .. } if model.instances[instance].is_sequential => {
             clock_transition
         }
         _ => signal_source_transition(
@@ -2753,6 +2797,42 @@ fn add_histogram_mass(signal: &mut Signal, rise: bool, bucket: usize, mass: f64)
     }
 }
 
+/// Prefers an edge-specific LUT over a shared rise/fall LUT and rejects
+/// ambiguous characterization.
+fn internal_power_table<'a>(
+    group: &'a InternalPower,
+    rise: bool,
+    instance: &PowerInstance,
+    owner: usize,
+) -> Result<Option<&'a PowerTable>, String> {
+    let direction = if rise {
+        PowerTransition::Rise
+    } else {
+        PowerTransition::Fall
+    };
+    let kind = if group
+        .tables
+        .iter()
+        .any(|table| table.transition == direction)
+    {
+        direction
+    } else {
+        PowerTransition::Both
+    };
+    let mut matching = group.tables.iter().filter(|table| table.transition == kind);
+    let first = matching.next();
+    let remaining = matching.count();
+    if remaining != 0 {
+        return Err(format!(
+            "instance '{}' pin '{}' internal_power has {} tables for one transition direction",
+            instance.instance_name,
+            instance.pins[owner].pin_name,
+            remaining + 1
+        ));
+    }
+    Ok(first)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn calculate_internal_energy(
     model: &PowerModelView<'_>,
@@ -2778,38 +2858,11 @@ fn calculate_internal_energy(
         // Directional power tables describe the owning pin's transition. The
         // related/source pin transition instead selects the slew histogram.
         let power_rise = event.owner_output_rise.unwrap_or(event.source_rise);
-        let exact: Vec<_> = group
-            .tables
-            .iter()
-            .filter(|table| {
-                table.transition
-                    == if power_rise {
-                        PowerTransition::Rise
-                    } else {
-                        PowerTransition::Fall
-                    }
-            })
-            .collect();
-        let tables: Vec<_> = if exact.is_empty() {
-            group
-                .tables
-                .iter()
-                .filter(|table| table.transition == PowerTransition::Both)
-                .collect()
-        } else {
-            exact
-        };
-        if tables.is_empty() {
+        let instance = &model.instances[event.instance];
+        let Some(table) = internal_power_table(group, power_rise, instance, event.owner_pin)?
+        else {
             continue;
-        }
-        if tables.len() > 1 {
-            return Err(format!(
-                "instance '{}' pin '{}' internal_power has {} tables for one transition direction",
-                model.instances[event.instance].instance_name,
-                model.instances[event.instance].pins[event.owner_pin].pin_name,
-                tables.len()
-            ));
-        }
+        };
         let histogram = if event.source_rise {
             &topology.signals[event.source.0].histogram.rise
         } else {
@@ -2826,7 +2879,23 @@ fn calculate_internal_energy(
                 }
             })
             .unwrap_or(0.0);
-        let table = tables[0];
+        let context = format!(
+            "instance '{}' pin '{}' internal_power",
+            instance.instance_name, instance.pins[event.owner_pin].pin_name
+        );
+        let mut energy_at = |input_transition| {
+            evaluate_power_lut(
+                library,
+                table,
+                RawLutQuery {
+                    input_transition,
+                    output_load: owner_load,
+                },
+                diagnostics,
+                &context,
+            )
+            .map_err(|error| error.to_string())
+        };
         let mut average_energy = 0.0;
         if histogram_total == 0.0 {
             let fallback_transition = signal_source_transition(
@@ -2834,38 +2903,12 @@ fn calculate_internal_energy(
                 primary_input_transition,
                 clock_transition,
             );
-            average_energy = evaluate_power_lut(
-                library,
-                table,
-                RawLutQuery {
-                    input_transition: fallback_transition,
-                    output_load: owner_load,
-                },
-                diagnostics,
-                "internal power",
-            )
-            .map_err(|error| error.to_string())?;
+            average_energy = energy_at(fallback_transition)?;
         } else {
-            for (bucket_index, mass) in histogram.iter().enumerate() {
-                if *mass == 0.0 {
-                    continue;
+            for (bucket, &mass) in buckets.iter().zip(histogram) {
+                if mass != 0.0 {
+                    average_energy += mass * energy_at(bucket.midpoint)? / histogram_total;
                 }
-                let energy = evaluate_power_lut(
-                    library,
-                    table,
-                    RawLutQuery {
-                        input_transition: buckets[bucket_index].midpoint,
-                        output_load: owner_load,
-                    },
-                    diagnostics,
-                    &format!(
-                        "instance '{}' pin '{}' internal_power",
-                        model.instances[event.instance].instance_name,
-                        model.instances[event.instance].pins[event.owner_pin].pin_name
-                    ),
-                )
-                .map_err(|error| error.to_string())?;
-                average_energy += mass * energy / histogram_total;
             }
         }
         let energy = count * average_energy;
@@ -2893,7 +2936,7 @@ mod cache_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::liberty_model::{InternalPower, LibraryBuilder, TimingArc};
+    use crate::liberty_model::{LibraryBuilder, TimingArc};
 
     #[test]
     fn indexed_conditions_match_partial_formula_evaluation() {
@@ -3111,6 +3154,7 @@ mod tests {
             0.0,
             WireLoadModel::default(),
             &HashMap::new(),
+            DriverFallback::EquivalentOperand,
         )
         .unwrap();
         assert!(Arc::ptr_eq(

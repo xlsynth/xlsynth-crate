@@ -12,7 +12,7 @@ use crate::liberty::cell_formula::Term;
 use crate::liberty_model::{Cell, Library, PinDirection, SequentialKind};
 use crate::liberty_proto::ClockGate;
 use crate::netlist::bit_ref::select_bit_number;
-use crate::netlist::hierarchy::ElaboratedModuleBoundary;
+use crate::netlist::hierarchy::{ElaboratedModuleBoundary, ElaboratedNetlist};
 use crate::netlist::normalized::{
     BitExpr, BitSource, NormalizedBitIndex, NormalizedConnection, NormalizedInstance,
     NormalizedNetlistModule,
@@ -35,6 +35,20 @@ pub struct LabeledNetlistAig {
     pub module_ports: Vec<ModulePortAigBinding>,
     pub module_boundaries: Vec<ModuleBoundaryAigBinding>,
     pub instances: Vec<InstanceAigBinding>,
+}
+
+/// A flattened combinational model and its physical driver aliases for timed
+/// evaluation.
+pub struct TimedLabeledNetlist {
+    model: LabeledNetlistAig,
+    pub(crate) wire_aliases: HashMap<(String, u32), (String, u32)>,
+}
+
+impl TimedLabeledNetlist {
+    /// The same circuit projected for settled evaluation.
+    pub fn settled_model(&self) -> &LabeledNetlistAig {
+        &self.model
+    }
 }
 
 /// One module-port bundle bound to AIG operands in LSb-to-MSb order.
@@ -697,8 +711,10 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
     dff_cells_inverted: &std::collections::HashSet<String>,
     options: &GateFnProjectOptions,
 ) -> Result<GateFn, String> {
+    let normalized =
+        NormalizedNetlistModule::new(module, nets, interner).map_err(|e| e.to_string())?;
     project_gatefn_from_netlist_and_liberty_internal(
-        module,
+        &normalized,
         nets,
         interner,
         liberty_lib,
@@ -729,9 +745,23 @@ pub fn project_labeled_netlist_aig_with_boundaries(
     liberty_lib: &Library,
     module_boundaries: &[ElaboratedModuleBoundary],
 ) -> Result<LabeledNetlistAig, String> {
+    let normalized =
+        NormalizedNetlistModule::new(module, nets, interner).map_err(|e| e.to_string())?;
+    project_normalized_labeled_aig(&normalized, nets, interner, liberty_lib, module_boundaries)
+}
+
+/// Projects a normalized flat netlist while preserving source-level port and
+/// cell labels.
+fn project_normalized_labeled_aig(
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+    module_boundaries: &[ElaboratedModuleBoundary],
+) -> Result<LabeledNetlistAig, String> {
     let empty_dff_cells = HashSet::new();
     let projection = project_gatefn_from_netlist_and_liberty_internal(
-        module,
+        normalized,
         nets,
         interner,
         liberty_lib,
@@ -743,16 +773,61 @@ pub fn project_labeled_netlist_aig_with_boundaries(
         module_boundaries,
         ProjectionMode::LabeledEval,
     )?;
-    let module_name = interner
-        .resolve(module.name)
-        .ok_or_else(|| "could not resolve module name".to_string())?
-        .to_string();
     Ok(LabeledNetlistAig {
-        module_name,
+        module_name: projection.gate_fn.name.clone(),
         gate_fn: projection.gate_fn,
         module_ports: projection.module_ports,
         module_boundaries: projection.module_boundaries,
         instances: projection.instances,
+    })
+}
+
+/// Retains named wire terminals and checks that all combinational logic is
+/// mapped to cells.
+pub fn project_timed_labeled_netlist(
+    elaborated: &ElaboratedNetlist,
+    liberty_lib: &Library,
+) -> Result<TimedLabeledNetlist, String> {
+    let ElaboratedNetlist {
+        module,
+        nets,
+        interner,
+        module_boundaries,
+    } = elaborated;
+    let normalized =
+        NormalizedNetlistModule::new(module, nets, interner).map_err(|e| e.to_string())?;
+    for assign in &normalized.assigns {
+        for (&target, rhs) in assign.lhs_bits.iter().zip(&assign.rhs_bits) {
+            if !matches!(
+                rhs,
+                BitExpr::Source(BitSource::Bit(_) | BitSource::Literal(_))
+            ) {
+                let bit = normalized.bit(target);
+                let name = crate::netlist::bit_ref::net_name(bit.net, nets, interner);
+                return Err(format!(
+                    "timed evaluation requires wire or known literal assignments: assign to '{name}[{}]' has no Liberty cell timing",
+                    bit.bit_number.0,
+                ));
+            }
+        }
+    }
+    let model = project_normalized_labeled_aig(
+        &normalized,
+        nets,
+        interner,
+        liberty_lib,
+        module_boundaries,
+    )?;
+    let terminals = physical_wire_terminals(&normalized, interner, |index, name| {
+        model.instances[index]
+            .pins
+            .iter()
+            .any(|p| p.direction == PinDirection::Output && p.pin_name == name)
+    });
+    let wire_aliases = named_wire_aliases(&normalized, nets, interner, &terminals);
+    Ok(TimedLabeledNetlist {
+        model,
+        wire_aliases,
     })
 }
 
@@ -1293,7 +1368,12 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let wire_terminals = physical_wire_terminals(&normalized, interner, &instances);
+    let wire_terminals = physical_wire_terminals(&normalized, interner, |index, name| {
+        instances[index]
+            .pins
+            .iter()
+            .any(|p| p.direction == PinDirection::Output && p.pin_name == name)
+    });
     let module_boundaries = build_sequential_module_boundary_aig_bindings(
         &normalized,
         module_boundaries,
@@ -1336,7 +1416,7 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
 fn physical_wire_terminals(
     normalized: &NormalizedNetlistModule<'_>,
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    instances: &[SequentialInstanceAigBinding],
+    is_output: impl Fn(usize, &str) -> bool,
 ) -> Vec<Option<NormalizedBitIndex>> {
     if normalized.assigns.is_empty() {
         return Vec::new();
@@ -1350,15 +1430,11 @@ fn physical_wire_terminals(
         }
     }
     for instance in &normalized.instances {
-        for pin in &instances[instance.raw_index.0].pins {
-            if pin.direction != PinDirection::Output {
-                continue;
-            }
-            let connection = instance
-                .connections
-                .iter()
-                .find(|conn| interner.resolve(conn.port) == Some(pin.pin_name.as_str()));
-            if let Some([BitSource::Bit(bit)]) = connection.map(|conn| conn.bits.as_slice()) {
+        for connection in &instance.connections {
+            if let [BitSource::Bit(bit)] = connection.bits.as_slice()
+                && let Some(name) = interner.resolve(connection.port)
+                && is_output(instance.raw_index.0, name)
+            {
                 terminals[bit.index()] = Some(*bit);
             }
         }
@@ -1990,9 +2066,6 @@ fn build_sequential_module_port_aig_bindings(
                 .resolve(port.name)
                 .ok_or_else(|| "could not resolve module port name".to_string())?
                 .to_string();
-            // A tran representative may belong to another packed range.
-            // Keep its electrical signal and label it with this port's index.
-            let (msb, lsb) = port.width.unwrap_or((0, 0));
             let bits_lsb_to_msb = port
                 .bits
                 .iter()
@@ -2018,11 +2091,7 @@ fn build_sequential_module_port_aig_bindings(
                         SequentialAigSignal::Operand(operand)
                     };
                     Ok(LabeledSequentialAigBit {
-                        bit_number: select_bit_number(msb, lsb, offset)
-                            .ok_or_else(|| {
-                                format!("bit offset {offset} exceeds declared width of port '{name}'")
-                            })?
-                            .0,
+                        bit_number: declared_port_bit_number(&name, port.width, offset)?,
                         signal,
                     })
                 })
@@ -2227,7 +2296,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn project_gatefn_from_netlist_and_liberty_internal(
-    module: &NetlistModule,
+    normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     liberty_lib: &Library,
@@ -2237,10 +2306,9 @@ fn project_gatefn_from_netlist_and_liberty_internal(
     module_boundaries: &[ElaboratedModuleBoundary],
     projection_mode: ProjectionMode,
 ) -> Result<GateFnProjection, String> {
-    let normalized =
-        NormalizedNetlistModule::new(module, nets, interner).map_err(|e| e.to_string())?;
+    let module = normalized.raw;
     if projection_mode == ProjectionMode::LabeledEval {
-        validate_labeled_eval_module(&normalized, nets, interner, liberty_lib)?;
+        validate_labeled_eval_module(normalized, nets, interner, liberty_lib)?;
     }
     let used_cell_names: HashSet<String> = module
         .instances
@@ -2257,24 +2325,24 @@ fn project_gatefn_from_netlist_and_liberty_internal(
     let module_name = interner.resolve(module.name).unwrap();
     let mut gb = GateBuilder::new(module_name.to_string(), GateBuilderOptions::no_opt());
     let mut resolved = ResolvedBitValues::new(normalized.bit_count());
-    collect_module_io_bits(&normalized, nets, interner, &mut gb, &mut resolved)?;
-    let module_output_bits = collect_module_output_bits(&normalized);
-    let mut pending_assigns = build_pending_assign_bits(&normalized);
+    collect_module_io_bits(normalized, nets, interner, &mut gb, &mut resolved)?;
+    let module_output_bits = collect_module_output_bits(normalized);
+    let mut pending_assigns = build_pending_assign_bits(normalized);
     let mut labeled_instances = if projection_mode == ProjectionMode::LabeledEval {
         vec![None; normalized.instances.len()]
     } else {
         Vec::new()
     };
     let (used_as_input, driven) =
-        collect_netlist_bit_usage(&normalized, interner, liberty_lib, |_, _| false)?;
-    check_undriven_bits(&used_as_input, &driven, &normalized, nets, interner)?;
+        collect_netlist_bit_usage(normalized, interner, liberty_lib, |_, _| false)?;
+    check_undriven_bits(&used_as_input, &driven, normalized, nets, interner)?;
     let mut unprocessed: Vec<_> = normalized.instances.iter().collect();
     let mut processed_any = true;
     while (!unprocessed.is_empty() || !pending_assigns.is_empty()) && processed_any {
         processed_any = false;
         let (next_pending_assigns, processed_assign) = process_pending_assign_bits(
             pending_assigns,
-            &normalized,
+            normalized,
             &mut resolved,
             nets,
             interner,
@@ -2303,7 +2371,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
                 nets,
                 &resolved,
                 &mut gb,
-                &normalized,
+                normalized,
             );
             if !missing_inputs.is_empty() {
                 log::trace!(
@@ -2324,7 +2392,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
                 nets,
                 &mut gb,
                 &mut resolved,
-                &normalized,
+                normalized,
                 dff_cells_identity,
                 dff_cells_inverted,
                 &cell_formula_map,
@@ -2341,7 +2409,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
                         inst_name,
                         interner,
                         nets,
-                        &normalized,
+                        normalized,
                         &input_map,
                         &processed.output_operands,
                     )?;
@@ -2387,7 +2455,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
                     nets,
                     &resolved,
                     &mut gb,
-                    &normalized,
+                    normalized,
                 );
                 if missing_inputs.is_empty() {
                     diag_lines.push(format!(
@@ -2430,7 +2498,7 @@ fn project_gatefn_from_netlist_and_liberty_internal(
                     collect_missing_expr_sources(
                         &assign.rhs_bits[pending_bit.rhs_bit_index],
                         &resolved,
-                        &normalized,
+                        normalized,
                         nets,
                         interner,
                         &mut missing,
@@ -2458,12 +2526,12 @@ fn project_gatefn_from_netlist_and_liberty_internal(
         }
     }
     let module_ports = if projection_mode == ProjectionMode::LabeledEval {
-        build_module_port_aig_bindings(&normalized, nets, interner, &resolved)?
+        build_module_port_aig_bindings(normalized, nets, interner, &resolved)?
     } else {
         Vec::new()
     };
     let module_boundaries = if projection_mode == ProjectionMode::LabeledEval {
-        build_module_boundary_aig_bindings(&normalized, module_boundaries, interner, &resolved)?
+        build_module_boundary_aig_bindings(normalized, module_boundaries, interner, &resolved)?
     } else {
         Vec::new()
     };
@@ -2665,6 +2733,19 @@ fn checked_pin_direction(
     }
 }
 
+/// Labels a port bit in its declared range even when a tran aliases a different
+/// range.
+fn declared_port_bit_number(
+    name: &str,
+    width: Option<(u32, u32)>,
+    offset: usize,
+) -> Result<u32, String> {
+    let (msb, lsb) = width.unwrap_or((0, 0));
+    select_bit_number(msb, lsb, offset)
+        .map(|bit| bit.0)
+        .ok_or_else(|| format!("bit offset {offset} exceeds declared width of port '{name}'"))
+}
+
 fn build_module_port_aig_bindings(
     normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
@@ -2682,8 +2763,8 @@ fn build_module_port_aig_bindings(
             let bits_lsb_to_msb = port
                 .bits
                 .iter()
-                .map(|bit_idx| {
-                    let bit = normalized.bit(*bit_idx);
+                .enumerate()
+                .map(|(offset, bit_idx)| {
                     let operand = resolved.resolve_bit(*bit_idx).ok_or_else(|| {
                         format!(
                             "module port bit '{}' is unresolved after AIG projection",
@@ -2691,7 +2772,7 @@ fn build_module_port_aig_bindings(
                         )
                     })?;
                     Ok(LabeledAigBit {
-                        bit_number: bit.bit_number.0,
+                        bit_number: declared_port_bit_number(&name, port.width, offset)?,
                         operand,
                     })
                 })
