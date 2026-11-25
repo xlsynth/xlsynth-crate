@@ -819,9 +819,8 @@ fn inverted_and_falling_edge_registers_keep_their_semantic_families() -> Result<
     Ok(())
 }
 
-#[test]
-fn dual_output_register_substitutions_update_both_polarities() -> Result<()> {
-    let mut builder = LibraryBuilder::from_library(library()?);
+pub(in crate::netlist) fn with_complementary_outputs(library: Library) -> Result<Library> {
+    let mut builder = LibraryBuilder::from_library(library);
     let inverted_function = builder.intern_string("IQN")?;
     let inverted_name = builder.intern_string("QN")?;
     for cell in &mut builder.library_mut().cells {
@@ -840,14 +839,22 @@ fn dual_output_register_substitutions_update_both_polarities() -> Result<()> {
             }
         }
     }
-    let library = builder.finish();
+    Ok(builder.finish())
+}
+
+/// Initial timing, substitution, and rollback must all agree with full STA
+/// on which outputs launch a path, even when QN is explicitly open.
+#[test]
+fn dual_output_register_substitutions_update_both_polarities() -> Result<()> {
+    let library = with_complementary_outputs(library()?)?;
     let mut parsed = read_gv_from_str(
-        r#"module m(input clk, input d, output [2:0] y);
+        r#"module m(input clk, input d, output [3:0] y);
         wire a,an,b;
         DFF1 launch(.CLK(clk),.D(d),.Q(a),.QN(an));
         BUF1 positive(.A(a),.Y(b));
         INV1 negative(.A(an),.Y(y[2]));
         DFF1 capture(.CLK(clk),.D(b),.Q(y[0]),.QN(y[1]));
+        DFF1 single(.CLK(clk),.D(d),.Q(y[3]),.QN());
         endmodule"#,
     )?;
     let larger = library
@@ -864,7 +871,7 @@ fn dual_output_register_substitutions_update_both_polarities() -> Result<()> {
         options().timing,
     )?;
     let initial = sta.score();
-    for instance in [0, 3] {
+    for instance in [0, 3, 4] {
         let before = sta.score();
         assert_eq!(
             sta.trial(instance, larger, usize::MAX, None, |_| false)?,

@@ -966,18 +966,7 @@ impl IncrementalSta<'_> {
         );
         self.cells[i] = cell;
         self.orders[i] = if self.instances[i].sequential {
-            self.lib.library.cells[cell]
-                .pins
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| {
-                    p.direction == PinDirection::Output as i32
-                        && self.instances[i]
-                            .pins
-                            .contains_key(self.lib.library.resolve_string(&p.name))
-                })
-                .map(|(index, _)| index)
-                .collect()
+            register_output_pin_order(self.lib.library, cell, &self.instances[i].pins)
         } else {
             combinational_output_pin_evaluation_order(&self.lib, cell, &self.instances[i].pins)?
         };

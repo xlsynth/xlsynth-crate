@@ -26,6 +26,7 @@ pub mod parse;
 pub mod power;
 pub mod proto;
 pub mod register_mapping;
+pub mod registered_fanout;
 pub mod report;
 pub mod resize;
 pub(crate) mod sequential_liberty;

@@ -8,6 +8,8 @@ use crate::aig::SequentialGateFn;
 use crate::aig_serdes::canonical_mapping_graph;
 use crate::liberty_model::Library;
 use crate::netlist::io::ParsedNetlist;
+use crate::netlist::registered_fanout::repair_registered_fanout;
+use crate::netlist::sta::StaOptions;
 use crate::techmap::postprocess::{CoverStrategy, PostMappingOptions, map_and_optimize_cover};
 
 /// Maps combinational logic with g8r's area mapper and assembles the selected
@@ -53,7 +55,24 @@ pub fn map_sequential_to_native_netlist(
     };
     let (cover, _) = map_and_optimize_cover(graph, library, strategy, post)?;
     let mut netlist = cover.netlist.into();
-    prepared.assemble(&mut netlist, "g8r").map_err(Error::msg)?;
+    let assembled = prepared.assemble(&mut netlist, "g8r").map_err(Error::msg)?;
+    // Q pins are ideal primary inputs in the cover. Assembly supplies the
+    // physical launch driver and the load of every connected capture pin.
+    if !design.registers.is_empty()
+        && let Some(fanout) = &post.fanout
+    {
+        let report = repair_registered_fanout(
+            &mut netlist,
+            library,
+            StaOptions {
+                primary_input_transition: fanout.primary_input_transition,
+                module_output_load: fanout.module_output_load,
+                wire_load: fanout.wire_load,
+            },
+            Some(assembled),
+        )?;
+        log::debug!(target: "xlsynth_g8r::netlist::registered_fanout", "{report:?}");
+    }
     Ok(netlist)
 }
 
