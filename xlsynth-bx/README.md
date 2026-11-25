@@ -1535,9 +1535,14 @@ in its body. For a block declared as `route<SPLIT: bool = {false}>`,
 `route(data)` binds `SPLIT` to `false` and `route<true>(data)` binds it to
 `true`. Omitted trailing value arguments use their braced defaults, evaluated
 in the block's declaration scope with preceding value parameters in scope.
-A `u32` parameter can supply the bit width or array length of an input port,
-result, or register. BX infers type parameters from the data inputs,
-including the element type of a port declared as `T[N]`.
+Input ports, results, and registers can use a `u32` constexpr expression for
+a bit width or array length. For example, `xs: uN[ceillog2(N)][N + u32:1]`
+has type `u4[10]` when `N = 9`. The caller supplies `N` or uses its default.
+
+BX resolves names in the block's declaration scope. At each call it infers
+type parameters from data inputs, including the element type of `T[N]`,
+then evaluates dependent dimensions and checks the concrete port types.
+A width can also use `bit_count<T>()` when another input supplies `T`.
 
 ```text
 block storage<W: u32, N: u32>(clk, data: bits[W][N]) -> bits[W][N] {

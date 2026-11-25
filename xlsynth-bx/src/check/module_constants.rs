@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
 
-use crate::ast::{Block, BlockStages, ConstDef, Expr, Type};
+use crate::ast::{Block, BlockStages, ConstDef, Expr, SourceNode, Type};
 use crate::infer_literal::has_implicit_constant_type;
 use crate::typed::bits;
 
@@ -17,7 +17,14 @@ pub(super) struct ModuleDimensions<'a, 'm> {
     pub(super) position: Option<usize>,
     pub(super) warning_owner: Option<&'m str>,
     zero_binding: ZeroBinding<'a>,
-    pub(super) block_size_formals: Option<&'a BTreeSet<&'m str>>,
+    pub(super) block_formals: Option<&'a BlockDimensionFormals<'a>>,
+}
+
+/// Bindings that become concrete when a block's data ports are specialized.
+pub(super) struct BlockDimensionFormals<'a> {
+    pub(super) values: BTreeSet<String>,
+    pub(super) u32_values: BTreeSet<&'a str>,
+    pub(super) types: &'a Bindings,
 }
 
 /// The declaration that owns the lexical `zero!` binding, or a binding
@@ -35,7 +42,7 @@ impl<'m> Declarations<'m> {
             position: self.positions.get(owner).copied(),
             warning_owner: self.positions.get_key_value(owner).map(|(&name, _)| name),
             zero_binding: ZeroBinding::Owner(owner),
-            block_size_formals: None,
+            block_formals: None,
         }
     }
 
@@ -50,20 +57,45 @@ impl<'m> Declarations<'m> {
             position,
             warning_owner,
             zero_binding: ZeroBinding::Resolved(zero_binding),
-            block_size_formals: None,
+            block_formals: None,
         }
     }
 }
 
 impl<'m> ModuleDimensions<'_, 'm> {
-    /// Data port widths and lengths can refer directly to a block's u32
-    /// formals.
-    pub(super) fn is_block_size_formal(&self, expr: &Expr) -> bool {
-        let Expr::Name(name) = expr else {
-            return false;
-        };
-        self.block_size_formals
-            .is_some_and(|names| names.contains(name.as_str()))
+    /// A width or length is a u32. Other formals can participate in an
+    /// expression computing it, including type operands such as bit_count<T>().
+    pub(super) fn is_dependent_block_size(&self, expr: &Expr) -> bool {
+        self.block_formals.is_some_and(|formals| match expr {
+            Expr::Name(name) => formals.u32_values.contains(name.as_str()),
+            _ => {
+                super::struct_parametrics::references_formal(SourceNode::Expression(expr), |name| {
+                    formals.values.contains(name) || formals.types.declares(name)
+                })
+            }
+        })
+    }
+
+    /// Resolve a fixed size now, or check names and retain a dependent
+    /// expression until the block has concrete type and value arguments.
+    pub(super) fn resolve_or_defer_size(
+        &self,
+        expr: &Expr,
+        is_local: &dyn Fn(&str) -> bool,
+        bindings: Option<&Bindings>,
+        types: &mut TypeResolver<'_, 'm>,
+    ) -> Result<Option<usize>, String> {
+        if !self.is_dependent_block_size(expr) {
+            return self.size(expr, is_local, bindings, types).map(Some);
+        }
+        if !matches!(expr, Expr::Name(_)) {
+            let formals = self.block_formals.expect("dependent block dimension");
+            let mut checker = types.struct_scope(*self);
+            checker.enclosing_type_locals = Some(is_local);
+            checker.function_type_bindings = Some(formals.types.clone());
+            checker.check_block_dimension_names(expr, &formals.values)?;
+        }
+        Ok(None)
     }
 
     /// Module constants already hold evaluated values. Stage inference needs

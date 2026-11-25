@@ -1492,7 +1492,7 @@ pub(super) fn struct_field_map<'e>(
 
 /// Check whether a type annotation or constexpr expression refers to an
 /// enclosing formal, accounting for names rebound in local expressions.
-fn references_formal(node: SourceNode<'_>, is_formal: impl Fn(&str) -> bool) -> bool {
+pub(super) fn references_formal(node: SourceNode<'_>, is_formal: impl Fn(&str) -> bool) -> bool {
     let mut nodes = ScopedSourceNodes::default();
     nodes.push(node);
     while let Some(node) = nodes.next() {

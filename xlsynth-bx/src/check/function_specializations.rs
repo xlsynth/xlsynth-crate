@@ -248,6 +248,19 @@ impl<'m> FunctionSpecializations<'m> {
         !self.active.is_empty()
     }
 
+    /// Evaluate annotations in a definition scope that shares the module's
+    /// specialization budgets, including work in nested struct definitions.
+    pub(super) fn with_definition<T>(
+        &mut self,
+        owner: &'m str,
+        evaluate: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.enter(owner)?;
+        let result = stacker::maybe_grow(1024 * 1024, 2 * 1024 * 1024, || evaluate(self));
+        self.leave();
+        result
+    }
+
     pub(super) fn enter(&mut self, name: &'m str) -> Result<(), String> {
         if self.active.contains(&name) {
             return Err(format!("recursive function dependency involving '{name}'"));

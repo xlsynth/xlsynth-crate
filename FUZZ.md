@@ -303,6 +303,12 @@ Generates type-generic BX blocks with named callbacks, flattens their combinatio
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_callbacks --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_block_port_dimensions.rs
+
+Compares BX block port signatures with value-parametric signatures on pinned DSLX functions. Generated bit widths and array lengths compose arithmetic, boolean conditionals, local function calls, and `ceillog2`, including zero-width results at one and width changes just above powers of two. Dimensions can also depend on `bit_count<T>()` of a tuple input. DSLX uses the concrete tuple type BX infers. Scalar, tuple, and nested array ports exercise both input and result checks. Concrete callers supply matching dimensions or change one width or length on either side of the call. Accepted programs compare flattened BX Block IR with DSLX IR and constexpr values. Empty arrays use their outer length as the observable result for comparison with DSLX constexpr evaluation.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_block_port_dimensions -- -max_len=14 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_block_value_parametrics.rs
 
 Compares explicit `u32` value parametrics on BX blocks with DSLX functions.

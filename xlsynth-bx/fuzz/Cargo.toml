@@ -114,6 +114,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_block_port_dimensions"
+path = "fuzz_targets/fuzz_bx_dslx_block_port_dimensions.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_block_value_parametrics"
 path = "fuzz_targets/fuzz_bx_dslx_block_value_parametrics.rs"
 test = false
