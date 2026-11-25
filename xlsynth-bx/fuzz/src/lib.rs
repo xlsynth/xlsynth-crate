@@ -40,6 +40,8 @@ mod struct_updates;
 mod tuple_match;
 mod type_aliases;
 mod unroll_arrays;
+mod unroll_map;
+mod unroll_map_clocked;
 mod unroll_types;
 
 pub use array_concat::check_array_concat;
@@ -75,6 +77,8 @@ pub use struct_updates::check_struct_updates;
 pub use tuple_match::check_tuple_match;
 pub use type_aliases::check_type_aliases;
 pub use unroll_arrays::check_unroll_arrays;
+pub use unroll_map::check_unroll_map;
+pub use unroll_map_clocked::check_unroll_map_clocked;
 pub use unroll_types::check_unroll_types;
 
 /// Generate a shared expression and compare both frontends on reproducible

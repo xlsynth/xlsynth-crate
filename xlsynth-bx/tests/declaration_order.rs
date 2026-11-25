@@ -80,6 +80,18 @@ fn strict_modules_require_earlier_block_dependencies() -> Result<(), String> {
             "pairs",
         ),
         (
+            "fn pairs(x: u8) -> (u8, u8)[1] { [(x, x)] }",
+            "block top(clk, x: u8) -> u8[1] { unroll_map! (pairs, _) in pairs(x) { pairs } }",
+            "top",
+            "pairs",
+        ),
+        (
+            stage,
+            "block top(clk, x: u8) -> u8[1] { unroll_map! lane in [x] { let q = step(lane); q } }",
+            "top",
+            "step",
+        ),
+        (
             helper,
             "fn apply<F: fn(u8) -> u8>(x: u8) -> u8 { F(x) }\nblock top(clk, x: u8) -> u8 { apply<step>(x) }",
             "top",

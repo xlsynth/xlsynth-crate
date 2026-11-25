@@ -58,7 +58,8 @@ block delay<T>(clk, x: T) -> T {
 }
 
 #[test]
-fn unrolled_product_specializes_clocked_cells_like_nested_ranges() -> Result<(), Box<dyn Error>> {
+fn unrolled_product_and_maps_specialize_clocked_cells_like_nested_ranges()
+-> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let cells = r#"
 use grid;
@@ -81,6 +82,19 @@ pub block nested(clk, data: u8[3][2], enable: bool[3][2]) -> u8[3][2] {
             update(acc, (r, c), lane)
         }(rows)
     }(zero!<u8[3][2]>())
+}
+pub block flat_map(clk, data: u8[3][2], enable: bool[3][2]) -> u8[6] {
+    unroll_map! (r, c) in grid::product<2, 3>() {
+        cell<r, c>(data[r][c], enable[r][c])
+    }
+}
+pub block nested_map(clk, data: u8[3][2], enable: bool[3][2]) -> u8[3][2] {
+    unroll_map! r in u32:0..u32:2 {
+        unroll_map! c in u32:0..u32:3 {
+            let lane = cell<r, c>(data[r][c], enable[r][c]);
+            lane
+        }
+    }
 }"#;
     let source = r#"
 use cells;
@@ -89,17 +103,25 @@ use cells;
     reg enable: bool[3][2];
     let flat = cells::mapped(data, enable);
     let nested = cells::nested(data, enable);
+    let collected = cells::flat_map(data, enable);
+    let matrix = cells::nested_map(data, enable);
     tick!(rst: true);
     assert_eq(flat, nested);
+    assert_eq(matrix, nested);
+    assert_eq(collected, flat[0] ++ flat[1]);
     data := [[u8:1, u8:2, u8:3], [u8:4, u8:5, u8:6]];
     enable := [[true, false, true], [false, true, false]];
     tick!();
     assert_eq(flat, nested);
+    assert_eq(matrix, nested);
+    assert_eq(collected, flat[0] ++ flat[1]);
     assert_eq(flat, [[u8:1, u8:0, u8:5], [u8:0, u8:16, u8:0]]);
     data := zero!<u8[3][2]>();
     enable := [[false, true, false], [true, false, true]];
     tick!();
     assert_eq(flat, nested);
+    assert_eq(matrix, nested);
+    assert_eq(collected, flat[0] ++ flat[1]);
     assert_eq(flat, [[u8:1, u8:1, u8:5], [u8:10, u8:16, u8:12]]);
 }"#;
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
@@ -328,6 +350,31 @@ fn last_item(index: u8) -> u8 {
         assert_eq(last_item(u8:2), u8:7);
     }
     assert_eq(last_item(u8:1), u8:7);
+}
+fn selected_lane<N: u32>(index: u8) -> u8[2] {
+    unroll_map! lane in u32:0..u32:2 {
+        const if lane == N { lookup(DATA, index) } else { u8:0 }
+    }
+}
+#[test] fn read_other_lane() {
+    assert_eq(selected_lane<1>(u8:2)[0], u8:0);
+}
+fn choose_table<READ: bool>(en: bool, index: u8) -> u8[1] {
+    let values = if en {
+        unroll_map! _ in u32:0..u32:1 {
+            const if READ { let item = lookup(DATA, index); item } else { u8:42 }
+        }
+    } else {
+        unroll_map! i in u32:0..u32:1 { const if i == u32:0 { zero!() } else { u8:9 } }
+    };
+    values
+}
+#[test] fn skipped_lane() {
+    assert_eq(selected_lane<2>(u8:2), [u8:0, u8:0]);
+    assert_eq(choose_table<false>(false, u8:2), [u8:0]);
+    assert_eq(choose_table<false>(true, u8:2), [u8:42]);
+    assert_eq(choose_table<true>(true, u8:1), [u8:29]);
+    if false { assert_eq(choose_table<true>(true, u8:2), [u8:9]); }
 }"#;
     let report = run_tests(
         source,
@@ -337,7 +384,7 @@ fn last_item(index: u8) -> u8 {
         &ImportOptions::default(),
         true,
     )?;
-    assert_eq!(report.tests.len(), 10);
+    assert_eq!(report.tests.len(), 12);
     assert_eq!(
         report.tests[0].failure.as_deref(),
         Some(
@@ -357,6 +404,7 @@ fn last_item(index: u8) -> u8 {
         (5, 24, "iterable_scope"),
         (7, 35, "nested_wildcard"),
         (8, 38, "helper_rest"),
+        (10, 53, "read_other_lane"),
     ] {
         assert_eq!(
             report.tests[index].failure,
@@ -367,6 +415,7 @@ fn last_item(index: u8) -> u8 {
     }
     assert_eq!(report.tests[6].failure, None);
     assert_eq!(report.tests[9].failure, None);
+    assert_eq!(report.tests[11].failure, None);
     Ok(())
 }
 

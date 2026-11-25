@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::generic_blocks::callback_argument_name;
+use super::struct_parametrics::StructWitness;
 use super::*;
 use crate::ast::{
     BindingPattern, ForIterable, FunctionParametricRef, MapExpr, ScopeStatement, StructArgumentRef,
-    StructLiteral, StructParametricRef, UnrollFor,
+    StructLiteral, StructParametricRef, UnrollFor, UnrollMap,
 };
 use crate::infer_literal::BindingWidths;
 use crate::typed::TypedIterable;
+use std::borrow::Cow;
 use std::cell::Cell;
 use xlsynth_pir::IrBits;
 
@@ -25,6 +27,30 @@ pub(super) struct StaticRange {
 enum UnrollElements {
     Range { next: IrBits, step: IrBits },
     Array(TypedExpr),
+}
+
+/// One checked iterable shared by the source-ordered copies of an unrolled
+/// body.
+struct UnrollInput {
+    element_type: Type,
+    widths: Option<BindingWidths>,
+    count: usize,
+    elements: Option<UnrollElements>,
+    operands: Vec<TypedExpr>,
+}
+
+/// The first lane of a nonempty pure map can supply a sibling's element
+/// type. Retain its scoped result and the advanced input for elaboration.
+pub(super) struct PreparedMapLane {
+    input: UnrollInput,
+    result: Rc<Expr>,
+    concrete: bool,
+}
+
+impl PreparedMapLane {
+    pub(super) fn count(&self) -> usize {
+        self.input.count
+    }
 }
 
 impl UnrollElements {
@@ -145,6 +171,11 @@ impl BodyChecker<'_, '_> {
             Expr::UnrollFor(fold) => {
                 self.unroll(fold, CarryContext::Expected(expected), structural)
             }
+            // A map body can directly return another map, bypassing
+            // expr_in_group.
+            Expr::UnrollMap(map) => stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
+                self.unroll_map(map, expected, structural)
+            }),
             _ if expected.is_none() => self.inferred_expr(expr),
             _ => self.expr(expr, expected),
         }
@@ -450,6 +481,7 @@ impl BodyChecker<'_, '_> {
         &mut self,
         iterable: &ForIterable,
         hint: Option<&Type>,
+        keyword: &str,
     ) -> Result<counted_for::Iteration, String> {
         match iterable {
             ForIterable::Range {
@@ -457,7 +489,7 @@ impl BodyChecker<'_, '_> {
                 limit,
                 inclusive,
             } => Ok(self
-                .static_range(start, limit, hint, *inclusive, "unroll_for!")?
+                .static_range(start, limit, hint, *inclusive, keyword)?
                 .into()),
             ForIterable::Array(Expr::Name(name))
                 if let Some(iteration) = self.prepared_loop_iterables.remove(name) =>
@@ -466,7 +498,7 @@ impl BodyChecker<'_, '_> {
             }
             ForIterable::Array(value) => {
                 let prior_callees = self.callee_specialization_count();
-                let iteration = self.array_iteration(value, hint, "unroll_for!")?;
+                let iteration = self.array_iteration(value, hint, keyword)?;
                 if self.callee_specialization_count() > prior_callees {
                     // A folded array, a wildcard, or a zero-trip loop can
                     // consume a specialized factory entirely at compile time.
@@ -477,23 +509,17 @@ impl BodyChecker<'_, '_> {
         }
     }
 
-    /// Elaborate one body per element in source order, including structural
-    /// instances in a block. The ordinal identifies each copy independently
-    /// of the value bound to its element pattern.
-    pub(super) fn unroll(
+    /// Check the expansion cost before sharing an array or enumerating range
+    /// indices.
+    fn prepare_unroll(
         &mut self,
-        fold: &UnrollFor,
-        context: CarryContext,
-        structural: bool,
-    ) -> Result<TypedExpr, String> {
-        self.validate_loop_binders(&fold.element, &fold.accumulator)?;
-        let annotation = fold
-            .annotation
-            .as_ref()
-            .map(|(i, a)| Ok::<_, String>((self.source_type(i)?, self.source_type(a)?)))
-            .transpose()?;
-        let element_hint = annotation.as_ref().map(|(element, _)| element);
-        let iteration = self.unroll_iteration(&fold.iterable, element_hint)?;
+        iterable: &ForIterable,
+        element: &BindingPattern,
+        hint: Option<&Type>,
+        statements: usize,
+        keyword: &str,
+    ) -> Result<UnrollInput, String> {
+        let iteration = self.unroll_iteration(iterable, hint, keyword)?;
         let count = iteration.count;
         let element_work = match &iteration.iterable {
             TypedIterable::Range { start } => start.get_bit_count().div_ceil(64).max(1),
@@ -508,15 +534,15 @@ impl BodyChecker<'_, '_> {
             }
         };
         self.charge_expansion(
-            "unroll_for!",
-            count.saturating_mul(fold.body.len().saturating_add(element_work)),
+            keyword,
+            count.saturating_mul(statements.saturating_add(element_work)),
         )?;
         let mut operands = iteration.operands;
-        let discard_element = matches!(&fold.element, BindingPattern::Name(name) if name == "_");
+        let discard_element = matches!(element, BindingPattern::Name(name) if name == "_");
         let observe_folded_array = self.decls.evaluate_pure_test_discards
             && self.source_kind == BodyKind::Function
             && !self.in_erased_operand;
-        let mut elements = if count == 0 || discard_element {
+        let elements = if count == 0 || discard_element {
             if observe_folded_array && let TypedIterable::Array(array) = iteration.iterable {
                 self.observe_pure_test_discard(array);
             }
@@ -538,6 +564,61 @@ impl BodyChecker<'_, '_> {
                 }
             })
         };
+        Ok(UnrollInput {
+            element_type: iteration.ty,
+            widths: iteration.widths,
+            count,
+            elements,
+            operands,
+        })
+    }
+
+    /// Bind the projected input under its source pattern and restore the
+    /// caller's scope after the iteration, including when checking its body
+    /// fails.
+    fn with_unroll_element<T>(
+        &mut self,
+        input: &mut UnrollInput,
+        element: &BindingPattern,
+        ordinal: usize,
+        check: impl FnOnce(&mut Self, &mut Vec<Shadowed>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.iteration_path.push(ordinal);
+        let mut saved = Vec::new();
+        let result = (|| {
+            if let Some(elements) = &mut input.elements {
+                let item = elements.next(ordinal, &input.element_type)?;
+                self.bind_pattern(element, item, input.widths.clone(), &mut saved)?;
+            }
+            check(self, &mut saved)
+        })();
+        self.leave_scope(saved);
+        self.iteration_path.pop();
+        result
+    }
+
+    /// Elaborate one body per element in source order, including structural
+    /// instances in a block. The ordinal identifies each copy independently
+    /// of the value bound to its element pattern.
+    pub(super) fn unroll(
+        &mut self,
+        fold: &UnrollFor,
+        context: CarryContext,
+        structural: bool,
+    ) -> Result<TypedExpr, String> {
+        self.validate_loop_binders(&fold.element, &fold.accumulator)?;
+        let annotation = fold
+            .annotation
+            .as_ref()
+            .map(|(i, a)| Ok::<_, String>((self.source_type(i)?, self.source_type(a)?)))
+            .transpose()?;
+        let mut input = self.prepare_unroll(
+            &fold.iterable,
+            &fold.element,
+            annotation.as_ref().map(|(element, _)| element),
+            fold.body.len(),
+            "unroll_for!",
+        )?;
         let seed = self.loop_seed(
             &fold.seed,
             annotation.as_ref().map(|(_, a)| a),
@@ -553,20 +634,20 @@ impl BodyChecker<'_, '_> {
             },
         )?;
         let mut carry = self.share_loop_value(seed, false);
-        if count == 0 {
-            scope::check_empty_binder_type(&fold.element, &iteration.ty)?;
+        if input.count == 0 {
+            scope::check_empty_binder_type(&fold.element, &input.element_type)?;
             scope::check_empty_binder_type(&fold.accumulator, &carry.ty)?;
-            self.check_empty_loop_names(fold)?;
-            return Ok(scope::sequence(operands, carry));
+            self.check_empty_loop_names(
+                "unroll_for!",
+                &[&fold.element, &fold.accumulator],
+                &fold.body,
+                &fold.result,
+                true,
+            )?;
+            return Ok(scope::sequence(input.operands, carry));
         }
         let mut previous_carries = Vec::new();
-        for ordinal in 0..count {
-            self.iteration_path.push(ordinal);
-            let mut saved = Vec::new();
-            if let Some(elements) = &mut elements {
-                let item = elements.next(ordinal, &iteration.ty)?;
-                self.bind_pattern(&fold.element, item, iteration.widths.clone(), &mut saved)?;
-            }
+        for ordinal in 0..input.count {
             let acc_type = carry.ty.clone();
             // A constexpr helper executes the seed and each iteration even
             // when the next iteration ignores its accumulator. Nonliteral
@@ -574,54 +655,21 @@ impl BodyChecker<'_, '_> {
             if self.preserve_assert_inputs && !matches!(carry.kind, K::Literal(_)) {
                 previous_carries.push(carry.clone());
             }
-            self.bind_pattern(&fold.accumulator, carry, None, &mut saved)?;
-            for stmt in &fold.body {
-                if let Stmt::LetPattern(binding) = stmt {
-                    let init = self
-                        .pattern_initializer(binding, structural)
+            carry =
+                self.with_unroll_element(&mut input, &fold.element, ordinal, |checker, saved| {
+                    checker.bind_pattern(&fold.accumulator, carry, None, saved)?;
+                    checker.unroll_bindings(
+                        &fold.body,
+                        structural,
+                        ordinal,
+                        "unroll_for!",
+                        saved,
+                    )?;
+                    let value = checker
+                        .scoped_result(&fold.result, Some(&acc_type), structural)
                         .map_err(|e| format!("unroll_for! iteration {ordinal}: {e}"))?;
-                    self.bind_pattern(&binding.pattern, init.value, init.widths, &mut saved)
-                        .map_err(|e| format!("unroll_for! iteration {ordinal}: {e}"))?;
-                    continue;
-                }
-                let Stmt::Let {
-                    name,
-                    ty,
-                    value: expr,
-                } = stmt
-                else {
-                    return Err(
-                        "unroll_for! bodies permit only let bindings before the result".into(),
-                    );
-                };
-                let ty = ty.as_ref().map(|t| self.source_type(t)).transpose()?;
-                let binding_error =
-                    |e| format!("unroll_for! iteration {ordinal}, let '{name}': {e}");
-                let (selected, structural) = self
-                    .select_let_initializer(expr, structural)
-                    .map_err(binding_error)?;
-                // Capture the selected result's widths before its lexical
-                // bindings leave scope, including widths of tuple members.
-                let (value, widths) = self
-                    .with_prepared_value(selected, |checker, expr| {
-                        let value = checker.let_value(Some(name), expr, ty.as_ref(), structural)?;
-                        let widths = if ty.is_none() {
-                            binding_widths(expr, &value.ty, &checker.inferred_bindings)?
-                        } else {
-                            None
-                        };
-                        Ok((value, widths))
-                    })
-                    .map_err(binding_error)?;
-                let value = self.share_loop_value(value, false);
-                self.bind_scoped_value(name, value, widths, &mut saved);
-            }
-            let value = self
-                .scoped_result(&fold.result, Some(&acc_type), structural)
-                .map_err(|e| format!("unroll_for! iteration {ordinal}: {e}"))?;
-            carry = self.share_loop_value(value, false);
-            self.leave_scope(saved);
-            self.iteration_path.pop();
+                    Ok(checker.share_loop_value(value, false))
+                })?;
         }
         let result = if previous_carries.is_empty() {
             carry
@@ -635,7 +683,267 @@ impl BodyChecker<'_, '_> {
                 },
             }
         };
-        Ok(scope::sequence(operands, result))
+        Ok(scope::sequence(input.operands, result))
+    }
+
+    /// Collect the body result of each iteration in the same order as the
+    /// input.
+    pub(super) fn unroll_map(
+        &mut self,
+        map: &UnrollMap,
+        expected: Option<&Type>,
+        structural: bool,
+    ) -> Result<TypedExpr, String> {
+        self.validate_source_pattern(&map.element)?;
+        let prepared = match &map.iterable {
+            ForIterable::Array(Expr::Name(name)) => self.prepared_map_lanes.remove(name),
+            _ => None,
+        };
+        let (mut input, mut first_result) = match prepared {
+            Some(lane) => (lane.input, Some(lane.result)),
+            None => (
+                self.prepare_unroll(
+                    &map.iterable,
+                    &map.element,
+                    None,
+                    map.body.len(),
+                    "unroll_map!",
+                )?,
+                None,
+            ),
+        };
+        let expected_element = match expected {
+            Some(Type::Array { element, size }) => {
+                self.check_array_length(input.count, *size, false, 0)?;
+                Some(element.as_ref())
+            }
+            Some(other) => return Err(format!("expected {other}, got an array")),
+            None => None,
+        };
+        if input.count == 0 {
+            scope::check_empty_binder_type(&map.element, &input.element_type)?;
+            self.check_empty_loop_names(
+                "unroll_map!",
+                &[&map.element],
+                &map.body,
+                &map.result,
+                structural,
+            )?;
+            if expected.is_none() {
+                return Err(
+                    "empty unroll_map! needs an array type to determine its result element type"
+                        .into(),
+                );
+            }
+            let (ty, kind) = self.array_literal(&[], expected, false)?;
+            return Ok(scope::sequence(input.operands, TypedExpr { ty, kind }));
+        }
+        let mut values: Vec<TypedExpr> = Vec::new();
+        for ordinal in 0..input.count {
+            let hint = expected_element.or_else(|| values.first().map(|first| &first.ty));
+            let value = if let Some(result) = first_result.take() {
+                self.iteration_path.push(ordinal);
+                let value = self.let_value(None, &result, hint, false);
+                self.iteration_path.pop();
+                value.map_err(|e| format!("unroll_map! iteration {ordinal}: {e}"))?
+            } else {
+                self.with_unroll_element(&mut input, &map.element, ordinal, |checker, saved| {
+                    checker.unroll_bindings(
+                        &map.body,
+                        structural,
+                        ordinal,
+                        "unroll_map!",
+                        saved,
+                    )?;
+                    let (result, structural) =
+                        checker.select_let_initializer(&map.result, structural)?;
+                    checker
+                        .let_value(None, result, hint, structural)
+                        .map_err(|e| format!("unroll_map! iteration {ordinal}: {e}"))
+                })?
+            };
+            // Check the full output layout as soon as its element type is
+            // known, before keeping any more copies of a potentially large body
+            // result.
+            if ordinal == 0 {
+                let ty = Type::array(value.ty.clone(), input.count);
+                self.structs.validate_type(&ty)?;
+                values.reserve(input.count);
+            }
+            values.push(value);
+        }
+        let ty = Type::array(values[0].ty.clone(), input.count);
+        Ok(scope::sequence(
+            input.operands,
+            TypedExpr {
+                ty,
+                kind: K::Array(values),
+            },
+        ))
+    }
+
+    /// Inspect the actual first result of a pure map. Later iterations use its
+    /// element type. Empty maps always need a type from their surrounding use.
+    pub(super) fn map_element_type_witness(&mut self, map: &UnrollMap) -> Result<bool, String> {
+        let ForIterable::Array(Expr::Name(name)) = &map.iterable else {
+            return Ok(false);
+        };
+        if let Some(lane) = self.prepared_map_lanes.get(name) {
+            return Ok(lane.concrete);
+        }
+        if self
+            .prepared_loop_iterables
+            .get(name)
+            .is_none_or(|iteration| iteration.count == 0)
+        {
+            return Ok(false);
+        }
+        self.validate_source_pattern(&map.element)?;
+        let mut input = self.prepare_unroll(
+            &map.iterable,
+            &map.element,
+            None,
+            map.body.len(),
+            "unroll_map!",
+        )?;
+        // Preparing an inner map here recurses along result edges.
+        let (result, concrete) = stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
+            self.with_unroll_element(&mut input, &map.element, 0, |checker, saved| {
+                checker.unroll_bindings(&map.body, false, 0, "unroll_map!", saved)?;
+                let mut result = checker.capture_iteration_result(saved, &map.result);
+                if let Cow::Owned(prepared) = checker.prepare_value(&result)? {
+                    result = prepared;
+                }
+                let concrete = checker.map_result_witness(&mut result)?;
+                Ok((result, concrete))
+            })
+        })?;
+        self.prepared_map_lanes.insert(
+            name.clone(),
+            PreparedMapLane {
+                input,
+                result: Rc::new(result),
+                concrete,
+            },
+        );
+        Ok(concrete)
+    }
+
+    /// Retain the first result while a caller follows its nested array lengths.
+    /// The enclosing map still consumes the same prepared lane at elaboration.
+    pub(super) fn map_first_result(&mut self, map: &UnrollMap) -> Result<Option<Rc<Expr>>, String> {
+        self.map_element_type_witness(map)?;
+        let ForIterable::Array(Expr::Name(name)) = &map.iterable else {
+            return Ok(None);
+        };
+        Ok(self
+            .prepared_map_lanes
+            .get(name)
+            .map(|lane| Rc::clone(&lane.result)))
+    }
+
+    /// Retain individually checked struct constructors so a later deferred
+    /// field can take its type from another array without rechecking earlier
+    /// fields. Ordinary result leaves use the shared scalar and map rules.
+    fn map_result_witness(&mut self, result: &mut Expr) -> Result<bool, String> {
+        match result {
+            Expr::Tuple(fields) => {
+                for field in fields {
+                    if !self.map_result_witness(field)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Expr::Array(items) => {
+                for item in items {
+                    if self.map_result_witness(item)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Expr::If {
+                then_value,
+                else_value,
+                ..
+            } => Ok(self.map_result_witness(then_value)? || self.map_result_witness(else_value)?),
+            Expr::Match { arms, .. } => {
+                for arm in arms {
+                    if self.map_result_witness(&mut arm.value)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Expr::Scope { result, .. } | Expr::SelectedOperand(result) => {
+                self.map_result_witness(result)
+            }
+            _ => match self.type_struct_witness(result)? {
+                StructWitness::Other => self.has_concrete_element_type(result),
+                StructWitness::Deferred => Ok(false),
+                StructWitness::Checked(value) => {
+                    let value = self.share_scoped_value(value);
+                    let alias = self.capture_value_alias(None, value, None);
+                    *result = Expr::Name(alias);
+                    Ok(true)
+                }
+            },
+        }
+    }
+
+    /// Elaborate lexical lets in source order while the input and optional
+    /// carry remain in scope. Structural lets can name a distinct child per
+    /// iteration.
+    fn unroll_bindings(
+        &mut self,
+        statements: &[Stmt],
+        structural: bool,
+        ordinal: usize,
+        keyword: &str,
+        saved: &mut Vec<Shadowed>,
+    ) -> Result<(), String> {
+        for stmt in statements {
+            if let Stmt::LetPattern(binding) = stmt {
+                let init = self
+                    .pattern_initializer(binding, structural)
+                    .map_err(|e| format!("{keyword} iteration {ordinal}: {e}"))?;
+                self.bind_pattern(&binding.pattern, init.value, init.widths, saved)
+                    .map_err(|e| format!("{keyword} iteration {ordinal}: {e}"))?;
+                continue;
+            }
+            let Stmt::Let {
+                name,
+                ty,
+                value: expr,
+            } = stmt
+            else {
+                return Err(format!(
+                    "{keyword} bodies permit only let bindings before the result"
+                ));
+            };
+            let ty = ty.as_ref().map(|t| self.source_type(t)).transpose()?;
+            let binding_error = |e| format!("{keyword} iteration {ordinal}, let '{name}': {e}");
+            let (selected, structural) = self
+                .select_let_initializer(expr, structural)
+                .map_err(binding_error)?;
+            // Capture the selected result's widths before its lexical
+            // bindings leave scope, including widths of tuple members.
+            let (value, widths) = self
+                .with_prepared_value(selected, |checker, expr| {
+                    let value = checker.let_value(Some(name), expr, ty.as_ref(), structural)?;
+                    let widths = if ty.is_none() {
+                        binding_widths(expr, &value.ty, &checker.inferred_bindings)?
+                    } else {
+                        None
+                    };
+                    Ok((value, widths))
+                })
+                .map_err(binding_error)?;
+            let value = self.share_loop_value(value, false);
+            self.bind_scoped_value(name, value, widths, saved);
+        }
+        Ok(())
     }
 }
 
@@ -659,6 +967,8 @@ struct LexicalScope<'a> {
     declarations: BTreeMap<String, LexicalKind>,
     parent: Option<&'a LexicalScope<'a>>,
     in_lambda: bool,
+    /// A zero-trip map inside a value expression still requires a pure body.
+    allow_children: bool,
     /// A const conditional resolves the qualifying type in either arm.
     /// Member lookup on that type waits until the arm is selected.
     in_const_if_arm: bool,
@@ -674,6 +984,7 @@ impl<'a> LexicalScope<'a> {
             declarations: BTreeMap::new(),
             parent: None,
             in_lambda: false,
+            allow_children: true,
             in_const_if_arm: false,
             visited,
         }
@@ -685,6 +996,7 @@ impl<'a> LexicalScope<'a> {
             declarations: BTreeMap::new(),
             parent: Some(self),
             in_lambda: self.in_lambda,
+            allow_children: self.allow_children,
             in_const_if_arm: self.in_const_if_arm,
             visited: self.visited,
         }
@@ -979,16 +1291,25 @@ impl BodyChecker<'_, '_> {
 
     /// DSLX resolves lexical names before unrolling, even when it never
     /// typechecks an iteration. Keep that distinction for an empty range.
-    fn check_empty_loop_names(&mut self, fold: &UnrollFor) -> Result<(), String> {
+    fn check_empty_loop_names(
+        &mut self,
+        keyword: &str,
+        patterns: &[&BindingPattern],
+        body: &[Stmt],
+        result: &Expr,
+        structural: bool,
+    ) -> Result<(), String> {
         if self.map_scope.is_some() {
             // The enclosing callback already resolved names in this subtree.
             return Ok(());
         }
         let visited = Cell::new(0);
         let locals = LexicalScope::root(&self.names, &visited);
-        self.check_body_names(fold, &mut locals.nested())?;
+        let mut scope = locals.nested();
+        scope.allow_children = structural;
+        self.check_body_names(keyword, patterns, body, result, &mut scope)?;
         if self.replaying_body() {
-            self.charge_expansion("unroll_for!", visited.get())?;
+            self.charge_expansion(keyword, visited.get())?;
         }
         Ok(())
     }
@@ -1018,13 +1339,16 @@ impl BodyChecker<'_, '_> {
 
     fn check_body_names(
         &self,
-        fold: &UnrollFor,
+        keyword: &str,
+        patterns: &[&BindingPattern],
+        body: &[Stmt],
+        result: &Expr,
         locals: &mut LexicalScope<'_>,
     ) -> Result<(), String> {
-        self.validate_loop_binders(&fold.element, &fold.accumulator)?;
-        locals.bind_pattern(&fold.element);
-        locals.bind_pattern(&fold.accumulator);
-        for stmt in &fold.body {
+        for pattern in patterns {
+            locals.bind_pattern(pattern);
+        }
+        for stmt in body {
             if let Stmt::LetPattern(binding) = stmt {
                 self.validate_source_pattern(&binding.pattern)?;
                 if let Some(ty) = &binding.ty {
@@ -1035,7 +1359,9 @@ impl BodyChecker<'_, '_> {
                 continue;
             }
             let Stmt::Let { name, value, ty } = stmt else {
-                return Err("unroll_for! bodies permit only let bindings before the result".into());
+                return Err(format!(
+                    "{keyword} bodies permit only let bindings before the result"
+                ));
             };
             if let Some(ty) = ty {
                 self.check_type_names(ty, locals)?;
@@ -1043,7 +1369,7 @@ impl BodyChecker<'_, '_> {
             self.check_expr_names(value, locals)?;
             locals.bind_pattern_name(name);
         }
-        self.check_expr_names(&fold.result, locals)
+        self.check_expr_names(result, locals)
     }
 
     /// An enclosing block port shadows a module name inside a symbolic type
@@ -1345,6 +1671,9 @@ impl BodyChecker<'_, '_> {
         hidden: bool,
         locals: &LexicalScope<'_>,
     ) -> Result<(), String> {
+        if !locals.allow_children {
+            return Err(self.block_in_value_error(name));
+        }
         if locals.in_const_if_arm && self.kind == BodyKind::Block && !locals.in_lambda && !hidden {
             self.reject_type_parameter_value(name)?;
         } else {
@@ -1660,7 +1989,25 @@ impl BodyChecker<'_, '_> {
                     self.check_type_names(index, locals)?;
                     self.check_type_names(acc, locals)?;
                 }
-                self.check_body_names(fold, &mut locals.nested())?;
+                self.validate_loop_binders(&fold.element, &fold.accumulator)?;
+                self.check_body_names(
+                    "unroll_for!",
+                    &[&fold.element, &fold.accumulator],
+                    &fold.body,
+                    &fold.result,
+                    &mut locals.nested(),
+                )?;
+            }
+            Expr::UnrollMap(map) => {
+                self.check_iterable_names(&map.iterable, locals)?;
+                self.validate_source_pattern(&map.element)?;
+                self.check_body_names(
+                    "unroll_map!",
+                    &[&map.element],
+                    &map.body,
+                    &map.result,
+                    &mut locals.nested(),
+                )?;
             }
             Expr::Map(map) => {
                 self.check_map_target(map, locals)?;

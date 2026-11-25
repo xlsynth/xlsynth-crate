@@ -4,7 +4,7 @@ use super::unroll::Shadowed;
 use super::{BodyChecker, CheckedStmt, K, TemporaryConstantBindings, Type, TypedExpr};
 use crate::ast::{
     BinaryOp, BindingPattern, ConstAssert, ConstDef, Expr, ForIterable, LetBinding, ScopeStatement,
-    Stmt, StructArgument, WidthSliceType,
+    Stmt, StructArgument, UnrollMap, WidthSliceType,
 };
 use crate::infer_literal::{BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type};
 use crate::typed::TEST_DISCARD_PREFIX;
@@ -617,6 +617,7 @@ impl BodyChecker<'_, '_> {
             self.names.remove(&name);
             self.inferred_bindings.remove(&name);
             self.prepared_loop_iterables.remove(&name);
+            self.prepared_map_lanes.remove(&name);
             self.local_type_aliases.remove(&name);
             self.constant_pattern_names.remove(&name);
         }
@@ -644,12 +645,70 @@ impl BodyChecker<'_, '_> {
                     && crate::infer_literal::has_const_if_result(source)
                     && !self.contains_type_struct_constructor(&value) =>
             {
-                Ok(Cow::Owned(Expr::SelectedOperand(Box::new(value))))
+                self.selected_aggregate_operand(value).map(Cow::Owned)
             }
             Cow::Owned(value) => {
                 crate::infer_literal::prepared_inference_operand(source, value).map(Cow::Owned)
             }
             value => Ok(value),
+        }
+    }
+
+    /// Keep independently selected tuple fields as witnesses even when their
+    /// siblings need a map element type from a later argument.
+    fn selected_aggregate_operand(&mut self, value: Expr) -> Result<Expr, String> {
+        if !self.selected_result_needs_map_context(&value)? {
+            return Ok(Expr::SelectedOperand(Box::new(value)));
+        }
+        match value {
+            Expr::Tuple(fields) => Ok(Expr::Tuple(
+                fields
+                    .into_iter()
+                    .map(|field| self.selected_aggregate_operand(field))
+                    .collect::<Result<_, _>>()?,
+            )),
+            value => Ok(value),
+        }
+    }
+
+    /// A selected aggregate can witness implicit literal widths, but a map
+    /// with no element witness still needs the completed argument type.
+    fn selected_result_needs_map_context(&mut self, expr: &Expr) -> Result<bool, String> {
+        if let Some(seed) = expr.unannotated_loop_seed() {
+            return self.selected_result_needs_map_context(seed);
+        }
+        match expr {
+            Expr::UnrollMap(map) => Ok(!self.map_element_type_witness(map)?),
+            Expr::Scope { result, .. } => self.selected_result_needs_map_context(result),
+            Expr::Tuple(items)
+            | Expr::Array(items)
+            | Expr::ArrayLiteral {
+                annotation: None,
+                members: items,
+                ..
+            } => {
+                for item in items {
+                    if self.selected_result_needs_map_context(item)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Expr::If {
+                then_value,
+                else_value,
+                ..
+            } => Ok(self.selected_result_needs_map_context(then_value)?
+                || self.selected_result_needs_map_context(else_value)?),
+            Expr::Match { arms, .. } => {
+                for arm in arms {
+                    if self.selected_result_needs_map_context(&arm.value)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
         }
     }
 
@@ -691,6 +750,17 @@ impl BodyChecker<'_, '_> {
                 self.prepare_scopes(arm, capture_anchors, before_scope)?
                     .into_owned(),
             ));
+        }
+        if let Expr::UnrollMap(map) = expr {
+            if self.prepared_map_count(expr).is_some() {
+                return Ok(Cow::Borrowed(expr));
+            }
+            before_scope(self)?;
+            // Nested map inputs are prepared before ordinary expression
+            // dispatch.
+            return stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
+                self.prepare_map_input(map).map(Cow::Owned)
+            });
         }
         // Constructors and branches share their members' contexts. A
         // self-determined leaf such as a function call can supply its actual
@@ -755,7 +825,7 @@ impl BodyChecker<'_, '_> {
             Expr::UnrollFor(fold) if fold.annotation.is_none() => {
                 let operands = self.prepare_loop_seed(&fold.seed, before_scope, |checker| {
                     checker.validate_loop_binders(&fold.element, &fold.accumulator)?;
-                    checker.unroll_iteration(&fold.iterable, None)
+                    checker.unroll_iteration(&fold.iterable, None, "unroll_for!")
                 })?;
                 if let Some((iterable, seed)) = operands {
                     let Expr::UnrollFor(fold) = prepared.to_mut() else {
@@ -911,6 +981,21 @@ impl BodyChecker<'_, '_> {
         Ok(prepared)
     }
 
+    /// Retain the checked input so its length can guide type inference before
+    /// elaborating the body. An empty map needs its element type from context.
+    fn prepare_map_input(&mut self, map: &UnrollMap) -> Result<Expr, String> {
+        let iteration = self.unroll_iteration(&map.iterable, None, "unroll_map!")?;
+        let alias = self.new_scope_alias(None);
+        self.prepared_loop_iterables
+            .insert(alias.clone(), iteration);
+        Ok(Expr::UnrollMap(Box::new(UnrollMap {
+            iterable: ForIterable::Array(Expr::Name(alias)),
+            element: map.element.clone(),
+            body: map.body.clone(),
+            result: map.result.clone(),
+        })))
+    }
+
     /// Check the loop iterable before entering any lexical scope needed to
     /// infer the seed. Reuse the checked iterable when elaborating the loop.
     fn prepare_loop_seed(
@@ -949,37 +1034,7 @@ impl BodyChecker<'_, '_> {
                 continue;
             };
             let scope = self.enter_scope(statements)?;
-            let mut aliases = BTreeMap::new();
-            for binding in &scope.saved {
-                let name = &binding.name;
-                if aliases.contains_key(name) {
-                    continue;
-                }
-                let alias = if let Some(ty) = self.local_type_aliases.remove(name) {
-                    let alias = self.new_scope_alias(Some(name));
-                    self.names.insert(alias.clone());
-                    self.local_type_aliases.insert(alias.clone(), ty);
-                    alias
-                } else {
-                    // Move the innermost binding before restoring its shadowed
-                    // names.
-                    let value = if self.in_loop_scope() {
-                        self.loop_values.remove(name)
-                    } else {
-                        self.function_values.remove(name)
-                    }
-                    .expect("bound scoped result");
-                    let widths = self.inferred_bindings.remove(name);
-                    let alias = self.capture_value_alias(Some(name), value, widths);
-                    if self.constant_pattern_names.contains(name) {
-                        self.constant_pattern_names.insert(alias.clone());
-                    }
-                    alias
-                };
-                aliases.insert(name.clone(), alias);
-            }
-            let mut result = result.as_ref().clone();
-            capture_names(&mut result, &mut aliases);
+            let mut result = self.capture_iteration_result(&scope.saved, result);
             self.leave_scope(scope.saved);
             if !scope.operands.is_empty() {
                 let statements = scope
@@ -1000,6 +1055,41 @@ impl BodyChecker<'_, '_> {
         Ok(prepared)
     }
 
+    /// Move the innermost bindings to aliases that the result can use after
+    /// the caller restores the enclosing lexical scope.
+    pub(super) fn capture_iteration_result(&mut self, saved: &[Shadowed], result: &Expr) -> Expr {
+        let mut aliases = BTreeMap::new();
+        for binding in saved {
+            let name = &binding.name;
+            if aliases.contains_key(name) {
+                continue;
+            }
+            let alias = if let Some(ty) = self.local_type_aliases.remove(name) {
+                let alias = self.new_scope_alias(Some(name));
+                self.names.insert(alias.clone());
+                self.local_type_aliases.insert(alias.clone(), ty);
+                alias
+            } else {
+                let value = if self.in_loop_scope() {
+                    self.loop_values.remove(name)
+                } else {
+                    self.function_values.remove(name)
+                }
+                .expect("bound scoped result");
+                let widths = self.inferred_bindings.remove(name);
+                let alias = self.capture_value_alias(Some(name), value, widths);
+                if self.constant_pattern_names.contains(name) {
+                    self.constant_pattern_names.insert(alias.clone());
+                }
+                alias
+            };
+            aliases.insert(name.clone(), alias);
+        }
+        let mut result = result.clone();
+        capture_names(&mut result, &mut aliases);
+        result
+    }
+
     fn new_scope_alias(&mut self, source_name: Option<&str>) -> String {
         let alias = format!("$scope_{}", self.scope_alias_names.len());
         self.scope_alias_names.push(source_name.map(str::to_owned));
@@ -1008,7 +1098,7 @@ impl BodyChecker<'_, '_> {
 
     /// Preserve a checked operand until the surrounding group has used its
     /// type and value. The enclosing alias scope releases all three entries.
-    fn capture_value_alias(
+    pub(super) fn capture_value_alias(
         &mut self,
         source_name: Option<&str>,
         value: TypedExpr,
@@ -1541,6 +1631,29 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             .pattern
             .visit_names(&mut |name| hidden.extend(aliases.remove_entry(name)));
     }
+    /// Capture references in iteration order, restoring enclosing aliases
+    /// afterward.
+    fn capture_unrolled_body(
+        body: &mut [Stmt],
+        result: &mut Expr,
+        aliases: &mut BTreeMap<String, String>,
+        mut hidden: Vec<(String, String)>,
+    ) {
+        for stmt in body {
+            // The checker accepts only lets in an unrolled body.
+            if let Stmt::Let { name, ty, value } = stmt {
+                if let Some(ty) = ty {
+                    rename_type(ty, aliases);
+                }
+                capture_names(value, aliases);
+                hidden.extend(aliases.remove_entry(name));
+            } else if let Stmt::LetPattern(binding) = stmt {
+                capture_binding(binding, aliases, &mut hidden);
+            }
+        }
+        capture_names(result, aliases);
+        aliases.extend(hidden);
+    }
     match expr {
         Expr::Name(name) => rename(name, aliases),
         Expr::Bool(_) | Expr::ByteString(_) | Expr::Literal { ty: None, .. } => {
@@ -1718,27 +1831,21 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         }
         Expr::SelectedOperand(value) => capture_names(value, aliases),
         Expr::UnrollFor(fold) => {
-            let mut hidden = capture_loop_inputs(
+            let hidden = capture_loop_inputs(
                 &mut fold.annotation,
                 &mut fold.iterable,
                 &mut fold.seed,
                 [&fold.element, &fold.accumulator],
                 aliases,
             );
-            for stmt in &mut fold.body {
-                // The checker accepts only lets in a fold body.
-                if let Stmt::Let { name, ty, value } = stmt {
-                    if let Some(ty) = ty {
-                        rename_type(ty, aliases);
-                    }
-                    capture_names(value, aliases);
-                    hidden.extend(aliases.remove_entry(name));
-                } else if let Stmt::LetPattern(binding) = stmt {
-                    capture_binding(binding, aliases, &mut hidden);
-                }
-            }
-            capture_names(&mut fold.result, aliases);
-            aliases.extend(hidden);
+            capture_unrolled_body(&mut fold.body, &mut fold.result, aliases, hidden);
+        }
+        Expr::UnrollMap(map) => {
+            capture_iterable(&mut map.iterable, aliases);
+            let mut hidden = Vec::new();
+            map.element
+                .visit_names(&mut |name| hidden.extend(aliases.remove_entry(name)));
+            capture_unrolled_body(&mut map.body, &mut map.result, aliases, hidden);
         }
         Expr::For(fold) => {
             let hidden = capture_loop_inputs(

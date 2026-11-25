@@ -12,16 +12,16 @@ use xlsynth_pir::{IrBits, IrValue};
 
 use crate::ImportOptions;
 use crate::ast::{
-    BinaryOp, Block, BlockStages, CallbackParam, Expr, ExternBlock, ExternFn, Function,
-    FunctionParametricRef, InvariantDecl, InvariantLemma, LetBinding, MatchArm, MatchPattern,
-    Module, Param, SourcePosition, SourceSpan, Stmt, StructArgument, StructDef, StructLiteralArgs,
-    StructSplat, Type, UnaryOp, WidthSliceType,
+    BinaryOp, Block, BlockStages, CallbackParam, Expr, ExternBlock, ExternFn, ForIterable,
+    Function, FunctionParametricRef, InvariantDecl, InvariantLemma, LetBinding, MatchArm,
+    MatchPattern, Module, Param, SourcePosition, SourceSpan, Stmt, StructArgument, StructDef,
+    StructLiteralArgs, StructSplat, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
     CommonTypeHint, ContextOperands, InferredBindings, WidthLookup, binding_widths,
     check_argument_widths, check_match_operand_width, check_result_width, common_type_hint,
-    context_operands, has_common_bit_type, has_concrete_element_type, minimum_operand_type,
+    context_operands, has_common_bit_type, has_concrete_leaf_type, minimum_operand_type,
     minimum_type, projected_type_compatible, unify_inferred_members,
 };
 use crate::parser::{character_or_bool_digits, explicit_width_hint};
@@ -208,6 +208,7 @@ fn has_aggregate_literal(expr: &Expr) -> bool {
     match expr {
         Expr::Scope { result, .. } => has_aggregate_literal(result),
         Expr::Array(_)
+        | Expr::UnrollMap(_)
         | Expr::Tuple(_)
         | Expr::ArrayLiteral {
             annotation: None, ..
@@ -220,6 +221,14 @@ fn has_aggregate_literal(expr: &Expr) -> bool {
         Expr::Match { arms, .. } => arms.iter().any(|arm| has_aggregate_literal(&arm.value)),
         _ => false,
     }
+}
+
+/// Literal width bindings visible along an expression's result edges.
+#[derive(Clone, Copy)]
+enum WitnessWidths {
+    Enclosing,
+    WithoutNames,
+    None,
 }
 
 /// A match subject and its patterns, checked independently of the result
@@ -2866,6 +2875,8 @@ struct BodyChecker<'a, 'm> {
     scope_alias_names: Vec<Option<String>>,
     /// Iterables checked before a scoped seed is prepared for result inference.
     prepared_loop_iterables: BTreeMap<String, counted_for::Iteration>,
+    /// First lanes prepared for type inference and consumed by map elaboration.
+    prepared_map_lanes: BTreeMap<String, unroll::PreparedMapLane>,
     /// Counted bodies bind runtime loop values even outside a structural
     /// unroll.
     in_counted_body: bool,
@@ -3266,6 +3277,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             function_values: BTreeMap::new(),
             scope_alias_names: Vec::new(),
             prepared_loop_iterables: BTreeMap::new(),
+            prepared_map_lanes: BTreeMap::new(),
             in_counted_body: false,
             map_scope: None,
             next_map: 1,
@@ -4047,6 +4059,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Scope { .. } => false,
             // Child-producing loops must themselves occupy a structural site.
             Expr::UnrollFor(_) => matches!(initializer, Expr::UnrollFor(_)),
+            Expr::UnrollMap(_) => matches!(initializer, Expr::UnrollMap(_)),
             _ => true,
         };
         Ok((value, structural))
@@ -4104,6 +4117,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::UnrollFor(fold) => {
                 return self.unroll(fold, CarryContext::Expected(expected), false);
             }
+            Expr::UnrollMap(map) => return self.unroll_map(map, expected, false),
             Expr::SelectedOperand(value) => return self.scoped_result(value, expected, false),
             Expr::For(fold) => {
                 return self.with_dslx_value_context(|checker| {
@@ -5008,6 +5022,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// arguments from another operand.
     fn contains_inferred_aggregate(&self, expr: &Expr) -> bool {
         match expr {
+            // The surrounding array type can supply the element type of an
+            // empty map or of a body such as `zero!()`.
+            Expr::UnrollMap(_) => true,
             Expr::For(fold) if fold.annotation.is_none() => {
                 self.contains_inferred_aggregate(&fold.seed)
             }
@@ -5068,13 +5085,92 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         })
     }
 
-    fn has_concrete_element_type(&self, expr: &Expr) -> Result<bool, String> {
-        has_concrete_element_type(expr, self.common_widths(), &|name, explicit| {
-            self.call_needs_result(name, explicit)
-        })
+    fn has_concrete_element_type(&mut self, expr: &Expr) -> Result<bool, String> {
+        self.concrete_element_type(expr, WitnessWidths::Enclosing)
     }
 
-    fn common_hint(&self, items: &[&Expr]) -> Result<CommonTypeHint, String> {
+    /// Walk the result edges that can supply a common element type. For a map,
+    /// inspect its first result with the actual iteration bindings in scope.
+    fn concrete_element_type(
+        &mut self,
+        expr: &Expr,
+        widths: WitnessWidths,
+    ) -> Result<bool, String> {
+        if let Some(seed) = expr.unannotated_loop_seed() {
+            return self.concrete_element_type(seed, WitnessWidths::None);
+        }
+        match expr {
+            Expr::UnrollMap(map) => self.map_element_type_witness(map),
+            Expr::SelectedOperand(value) => self.concrete_element_type(value, widths),
+            Expr::Scope { result, .. } => self.concrete_element_type(
+                result,
+                match widths {
+                    WitnessWidths::Enclosing => WitnessWidths::WithoutNames,
+                    other => other,
+                },
+            ),
+            Expr::If {
+                then_value,
+                else_value,
+                ..
+            } => Ok(self.concrete_element_type(then_value, widths)?
+                || self.concrete_element_type(else_value, widths)?),
+            Expr::Match { arms, .. } => {
+                for arm in arms {
+                    if self.concrete_element_type(&arm.value, widths)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Expr::Tuple(fields) => {
+                for field in fields {
+                    if !self.concrete_element_type(field, widths)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Expr::Array(elements) => {
+                for element in elements {
+                    if self.concrete_element_type(element, widths)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Expr::ArrayLiteral { annotation, .. } => Ok(annotation.is_some()),
+            _ => {
+                let locals = match widths {
+                    WitnessWidths::Enclosing => self.common_widths(),
+                    WitnessWidths::WithoutNames => {
+                        self.common_widths().and_then(WidthLookup::without_names)
+                    }
+                    WitnessWidths::None => None,
+                };
+                has_concrete_leaf_type(expr, locals, &|name, explicit| {
+                    self.call_needs_result(name, explicit)
+                })
+            }
+        }
+    }
+
+    /// A map's prepared iterable supplies its result length before the body
+    /// receives an element type from a sibling or callee.
+    fn prepared_map_count(&self, expr: &Expr) -> Option<usize> {
+        if let Expr::UnrollMap(map) = expr
+            && let ForIterable::Array(Expr::Name(name)) = &map.iterable
+        {
+            self.prepared_loop_iterables
+                .get(name)
+                .map(|input| input.count)
+                .or_else(|| self.prepared_map_lanes.get(name).map(|lane| lane.count()))
+        } else {
+            None
+        }
+    }
+
+    fn common_hint(&mut self, items: &[&Expr]) -> Result<CommonTypeHint, String> {
         if items
             .iter()
             .any(|item| self.contains_inferred_aggregate(item))
@@ -5083,6 +5179,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 if !self.contains_inferred_aggregate(item)
                     && self.has_concrete_element_type(item)?
                 {
+                    return Ok(CommonTypeHint::FromExpr(i));
+                }
+            }
+            for (i, item) in items.iter().enumerate() {
+                if matches!(item, Expr::UnrollMap(_)) && self.has_concrete_element_type(item)? {
                     return Ok(CommonTypeHint::FromExpr(i));
                 }
             }

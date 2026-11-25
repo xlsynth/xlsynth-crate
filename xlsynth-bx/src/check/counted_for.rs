@@ -244,6 +244,7 @@ impl BodyChecker<'_, '_> {
                 Err("cannot infer the element type of an empty array literal".into())
             }
             Expr::Array(items) if path.is_empty() => Ok(Some(items.len())),
+            Expr::UnrollMap(_) if path.is_empty() => Ok(self.prepared_map_count(expr)),
             Expr::Array(items) if let [Member::ArrayElement, rest @ ..] = path => {
                 items.iter().try_fold(None, |size, item| {
                     Ok(size.or(self.iterable_length(item, rest)?))

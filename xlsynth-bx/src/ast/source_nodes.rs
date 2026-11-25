@@ -157,6 +157,13 @@ impl<'a> SourceNode<'a> {
                         &fold.seed,
                     );
                 }
+                Expr::UnrollMap(map) => {
+                    pending.leave_scope();
+                    pending.push(Expression(&map.result));
+                    pending.extend(map.body.iter().rev().map(Statement));
+                    pending.bind_pattern(&map.element);
+                    pending.push(Iterable(&map.iterable));
+                }
                 Expr::For(fold) => {
                     pending.leave_scope();
                     pending.push(Expression(&fold.body));

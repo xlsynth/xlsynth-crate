@@ -1659,6 +1659,43 @@ An unconditional let initializer or block result can elaborate children in
 its loop body. Pure loops can also appear inside other value expressions.
 `zero!<T>()` supplies an all-zero value of a concrete type and
 `update(array, index, value)` returns an array with one element replaced.
+
+### Collecting results with `unroll_map!`
+
+Use `unroll_map! element in iterable { expression }` when each iteration
+produces one result. BX collects the results into an array in source order.
+The input may be a fixed-length array of runtime values or a range with
+compile-time bounds. The binder can unpack a tuple.
+
+```text
+fn sum_pairs(pairs: (u8, u8)[3]) -> u16[3] {
+    unroll_map! (x, y) in pairs { (x as u16) + (y as u16) }
+}
+```
+
+In a block, the body can directly return a child block's output. Using the
+`grid` library and `delay` block above, this creates six independent
+registers and collects their outputs into a flat array.
+
+```text
+pub block delay_lanes(clk, data: u8[3][2], enable: bool[3][2]) -> u8[6] {
+    unroll_map! (r, c) in grid::product<2, 3>() {
+        delay(enable[r][c], data[r][c])
+    }
+}
+```
+
+Lane `r * 3 + c` corresponds to coordinate `(r, c)`. Nest a map over
+columns inside a map over rows to collect a two-dimensional array. Each
+iteration must produce the same element type. For an empty input, give BX
+the output element type through an enclosing return type or a binding such
+as `let outputs: u16[0] = unroll_map! x in xs { x as u16 };`. An empty map
+creates no child instances.
+
+Pure bodies follow the same element order as DSLX `map`. When the body
+instantiates hardware, place the map at an unconditional block binding,
+the block result, or inside another structural unroll.
+
 BX bounds total unrolling work per function or block, accounting for nested iterations
 and materialized constant aggregates.
 

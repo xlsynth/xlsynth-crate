@@ -307,6 +307,7 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                 bind_pattern(&fold.element);
                 bind_pattern(&fold.accumulator);
             }
+            SourceNode::Expression(Expr::UnrollMap(map)) => bind_pattern(&map.element),
             SourceNode::Expression(Expr::For(fold)) => {
                 bind_pattern(&fold.element);
                 bind_pattern(&fold.accumulator);
@@ -381,6 +382,12 @@ block nested(clk, x: u8) -> u8 {
         let y = device(a);
         y
     }(x)
+}
+block skipped_map(clk, x: u8) -> u8[0] {
+    unroll_map! _ in u8:0..u8:0 {
+        let z = device(x);
+        z
+    }
 }
 "#;
         let checked = check_module(&parse_module(source)?)?;

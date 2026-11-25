@@ -459,6 +459,45 @@ impl<'f> InferredBindings<'f> {
                 // The captured trailing value supplies the dimension witness.
                 self.infer_literal_values(pattern, result, checker, child_type_budget(remaining)?)?;
             }
+            (
+                Type::Array { element, .. } | Type::ParametricArray { element, .. },
+                Expr::UnrollMap(map),
+            ) => {
+                if let Some(count) = checker.prepared_map_count(expr) {
+                    if let Type::ParametricArray { size, .. } = pattern {
+                        self.bind_size(size, count, WitnessType::Exact)?;
+                    }
+                    if count > 0
+                        && self.needs_witness(element)
+                        && let Some(result) = checker.map_first_result(map)?
+                    {
+                        self.infer_literal_values(
+                            element,
+                            &result,
+                            checker,
+                            child_type_budget(remaining)?,
+                        )?;
+                    }
+                }
+            }
+            (
+                Type::Array { .. } | Type::ParametricArray { .. },
+                Expr::If {
+                    then_value,
+                    else_value,
+                    ..
+                },
+            ) => {
+                let depth = child_type_budget(remaining)?;
+                self.infer_literal_values(pattern, then_value, checker, depth)?;
+                self.infer_literal_values(pattern, else_value, checker, depth)?;
+            }
+            (Type::Array { .. } | Type::ParametricArray { .. }, Expr::Match { arms, .. }) => {
+                let depth = child_type_budget(remaining)?;
+                for arm in arms {
+                    self.infer_literal_values(pattern, &arm.value, checker, depth)?;
+                }
+            }
             (Type::ParametricArray { size, element }, Expr::Array(items)) => {
                 if let Some(first) = items.first() {
                     self.bind_size(size, items.len(), WitnessType::Exact)?;
@@ -1154,7 +1193,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         inferred: &mut InferredBindings<'_>,
         tuple_member: bool,
     ) -> Result<Option<TypedExpr>, String> {
-        if !inferred.needs_witness(formal) {
+        if !inferred.needs_witness(formal)
+            || self.prepared_map_count(expr).is_some() && !self.has_concrete_element_type(expr)?
+        {
             return Ok(None);
         }
         let value = if self.contains_type_struct_constructor(expr) {
@@ -1325,11 +1366,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let mut needs_sibling = true;
         for expr in exprs {
-            if !crate::infer_literal::requires_sibling_type(
-                expr,
-                self.common_widths(),
-                &|name, count| self.call_needs_result(name, count),
-            )? {
+            let contextual = if self.prepared_map_count(expr).is_some() {
+                !self.has_concrete_element_type(expr)?
+            } else {
+                crate::infer_literal::requires_sibling_type(
+                    expr,
+                    self.common_widths(),
+                    &|name, count| self.call_needs_result(name, count),
+                )?
+            };
+            if !contextual {
                 needs_sibling = false;
                 break;
             }
