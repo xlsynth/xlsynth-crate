@@ -942,13 +942,14 @@ depth, and fanout histogram excluding literals.
 ### `gv-eval`: evaluate a gate-level netlist
 
 Projects a Liberty-backed standard-cell netlist into a labeled AIG and
-evaluates either one typed input tuple or an ordered `.irvals` stimulus file.
+accepts a typed input tuple, an ordered `.irvals` file, or a combinational
+timed stimulus.
 By default the netlist is combinational. With `--sequential`, one input
 record represents one active clock edge and evaluation uses the labeled
 sequential transition AIG. Inputs are supplied in module-header order; in
 sequential mode the selected clock is metadata and is omitted from input
-records. A module with one output prints a bits value; multiple outputs print
-a tuple in module-header order.
+records. For tuple and `.irvals` inputs, a module with one output prints a
+bits value, and multiple outputs print a tuple in module-header order.
 
 Structural helper-module hierarchy is elaborated recursively before projection:
 parsed submodules are flattened into the selected top module, while instances
@@ -1038,6 +1039,54 @@ xlsynth-driver gv-eval \
   --cycle-time 1.0
 ```
 
+To observe transitions within a combinational circuit, supply a timed stimulus.
+For a design with one input port named `a`, this JSON requests a rising edge at
+time 2 and a falling edge at time 8.
+
+```json
+{
+  "initial_inputs": "(bits[1]:0)",
+  "input_events": [
+    {"port": "a", "bit": 0, "time": 2, "value": true, "slew": 0.05},
+    {"port": "a", "bit": 0, "time": 8, "value": false, "slew": 0.05}
+  ],
+  "duration": 12
+}
+```
+
+```shell
+xlsynth-driver gv-eval \
+  --netlist /path/to/design.gv \
+  --liberty_proto /path/to/cells.timing.power.proto \
+  --timed-stimulus-json /path/to/edges.json \
+  --timed-output-json /path/to/timed-report.json
+```
+
+`initial_inputs` is the settled typed tuple in module-input order. `bit`
+selects the declared Verilog bit number. Times, positive slews, and the positive
+observation duration use the Liberty time unit. A run requires nominal
+voltage and explicit time, voltage, and capacitance units. The report covers events
+at or after zero and strictly before `duration`. It records physical
+signal transitions, their capacitive switching energy, characterized
+internal energy, and total dynamic energy. Dividing total dynamic energy
+by `duration` gives average dynamic power including idle time. Interpret
+the numeric energy and power in the units reported in the JSON. For
+example, with V, pF and ns, energy is in pJ and average power is in mW.
+In timed mode continuous assignments must wire named bits or constants. Map
+Boolean expressions to characterized cells. Wire assigns and `tran` aliases
+share the physical driver's load and transition history.
+An exercised timing arc needs both delay and output slew data. Cell
+internal energy is counted where applicable Liberty power tables exist.
+Absent characterization contributes zero to the estimate.
+
+The model treats a driver's output crossing as the input crossing at its
+sinks. It cancels a pending output crossing when the cell function reverses
+before the delay elapses. For simultaneous changes on up to eight input pins,
+a timing arc must be enabled in a pin state where its input can cause the
+output edge. Wider batches use the pin values just before the batch for
+Liberty conditions. The estimate covers propagated full-swing glitches and
+excludes partial-swing energy and leakage.
+
 Sequential dynamic-power analysis uses the same cycle records as sequential
 evaluation. Each cycle contributes an inactive input settle, one active clock
 edge with Q/combinational settle, and one inactive clock edge:
@@ -1060,7 +1109,12 @@ Flags:
 - `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
 - `--liberty_proto <PATH>`: Liberty proto, optionally gzip-compressed. Required.
 - `--module_name <MODULE>`: optional module selection when the netlist contains multiple modules.
-- Exactly one positional typed argument tuple or `--input-irvals <PATH>` is required.
+- Supply exactly one input source: a positional typed argument tuple,
+  `--input-irvals <PATH>`, or `--timed-stimulus-json <PATH>`.
+- `--timed-stimulus-json <PATH>` selects combinational timed evaluation
+  with per-edge input slews and an explicit duration.
+- `--timed-output-json <PATH>` writes the event and energy report. The timed
+  stimulus and output flags are required together.
 - `--sequential`: evaluate one active clock edge per input record using the
   labeled sequential transition graph.
 - `--clock-port-name <PORT>`: optional sequential-only top-level clock hint
@@ -1079,22 +1133,23 @@ Flags:
   dynamic-energy JSON. Combinational mode requires at least two input samples;
   clocked sequential mode may use one cycle. Liberty `nominal_voltage` is
   required.
-- `--primary-input-transition <TIME>`: input rise/fall transition time used by
-  power analysis. Defaults to `0.01` in the Liberty time unit.
+- `--primary-input-transition <TIME>`: input rise/fall transition time for
+  sample-driven power analysis. Defaults to `0.01` in the Liberty time unit.
+  Timed stimuli specify a slew for each input edge.
 - `--clock-transition <TIME>`: sequential clock rise/fall transition time.
   Defaults to `--primary-input-transition`.
 - `--module-output-load <CAPACITANCE>`: external load added to every design
   output bit. Defaults to `0` in the Liberty capacitance unit.
 - `--wire-capacitance-constant-ff <FF>` and
   `--wire-capacitance-per-sink-ff <FF>`: affine wire capacitance, both default
-  to zero. Require `--power-output-json`; apply to combinational and sequential
-  power analysis. Values must be finite and nonnegative and are converted from
+  to zero. Require `--power-output-json` or `--timed-output-json`. Values
+  must be finite and nonnegative and are converted from
   fF to Liberty capacitance units; conversion and total-load overflow are errors.
 - `--cycle-time <TIME>`: optional time represented by each adjacent
   combinational sample pair or each sequential cycle. When present, the report
   includes average dynamic power.
 
-Power JSON reports include a `wire_load` object whenever either applied
+Sample-driven power JSON reports include a `wire_load` object whenever either applied
 coefficient is nonzero. Its `constant_capacitance` and
 `capacitance_per_sink` are expressed in the report's `capacitance_unit`,
 after conversion from the CLI's fF values. An absent `wire_load` means both
@@ -1107,7 +1162,7 @@ asserted immediately before the root rising edge. These clock
 transitions are included in labeled port and pin aggregates. The report also
 records active-edge count separately.
 
-Power analysis is edge-based and intentionally excludes leakage and glitches.
+Sample-driven power analysis is edge-based and excludes leakage and glitches.
 It computes internal energy from Liberty `internal_power` tables and switching
 energy as `0.5 * C * V^2` for each observed rise and fall. Net capacitance is
 the sum of connected cell-input capacitances plus the requested design-output

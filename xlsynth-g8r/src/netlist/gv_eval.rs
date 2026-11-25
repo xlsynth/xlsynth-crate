@@ -21,9 +21,9 @@ use crate::aig_sim::sequential::{
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::gatefn_from_netlist::{
     project_labeled_netlist_aig_with_boundaries,
-    project_labeled_sequential_netlist_aig_with_boundaries,
+    project_labeled_sequential_netlist_aig_with_boundaries, project_timed_labeled_netlist,
 };
-use crate::netlist::hierarchy::elaborate_hierarchy;
+use crate::netlist::hierarchy::{ElaboratedNetlist, elaborate_hierarchy};
 use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, read_gv_from_path, select_module};
 use crate::netlist::parse::{NetlistModule, PortDirection};
 use crate::netlist::power::{
@@ -36,7 +36,7 @@ pub use crate::netlist::gatefn_from_netlist::{
     LabeledSequentialAigBit, LabeledSequentialClock, LabeledSequentialNetlistAig,
     ModuleBoundaryAigBinding, ModulePortAigBinding, PinConnection, SequentialAigSignal,
     SequentialClockEdge, SequentialInstanceAigBinding, SequentialInstancePinAigBinding,
-    SequentialModuleBoundaryAigBinding, SequentialModulePortAigBinding,
+    SequentialModuleBoundaryAigBinding, SequentialModulePortAigBinding, TimedLabeledNetlist,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -231,9 +231,7 @@ pub fn load_labeled_netlist_aig_with_liberty(
     liberty: &Library,
     options: &GvEvalOptions,
 ) -> Result<LabeledNetlistAig> {
-    let parsed = read_gv_from_path(netlist_path)?;
-    let module = select_module(&parsed, options.module_name.as_deref())?;
-    let elaborated = elaborate_hierarchy(&parsed, module)?;
+    let elaborated = load_elaborated_module(netlist_path, options)?;
     project_labeled_netlist_aig_with_boundaries(
         &elaborated.module,
         &elaborated.nets,
@@ -242,6 +240,27 @@ pub fn load_labeled_netlist_aig_with_liberty(
         &elaborated.module_boundaries,
     )
     .map_err(|e| anyhow!(e))
+}
+
+/// Loads the top module for timed evaluation and preserves its physical wire
+/// alias map.
+pub fn load_timed_netlist_with_liberty(
+    netlist_path: &Path,
+    liberty: &Library,
+    options: &GvEvalOptions,
+) -> Result<TimedLabeledNetlist> {
+    let elaborated = load_elaborated_module(netlist_path, options)?;
+    project_timed_labeled_netlist(&elaborated, liberty).map_err(|e| anyhow!(e))
+}
+
+/// Reads and flattens the selected module for combinational projection.
+fn load_elaborated_module(
+    netlist_path: &Path,
+    options: &GvEvalOptions,
+) -> Result<ElaboratedNetlist> {
+    let parsed = read_gv_from_path(netlist_path)?;
+    let module = select_module(&parsed, options.module_name.as_deref())?;
+    elaborate_hierarchy(&parsed, module)
 }
 
 /// Loads a gate-level module as a labeled, single-clock transition AIG.
@@ -442,7 +461,7 @@ impl LabeledNetlistAig {
             .collect()
     }
 
-    fn lower_arg_tuple(&self, args: &IrValue) -> Result<Vec<IrBits>, String> {
+    pub(super) fn lower_arg_tuple(&self, args: &IrValue) -> Result<Vec<IrBits>, String> {
         let elements = args
             .as_elements()
             .map_err(|e| format!("argument value is not a tuple: {e}"))?;

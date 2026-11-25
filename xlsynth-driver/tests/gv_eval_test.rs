@@ -94,6 +94,34 @@ lut_shapes: {}
 interned_strings: ["D", "CLK", "Q", "IQ"]
 "#;
 
+const TIMED_BUF_LIBERTY: &str = r#"
+format_magic: 5496997758228255311
+units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
+nominal_voltage: 1.0
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 1 direction: INPUT capacitance: 1.0 }
+  pins: {
+    name_string_id: 2 direction: OUTPUT function_string_id: 1
+    timing_arcs: {
+      related_pin_string_id: 1
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      timing_sense: TIMING_SENSE_POSITIVE_UNATE
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 2.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.1 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 2.0 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.1 }
+    }
+    internal_power: {
+      related_pin_string_ids: 1
+      tables: { transition: POWER_TRANSITION_RISE shape_id: 1 values: 3.0 }
+    }
+  }
+}
+lut_shapes: {}
+interned_strings: ["A", "Y"]
+"#;
+
 fn write_fixture(netlist: &str, liberty: &str) -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     std::fs::write(temp_dir.path().join("design.gv"), netlist).expect("write netlist");
@@ -104,6 +132,7 @@ fn write_fixture(netlist: &str, liberty: &str) -> tempfile::TempDir {
 fn run_gv_eval(temp_dir: &tempfile::TempDir, input_args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
     command
+        .current_dir(temp_dir.path())
         .arg("gv-eval")
         .arg("--netlist")
         .arg(temp_dir.path().join("design.gv"))
@@ -689,4 +718,193 @@ endmodule"#
             String::from_utf8_lossy(&result.stderr).contains("must be finite and non-negative")
         );
     }
+}
+
+/// Builds a one-edge timed stimulus using the buffer test library.
+fn write_timed_fixture(netlist: &str) -> std::io::Result<tempfile::TempDir> {
+    let dir = write_fixture(netlist, TIMED_BUF_LIBERTY);
+    std::fs::write(
+        dir.path().join("stimulus.json"),
+        r#"{
+  "initial_inputs": "(bits[1]:0)",
+  "input_events": [{"port":"a","bit":0,"time":1,"value":true,"slew":0.2}],
+  "duration": 10
+}"#,
+    )?;
+    Ok(dir)
+}
+
+const TIMED_ARGS: &[&str] = &[
+    "--timed-stimulus-json",
+    "stimulus.json",
+    "--timed-output-json",
+    "timed.json",
+    "--module-output-load",
+    "2",
+];
+
+#[test]
+fn gv_eval_rejects_incompatible_timed_options_before_loading_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let assert_usage_error = |args: &[&str]| {
+        let output = run_gv_eval(&dir, args);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    for extra in [
+        &["(bits[1]:0)"][..],
+        &["--input-irvals", "samples.irvals"],
+        &["--sequential"],
+        &["--clock-port-name", "clk"],
+        &["--initial-state-all-zeros"],
+        &["--initial-state-file", "initial.irvals"],
+        &["--final-state-irvals", "final.irvals"],
+        &["--toggle-output-json", "toggle.json"],
+        &["--power-output-json", "power.json"],
+        &["--primary-input-transition", "0.1"],
+        &["--clock-transition", "0.1"],
+        &["--cycle-time", "1"],
+    ] {
+        assert_usage_error(&[TIMED_ARGS, extra].concat());
+    }
+    // Neither another report nor another stimulus can substitute for the
+    // missing half of the timed pair.
+    for args in [
+        &["--timed-stimulus-json", "stimulus.json"][..],
+        &["--timed-output-json", "timed.json"],
+        &[
+            "--timed-stimulus-json",
+            "stimulus.json",
+            "--power-output-json",
+            "power.json",
+        ],
+        &[
+            "--timed-output-json",
+            "timed.json",
+            "--input-irvals",
+            "samples.irvals",
+        ],
+        &["--timed-output-json", "timed.json", "(bits[1]:0)"],
+    ] {
+        assert_usage_error(args);
+    }
+}
+
+#[test]
+fn gv_eval_timed_reports_transitions_energy_and_average_power() {
+    let netlist = r#"
+module top (a, y);
+  input a;
+  output y;
+  BUF buf0 (.A(a), .Y(y));
+endmodule
+"#;
+    let temp_dir = write_timed_fixture(netlist).unwrap();
+    let mut args = TIMED_ARGS.to_vec();
+    args.extend(["--wire-capacitance-constant-ff", "1000"]);
+    let output = run_gv_eval(&temp_dir, &args);
+    assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp_dir.path().join("timed.json")).unwrap())
+            .unwrap();
+    assert_eq!(report["events"].as_array().unwrap().len(), 2);
+    assert_eq!(report["events"][0]["time"], 1.0);
+    assert_eq!(report["events"][1]["time"], 3.0);
+    assert_eq!(report["switching_energy"], 2.0);
+    assert_eq!(report["internal_energy"], 3.0);
+    assert_eq!(report["total_dynamic_energy"], 5.0);
+    assert_eq!(report["average_dynamic_power"], 0.5);
+}
+
+#[test]
+fn gv_eval_timed_tran_preserves_declared_port_bits_and_their_loads() {
+    // The output "first" is canonical for a[4], and input a[5] is canonical for
+    // last[7].
+    let netlist = r#"
+module top(first, a, last);
+  output first;
+  input a;
+  wire [5:4] a;
+  output [7:6] last;
+  tran(first, a[4]);
+  tran(last[7], a[5]);
+  assign last[6] = a[5];
+endmodule
+"#;
+    let dir = write_fixture(netlist, TIMED_BUF_LIBERTY);
+    std::fs::write(
+        dir.path().join("stimulus.json"),
+        r#"{
+  "initial_inputs": "(bits[2]:0)",
+  "input_events": [
+    {"port":"a","bit":4,"time":1,"value":true,"slew":0.2},
+    {"port":"a","bit":5,"time":2,"value":true,"slew":0.2}
+  ],
+  "duration": 10
+}"#,
+    )
+    .unwrap();
+    assert_success(&run_gv_eval(&dir, TIMED_ARGS));
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("timed.json")).unwrap()).unwrap();
+    // a[4] drives one external 2 pF load and a[5] drives two such loads.
+    assert_eq!(
+        report["events"],
+        serde_json::json!([
+            {"signal": {"kind": "input", "port": "a", "bit": 4},
+             "time": 1.0, "value": true, "slew": 0.2, "switching_energy": 1.0},
+            {"signal": {"kind": "input", "port": "a", "bit": 5},
+             "time": 2.0, "value": true, "slew": 0.2, "switching_energy": 2.0}
+        ])
+    );
+}
+
+#[test]
+fn gv_eval_timed_assign_and_tran_keep_equivalent_physical_drivers_distinct() {
+    let netlist = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire left_net, right_net, alias1, alias2;
+  BUF left (.A(a), .Y(left_net));
+  BUF right (.A(a), .Y(right_net));
+  tran(alias1, left_net);
+  assign alias2 = alias1;
+  assign y = alias2;
+endmodule
+"#;
+    let temp_dir = write_timed_fixture(netlist).unwrap();
+    assert_success(&run_gv_eval(&temp_dir, TIMED_ARGS));
+    let energy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp_dir.path().join("timed.json")).unwrap())
+            .unwrap();
+    let edges = energy["events"].as_array().unwrap();
+    assert_eq!(edges.len(), 3);
+    assert_eq!(edges[1]["signal"]["instance"], "left");
+    assert_eq!(edges[1]["switching_energy"], 1.0);
+    assert_eq!(edges[2]["signal"]["instance"], "right");
+    assert_eq!(edges[2]["switching_energy"], 0.0);
+    assert_eq!(energy["total_dynamic_energy"], 8.0);
+
+    // Both computed logic and unknown literals lack a characterized drive.
+    for (rhs, diagnostic) in [
+        ("alias2 ^ 1'b0", "assignment to 'y' computes Boolean logic"),
+        (
+            "1'bx",
+            "timed evaluation requires wire or known literal assignments",
+        ),
+    ] {
+        let design = netlist.replace("assign y = alias2;", &format!("assign y = {rhs};"));
+        std::fs::write(temp_dir.path().join("design.gv"), design).unwrap();
+        let output = run_gv_eval(&temp_dir, TIMED_ARGS);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(diagnostic));
+    }
+    let known = netlist.replace("assign y = alias2;", "assign y = 1'b1;");
+    std::fs::write(temp_dir.path().join("design.gv"), known).unwrap();
+    assert_success(&run_gv_eval(&temp_dir, TIMED_ARGS));
 }

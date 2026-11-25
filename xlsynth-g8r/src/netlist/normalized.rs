@@ -359,7 +359,9 @@ fn normalize_ports(
             })?;
             Ok(NormalizedPort {
                 direction: port.direction.clone(),
-                width: port.width,
+                // A separate wire declaration can supply a non-ANSI port's
+                // packed range.
+                width: nets[net_idx.0].width,
                 name: port.name,
                 bits: bits_by_net[net_idx.0]
                     .iter()
