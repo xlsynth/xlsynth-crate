@@ -251,12 +251,12 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             ResizeOptions {
                 timing: timing.expect("area recovery has a timing model"),
                 max_area_growth: 0.0,
-                max_upsize_rounds: 0,
+                max_timing_rounds: 0,
                 timing_evaluation_budget: Some(0),
-                max_downsize_rounds: matches
+                max_recovery_rounds: matches
                     .get_one::<usize>("area-recovery-rounds")
                     .copied()
-                    .unwrap_or(defaults.max_downsize_rounds),
+                    .unwrap_or(defaults.max_recovery_rounds),
                 recovery_evaluation_budget: matches
                     .get_one::<usize>("area-recovery-evaluation-budget")
                     .copied(),
@@ -346,7 +346,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             recovered.initial_area, recovered.final_area
         ));
         report["area_recovery"] = serde_json::to_value(recovered)?;
-        report["area_recovery_rounds"] = options.max_downsize_rounds.into();
+        report["area_recovery_rounds"] = options.max_recovery_rounds.into();
     }
     if let Some(timing) = timing {
         report["post_mapping_timing"] = serde_json::json!({

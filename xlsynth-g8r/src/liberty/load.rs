@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use flate2::read::MultiGzDecoder;
 use prost::Message;
 use prost_reflect::DynamicMessage;
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -172,6 +173,36 @@ pub fn load_library_from_path(path: &Path) -> Result<liberty_model::Library> {
 pub fn load_library_with_timing_data_from_path(path: &Path) -> Result<liberty_model::Library> {
     let bytes = read_liberty_proto_bytes_from_path(path)?;
     decode_library_with_timing_data_from_bytes(&bytes, &path.display().to_string())
+}
+
+/// A timing model and the digest of the exact source bytes passed to its
+/// decoder. For compressed inputs the identity covers the original compressed
+/// file.
+pub struct TimingLibrarySnapshot {
+    pub library: liberty_model::Library,
+    pub sha256: String,
+}
+
+impl TimingLibrarySnapshot {
+    /// Capture one source snapshot so that later sidecars can be checked even
+    /// if the original path is replaced while the model is in use.
+    pub fn from_path(path: &Path) -> Result<Self> {
+        let raw = std::fs::read(path)
+            .with_context(|| format!("reading liberty proto '{}'", path.display()))?;
+        let sha256 = format!("{:x}", Sha256::digest(&raw));
+        let bytes = if path.extension().is_some_and(|ext| ext == "gz") {
+            let mut bytes = Vec::new();
+            MultiGzDecoder::new(raw.as_slice())
+                .read_to_end(&mut bytes)
+                .with_context(|| format!("decompressing liberty proto '{}'", path.display()))?;
+            bytes
+        } else {
+            raw
+        };
+        let library =
+            decode_library_with_timing_data_from_bytes(&bytes, &path.display().to_string())?;
+        Ok(Self { library, sha256 })
+    }
 }
 
 #[cfg(test)]

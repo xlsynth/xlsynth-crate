@@ -25,3 +25,16 @@ impl From<MappedNetlist> for ParsedNetlist {
         }
     }
 }
+
+/// Prevent emitted cell instances from resolving to their enclosing module.
+pub(crate) fn validate_module_name(
+    name: &str,
+    library: &crate::liberty::Library,
+) -> Result<(), String> {
+    if library.cells.iter().any(|cell| cell.name == name) {
+        return Err(format!(
+            "top module name conflicts with a Liberty cell name '{name}'"
+        ));
+    }
+    Ok(())
+}

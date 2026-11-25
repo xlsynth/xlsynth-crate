@@ -209,7 +209,7 @@ mod tests {
             let options = PostMappingOptions {
                 fanout,
                 recovery: Some(ResizeOptions {
-                    max_upsize_rounds: 0,
+                    max_timing_rounds: 0,
                     recovery_evaluation_budget: Some(1),
                     ..Default::default()
                 }),
