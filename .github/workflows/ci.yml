@@ -1313,4 +1313,5 @@ jobs:
           echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Ensure benches compile
-        run: cargo bench --features with-z3-system,with-bitwuzla-system --workspace --exclude sample-usage --no-run
+        # Let Cargo expand the glob to all named benchmarks and skip implicit lib/bin harnesses.
+        run: cargo bench --features with-z3-system,with-bitwuzla-system --workspace --exclude sample-usage --bench '*' --no-run
