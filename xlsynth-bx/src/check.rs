@@ -2826,6 +2826,7 @@ struct BodyChecker<'a, 'm> {
     /// source order.
     block_position: Option<usize>,
     local_callees: BTreeSet<String>,
+    /// Names bound in the source body. Output fields are not bindings.
     names: BTreeSet<String>,
     /// Lexical constants and value parametrics eligible as named match
     /// patterns.
@@ -2835,6 +2836,7 @@ struct BodyChecker<'a, 'm> {
     /// Bare dimension bindings in a struct declaration can have any integer
     /// type.
     in_struct_definition: bool,
+    /// Physical output names, reserved when assigning an IR instance name.
     outputs: BTreeSet<String>,
     reserved_hardware_names: BTreeSet<String>,
     values: BTreeMap<String, Type>,
@@ -3393,16 +3395,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
         }
         if let Some(clock) = &block.clock {
-            c.hardware_name(clock)?;
+            declare(&mut c.names, clock)?;
         } else {
             c.clockless_block = Some(block);
         }
         if let Some(rst) = &block.reset {
-            c.hardware_name(rst)?;
+            declare(&mut c.names, rst)?;
             c.values.insert(rst.clone(), Type::Bool);
         }
         for p in &interface.params {
-            c.hardware_name(&p.name)?;
+            declare(&mut c.names, &p.name)?;
             c.values.insert(p.name.clone(), p.ty.clone());
         }
         c.body(block, &block.statements, false)?;
@@ -3528,13 +3530,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             functions: self.function_registry.as_deref_mut(),
         };
         resolve(&mut types, dimensions, bindings)
-    }
-
-    fn hardware_name(&mut self, name: &str) -> Result<(), String> {
-        if self.outputs.contains(name) {
-            return Err(format!("name '{name}' collides with an output port"));
-        }
-        declare(&mut self.names, name)
     }
 
     /// Keep the source binding as the generated instance name when available
@@ -3805,7 +3800,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         return Err(format!("conditional declaration of register '{name}'"));
                     }
                     let ty = self.source_type(ty)?;
-                    self.hardware_name(name)?;
+                    declare(&mut self.names, name)?;
                     let reset = match reset {
                         None => None,
                         Some(expr) => {
