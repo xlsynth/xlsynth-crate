@@ -8,9 +8,7 @@ use xlsynth_bx::{ResetBehavior, compile, empty_package};
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog_with_register_names};
 use xlsynth_pir::ir::NodePayload;
 
-#[test]
-fn register_can_share_an_output_port_name() -> Result<(), Box<dyn Error>> {
-    let source = r#"
+const FLOW_REG: &str = r#"
 struct Output { pop_valid: bool }
 
 pub block flow_reg(clk, push_valid: bool) -> Output {
@@ -19,7 +17,10 @@ pub block flow_reg(clk, push_valid: bool) -> Output {
     Output { pop_valid }
 }
 "#;
-    let package = compile(source, empty_package("flow"), ResetBehavior::default())?;
+
+#[test]
+fn register_can_share_an_output_port_name() -> Result<(), Box<dyn Error>> {
+    let package = compile(FLOW_REG, empty_package("flow"), ResetBehavior::default())?;
     let block = package.get_block("flow_reg").unwrap();
     let output = block.output_ports().next().unwrap();
     assert_eq!(block.port_name(output), "pop_valid");
@@ -34,26 +35,30 @@ pub block flow_reg(clk, push_valid: bool) -> Output {
             if register == "pop_valid__1" && *arg == input
     )));
 
-    let ir = package.to_string();
-    xlsynth::IrPackage::parse_ir(&ir, None)?;
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
     let rtl = emit_system_verilog_with_register_names(&package, &BlockCodegenOptions::default())?;
     assert_eq!(rtl.top_register_names["pop_valid__1"], "pop_valid__1");
+    Ok(())
+}
 
-    // The XLS parser accepts a shared name, but its Verilog emitter rejects
-    // it. Exercise that emitter too when the XLS tools are installed in CI.
-    if let Some(tools) = std::env::var_os("XLSYNTH_TOOLS") {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("flow.ir");
-        std::fs::write(&path, ir)?;
-        let result = Command::new(Path::new(&tools).join("block_to_verilog_main"))
-            .arg(&path)
-            .output()?;
-        assert!(
-            result.status.success(),
-            "block_to_verilog_main failed: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-    }
+// Parsing alone misses the name collision. CI supplies the XLS Verilog emitter.
+#[test]
+fn xls_emits_verilog_for_shared_register_and_port_name() -> Result<(), Box<dyn Error>> {
+    let Some(tools) = std::env::var_os("XLSYNTH_TOOLS") else {
+        return Ok(());
+    };
+    let package = compile(FLOW_REG, empty_package("flow"), ResetBehavior::default())?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("flow.ir");
+    std::fs::write(&path, package.to_string())?;
+    let result = Command::new(Path::new(&tools).join("block_to_verilog_main"))
+        .arg(path)
+        .output()?;
+    assert!(
+        result.status.success(),
+        "block_to_verilog_main failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     Ok(())
 }
 

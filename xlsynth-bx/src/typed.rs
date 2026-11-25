@@ -287,6 +287,8 @@ pub enum CheckedStmt {
     },
     Reg {
         name: String,
+        /// Alternate IR name if an output port also uses `name`.
+        ir_name: Option<String>,
         ty: Type,
         reset: Option<IrValue>,
     },

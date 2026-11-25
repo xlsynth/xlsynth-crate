@@ -2667,8 +2667,11 @@ fn collect_assertion_labels<'a>(
     Ok(())
 }
 
-/// Physical names that must survive lowering, including any inferred reset.
-pub(crate) fn port_names(block: &CheckedBlock) -> impl Iterator<Item = &str> + Clone {
+/// Port, register and instance names reserved in the block's hardware
+/// namespace.
+fn fixed_hardware_names(
+    block: &CheckedBlock,
+) -> impl Iterator<Item = (&str, &'static str)> + Clone {
     block
         .clock
         .as_deref()
@@ -2681,13 +2684,6 @@ pub(crate) fn port_names(block: &CheckedBlock) -> impl Iterator<Item = &str> + C
                 .chain(&block.output_ports)
                 .map(|p| p.name.as_str()),
         )
-}
-
-/// Names to avoid when adding an assertion label or inferring a reset port.
-fn fixed_hardware_names(
-    block: &CheckedBlock,
-) -> impl Iterator<Item = (&str, &'static str)> + Clone {
-    port_names(block)
         .map(|name| (name, "port"))
         .chain(block.statements.iter().filter_map(|s| match s {
             CheckedStmt::Reg { name, .. } => Some((name.as_str(), "register")),
@@ -2712,8 +2708,7 @@ fn inferred_reset_port<'a>(names: impl Iterator<Item = &'a str> + Clone) -> Stri
     }
 }
 
-/// Reserve source bindings and assertion labels before allocating instance
-/// or observation port names.
+/// Reserve bindings and assertion labels before naming hardware.
 fn block_binding_names(block: &Block) -> BTreeSet<String> {
     let mut names: BTreeSet<_> = block
         .clock
@@ -2840,7 +2835,7 @@ struct BodyChecker<'a, 'm> {
     /// Bare dimension bindings in a struct declaration can have any integer
     /// type.
     in_struct_definition: bool,
-    /// Physical output names, reserved when assigning an IR instance name.
+    /// Physical output names take precedence over internal hardware names.
     outputs: BTreeSet<String>,
     reserved_hardware_names: BTreeSet<String>,
     values: BTreeMap<String, Type>,
@@ -3536,6 +3531,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         resolve(&mut types, dimensions, bindings)
     }
 
+    /// Reserve the first free numbered name, skipping even later declarations.
+    fn suffixed_hardware_name(&mut self, base: &str, separator: &str) -> String {
+        let mut suffix = 1usize;
+        loop {
+            let name = format!("{base}{separator}{suffix}");
+            if self.reserved_hardware_names.insert(name.clone()) {
+                return name;
+            }
+            suffix += 1;
+        }
+    }
+
     /// Keep the source binding as the generated instance name when available
     /// in IR. An output port or an IR keyword such as `next` needs a suffix.
     fn call_instance_name(&mut self, binding: &str) -> String {
@@ -3544,13 +3551,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return binding.to_owned();
         }
         let base = format!("{binding}_inst");
-        let mut name = base.clone();
-        let mut suffix = 0;
-        while !self.reserved_hardware_names.insert(name.clone()) {
-            suffix += 1;
-            name = format!("{base}_{suffix}");
+        if self.reserved_hardware_names.insert(base.clone()) {
+            return base;
         }
-        name
+        self.suffixed_hardware_name(&base, "_")
     }
 
     /// Elaborate a call to static hardware, then assemble its outputs into a BX
@@ -3826,8 +3830,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     };
                     self.regs.insert(name.clone(), ty.clone());
                     self.values.insert(name.clone(), ty.clone());
+                    // XLS emits registers before output ports. Give the
+                    // register a suffix so the port keeps its public name.
+                    let ir_name = self
+                        .outputs
+                        .contains(name)
+                        .then(|| self.suffixed_hardware_name(name, "__"));
                     CheckedStmt::Reg {
                         name: name.clone(),
+                        ir_name,
                         ty: ty.clone(),
                         reset,
                     }
