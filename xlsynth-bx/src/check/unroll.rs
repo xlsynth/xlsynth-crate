@@ -964,6 +964,8 @@ struct LexicalScope<'a> {
     /// The root borrows names from elaboration so skipped loops need no copy
     /// of the enclosing scope.
     enclosing_names: Option<&'a BTreeSet<String>>,
+    /// All root bindings in a block dimension are value parametrics.
+    enclosing_constants: bool,
     declarations: BTreeMap<String, LexicalKind>,
     parent: Option<&'a LexicalScope<'a>>,
     in_lambda: bool,
@@ -981,6 +983,7 @@ impl<'a> LexicalScope<'a> {
     fn root(names: &'a BTreeSet<String>, visited: &'a Cell<usize>) -> Self {
         Self {
             enclosing_names: Some(names),
+            enclosing_constants: false,
             declarations: BTreeMap::new(),
             parent: None,
             in_lambda: false,
@@ -993,6 +996,7 @@ impl<'a> LexicalScope<'a> {
     fn nested(&self) -> LexicalScope<'_> {
         LexicalScope {
             enclosing_names: None,
+            enclosing_constants: false,
             declarations: BTreeMap::new(),
             parent: Some(self),
             in_lambda: self.in_lambda,
@@ -1059,7 +1063,7 @@ impl BodyChecker<'_, '_> {
                     can_construct: alias.can_construct,
                     constructor: alias.constructor.clone(),
                 }
-            } else if self.constant_pattern_names.contains(name) {
+            } else if scope.enclosing_constants || self.constant_pattern_names.contains(name) {
                 LexicalKind::Constant
             } else {
                 LexicalKind::Value
@@ -1246,9 +1250,14 @@ impl BodyChecker<'_, '_> {
                 || self.resolver.lookup(target)?.is_some()))
     }
 
+    /// A local binder or an enclosing block port hides a module-level callee.
+    fn lexical_callee_hidden(&self, name: &str, locals: &LexicalScope<'_>) -> bool {
+        locals.contains(name) || self.has_local_name(name)
+    }
+
     /// A lambda argument is available only on the built-in map.
     fn check_map_target(&self, map: &MapExpr, locals: &LexicalScope<'_>) -> Result<(), String> {
-        if locals.contains(&map.target) {
+        if self.lexical_callee_hidden(&map.target, locals) {
             return Err("'map' names a local value here".into());
         }
         if !self.is_builtin_map(&map.target, |_| false)? {
@@ -1319,6 +1328,19 @@ impl BodyChecker<'_, '_> {
     pub(super) fn check_deferred_expr_names(&self, expr: &Expr) -> Result<(), String> {
         let visited = Cell::new(0);
         self.check_expr_names(expr, &LexicalScope::root(&self.names, &visited))
+    }
+
+    /// A block value formal is also a valid constant in a match pattern.
+    pub(super) fn check_block_dimension_names(
+        &mut self,
+        expr: &Expr,
+        names: &BTreeSet<String>,
+    ) -> Result<(), String> {
+        self.template_name_depth = Some(Cell::new(0));
+        let visited = Cell::new(0);
+        let mut scope = LexicalScope::root(names, &visited);
+        scope.enclosing_constants = true;
+        self.check_expr_names(expr, &scope)
     }
 
     /// Keep skipped arms lexically well formed without resolving their types.
@@ -1775,7 +1797,9 @@ impl BodyChecker<'_, '_> {
                 name,
                 builtin_args: Some(args),
                 ..
-            } if self.is_builtin_map(name, |target| locals.contains(target))? => {
+            } if self
+                .is_builtin_map(name, |target| self.lexical_callee_hidden(target, locals))? =>
+            {
                 // A skipped iteration resolves names without checking call
                 // arity.
                 for (index, arg) in args.iter().enumerate() {
@@ -1788,7 +1812,9 @@ impl BodyChecker<'_, '_> {
                 }
             }
             Expr::MapBeforeUse { name, .. }
-                if self.is_builtin_map(name, |target| locals.contains(target))? =>
+                if self.is_builtin_map(name, |target| {
+                    self.lexical_callee_hidden(target, locals)
+                })? =>
             {
                 return Err("invalid operand syntax for the built-in map".into());
             }
@@ -1843,14 +1869,18 @@ impl BodyChecker<'_, '_> {
                     self.check_lexical_block_call(
                         name,
                         parametrics.len(),
-                        locals.contains(name),
+                        self.lexical_callee_hidden(name, locals),
                         locals,
                     )?;
                     if self.kind == BodyKind::Function || locals.in_lambda {
                         return Err(format!("pure function cannot call block '{name}'"));
                     }
                 } else if template.is_some_and(|f| !f.has_inferred_parametrics()) {
-                    self.callable_template(name, locals.contains(name), parametrics.len())?;
+                    self.callable_template(
+                        name,
+                        self.lexical_callee_hidden(name, locals),
+                        parametrics.len(),
+                    )?;
                 } else {
                     self.check_value_name(name, locals, /* callee= */ true)?;
                 }
@@ -2020,7 +2050,9 @@ impl BodyChecker<'_, '_> {
                 callback,
                 parametrics,
             } => {
-                if !self.is_builtin_map(target, |target| locals.contains(target))? {
+                if !self
+                    .is_builtin_map(target, |target| self.lexical_callee_hidden(target, locals))?
+                {
                     return Err("this named map requires the built-in map".into());
                 }
                 self.check_iterable_names(iterable, locals)?;
@@ -2113,7 +2145,7 @@ impl BodyChecker<'_, '_> {
         locals: &LexicalScope<'_>,
     ) -> Result<(), String> {
         locals.visited.set(locals.visited.get().saturating_add(1));
-        self.map_callee(callback, |head| locals.contains(head))
+        self.map_callee(callback, |head| self.lexical_callee_hidden(head, locals))
             .map(|_| ())
     }
 
@@ -2126,7 +2158,7 @@ impl BodyChecker<'_, '_> {
     ) -> Result<(), String> {
         locals.visited.set(locals.visited.get().saturating_add(1));
         self.callback_source(callback_argument_name(actual)?, |head| {
-            locals.contains(head)
+            self.lexical_callee_hidden(head, locals)
         })
         .map(|_| ())
     }

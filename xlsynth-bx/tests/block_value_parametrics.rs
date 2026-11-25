@@ -54,6 +54,7 @@ fn unused_dimension_dependent_ports_check_independent_struct_arguments() -> Resu
     for (formals, arguments, expected) in [
         ("T, Tag: u32", "u8, true", "u32"),
         ("T, Tag: u32", "bits[W], true", "u32"),
+        ("T, Tag: u32", "bits[ceillog2(W)], true", "u32"),
         ("T, U, Tag: U", "bits[W], u8, true", "u8"),
         ("T, N: u32, Tag: bits[N]", "bits[W], 8, true", "u8"),
     ] {
@@ -733,5 +734,207 @@ fn boolean_block_parameters_cannot_supply_port_sizes() -> Result<(), String> {
             "block 'bank': 'FLAG' names a local value in this type dimension"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn block_port_dimension_expressions_specialize_in_the_declaring_module()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    fs::write(
+        directory.path().join("banks.bx"),
+        r#"
+const N = u32:32;
+const PAD = u32:2;
+fn slots(n: u32) -> u32 { n + PAD }
+struct Words<T, Tag: u32> { words: T }
+
+pub block bank<N: u32>(clk, data: uN[ceillog2(N)][slots(N)]) -> Words<bits[ceillog2(N)][N + PAD], 7> {
+    reg q: bits[ceillog2(N)][N + PAD];
+    q := data;
+    Words { words: q }
+}
+"#,
+    )?;
+    let source = r#"
+use banks::bank;
+const N = u32:8;
+const PAD = u32:10;
+fn slots(n: u32) -> u32 { n + PAD }
+
+pub block circuit(clk, empty_bits: uN[0][3], small: u3[10], large: u4[11]) -> (uN[0][3], u3[10], u4[11]) {
+    let z = bank<1>(empty_bits);
+    let a = bank<N>(small);
+    let b = bank<9>(large);
+    (z.words, a.words, b.words)
+}
+"#;
+    let package = compile_with_options(
+        source,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &search_paths(&[directory.path()]),
+    )?;
+    let circuit = package.get_top_block().ok_or("missing circuit")?;
+    let [empty_bits, small, large] = circuit.instantiations.as_slice() else {
+        panic!("expected three bank instances");
+    };
+    for (instance, width, length) in [(empty_bits, 0, 3), (small, 3, 10), (large, 4, 11)] {
+        let bank = package.get_block(&instance.block).ok_or("missing bank")?;
+        let input = bank.get_input_port("data").ok_or("missing data input")?;
+        let output = bank
+            .get_output_port("words")
+            .ok_or("missing words output")?;
+        let ty = Type::new_array(Type::Bits(width), length);
+        assert_eq!(bank.port_type(input), &ty);
+        assert_eq!(bank.port_type(output), &ty);
+    }
+    Ok(())
+}
+
+#[test]
+fn computed_block_input_width_rejects_a_mismatched_argument() -> Result<(), String> {
+    let source = r#"
+block index<N: u32>(clk, x: bits[ceillog2(N)]) -> bits[ceillog2(N)] { x }
+pub block circuit(clk, x: u4) -> u3 { let y = index<5>(x); y }
+"#;
+    assert_eq!(
+        check_module(&parse_module(source)?).unwrap_err(),
+        "block 'circuit': let 'y': input 'x', call to block 'index': expected u3, got u4",
+    );
+    Ok(())
+}
+
+#[test]
+fn unused_dependent_block_dimensions_check_all_names_in_declaration_scope() -> Result<(), String> {
+    for name in ["missing", "input"] {
+        for signature in [
+            format!("(clk, input: u32, x: bits[N + {name}]) -> u32 {{ input }}"),
+            format!("(clk, input: u32) -> u8[N + {name}] {{ zero!() }}"),
+        ] {
+            let source = format!(
+                "const input = u32:4; block bank<N: u32>{signature} pub block top(clk, x: u8) -> u8 {{ x }}"
+            );
+            let error = check_module(&parse_module(&source)?).unwrap_err();
+            assert!(error.contains(name), "{signature}: {error}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn unused_dependent_block_dimensions_reject_shadowed_helpers() -> Result<(), String> {
+    let helpers = r#"
+fn bump(x: u32) -> u32 { x + u32:1 }
+fn apply<F: fn(u32) -> u32>(x: u32) -> u32 { F(x) }
+"#;
+    for (port, width, diagnostic) in [
+        (
+            "apply",
+            "apply<bump>(N)",
+            "'apply' names a local value here",
+        ),
+        ("bump", "apply<bump>(N)", "'bump' names a local value here"),
+        (
+            "map",
+            "N + map([u32:1], bump)[u32:0]",
+            "'map' names a local value in this type argument",
+        ),
+        (
+            "bump",
+            "N + map([u32:1], bump)[u32:0]",
+            "'bump' names a local value here",
+        ),
+    ] {
+        let source = format!(
+            r#"
+{helpers}
+block stage<N: u32>(clk, {port}: bool, y: bits[{width}]) -> bool {{ true }}
+pub block circuit(clk, x: u8) -> u8 {{ x }}
+"#
+        );
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert_eq!(error, format!("block 'stage': {diagnostic}"), "{width}");
+    }
+    Ok(())
+}
+
+#[test]
+fn computed_port_dimensions_can_use_inferred_types_and_boolean_values() -> Result<(), String> {
+    let source = r#"
+block wire<T, EXTRA: bool>(clk, sample: T, data: bits[bit_count<T>() + (EXTRA as u32)])
+    -> bits[bit_count<T>() + (EXTRA as u32)] {
+    reg q: bits[bit_count<T>() + (EXTRA as u32)];
+    q := data;
+    q
+}
+pub block circuit(clk, a: u3, b: u4) -> (u3, u4) {
+    let narrow = wire<false>(a, a);
+    let wide = wire<true>(a, b);
+    (narrow, wide)
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let circuit = package.get_top_block().ok_or("missing circuit")?;
+    let [narrow, wide] = circuit.instantiations.as_slice() else {
+        panic!("expected two wire instances");
+    };
+    for (instance, width) in [(narrow, 3), (wide, 4)] {
+        let wire = package.get_block(&instance.block).ok_or("missing wire")?;
+        assert_eq!(wire.registers[0].ty, Type::Bits(width));
+    }
+    Ok(())
+}
+
+#[test]
+fn scoped_port_dimensions_respect_local_bindings() -> Result<(), String> {
+    let source = r#"
+block stage<N: u32>(clk, x: bits[{ let N = N + u32:1; N }]) -> bits[{ let N = u32:3; N }] {
+    x as u3
+}
+pub block circuit(clk, x: u5) -> u3 { let q = stage<4>(x); q }
+"#;
+    check_module(&parse_module(source)?)?;
+
+    let unused = r#"
+block stage<N: u32>(clk, x: bits[{ let N = true; N }]) -> bool { true }
+pub block circuit(clk, x: bool) -> bool { x }
+"#;
+    let error = check_module(&parse_module(unused)?).unwrap_err();
+    assert_eq!(error, "block 'stage': expected u32, got bool");
+    Ok(())
+}
+
+#[test]
+fn a_match_pattern_compares_against_the_block_parameter_when_computing_a_width()
+-> Result<(), String> {
+    let source = r#"
+block select<N: u32>(clk, x: bits[match u32:1 { N => u32:4, _ => u32:7 }]) -> u8 { x as u8 }
+pub block circuit(clk, a: u4, b: u7) -> (u8, u8) {
+    let matched = select<1>(a);
+    let unmatched = select<2>(b);
+    (matched, unmatched)
+}
+"#;
+    check_module(&parse_module(source)?)?;
+    Ok(())
+}
+
+#[test]
+fn computed_mixed_struct_dimensions_respect_alias_layout_bounds() -> Result<(), String> {
+    let source = r#"
+type Lane = u16;
+struct Bank<T, Tag: u32> { words: T }
+block make<N: u32>(clk, x: bool) -> Bank<Lane[N + u32:1], 7> {
+    Bank { words: zero!<Lane[N + u32:1]>() }
+}
+pub block circuit(clk, x: bool) -> bool { let q = make<65535>(x); x }
+"#;
+    check_module(&parse_module(&source.replace("make<65535>", "make<7>"))?)?;
+    let error = check_module(&parse_module(source)?).unwrap_err();
+    assert_eq!(
+        error,
+        "block 'circuit': let 'q': call to block 'make': type u16[65536] exceeds maximum concrete type size 1048576"
+    );
     Ok(())
 }

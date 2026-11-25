@@ -986,8 +986,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .function_registry
             .as_deref_mut()
             .ok_or_else(|| format!("cannot specialize '{owner}' in this type annotation"))?;
-        registry.enter(owner)?;
-        let result = stacker::maybe_grow(1024 * 1024, 2 * 1024 * 1024, || {
+        registry.with_definition(owner, |registry| {
             let mut definition =
                 BodyChecker::new(self.decls, self.resolver, self.structs, BodyKind::Function);
             definition.function_position = self
@@ -999,9 +998,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             definition.zero_binding = self.decls.zero_binding(owner);
             definition.function_registry = Some(registry);
             evaluate(&mut definition)
-        });
-        registry.leave();
-        result
+        })
     }
 
     /// Check an explicitly supplied value or evaluate its default in the

@@ -3,22 +3,21 @@
 //! Infer a template's type arguments across all of its data inputs.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use crate::ast::{Expr, Param, Type};
 use crate::typed::{BoundParametricValue, TypedExpr, TypedExprKind as K};
 
-use super::generic_blocks::{Bindings, BlockPortTypes};
+use super::generic_blocks::Bindings;
 use super::struct_parametrics::StructWitness;
 use super::{
-    BlockParametricArguments, BlockTemplate, BodyChecker, BranchSelector, MAX_ELABORATION_DEPTH,
-    MAX_TYPE_SIZE, MatchSelector, has_aggregate_literal,
+    BlockParametricArguments, BlockSpecialization, BlockTemplate, BodyChecker, BranchSelector,
+    MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, MatchSelector, TypeResolver, has_aggregate_literal,
 };
 
-/// Parametric bindings, dimension-resolved ports, and checked inputs of one
-/// block call.
+/// A block's specialized interface and the data arguments checked against it.
 pub(super) struct BlockArguments<'m> {
-    pub(super) parametrics: BlockParametricArguments<'m>,
-    pub(super) concrete_ports: Option<BlockPortTypes>,
+    pub(super) specialization: Rc<BlockSpecialization<'m>>,
     pub(super) inputs: Vec<TypedExpr>,
 }
 
@@ -224,7 +223,7 @@ impl<'m> BodyChecker<'_, 'm> {
             |p: &Param, e: String| format!("input '{}', call to block '{target}': {e}", p.name);
         let mut bindings = Bindings::new(type_params);
         let mut inputs = Vec::with_capacity(formals.len());
-        self.charge_expansion("block port dimensions", template.port_binding_work)?;
+        self.charge_expansion("block input types", template.input_pattern_work)?;
         for (p, arg) in formals.iter().zip(args) {
             // An argument of type T[N] can supply T before a default computes N
             // from that type. The concrete port below checks the array length.
@@ -265,31 +264,37 @@ impl<'m> BodyChecker<'_, 'm> {
             }
         }
         let values = template.apply_value_defaults(self, supplied, &bindings)?;
-        let concrete_ports = template.specialize_dependent_ports(self, &bindings, &values)?;
+        let path = self.specialization.map_or(&[][..], |s| s.path.as_slice());
+        let specialization = self
+            .specializations
+            .as_mut()
+            .expect("block elaboration")
+            .intern(
+                template,
+                BlockParametricArguments {
+                    bindings,
+                    callbacks,
+                    values,
+                },
+                path,
+                self.decls.module_dimensions(target),
+                &mut TypeResolver {
+                    resolver: self.resolver,
+                    structs: self.structs,
+                    functions: self.function_registry.as_deref_mut(),
+                },
+            )
+            .map_err(|e| format!("call to block '{target}': {e}"))?;
         let inputs = inputs
             .into_iter()
-            .zip(
-                concrete_ports
-                    .as_ref()
-                    .map_or(formals, |ports| &ports.params),
-            )
+            .zip(&specialization.interface.params)
             .map(|(input, p)| {
-                let checked = if concrete_ports.is_some() {
-                    self.finish_input(input, &p.ty)
-                } else {
-                    self.bound_block_type(target, &p.ty, &bindings)
-                        .and_then(|ty| self.finish_input(input, &ty))
-                };
-                checked.map_err(|e| input_error(p, e))
+                self.finish_input(input, &p.ty)
+                    .map_err(|e| input_error(p, e))
             })
             .collect::<Result<_, _>>()?;
         Ok(BlockArguments {
-            parametrics: BlockParametricArguments {
-                bindings,
-                callbacks,
-                values,
-            },
-            concrete_ports,
+            specialization,
             inputs,
         })
     }

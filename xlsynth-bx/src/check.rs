@@ -358,6 +358,8 @@ struct BlockTemplate<'m> {
     /// Source nodes visited when specializing a dimension-dependent signature,
     /// including phantom struct arguments. Fixed signatures skip this pass.
     port_binding_work: usize,
+    /// Written input type nodes matched against data on every dependent call.
+    input_pattern_work: usize,
     /// Concrete annotation for each value formal, resolved in declaration
     /// scope.
     value_types: Vec<Type>,
@@ -539,7 +541,6 @@ impl<'m> BlockSpecializations<'m> {
     fn intern(
         &mut self,
         template: &BlockTemplate<'m>,
-        concrete_ports: Option<BlockPortTypes>,
         arguments: BlockParametricArguments<'m>,
         path: &[&'m str],
         dimensions: ModuleDimensions<'_, 'm>,
@@ -578,6 +579,12 @@ impl<'m> BlockSpecializations<'m> {
                 "generic block specialization limit of {MAX_SPECIALIZATIONS} exceeded"
             ));
         }
+        let concrete_ports = template.specialize_dependent_ports(
+            dimensions,
+            types,
+            &bindings,
+            &parametric_values,
+        )?;
         // Distinct explicit bindings can replicate the same wide ports.
         // Charge the fully bound interface before cloning its concrete types.
         let mut formal_nodes = 0;
@@ -939,9 +946,9 @@ fn resolve_type<'m>(
             if let Some(bindings) = bindings {
                 bindings.reject_value(name)?;
                 if bindings.has_unbound_variable(ty)
-                    || (dimensions.block_size_formals.is_some()
+                    || (dimensions.block_formals.is_some()
                         && generic_blocks::has_matching_dimension(ty, &|expr| {
-                            dimensions.is_block_size_formal(expr)
+                            dimensions.is_dependent_block_size(expr)
                         }))
                 {
                     let template = types
@@ -1106,15 +1113,14 @@ fn resolve_type<'m>(
         }
         Type::ParametricBits { signed, width } => {
             let signed = dimensions.signed(signed, is_local, bindings, types)?;
-            if dimensions.is_block_size_formal(width) {
+            if let Some(width) =
+                dimensions.resolve_or_defer_size(width, is_local, bindings, types)?
+            {
+                Ok(Type::Bits { signed, width })
+            } else {
                 Ok(Type::ParametricBits {
                     signed: Box::new(Expr::Bool(signed)),
                     width: width.clone(),
-                })
-            } else {
-                Ok(Type::Bits {
-                    signed,
-                    width: dimensions.size(width, is_local, bindings, types)?,
                 })
             }
         }
@@ -1127,16 +1133,13 @@ fn resolve_type<'m>(
                 types,
                 child_type_budget(remaining)?,
             )?;
-            if dimensions.is_block_size_formal(size) {
+            if let Some(size) = dimensions.resolve_or_defer_size(size, is_local, bindings, types)? {
+                Ok(Type::array(element, size))
+            } else {
                 Ok(Type::ParametricArray {
                     element: Box::new(element),
                     size: size.clone(),
                 })
-            } else {
-                Ok(Type::array(
-                    element,
-                    dimensions.size(size, is_local, bindings, types)?,
-                ))
             }
         }
         Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
@@ -1168,7 +1171,7 @@ impl<'m> TypeResolver<'_, 'm> {
         let ty = match bindings {
             Some(bindings)
                 if bindings.has_unbound_variable(&application)
-                    || (dimensions.block_size_formals.is_some()
+                    || (dimensions.block_formals.is_some()
                         && generic_blocks::has_block_dimension(&application)) =>
             {
                 return Ok(application);
@@ -3601,24 +3604,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
             }
             let call = self.generic_inputs(template, args, &callbacks, values)?;
-            let path = self.specialization.map_or(&[][..], |s| s.path.as_slice());
-            spec = self
-                .specializations
-                .as_mut()
-                .expect("block elaboration")
-                .intern(
-                    template,
-                    call.concrete_ports,
-                    call.parametrics,
-                    path,
-                    self.decls.module_dimensions(target),
-                    &mut TypeResolver {
-                        resolver: self.resolver,
-                        structs: self.structs,
-                        functions: self.function_registry.as_deref_mut(),
-                    },
-                )
-                .map_err(|e| format!("call to block '{target}': {e}"))?;
+            spec = call.specialization;
             prepared = Some(call.inputs.into_iter());
             (spec.name.as_str(), &spec.interface)
         } else {

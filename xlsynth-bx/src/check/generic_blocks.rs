@@ -13,6 +13,7 @@ use crate::ast::{
 use crate::parser::{is_identifier, is_use_identifier};
 use crate::typed::BoundParametricValue;
 
+use super::module_constants::BlockDimensionFormals;
 use super::struct_parametrics::BoundStructArgument;
 use super::{
     BlockCallbackFormal, BlockInterface, BlockTemplate, BodyChecker, MAX_ELABORATION_DEPTH,
@@ -159,8 +160,7 @@ pub(super) struct BlockPortTypes {
     pub(super) result: Type,
 }
 
-/// Only dimensions supplied by block value formals survive declaration
-/// resolution.
+/// Parameter-dependent dimensions survive declaration resolution.
 pub(super) fn has_block_dimension(ty: &Type) -> bool {
     has_matching_dimension(ty, &|_| true)
 }
@@ -259,7 +259,8 @@ impl<'m> BlockTemplate<'m> {
     /// a nominal type with the same name.
     pub(super) fn specialize_dependent_ports(
         &self,
-        caller: &mut BodyChecker<'_, 'm>,
+        dimensions: ModuleDimensions<'_, 'm>,
+        types: &mut TypeResolver<'_, 'm>,
         bindings: &Bindings,
         values: &[BoundParametricValue],
     ) -> Result<Option<BlockPortTypes>, String> {
@@ -267,44 +268,53 @@ impl<'m> BlockTemplate<'m> {
             return Ok(None);
         }
         let block = self.block;
-        let mut definition = BodyChecker::struct_type_scope(
-            caller.decls.module_dimensions(&block.name),
-            caller.resolver,
-            caller.structs,
-            caller.function_registry.as_deref_mut(),
-        );
-        definition.function_type_bindings = Some(bindings.clone());
-        definition
-            .names
-            .extend(block.clock.iter().chain(&block.reset).cloned());
-        definition
-            .names
-            .extend(block.callback_params.iter().map(|p| p.name.clone()));
-        for (formal, value) in block.value_parametrics.iter().zip(values) {
-            definition.bind_parametric_value(&formal.name, value);
-        }
-        // One binding can be expanded by many ports. Bound all the copied
-        // source type arguments together before retaining the concrete ports.
-        let mut copies = Some(Default::default());
-        let mut resolve = |definition: &mut BodyChecker<'_, 'm>, source: &Type| {
-            let ty = definition.resolve_annotation(source, MAX_ELABORATION_DEPTH, &mut copies)?;
-            definition.structs.update_imports(definition.resolver)?;
-            definition.structs.validate_type(&ty)?;
-            Ok::<_, String>(ty)
-        };
-        let params = block
-            .params
-            .iter()
-            .map(|p| {
-                definition.names.insert(p.name.clone());
-                Ok(Param {
-                    name: p.name.clone(),
-                    ty: resolve(&mut definition, &p.ty)?,
+        let registry = types
+            .functions
+            .as_deref_mut()
+            .ok_or_else(|| format!("cannot specialize '{}' in this type annotation", block.name))?;
+        registry.with_definition(&block.name, |registry| {
+            let mut definition = BodyChecker::struct_type_scope(
+                dimensions,
+                types.resolver,
+                types.structs,
+                Some(registry),
+            );
+            definition.charge_expansion("block port dimensions", self.port_binding_work)?;
+            definition.function_type_bindings = Some(bindings.clone());
+            definition
+                .names
+                .extend(block.clock.iter().chain(&block.reset).cloned());
+            definition
+                .names
+                .extend(block.callback_params.iter().map(|p| p.name.clone()));
+            for (formal, value) in block.value_parametrics.iter().zip(values) {
+                definition.bind_parametric_value(&formal.name, value);
+            }
+            // One binding can be expanded by many ports. Bound all the copied
+            // source type arguments together before retaining the concrete
+            // ports.
+            let mut copies = Some(Default::default());
+            let mut resolve = |definition: &mut BodyChecker<'_, 'm>, source: &Type| {
+                let ty =
+                    definition.resolve_annotation(source, MAX_ELABORATION_DEPTH, &mut copies)?;
+                definition.structs.update_imports(definition.resolver)?;
+                definition.structs.validate_type(&ty)?;
+                Ok::<_, String>(ty)
+            };
+            let params = block
+                .params
+                .iter()
+                .map(|p| {
+                    definition.names.insert(p.name.clone());
+                    Ok(Param {
+                        name: p.name.clone(),
+                        ty: resolve(&mut definition, &p.ty)?,
+                    })
                 })
-            })
-            .collect::<Result<_, String>>()?;
-        let result = resolve(&mut definition, &block.result)?;
-        Ok(Some(BlockPortTypes { params, result }))
+                .collect::<Result<_, String>>()?;
+            let result = resolve(&mut definition, &block.result)?;
+            Ok(Some(BlockPortTypes { params, result }))
+        })
     }
 
     /// Resolve module types while retaining the block's symbolic type names
@@ -363,8 +373,17 @@ impl<'m> BlockTemplate<'m> {
             .chain(&block.reset)
             .chain(block.callback_params.iter().map(|p| &p.name))
             .chain(block.value_parametrics.iter().map(|p| &p.name));
+        let formals = BlockDimensionFormals {
+            values: block
+                .value_parametrics
+                .iter()
+                .map(|p| p.name.clone())
+                .collect(),
+            u32_values: size_formals,
+            types: bindings,
+        };
         let mut port_dimensions = dimensions;
-        port_dimensions.block_size_formals = (!size_formals.is_empty()).then_some(&size_formals);
+        port_dimensions.block_formals = Some(&formals);
         let (params, result) = resolve_signature(
             &block.params,
             &block.result,
@@ -373,11 +392,6 @@ impl<'m> BlockTemplate<'m> {
             port_dimensions,
             types,
         )?;
-        let value_names: BTreeSet<_> = block
-            .value_parametrics
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect();
         let mut callback_indices = BTreeMap::new();
         let mut callback_params = Vec::with_capacity(block.callback_params.len());
         for (index, callback) in block.callback_params.iter().enumerate() {
@@ -385,7 +399,7 @@ impl<'m> BlockTemplate<'m> {
             let mut resolve = |ty: &Type| {
                 resolve_type(
                     ty,
-                    &|name| callback_indices.contains_key(name) || value_names.contains(name),
+                    &|name| callback_indices.contains_key(name) || formals.values.contains(name),
                     Some(bindings),
                     dimensions,
                     types,
@@ -415,12 +429,28 @@ impl<'m> BlockTemplate<'m> {
                     .map_err(|e| format!("callable parameter '{}': {e}", signature.name))?;
             }
         }
-        let port_binding_work = {
+        let (input_pattern_work, port_binding_work) = {
             let types = params.iter().map(|p| &p.ty).chain([&result]);
             if types.clone().any(has_block_dimension) {
-                types.map(source_type_nodes).sum()
+                // Specialization revisits every written port, including fixed
+                // expressions that declaration resolution folded to a size.
+                let mut work: usize = types.map(source_type_nodes).sum();
+                let mut expressions = Vec::new();
+                for ty in block.params.iter().map(|p| &p.ty).chain([&block.result]) {
+                    super::type_dependencies(
+                        ty,
+                        |_, _| {},
+                        |expr| expressions.push(SourceNode::Expression(expr)),
+                    );
+                }
+                while let Some(node) = expressions.pop() {
+                    work += 1;
+                    node.push_children(&mut expressions);
+                }
+                let input_work = block.params.iter().map(|p| source_type_nodes(&p.ty)).sum();
+                (input_work, work)
             } else {
-                0
+                (0, 0)
             }
         };
         let ports = BlockPortTypes { params, result };
@@ -455,6 +485,7 @@ impl<'m> BlockTemplate<'m> {
             stages: dimensions.block_stages(block)?,
             ports,
             port_binding_work,
+            input_pattern_work,
             callback_params,
             value_types,
             required_arguments,
@@ -915,7 +946,58 @@ fn canonical_argument(ty: &Type) -> Type {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::check::MAX_TYPE_SIZE;
+    use crate::ImportOptions;
+    use crate::check::{
+        BlockParametricArguments, BlockSpecializations, Declarations, FunctionSpecializations,
+        ImportResolver, MAX_TYPE_SIZE,
+    };
+    use crate::parser::parse_module;
+    use xlsynth_pir::IrValue;
+
+    #[test]
+    fn distinct_block_port_bindings_share_the_constant_evaluation_budget() -> Result<(), String> {
+        let module = parse_module("block stage<N: u32>(xs: u8[N + u32:1]) -> bool { true }")?;
+        let block = &module.blocks[0];
+        let decls = Declarations::default();
+        let dimensions = decls.module_dimensions(&block.name);
+        let mut functions = FunctionSpecializations::new(BTreeSet::new());
+        // Folding the addition fits once, including its two scalar operands.
+        functions.constant_budgets.required = 5;
+        let mut resolver = ImportResolver::new(&[], &ImportOptions::default())?;
+        let mut types = TypeResolver {
+            resolver: &mut resolver,
+            structs: &mut StructTable::default(),
+            functions: Some(&mut functions),
+        };
+        let bindings = Bindings::new(&block.type_params);
+        let template = BlockTemplate::new(block, &bindings, dimensions, &mut types)?;
+        let mut blocks = BlockSpecializations::new(BTreeSet::new());
+        let mut intern = |n| {
+            let args = BlockParametricArguments {
+                bindings: bindings.clone(),
+                values: vec![BoundParametricValue {
+                    ty: Type::unsigned(32),
+                    value: IrValue::u32(n),
+                }],
+                callbacks: vec![],
+            };
+            blocks.intern(&template, args, &[], dimensions, &mut types)
+        };
+        let first = intern(1)?;
+        assert_eq!(
+            first.interface.params[0].ty,
+            Type::array(Type::unsigned(8), 2)
+        );
+        assert!(Rc::ptr_eq(&first, &intern(1)?));
+        assert_eq!(
+            intern(2).map(|_| ()),
+            Err(format!(
+                "constant evaluation exceeds the work limit of {MAX_TYPE_SIZE}"
+            ))
+        );
+        assert!(!functions.checking_definition());
+        Ok(())
+    }
 
     #[test]
     fn substitution_checks_combined_size_and_depth_before_copying() -> Result<(), String> {
