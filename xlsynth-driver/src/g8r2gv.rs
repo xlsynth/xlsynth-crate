@@ -486,7 +486,7 @@ pub(crate) fn map_design(
             recovery: recover.then(|| ResizeOptions {
                 timing,
                 max_area_growth: 0.0,
-                max_upsize_rounds: 0,
+                max_timing_rounds: 0,
                 timing_evaluation_budget: Some(0),
                 ..Default::default()
             }),
@@ -614,13 +614,13 @@ mod tests {
                 (
                     "electrical-min-area",
                     "nearest-area",
-                    RecoveryCellMenu::ElectricalMinArea,
+                    RecoveryCellMenu::CheapestGroupsThenFastest,
                     TimingCellMenu::NearestArea,
                 ),
                 (
                     "electrical-min-area",
                     "delay-bands-fastest-first",
-                    RecoveryCellMenu::ElectricalMinArea,
+                    RecoveryCellMenu::CheapestGroupsThenFastest,
                     TimingCellMenu::DelayBandsFastestFirst,
                 ),
             ] {

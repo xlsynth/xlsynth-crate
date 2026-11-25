@@ -76,7 +76,7 @@ fn map_before_adaptive_sizing(dir: &Path) -> Result<Vec<u8>> {
     };
     let sizing = ResizeOptions {
         timing,
-        recovery_cell_menu: RecoveryCellMenu::ElectricalMinArea,
+        recovery_cell_menu: RecoveryCellMenu::CheapestGroupsThenFastest,
         recovery_cell_limit: Some(12),
         ..Default::default()
     };
@@ -101,7 +101,7 @@ fn map_before_adaptive_sizing(dir: &Path) -> Result<Vec<u8>> {
             recovery: Some(ResizeOptions {
                 timing,
                 max_area_growth: 0.0,
-                max_upsize_rounds: 0,
+                max_timing_rounds: 0,
                 timing_evaluation_budget: Some(0),
                 ..Default::default()
             }),

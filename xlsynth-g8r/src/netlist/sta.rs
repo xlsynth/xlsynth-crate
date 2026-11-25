@@ -844,6 +844,11 @@ fn validate_instance_functional_timing_coverage(
 }
 
 impl<'a> PreparedStaLibrary<'a> {
+    /// The immutable Liberty snapshot whose cell indices this preparation uses.
+    pub(crate) fn library(&self) -> &'a crate::liberty_model::Library {
+        self.library
+    }
+
     /// Validates related-pin identities on every combinational output arc,
     /// including outputs that are unconnected in a particular instance.
     fn timing_related_input_pins(&self, cell_idx: usize) -> Result<&HashSet<String>> {

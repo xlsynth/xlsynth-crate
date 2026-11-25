@@ -14,6 +14,27 @@ const ELECTRICAL_COMPARISON_TOLERANCE: f64 = 1e-9;
 const NEAR_CRITICAL_ENDPOINT_LIMIT: usize = 32;
 const NEAR_CRITICAL_WINDOW_FRACTION: f64 = 0.05;
 
+/// Path class used as a resizing objective. STA stores these in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TimingBoundary {
+    InputToOutput = 0,
+    InputToRegister = 1,
+    RegisterToOutput = 2,
+    RegisterToRegister = 3,
+}
+
+impl TimingBoundary {
+    const FALLBACK_BOUNDARIES: [Self; 3] = [
+        Self::InputToOutput,
+        Self::InputToRegister,
+        Self::RegisterToOutput,
+    ];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// Stable total ordering for timing scores and search priorities.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RankedIndex(f64, usize);
@@ -62,13 +83,62 @@ impl TimingTieBreak {
     }
 }
 
+/// The objective and tie-break before a trial. A trial may move the worst
+/// boundary, but its near-critical sum must still use the original boundary.
+#[derive(Clone, Copy)]
+pub(super) struct TimingProgress {
+    boundary: TimingBoundary,
+    delay: f64,
+    tie_break: TimingTieBreak,
+}
+
+/// Timing progress and the dimensionless ratio used to price area growth.
+pub(super) struct TimingImprovement {
+    pub improved: bool,
+    pub ratio: f64,
+}
+
+impl TimingProgress {
+    pub fn capture(sta: &IncrementalSta<'_>) -> Self {
+        let boundary = sta.objective();
+        Self {
+            boundary,
+            delay: sta.score().values()[boundary.index()],
+            tie_break: sta.secondary(boundary),
+        }
+    }
+
+    pub fn compare(self, sta: &IncrementalSta<'_>) -> TimingImprovement {
+        self.compare_values(
+            sta.score().values()[sta.objective().index()],
+            sta.secondary(self.boundary),
+        )
+    }
+
+    fn compare_values(self, delay: f64, tie_break: TimingTieBreak) -> TimingImprovement {
+        let faster = delay < self.delay - TIMING_COMPARISON_TOLERANCE;
+        let ratio = if self.delay <= 0.0 {
+            // A nonpositive characterized delay cannot justify extra area.
+            1.0
+        } else if faster {
+            delay / self.delay
+        } else {
+            tie_break.relative_to(self.tie_break)
+        };
+        TimingImprovement {
+            improved: faster || (delay <= self.delay && tie_break.improves(self.tie_break)),
+            ratio,
+        }
+    }
+}
+
 /// Resizing policy adapter; the timing engine owns all mutations and rollback.
 pub(super) trait ResizeTimingPolicy {
-    fn objective(&self) -> usize;
-    fn secondary(&self, objective: usize) -> TimingTieBreak;
+    fn objective(&self) -> TimingBoundary;
+    fn secondary(&self, objective: TimingBoundary) -> TimingTieBreak;
     fn critical_instances(
         &self,
-        objective: usize,
+        objective: TimingBoundary,
         limit: usize,
         eligible: impl Fn(usize) -> bool,
     ) -> Vec<usize>;
@@ -87,37 +157,39 @@ pub(super) trait ResizeTimingPolicy {
 impl ResizeTimingPolicy for IncrementalSta<'_> {
     /// Selects register-to-register timing when reachable. Otherwise the
     /// longest currently reachable path determines the boundary.
-    fn objective(&self) -> usize {
-        if self.endpoint_maximum_count(3) > 0 {
-            3
+    fn objective(&self) -> TimingBoundary {
+        if self.endpoint_maximum_count(TimingBoundary::RegisterToRegister.index()) > 0 {
+            TimingBoundary::RegisterToRegister
         } else {
             let delays = self.score().values();
-            (0..3)
-                .filter(|i| self.endpoint_maximum_count(*i) > 0)
-                .max_by(|a, b| delays[*a].total_cmp(&delays[*b]))
-                .unwrap_or(0)
+            TimingBoundary::FALLBACK_BOUNDARIES
+                .into_iter()
+                .filter(|i| self.endpoint_maximum_count(i.index()) > 0)
+                .max_by(|a, b| delays[a.index()].total_cmp(&delays[b.index()]))
+                .unwrap_or(TimingBoundary::InputToOutput)
         }
     }
 
     /// Breaks delay ties without losing progress on large critical plateaus.
-    fn secondary(&self, objective: usize) -> TimingTieBreak {
+    fn secondary(&self, objective: TimingBoundary) -> TimingTieBreak {
         // When a registered path is absent, tied critical endpoints can lie in
         // different boundary classes. Count them together so resolving one
         // tied class remains a useful step toward lowering the maximum.
-        let worst_count = if objective == 3 {
-            self.endpoint_maximum_count(3)
+        let worst_count = if objective == TimingBoundary::RegisterToRegister {
+            self.endpoint_maximum_count(objective.index())
         } else {
             let delays = self.score().values();
-            let worst = delays[self.objective()];
-            (0..3)
-                .filter(|&i| delays[i] == worst)
-                .map(|i| self.endpoint_maximum_count(i))
+            let worst = delays[self.objective().index()];
+            TimingBoundary::FALLBACK_BOUNDARIES
+                .into_iter()
+                .filter(|&i| delays[i.index()] == worst)
+                .map(|i| self.endpoint_maximum_count(i.index()))
                 .sum()
         };
         TimingTieBreak {
             worst_count,
             near_sum: self
-                .endpoint_arrivals(objective)
+                .endpoint_arrivals(objective.index())
                 .rev()
                 .take(NEAR_CRITICAL_ENDPOINT_LIMIT)
                 .map(|(_, arrival)| arrival)
@@ -132,11 +204,12 @@ impl ResizeTimingPolicy for IncrementalSta<'_> {
     /// consume the limit of selectable candidates.
     fn critical_instances(
         &self,
-        objective: usize,
+        objective: TimingBoundary,
         limit: usize,
         eligible: impl Fn(usize) -> bool,
     ) -> Vec<usize> {
         let mut queue = BTreeSet::new();
+        let objective = objective.index();
         let worst = self.score().values()[objective];
         for (endpoint, arrival) in self
             .endpoint_arrivals(objective)
@@ -270,4 +343,96 @@ fn electrical_worsens(new: ElectricalViolations, old: ElectricalViolations) -> b
     new.capacitance > old.capacitance + ELECTRICAL_COMPARISON_TOLERANCE
         || new.transition > old.transition + ELECTRICAL_COMPARISON_TOLERANCE
         || new.fanout > old.fanout + ELECTRICAL_COMPARISON_TOLERANCE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::liberty::model::{library_from_proto, library_to_proto};
+    use crate::netlist::io::read_gv_from_str;
+
+    /// Two independently timed path classes, with a zero-delay capture flop.
+    fn path_class_library() -> Result<Library> {
+        let mut proto = library_to_proto(super::super::tests::library()?)?;
+        for cell in &mut proto.cells {
+            let value = match cell.name.as_str() {
+                "BUF1" => 100.0,
+                "BUF2" => 99.0,
+                "BUF4" => 96.0,
+                "DFF1" => 0.0,
+                _ => continue,
+            };
+            for pin in &mut cell.pins {
+                for arc in &mut pin.timing_arcs {
+                    for table in &mut arc.tables {
+                        table.values.fill(value);
+                    }
+                }
+            }
+        }
+        Ok(library_from_proto(proto)?)
+    }
+
+    #[test]
+    fn timing_progress_follows_the_moving_bottleneck() -> Result<()> {
+        let lib = path_class_library()?;
+        let net = read_gv_from_str(
+            "module m(input clk,input a,input b,output y,output q); wire d; BUF1 direct(.A(a),.Y(y)); BUF2 capture_path(.A(b),.Y(d)); DFF1 capture(.CLK(clk),.D(d),.Q(q)); endmodule",
+        )?;
+        let mut sta = IncrementalSta::new(
+            &net.modules[0],
+            &net.nets,
+            &net.interner,
+            &lib,
+            StaOptions::default(),
+        )?;
+        let before = TimingProgress::capture(&sta);
+        assert_eq!(before.boundary, TimingBoundary::InputToOutput);
+        assert_eq!(before.delay, 100.0);
+        let fast = lib.cells.iter().position(|c| c.name == "BUF4").unwrap();
+        assert_eq!(
+            sta.trial(0, fast, usize::MAX, None, |after| {
+                assert_eq!(after.objective(), TimingBoundary::InputToRegister);
+                let progress = before.compare(after);
+                assert!(progress.improved);
+                assert_eq!(progress.ratio, 0.99);
+                true
+            })?,
+            TrialOutcome::Accepted
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn timing_progress_counts_tied_endpoints_across_path_classes() -> Result<()> {
+        let lib = path_class_library()?;
+        let net = read_gv_from_str(
+            "module m(input clk,input a,input b,output y,output q); wire d; BUF1 direct(.A(a),.Y(y)); BUF1 capture_path(.A(b),.Y(d)); DFF1 capture(.CLK(clk),.D(d),.Q(q)); endmodule",
+        )?;
+        let mut sta = IncrementalSta::new(
+            &net.modules[0],
+            &net.nets,
+            &net.interner,
+            &lib,
+            StaOptions::default(),
+        )?;
+        let before = TimingProgress::capture(&sta);
+        assert_eq!(before.boundary, TimingBoundary::InputToRegister);
+        assert_eq!(before.tie_break.worst_count, 2);
+        let fast = lib.cells.iter().position(|c| c.name == "BUF4").unwrap();
+        assert_eq!(
+            sta.trial(1, fast, usize::MAX, None, |after| {
+                assert_eq!(after.objective(), TimingBoundary::InputToOutput);
+                let secondary = after.secondary(before.boundary);
+                assert_eq!(secondary.worst_count, 1);
+                assert_eq!(secondary.near_sum, 96.0);
+                let progress = before.compare(after);
+                assert!(progress.improved);
+                assert_eq!(progress.ratio, 0.5);
+                true
+            })?,
+            TrialOutcome::Accepted
+        );
+        Ok(())
+    }
 }

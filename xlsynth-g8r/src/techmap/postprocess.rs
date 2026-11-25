@@ -14,9 +14,7 @@ use crate::netlist::fanout_opt::{
     FanoutOptimizationOptions, FanoutOptimizationReport, optimize_fanout,
 };
 use crate::netlist::mapped::MappedNetlist;
-use crate::netlist::resize::{
-    RecoveryWindowCheckpoint, ResizeOptions, ResizeReport, resize_netlist_with_remaining_budget,
-};
+use crate::netlist::resize::{ResizeOptions, ResizeReport, resize_netlist_with_remaining_budget};
 use anyhow::{Context, Result};
 
 /// Electrical optimization stages requested after covering, in execution order.
@@ -114,7 +112,6 @@ impl PostMappingOptions {
                     &mut mapped.interner,
                     library,
                     options,
-                    RecoveryWindowCheckpoint::Latest,
                 )
                 .context("mapped area recovery failed")
             })
@@ -212,7 +209,7 @@ mod tests {
             let options = PostMappingOptions {
                 fanout,
                 recovery: Some(ResizeOptions {
-                    max_upsize_rounds: 0,
+                    max_timing_rounds: 0,
                     recovery_evaluation_budget: Some(1),
                     ..Default::default()
                 }),

@@ -278,8 +278,9 @@ pub fn check(data: &[u8]) -> ResizeReport {
             reset: None,
             max_operations: 24,
             // The structural mapper requires literal-free cell inputs/outputs.
-            // Keeping expressions unfolded and omitting constants satisfies that
-            // contract without filtering particular graph shapes or resize moves.
+            // Keeping expressions unfolded and omitting constants satisfies
+            // that contract without filtering particular graph shapes or resize
+            // moves.
             builder_mode: RandomGateBuilderMode::Unoptimized,
             allow_constants: false,
             ..RandomGateOptions::default()
@@ -318,8 +319,8 @@ pub fn check(data: &[u8]) -> ResizeReport {
             wire_load: Default::default(),
         },
         max_area_growth: [0.0, 0.02, 0.5][rng.gen_range(0..3)],
-        max_upsize_rounds: rng.gen_range(0..=8),
-        max_downsize_rounds: rng.gen_range(0..=8),
+        max_timing_rounds: rng.gen_range(0..=8),
+        max_recovery_rounds: rng.gen_range(0..=8),
         max_candidate_sites: rng.gen_bool(0.5).then(|| rng.gen_range(1..=64)),
         max_cell_candidates: rng.gen_range(1..=8),
         timing_evaluation_budget: rng.gen_bool(0.5).then(|| rng.gen_range(0..=4096)),

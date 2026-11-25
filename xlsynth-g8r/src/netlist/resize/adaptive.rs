@@ -3,104 +3,19 @@
 //! Repeat timing search and area recovery with fixed registers until the
 //! netlist stops changing or the iteration limit is reached.
 
-use std::collections::{HashMap, HashSet};
-
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::{
-    RecoveryCellMenu, RecoveryWindowCheckpoint, ResizeOptions, ResizeReport, TimingCellMenu,
-    resize_netlist_with_recovery_checkpoint,
+    RecoveryCellMenu, RecoveryWindowCheckpoint, RecoveryWorkPolicy, ResizeOptions, ResizeReport,
+    TimingCellMenu, resize_netlist,
 };
 use crate::liberty::Library;
-use crate::liberty_model::Cell;
 use crate::netlist::emit::emit_module_as_netlist_text;
-use crate::netlist::io::{ParsedNetlist, read_gv_from_str, select_module};
+use crate::netlist::io::{read_gv_from_str, select_module};
 use crate::netlist::mapped::MappedNetlist;
 use crate::netlist::sta::StaOptions;
-
-/// Checks each mapped master and removes conflicting shared masters from
-/// the alternate sizing view before the search chooses replacements.
-pub fn prepare_sizing_view(
-    mapped: &ParsedNetlist,
-    mapping: &Library,
-    sizing: &mut Library,
-) -> Result<()> {
-    let module = select_module(mapped, None)?;
-    let name = mapped
-        .interner
-        .resolve(module.name)
-        .context("missing module name")?;
-    crate::netlist::mapped::validate_module_name(name, sizing).map_err(anyhow::Error::msg)?;
-    let mut cells = HashMap::with_capacity(sizing.cells.len());
-    for cell in &sizing.cells {
-        ensure!(
-            cells.insert(cell.name.as_str(), cell).is_none(),
-            "duplicate Liberty cell name '{}' in sizing library",
-            cell.name
-        );
-    }
-    let mut incompatible = HashSet::new();
-    for cell in &mapping.cells {
-        if cells
-            .get(cell.name.as_str())
-            .is_some_and(|other| !compatible_cell(cell, mapping, other, sizing))
-        {
-            incompatible.insert(cell.name.as_str());
-        }
-    }
-    for instance in &module.instances {
-        let name = mapped
-            .interner
-            .resolve(instance.type_name)
-            .context("missing cell name")?;
-        ensure!(
-            cells.contains_key(name),
-            "sizing library is missing mapped cell '{name}'"
-        );
-        ensure!(
-            !incompatible.contains(name),
-            "sizing library has incompatible behavior or pins for cell '{name}'"
-        );
-    }
-    sizing
-        .cells
-        .retain(|cell| !incompatible.contains(cell.name.as_str()));
-    Ok(())
-}
-
-/// Exact pin equations cover clock gates and large cells outside ordinary
-/// sizing families. For different equations use the resizer's Boolean test.
-fn compatible_cell(cell: &Cell, mapping: &Library, other: &Cell, sizing: &Library) -> bool {
-    if cell.sequential != other.sequential || cell.clock_gate != other.clock_gate {
-        return false;
-    }
-    if cell.unsupported_semantics == other.unsupported_semantics
-        && pin_equations(cell, mapping) == pin_equations(other, sizing)
-    {
-        return true;
-    }
-    super::cell_signature(cell, mapping)
-        .is_some_and(|signature| super::cell_signature(other, sizing) == Some(signature))
-}
-
-fn pin_equations<'a>(cell: &'a Cell, library: &'a Library) -> Vec<(&'a str, i32, bool, &'a str)> {
-    let mut pins: Vec<_> = cell
-        .pins
-        .iter()
-        .map(|pin| {
-            (
-                library.resolve_string(&pin.name),
-                pin.direction,
-                pin.is_clocking_pin,
-                library.resolve_string(&pin.function),
-            )
-        })
-        .collect();
-    pins.sort_unstable();
-    pins
-}
 
 /// Constraints and cell shortlists shared by the adaptive sizing passes.
 #[derive(Clone, Debug)]
@@ -119,17 +34,7 @@ pub struct AdaptiveResizeOptions {
 
 impl Default for AdaptiveResizeOptions {
     fn default() -> Self {
-        Self {
-            timing: StaOptions {
-                primary_input_transition: 0.01,
-                module_output_load: 0.01,
-                ..StaOptions::default()
-            },
-            timing_cell_menu: TimingCellMenu::DelayBandsFastestFirst,
-            recovery_cell_menu: RecoveryCellMenu::ElectricalMinArea,
-            recovery_cell_limit: 12,
-            record_gate_hashes: false,
-        }
+        RegisteredDelayPolicy::default_options()
     }
 }
 
@@ -189,24 +94,12 @@ pub fn finish_mapped_netlist(
             .then(|| format!("{:x}", Sha256::digest(gate)))
     };
     let mapped_sha256 = hash(&mapped_gv);
-    // Timing trials and recovery both keep the register masters fixed.
-    let mixed_options = ResizeOptions {
-        timing_cell_menu: options.timing_cell_menu,
-        max_upsize_rounds: 10,
-        max_downsize_rounds: 4,
-        max_area_growth: 0.02,
-        timing_evaluation_budget: Some(250_000),
-        timing: options.timing,
-        recovery_cell_menu: options.recovery_cell_menu,
-        recovery_cell_limit: Some(options.recovery_cell_limit),
-        resize_registers: false,
-        ..ResizeOptions::default()
-    };
+    let policy = RegisteredDelayPolicy::new(options);
     let mixed = run_epochs(
         &mut mapped_gv,
         module_name,
         library,
-        &mixed_options,
+        &policy,
         options.record_gate_hashes,
     )?;
     let final_sha256 = hash(&mapped_gv);
@@ -225,26 +118,70 @@ pub fn finish_mapped_netlist(
     })
 }
 
+/// Registered delay mapping repeatedly searches timing and recovers area with
+/// fixed register masters. The area and work allowances restart each epoch.
+struct RegisteredDelayPolicy {
+    max_epochs: usize,
+    resize: ResizeOptions,
+}
+
+impl RegisteredDelayPolicy {
+    /// Defaults exposed to callers before their explicit CLI or API overrides.
+    fn default_options() -> AdaptiveResizeOptions {
+        AdaptiveResizeOptions {
+            timing: StaOptions {
+                primary_input_transition: 0.01,
+                module_output_load: 0.01,
+                ..StaOptions::default()
+            },
+            timing_cell_menu: TimingCellMenu::DelayBandsFastestFirst,
+            recovery_cell_menu: RecoveryCellMenu::CheapestGroupsThenFastest,
+            recovery_cell_limit: 12,
+            record_gate_hashes: false,
+        }
+    }
+
+    fn new(options: &AdaptiveResizeOptions) -> Self {
+        Self {
+            max_epochs: 46,
+            resize: ResizeOptions {
+                timing_cell_menu: options.timing_cell_menu,
+                max_cell_candidates: 8,
+                max_timing_rounds: 10,
+                max_recovery_rounds: 4,
+                max_area_growth: 0.02,
+                timing_evaluation_budget: Some(250_000),
+                timing: options.timing,
+                recovery_cell_menu: options.recovery_cell_menu,
+                recovery_cell_limit: Some(options.recovery_cell_limit),
+                recovery_work_policy: RecoveryWorkPolicy::Renewable {
+                    checkpoint: RecoveryWindowCheckpoint::Tightest,
+                },
+                resize_registers: false,
+                ..ResizeOptions::default()
+            },
+        }
+    }
+}
+
 fn run_epochs(
     gate: &mut String,
     module_name: Option<&str>,
     library: &Library,
-    options: &ResizeOptions,
+    policy: &RegisteredDelayPolicy,
     record_gate_hashes: bool,
 ) -> Result<AdaptivePhaseReport> {
-    const MAX_EPOCHS: usize = 46;
     let mut epochs = Vec::new();
     let mut epoch_gate_sha256 = record_gate_hashes.then(Vec::new);
     let mut stop = AdaptiveStopReason::EpochCap;
-    for epoch in 1..=MAX_EPOCHS {
+    for epoch in 1..=policy.max_epochs {
         let (next_gate, report) = edit_gate(gate, module_name, |mapped| {
-            resize_netlist_with_recovery_checkpoint(
+            resize_netlist(
                 &mut mapped.module,
                 &mapped.nets,
                 &mut mapped.interner,
                 library,
-                options,
-                RecoveryWindowCheckpoint::Tightest,
+                &policy.resize,
             )
         })
         .with_context(|| format!("Adaptive sizing epoch {epoch}"))?;

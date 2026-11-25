@@ -99,28 +99,40 @@ pub fn load_ff_in_library_units(library: &Library, ff: f64) -> Result<f64, Strin
     Ok(load)
 }
 
+/// External timing constraints expressed in one Liberty library's units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IoTimingConstraints {
+    pub primary_input_transition: f64,
+    pub module_output_load: f64,
+}
+
 /// Express a resolved input transition and output load in a second timing
 /// view's units. Legacy views that both omit a unit share the same numerical
 /// convention. Differing declarations require known physical units.
 pub fn convert_io_constraints(
     from: &Library,
     to: &Library,
-    input_transition: f64,
-    output_load: f64,
-) -> Result<(f64, f64), String> {
+    constraints: IoTimingConstraints,
+) -> Result<IoTimingConstraints, String> {
     let unspecified = LibraryUnits::default();
     let from = from.units.as_ref().unwrap_or(&unspecified);
     let to = to.units.as_ref().unwrap_or(&unspecified);
-    let transition = convert_units(input_transition, &from.time_unit, &to.time_unit, |unit| {
-        unit_scale(unit, 's', "time")
-    })?;
+    let transition = convert_units(
+        constraints.primary_input_transition,
+        &from.time_unit,
+        &to.time_unit,
+        |unit| unit_scale(unit, 's', "time"),
+    )?;
     let load = convert_units(
-        output_load,
+        constraints.module_output_load,
         &from.capacitance_unit,
         &to.capacitance_unit,
         capacitance_unit_in_ff,
     )?;
-    Ok((transition, load))
+    Ok(IoTimingConstraints {
+        primary_input_transition: transition,
+        module_output_load: load,
+    })
 }
 
 fn convert_units(
@@ -204,17 +216,25 @@ mod tests {
         from.units = None;
         let mut to = library();
         to.units = Some(LibraryUnits::default());
+        let constraints = IoTimingConstraints {
+            primary_input_transition: 0.01,
+            module_output_load: 0.004,
+        };
         assert_eq!(
-            convert_io_constraints(&from, &to, 0.01, 0.004).unwrap(),
-            (0.01, 0.004)
+            convert_io_constraints(&from, &to, constraints).unwrap(),
+            constraints
         );
         // A physical value in a declared unit cannot be inferred from an
         // unspecified unit, except that a zero constraint scales to zero.
         to.units.as_mut().unwrap().time_unit = "1ps".into();
-        assert!(convert_io_constraints(&from, &to, 0.01, 0.004).is_err());
+        assert!(convert_io_constraints(&from, &to, constraints).is_err());
+        let zero_transition = IoTimingConstraints {
+            primary_input_transition: 0.0,
+            ..constraints
+        };
         assert_eq!(
-            convert_io_constraints(&from, &to, 0.0, 0.004).unwrap(),
-            (0.0, 0.004)
+            convert_io_constraints(&from, &to, zero_transition).unwrap(),
+            zero_transition
         );
     }
 

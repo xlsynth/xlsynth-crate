@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shortlists compatible cells using a cheap loaded-path estimate.
-//! The existing incremental STA still decides every actual replacement.
+//! Bounded compatible-cell nomination. Estimates order trials; incremental STA
+//! decides whether each replacement is legal and worthwhile.
 
 use std::collections::HashMap;
 
+use super::{AREA_COMPARISON_TOLERANCE, CellFamilies, ResizeOptions};
 use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::sta::incremental::IncrementalSta;
 use crate::netlist::sta::{PreparedStaLibrary, fixed_pin_delays};
@@ -15,10 +16,9 @@ pub enum RecoveryCellMenu {
     /// First cells in increasing (area, name) order.
     #[default]
     Area,
-    /// Shortlist the fastest cell at each low cost. Reserve the last
-    /// trial for the fastest remaining cell. One trial takes the first
-    /// minimum by name without estimating delay.
-    ElectricalMinArea,
+    /// The fastest cell in each cheap area group, then the fastest remaining
+    /// cell. A single trial takes the minimum-area cell by name.
+    CheapestGroupsThenFastest,
 }
 
 /// How timing search nominates cells for its bounded, exact timing trials.
@@ -32,82 +32,217 @@ pub enum TimingCellMenu {
     DelayBandsFastestFirst,
 }
 
-/// Per-phase estimates at a fixed transition. Changes in the downstream load
-/// select a distinct cache entry. The timing engine still prices each trial.
-#[derive(Default)]
-pub(super) struct LoadedPaths {
+/// One phase's fixed library and input transition, with delay estimates keyed
+/// by candidate and the exact output load. Borrow STA only for each query.
+struct CellDelayEstimates<'a> {
+    library: &'a Library,
+    transition: f64,
     delays: HashMap<(usize, u64), Option<f64>>,
-    ranked_by_delay: Vec<(usize, f64)>,
 }
 
-impl LoadedPaths {
-    /// Estimate the slowest arc through the candidate at its output load.
-    fn cost(
+impl<'a> CellDelayEstimates<'a> {
+    fn new(library: &'a Library, transition: f64) -> Self {
+        Self {
+            library,
+            transition,
+            delays: HashMap::new(),
+        }
+    }
+
+    /// Estimate the worst input-to-output arc at the current load. The caller
+    /// must use STA prepared from this selector's library.
+    fn estimated_delay(
         &mut self,
         cell: usize,
         load: f64,
-        transition: f64,
-        lib: &Library,
         prepared: &PreparedStaLibrary<'_>,
     ) -> Option<f64> {
         *self
             .delays
             .entry((cell, load.to_bits()))
-            .or_insert_with(|| loaded_path_delay(lib, prepared, cell, transition, load))
+            .or_insert_with(|| {
+                loaded_path_delay(self.library, prepared, cell, self.transition, load)
+            })
     }
+}
 
-    /// Select eligible nominees and order them for bounded incremental STA
-    /// trials.
-    pub(super) fn timing_shortlist(
-        &mut self,
-        candidates: &mut Vec<usize>,
-        width: usize,
-        sta: &IncrementalSta<'_>,
-        instance: usize,
-        options: &super::ResizeOptions,
-        lib: &Library,
-    ) {
-        if options.timing_cell_menu == TimingCellMenu::DelayBandsFastestFirst
-            && self.delay_band_shortlist(candidates, width, sta, instance, options, lib)
-        {
-            return;
+/// Nominates compatible, distinct, eligible cells in deterministic trial order.
+/// Library, families, transition, menus, and limits are fixed for the phase.
+/// Returned indices belong to the same library as the STA instance.
+pub(super) struct CandidateSelector<'a> {
+    library: &'a Library,
+    families: &'a CellFamilies,
+    options: &'a ResizeOptions,
+    estimates: CellDelayEstimates<'a>,
+    ranked_by_delay: Vec<(usize, f64)>,
+    recovery_menus: HashMap<(usize, u64), Vec<usize>>,
+    choices: Vec<usize>,
+}
+
+impl<'a> CandidateSelector<'a> {
+    pub(super) fn new<'lib: 'a>(
+        prepared: &PreparedStaLibrary<'lib>,
+        families: &'a CellFamilies,
+        options: &'a ResizeOptions,
+    ) -> Self {
+        let library = prepared.library();
+        Self {
+            library,
+            families,
+            options,
+            estimates: CellDelayEstimates::new(library, options.timing.primary_input_transition),
+            ranked_by_delay: Vec::new(),
+            recovery_menus: HashMap::new(),
+            choices: Vec::new(),
         }
-        let current_area = lib.cells[sta.cell_indices()[instance]].area;
-        candidates.sort_by(|&a, &b| {
-            (lib.cells[a].area - current_area)
-                .abs()
-                .total_cmp(&(lib.cells[b].area - current_area).abs())
-                .then_with(|| lib.cells[a].name.cmp(&lib.cells[b].name))
-        });
     }
 
-    /// Anchor the fastest cell, then take the minimum-area cell in each
-    /// equal-rank band of the remaining candidates. Missing estimates rank
-    /// last. Without any finite estimate, preserve the full eligible list.
+    /// Select timing candidates after applying the pass-wide area allowance.
+    pub(super) fn timing_candidates(
+        &mut self,
+        instance: usize,
+        sta: &IncrementalSta<'_>,
+        area: f64,
+        area_limit: f64,
+    ) -> &[usize] {
+        debug_assert!(std::ptr::eq(self.library, sta.prepared_library().library()));
+        let current = sta.cell_indices()[instance];
+        self.choices.clear();
+        self.choices.extend(
+            self.families
+                .alternatives(current)
+                .iter()
+                .copied()
+                .filter(|&cell| {
+                    cell != current
+                        && area - self.library.cells[current].area + self.library.cells[cell].area
+                            <= area_limit + AREA_COMPARISON_TOLERANCE
+                }),
+        );
+        let width = self.options.max_cell_candidates;
+        if self.options.timing_cell_menu != TimingCellMenu::DelayBandsFastestFirst
+            || !self.delay_band_shortlist(instance, sta, width)
+        {
+            let current_area = self.library.cells[current].area;
+            self.choices.sort_by(|&a, &b| {
+                (self.library.cells[a].area - current_area)
+                    .abs()
+                    .total_cmp(&(self.library.cells[b].area - current_area).abs())
+                    .then_with(|| self.library.cells[a].name.cmp(&self.library.cells[b].name))
+            });
+        }
+        self.choices.truncate(width);
+        &self.choices
+    }
+
+    /// Select smaller recovery candidates, preserving area order when the full
+    /// family fits, only one trial is allowed, or delay estimates are
+    /// unavailable.
+    pub(super) fn recovery_candidates(
+        &mut self,
+        instance: usize,
+        sta: &IncrementalSta<'_>,
+        area: f64,
+        area_limit: f64,
+    ) -> &[usize] {
+        debug_assert!(std::ptr::eq(self.library, sta.prepared_library().library()));
+        let current = sta.cell_indices()[instance];
+        let width = self
+            .options
+            .recovery_cell_limit
+            .unwrap_or(self.options.max_cell_candidates);
+        let family = self.families.alternatives(current);
+        let end = family.partition_point(|&cell| {
+            self.library.cells[cell].area < self.library.cells[current].area
+        });
+        let eligible = &family[..end];
+        let shortlist = if eligible.len() <= width
+            || width <= 1
+            || self.options.recovery_cell_menu == RecoveryCellMenu::Area
+        {
+            eligible
+        } else if let Some(load) = sta.single_output_load(instance) {
+            let estimates = &mut self.estimates;
+            let lib = self.library;
+            self.recovery_menus
+                .entry((current, load.to_bits()))
+                .or_insert_with(|| {
+                    let mut fastest = |cells: &[usize]| {
+                        let mut best = cells[0];
+                        let mut best_delay = f64::INFINITY;
+                        for &cell in cells {
+                            // Missing estimates and equal-delay ties preserve
+                            // area/name order.
+                            if let Some(delay) =
+                                estimates.estimated_delay(cell, load, sta.prepared_library())
+                                && delay < best_delay
+                            {
+                                best = cell;
+                                best_delay = delay;
+                            }
+                        }
+                        best
+                    };
+                    let mut rest = eligible;
+                    let mut choices = Vec::with_capacity(width);
+                    while !rest.is_empty() && choices.len() + 1 < width {
+                        let end = rest.partition_point(|&cell| {
+                            lib.cells[cell].area == lib.cells[rest[0]].area
+                        });
+                        choices.push(fastest(&rest[..end]));
+                        rest = &rest[end..];
+                    }
+                    if !rest.is_empty() {
+                        choices.push(fastest(rest));
+                    }
+                    choices
+                })
+                .as_slice()
+        } else {
+            // Sequential and multi-output candidates use ordinary area order.
+            eligible
+        };
+        self.choices.clear();
+        self.choices.extend(
+            shortlist
+                .iter()
+                .copied()
+                .filter(|&cell| {
+                    cell != current
+                        && self.library.cells[cell].area < self.library.cells[current].area
+                        && area - self.library.cells[current].area + self.library.cells[cell].area
+                            <= area_limit + AREA_COMPARISON_TOLERANCE
+                })
+                .take(width),
+        );
+        &self.choices
+    }
+
+    /// Anchor the fastest cell and select the cheapest representative of each
+    /// remaining equal-rank delay band. With no finite estimate, report failure
+    /// so the caller can use its nearest-area fallback.
     fn delay_band_shortlist(
         &mut self,
-        candidates: &mut Vec<usize>,
-        width: usize,
-        sta: &IncrementalSta<'_>,
         instance: usize,
-        options: &super::ResizeOptions,
-        lib: &Library,
+        sta: &IncrementalSta<'_>,
+        width: usize,
     ) -> bool {
-        if width == 0 || candidates.is_empty() {
+        if width == 0 || self.choices.is_empty() {
             return false;
         }
         let Some(load) = sta.single_output_load(instance) else {
             return false;
         };
-        let transition = options.timing.primary_input_transition;
         self.ranked_by_delay.clear();
-        for &cell in candidates.iter() {
+        for &cell in &self.choices {
             let delay = self
-                .cost(cell, load, transition, lib, sta.prepared_library())
+                .estimates
+                .estimated_delay(cell, load, sta.prepared_library())
                 .filter(|delay| delay.is_finite())
                 .unwrap_or(f64::INFINITY);
             self.ranked_by_delay.push((cell, delay));
         }
+        let lib = self.library;
         let ranked = &mut self.ranked_by_delay;
         ranked.sort_by(|&(a, ad), &(b, bd)| {
             ad.total_cmp(&bd)
@@ -117,11 +252,8 @@ impl LoadedPaths {
         if !ranked[0].1.is_finite() {
             return false;
         }
-        candidates.clear();
-        candidates.push(ranked[0].0);
-        // Use one slot for the fastest cell. Spend the rest on cheaper cells at
-        // different points in the delay ranking so a cluster of nearly
-        // identical fast cells cannot consume every exact timing trial.
+        self.choices.clear();
+        self.choices.push(ranked[0].0);
         let bands = width.min(ranked.len()) - 1;
         let remaining = &ranked[1..];
         for band in 0..bands {
@@ -137,81 +269,9 @@ impl LoadedPaths {
                         .then_with(|| lib.cells[a].name.cmp(&lib.cells[b].name))
                 })
                 .expect("each delay band contains at least one cell");
-            candidates.push(cell);
+            self.choices.push(cell);
         }
         true
-    }
-}
-
-/// All shortlist data belongs to one recovery phase with fixed library,
-/// transition, menu and width. Only the load on an instance can change.
-#[derive(Default)]
-pub(super) struct RecoveryMenus {
-    indices: HashMap<(usize, u64), Vec<usize>>,
-    paths: LoadedPaths,
-}
-
-impl RecoveryMenus {
-    pub(super) fn shortlist<'a>(
-        &'a mut self,
-        area_sorted: &'a [usize],
-        current: usize,
-        sta: &IncrementalSta<'_>,
-        instance: usize,
-        options: &super::ResizeOptions,
-        lib: &Library,
-    ) -> &'a [usize] {
-        let width = options
-            .recovery_cell_limit
-            .unwrap_or(options.max_cell_candidates);
-        let end = area_sorted.partition_point(|&c| lib.cells[c].area < lib.cells[current].area);
-        let eligible = &area_sorted[..end];
-        if eligible.len() <= width
-            || width <= 1
-            || options.recovery_cell_menu == RecoveryCellMenu::Area
-        {
-            return eligible;
-        }
-
-        // A sequential or multi-output cell needs another timing model. Keep
-        // these families in normal area order for every policy.
-        let Some(load) = sta.single_output_load(instance) else {
-            return eligible;
-        };
-        let key = (current, load.to_bits());
-        self.indices.entry(key).or_insert_with(|| {
-            let prepared = sta.prepared_library();
-            let transition = options.timing.primary_input_transition;
-            let mut fastest = |cells: &[usize]| {
-                let mut best = cells[0];
-                let mut best_cost = f64::INFINITY;
-                for &cell in cells {
-                    // Missing estimates and equal-cost ties preserve area/name
-                    // order.
-                    if let Some(value) = self.paths.cost(cell, load, transition, lib, prepared)
-                        && value < best_cost
-                    {
-                        best = cell;
-                        best_cost = value;
-                    }
-                }
-                best
-            };
-            // Give each cheap group a trial. Keep the final slot for a
-            // faster cell even when it lies outside those groups.
-            let mut rest = eligible;
-            let mut choices = Vec::with_capacity(width);
-            let cost = |cell: usize| lib.cells[cell].area;
-            while !rest.is_empty() && choices.len() + 1 < width {
-                let end = rest.partition_point(|&cell| cost(cell) == cost(rest[0]));
-                choices.push(fastest(&rest[..end]));
-                rest = &rest[end..];
-            }
-            if !rest.is_empty() {
-                choices.push(fastest(rest));
-            }
-            choices
-        })
     }
 }
 

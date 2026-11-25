@@ -9,15 +9,14 @@ use clap::ArgMatches;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use xlsynth_g8r::aig::SequentialGateFn;
-use xlsynth_g8r::liberty::io_defaults::convert_io_constraints;
+use xlsynth_g8r::liberty::io_defaults::{IoTimingConstraints, convert_io_constraints};
 use xlsynth_g8r::liberty::load::TimingLibrarySnapshot;
 use xlsynth_g8r::liberty_model::Library;
 use xlsynth_g8r::netlist::emit::emit_netlist_as_text;
 use xlsynth_g8r::netlist::io::{ParsedNetlist, read_gv_from_str};
 use xlsynth_g8r::netlist::resize::ResizeOptions;
-use xlsynth_g8r::netlist::resize::adaptive::{
-    AdaptiveResizeOptions, finish_mapped_netlist, prepare_sizing_view,
-};
+use xlsynth_g8r::netlist::resize::adaptive::{AdaptiveResizeOptions, finish_mapped_netlist};
+use xlsynth_g8r::netlist::resize::sizing_library::validate_and_filter_sizing_library;
 use xlsynth_g8r::netlist::sta::StaOptions;
 
 use crate::mapped_netlist_output::{Format, output_paths_alias, path_aliases_stream};
@@ -81,14 +80,18 @@ impl Finish {
             .is_some();
         protect_inputs(matches, map_path, path)?;
         if alternate.is_some() {
-            (timing.primary_input_transition, timing.module_output_load) = convert_io_constraints(
+            let converted = convert_io_constraints(
                 map_library,
                 library,
-                timing.primary_input_transition,
-                timing.module_output_load,
+                IoTimingConstraints {
+                    primary_input_transition: timing.primary_input_transition,
+                    module_output_load: timing.module_output_load,
+                },
             )
             .map_err(anyhow::Error::msg)
             .context("converting I/O constraints to --resize-liberty-proto units")?;
+            timing.primary_input_transition = converted.primary_input_transition;
+            timing.module_output_load = converted.module_output_load;
         }
         let mut options = AdaptiveResizeOptions {
             timing,
@@ -116,7 +119,7 @@ impl Finish {
     ) -> anyhow::Result<(Vec<u8>, Option<Vec<u8>>)> {
         let library = match &mut self.alternate {
             Some(view) => {
-                prepare_sizing_view(mapped, map_library, &mut view.library)?;
+                validate_and_filter_sizing_library(mapped, map_library, &mut view.library)?;
                 &view.library
             }
             None => map_library,

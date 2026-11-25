@@ -24,9 +24,10 @@ use crate::netlist::sta::incremental::{
 
 pub mod adaptive;
 mod menu;
+pub mod sizing_library;
 pub use menu::{RecoveryCellMenu, TimingCellMenu};
 mod timing;
-use timing::{ResizeTimingPolicy, TimingTieBreak};
+use timing::{ResizeTimingPolicy, TimingProgress};
 
 const AREA_COMPARISON_TOLERANCE: f64 = 1e-12;
 const MAX_SIGNATURE_VARIABLES: usize = 10;
@@ -43,6 +44,18 @@ pub enum RecoveryWindowCheckpoint {
     Tightest,
 }
 
+/// How automatic recovery work is bounded. An explicit evaluation budget
+/// remains a hard cap under either policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecoveryWorkPolicy {
+    #[default]
+    HardCap,
+    /// Renew productive graph-sized windows on registered netlists.
+    Renewable {
+        checkpoint: RecoveryWindowCheckpoint,
+    },
+}
+
 /// Deterministic search limits. The area allowance is relative to the input,
 /// never compounded across accepted moves. All timing limits use Liberty units.
 #[derive(Clone, Debug)]
@@ -50,9 +63,9 @@ pub struct ResizeOptions {
     pub timing: StaOptions,
     pub max_area_growth: f64,
     /// Timing-search rounds; substitutions may increase or decrease cell area.
-    pub max_upsize_rounds: usize,
+    pub max_timing_rounds: usize,
     /// Area-recovery rounds against the timing-search checkpoint.
-    pub max_downsize_rounds: usize,
+    pub max_recovery_rounds: usize,
     /// Timing sites per round; None uses max(64, ceil(instance_count / 512)).
     /// Recovery has no site cap and uses its evaluation budget instead.
     pub max_candidate_sites: Option<usize>,
@@ -70,10 +83,12 @@ pub struct ResizeOptions {
     pub timing_evaluation_budget: Option<usize>,
     /// Instance timing and functional-coverage propagation evaluations across
     /// all recovery rounds; None uses max(100_000, 8 * instance_count).
-    /// Independent of timing work. On registered stages the automatic value
-    /// is the size of a work window. A productive scalar sweep may renew it,
-    /// up to a logarithmic number of windows. Explicit budgets are hard caps.
+    /// Independent of timing work. Renewable mode treats the automatic value
+    /// as a window size; explicit budgets are always hard caps.
     pub recovery_evaluation_budget: Option<usize>,
+    /// Whether productive registered recovery may renew automatic work, and
+    /// how its timing limits change at each renewal.
+    pub recovery_work_policy: RecoveryWorkPolicy,
     pub resize_registers: bool,
 }
 
@@ -94,8 +109,8 @@ impl Default for ResizeOptions {
         Self {
             timing: StaOptions::default(),
             max_area_growth: 0.02,
-            max_upsize_rounds: 4,
-            max_downsize_rounds: 2,
+            max_timing_rounds: 4,
+            max_recovery_rounds: 2,
             max_candidate_sites: None,
             max_cell_candidates: 8,
             recovery_cell_limit: None,
@@ -103,6 +118,7 @@ impl Default for ResizeOptions {
             timing_cell_menu: TimingCellMenu::NearestArea,
             timing_evaluation_budget: None,
             recovery_evaluation_budget: None,
+            recovery_work_policy: RecoveryWorkPolicy::HardCap,
             resize_registers: true,
         }
     }
@@ -368,8 +384,8 @@ enum SearchPhase {
 impl SearchPhase {
     fn rounds(self, options: &ResizeOptions) -> usize {
         match self {
-            Self::Timing => options.max_upsize_rounds,
-            Self::AreaRecovery => options.max_downsize_rounds,
+            Self::Timing => options.max_timing_rounds,
+            Self::AreaRecovery => options.max_recovery_rounds,
         }
     }
 
@@ -380,6 +396,40 @@ impl SearchPhase {
             Self::AreaRecovery => limits.recovery_evaluations,
         };
         start_work.saturating_add(allowance)
+    }
+}
+
+/// One phase's cumulative STA work ceiling and optional productive windows.
+/// A renewed window retries the interrupted trial without changing its order.
+struct PhaseWorkBudget {
+    hard_limit: usize,
+    limit: usize,
+    window: Option<usize>,
+    accepted_at_window_start: usize,
+}
+
+impl PhaseWorkBudget {
+    fn new(hard_limit: usize, start_work: usize, window: Option<usize>) -> Self {
+        Self {
+            hard_limit,
+            limit: window.map_or(hard_limit, |w| hard_limit.min(start_work.saturating_add(w))),
+            window,
+            accepted_at_window_start: 0,
+        }
+    }
+
+    /// Renew only when the preceding window accepted a replacement and there
+    /// is room under the phase's hard cap.
+    fn renew(&mut self, accepted: usize) -> bool {
+        let Some(window) = self.window else {
+            return false;
+        };
+        if self.limit >= self.hard_limit || accepted == self.accepted_at_window_start {
+            return false;
+        }
+        self.accepted_at_window_start = accepted;
+        self.limit = self.hard_limit.min(self.limit.saturating_add(window));
+        true
     }
 }
 
@@ -468,12 +518,9 @@ impl ResizeSearch<'_> {
         match phase {
             SearchPhase::Timing => {
                 let previous = sta.score();
-                // A previous swap can move the worst path to another I/O
-                // boundary. Compare the bottleneck before and after this trial.
-                let objective = sta.objective();
-                let secondary = sta.secondary(objective);
+                let progress = TimingProgress::capture(sta);
                 sta.trial(instance, cell, work_limit, Some(previous), |timing| {
-                    self.accept_timing(timing, previous, objective, secondary, new_area)
+                    self.accept_timing(timing, previous, progress, new_area)
                 })
             }
             SearchPhase::AreaRecovery => sta.trial(
@@ -492,29 +539,16 @@ impl ResizeSearch<'_> {
         &self,
         timing: &IncrementalSta<'_>,
         previous: BoundaryDelays,
-        previous_objective: usize,
-        previous_secondary: TimingTieBreak,
+        previous_progress: TimingProgress,
         new_area: f64,
     ) -> bool {
         let score = timing.score();
-        let secondary = timing.secondary(previous_objective);
-        let old_delay = previous.values()[previous_objective];
-        let new_delay = score.values()[timing.objective()];
-        let delay_ratio = if old_delay <= 0.0 {
-            // Negative characterized delays are supported by STA, but cannot
-            // define a positive merit ratio that justifies additional area.
-            1.0
-        } else if new_delay < old_delay - TIMING_COMPARISON_TOLERANCE {
-            new_delay / old_delay
-        } else {
-            secondary.relative_to(previous_secondary)
-        };
-        let worthwhile = new_area <= self.area || delay_ratio < (self.area / new_area).sqrt();
+        let progress = previous_progress.compare(timing);
+        let worthwhile = new_area <= self.area || progress.ratio < (self.area / new_area).sqrt();
         score.within(self.initial_delay)
             && score.within(previous)
             && worthwhile
-            && (new_delay < old_delay - TIMING_COMPARISON_TOLERANCE
-                || (new_delay <= old_delay && secondary.improves(previous_secondary)))
+            && progress.improved
     }
 
     /// Runs one bounded phase without changing candidate or tie-breaking order.
@@ -543,84 +577,48 @@ impl ResizeSearch<'_> {
         let start_work = sta.propagated_instances();
         // Anchor once per phase, not per round. Recovery starts with its own
         // full allowance regardless of how much work timing consumed.
-        let hard_limit = phase.work_limit(self.work_limits, start_work);
-        let mut work_limit =
-            window.map_or(hard_limit, |w| hard_limit.min(start_work.saturating_add(w)));
-        let mut accepted_at_window_start = 0;
-        let mut timing_candidates = Vec::new();
-        let mut timing_paths = menu::LoadedPaths::default();
-        let mut recovery_menus = menu::RecoveryMenus::default();
+        let mut budget = PhaseWorkBudget::new(
+            phase.work_limit(self.work_limits, start_work),
+            start_work,
+            window,
+        );
+        let mut selector =
+            menu::CandidateSelector::new(sta.prepared_library(), self.families, self.options);
         'rounds: for _ in 0..rounds {
             let sites = self.candidate_sites(phase, sta);
             let mut accepted = 0;
             for i in sites {
                 let current = sta.cell_indices()[i];
-                let area = self.area;
-                let area_limit = self.area_limit;
                 let library = self.library;
-                let allowed = |cell: &usize| {
-                    *cell != current
-                        && match phase {
-                            SearchPhase::Timing => true,
-                            SearchPhase::AreaRecovery => {
-                                library.cells[*cell].area < library.cells[current].area
-                            }
-                        }
-                        && area - library.cells[current].area + library.cells[*cell].area
-                            <= area_limit + AREA_COMPARISON_TOLERANCE
-                };
                 let alternatives = self.families.alternatives(current);
-                let candidates = match phase {
-                    SearchPhase::Timing => {
-                        timing_candidates.clear();
-                        timing_candidates.extend(alternatives.iter().copied().filter(allowed));
-                        timing_paths.timing_shortlist(
-                            &mut timing_candidates,
-                            self.options.max_cell_candidates,
-                            sta,
-                            i,
-                            self.options,
-                            library,
-                        );
-                        timing_candidates.as_slice()
-                    }
-                    SearchPhase::AreaRecovery
-                        if self.options.recovery_cell_menu != RecoveryCellMenu::Area =>
-                    {
-                        recovery_menus.shortlist(
-                            alternatives,
-                            current,
-                            sta,
-                            i,
-                            self.options,
-                            library,
-                        )
-                    }
-                    SearchPhase::AreaRecovery => alternatives,
-                };
                 let limit = match phase {
+                    SearchPhase::Timing => self.options.max_cell_candidates,
                     SearchPhase::AreaRecovery => self
                         .options
                         .recovery_cell_limit
                         .unwrap_or(self.options.max_cell_candidates),
-                    SearchPhase::Timing => self.options.max_cell_candidates,
                 };
-                for cell in candidates.iter().copied().filter(allowed).take(limit) {
+                let candidates = match phase {
+                    SearchPhase::Timing => {
+                        selector.timing_candidates(i, sta, self.area, self.area_limit)
+                    }
+                    SearchPhase::AreaRecovery => {
+                        selector.recovery_candidates(i, sta, self.area, self.area_limit)
+                    }
+                };
+                for &cell in candidates {
                     let new_area = self.area - library.cells[sta.cell_indices()[i]].area
                         + library.cells[cell].area;
                     let result = loop {
                         stats.trials += 1;
-                        let trial = self.trial(phase, sta, i, cell, work_limit, new_area);
-                        let Some(window) = window else { break trial };
+                        let trial = self.trial(phase, sta, i, cell, budget.limit, new_area);
                         if !matches!(trial, Ok(TrialOutcome::PropagationLimit))
-                            || work_limit >= hard_limit
-                            || stats.accepted == accepted_at_window_start
+                            || !budget.renew(stats.accepted)
                         {
                             break trial;
                         }
                         // Retry the rolled-back trial at the same position with
                         // a fresh allowance.
-                        accepted_at_window_start = stats.accepted;
                         let observed = sta.score();
                         self.timing_checkpoint = match checkpoint {
                             RecoveryWindowCheckpoint::Latest => observed,
@@ -628,7 +626,6 @@ impl ResizeSearch<'_> {
                                 self.timing_checkpoint.tightened_with(observed)
                             }
                         };
-                        work_limit = hard_limit.min(work_limit.saturating_add(window));
                         stats.renewed_windows += 1;
                     };
                     if matches!(phase, SearchPhase::Timing) {
@@ -693,34 +690,7 @@ pub fn resize_netlist(
     library: &Library,
     options: &ResizeOptions,
 ) -> Result<ResizeReport> {
-    resize_netlist_with_recovery_checkpoint(
-        module,
-        nets,
-        interner,
-        library,
-        options,
-        RecoveryWindowCheckpoint::Latest,
-    )
-}
-
-/// Resize with an explicit choice of timing limits at automatic recovery-window
-/// renewals.
-pub fn resize_netlist_with_recovery_checkpoint(
-    module: &mut NetlistModule,
-    nets: &[Net],
-    interner: &mut StringInterner<StringBackend<SymbolU32>>,
-    library: &Library,
-    options: &ResizeOptions,
-    checkpoint: RecoveryWindowCheckpoint,
-) -> Result<ResizeReport> {
-    resize_netlist_with_remaining_budget(
-        module,
-        nets,
-        interner,
-        library,
-        &mut options.clone(),
-        checkpoint,
-    )
+    resize_netlist_with_remaining_budget(module, nets, interner, library, &mut options.clone())
 }
 
 /// Charges each phase's actual visits to explicit budgets shared across resize
@@ -731,7 +701,6 @@ pub(crate) fn resize_netlist_with_remaining_budget(
     interner: &mut StringInterner<StringBackend<SymbolU32>>,
     library: &Library,
     options: &mut ResizeOptions,
-    checkpoint: RecoveryWindowCheckpoint,
 ) -> Result<ResizeReport> {
     if !options.max_area_growth.is_finite() || options.max_area_growth < 0.0 {
         return Err(anyhow!("max_area_growth must be finite and nonnegative"));
@@ -745,11 +714,17 @@ pub(crate) fn resize_netlist_with_remaining_budget(
     }
     let families = CellFamilies::new(library);
     let mut sta = IncrementalSta::new(module, nets, interner, library, options.timing)?;
-    let registered = (0..sta.instance_count()).any(|i| sta.is_register(i));
-    let registered = registered && !matches!(checkpoint, RecoveryWindowCheckpoint::Latest);
-    let recovery_window = (registered && options.recovery_evaluation_budget.is_none())
-        .then_some(work_limits.recovery_evaluations);
-    let work_limits = if registered {
+    let checkpoint = match options.recovery_work_policy {
+        RecoveryWorkPolicy::Renewable { checkpoint }
+            if options.recovery_evaluation_budget.is_none()
+                && (0..sta.instance_count()).any(|i| sta.is_register(i)) =>
+        {
+            Some(checkpoint)
+        }
+        _ => None,
+    };
+    let recovery_window = checkpoint.map(|_| work_limits.recovery_evaluations);
+    let work_limits = if checkpoint.is_some() {
         options.registered_limits(sta.instance_count())
     } else {
         work_limits
@@ -801,7 +776,7 @@ pub(crate) fn resize_netlist_with_remaining_budget(
         &mut sta,
         SearchPhase::AreaRecovery.rounds(options),
         recovery_window,
-        checkpoint,
+        checkpoint.unwrap_or_default(),
     );
     // Preparation failures spend no visits. Once search completes, charge
     // even rejected trials before final verification can reject this netlist.

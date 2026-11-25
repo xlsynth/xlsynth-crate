@@ -264,8 +264,8 @@ fn phase_stop_reasons_report_independent_work_limits() -> Result<()> {
     let timed = "module m(input a, output y); BUF1 b(.A(a),.Y(y)); endmodule";
     for (
         timing_budget,
-        max_upsize_rounds,
-        max_downsize_rounds,
+        max_timing_rounds,
+        max_recovery_rounds,
         expected_timing,
         expected_area,
         exhausted,
@@ -310,8 +310,8 @@ fn phase_stop_reasons_report_independent_work_limits() -> Result<()> {
             &ResizeOptions {
                 timing_evaluation_budget: Some(timing_budget),
                 recovery_evaluation_budget: Some(1000),
-                max_upsize_rounds,
-                max_downsize_rounds,
+                max_timing_rounds,
+                max_recovery_rounds,
                 ..options()
             },
         )?;
@@ -549,6 +549,51 @@ fn recovery_checkpoint_modes_at_work_window_renewal() -> Result<()> {
 }
 
 #[test]
+fn recovery_work_policy_controls_renewal_independently_of_checkpoint() -> Result<()> {
+    let lib = library()?;
+    let source = "module m(input clk,input d,output q); wire a; BUF1 b(.A(d),.Y(a)); DFF1 f(.CLK(clk),.D(a),.Q(q)); endmodule";
+    for (policy, explicit_budget, expected_work) in [
+        (RecoveryWorkPolicy::HardCap, None, 100_000),
+        (
+            RecoveryWorkPolicy::Renewable {
+                checkpoint: RecoveryWindowCheckpoint::Latest,
+            },
+            None,
+            200_000,
+        ),
+        (
+            RecoveryWorkPolicy::Renewable {
+                checkpoint: RecoveryWindowCheckpoint::Tightest,
+            },
+            None,
+            200_000,
+        ),
+        (
+            RecoveryWorkPolicy::Renewable {
+                checkpoint: RecoveryWindowCheckpoint::Tightest,
+            },
+            Some(7),
+            7,
+        ),
+    ] {
+        let mut net = read_gv_from_str(source)?;
+        let report = resize(
+            &mut net,
+            &lib,
+            &ResizeOptions {
+                max_timing_rounds: 0,
+                max_recovery_rounds: 0,
+                recovery_evaluation_budget: explicit_budget,
+                recovery_work_policy: policy,
+                ..options()
+            },
+        )?;
+        assert_eq!(report.work_limits.recovery_evaluations, expected_work);
+    }
+    Ok(())
+}
+
+#[test]
 fn phase_budgets_do_not_reset_per_round_or_borrow_from_each_other() -> Result<()> {
     let library = library()?;
     let mut parsed =
@@ -587,7 +632,7 @@ fn phase_budgets_do_not_reset_per_round_or_borrow_from_each_other() -> Result<()
         &mut parsed,
         &library,
         &ResizeOptions {
-            max_upsize_rounds: 0,
+            max_timing_rounds: 0,
             timing_evaluation_budget: Some(1000),
             recovery_evaluation_budget: Some(1),
             ..options()
@@ -675,8 +720,8 @@ fn final_area_is_recomputed_without_incremental_cancellation() -> Result<()> {
             &mut parsed,
             &library,
             &ResizeOptions {
-                max_upsize_rounds: usize::from(timing_phase),
-                max_downsize_rounds: usize::from(!timing_phase),
+                max_timing_rounds: usize::from(timing_phase),
+                max_recovery_rounds: usize::from(!timing_phase),
                 ..options()
             },
         )?;
@@ -698,7 +743,7 @@ fn downsize_uses_fixed_worst_endpoint_limit() -> Result<()> {
         "module m(input a, output y, output z); BUF1 slow(.A(a),.Y(y)); BUF4 fast(.A(a),.Y(z)); endmodule",
     )?;
     let options = ResizeOptions {
-        max_upsize_rounds: 0,
+        max_timing_rounds: 0,
         ..options()
     };
     let report = resize(&mut parsed, &library, &options)?;
@@ -749,7 +794,7 @@ fn recovery_keeps_zero_headroom_candidates_with_identical_timing() -> Result<()>
         &mut parsed,
         &library,
         &ResizeOptions {
-            max_upsize_rounds: 0,
+            max_timing_rounds: 0,
             ..options()
         },
     )?;
@@ -796,8 +841,8 @@ fn fixed_capture_registers_do_not_consume_timing_candidate_slots() -> Result<()>
         &ResizeOptions {
             resize_registers: false,
             max_candidate_sites: Some(1),
-            max_upsize_rounds: 1,
-            max_downsize_rounds: 0,
+            max_timing_rounds: 1,
+            max_recovery_rounds: 0,
             ..options()
         },
     )?;
@@ -828,8 +873,8 @@ fn unaffordable_cells_do_not_hide_area_neutral_timing_candidates() -> Result<()>
         &ResizeOptions {
             max_area_growth: 0.0,
             max_candidate_sites: Some(1),
-            max_upsize_rounds: 1,
-            max_downsize_rounds: 0,
+            max_timing_rounds: 1,
+            max_recovery_rounds: 0,
             ..options()
         },
     )?;
@@ -862,8 +907,8 @@ fn unaffordable_alternatives_do_not_consume_per_cell_candidate_limit() -> Result
         &ResizeOptions {
             max_area_growth: 0.0,
             max_cell_candidates: 1,
-            max_upsize_rounds: 1,
-            max_downsize_rounds: 0,
+            max_timing_rounds: 1,
+            max_recovery_rounds: 0,
             ..options()
         },
     )?;
@@ -895,8 +940,8 @@ fn cells_without_alternatives_do_not_hide_resizable_fanin() -> Result<()> {
         &library,
         &ResizeOptions {
             max_candidate_sites: Some(1),
-            max_upsize_rounds: 1,
-            max_downsize_rounds: 0,
+            max_timing_rounds: 1,
+            max_recovery_rounds: 0,
             ..options()
         },
     )?;
@@ -1104,11 +1149,20 @@ fn critical_candidates_do_not_cross_launch_register_data_boundaries() -> Result<
         &library,
         options().timing,
     )?;
-    assert_eq!(sta.objective(), 3);
-    let mut candidates = sta.critical_instances(3, usize::MAX, |_| true);
+    assert_eq!(sta.objective(), timing::TimingBoundary::RegisterToRegister);
+    let mut candidates = sta.critical_instances(
+        timing::TimingBoundary::RegisterToRegister,
+        usize::MAX,
+        |_| true,
+    );
     candidates.sort_unstable();
     assert_eq!(candidates, vec![1, 2, 3]);
-    assert_eq!(sta.critical_instances(2, usize::MAX, |_| true), vec![3]);
+    assert_eq!(
+        sta.critical_instances(timing::TimingBoundary::RegisterToOutput, usize::MAX, |_| {
+            true
+        }),
+        vec![3]
+    );
     Ok(())
 }
 
@@ -1434,8 +1488,8 @@ fn unusable_combinational_alternatives_do_not_abort_either_phase() -> Result<()>
                 "module m(input a, output y, output z); {start} b(.A(a),.Y(y)); INV1 guard(.A(a),.Y(z)); endmodule"
             );
             let opts = ResizeOptions {
-                max_upsize_rounds: usize::from(!recovery),
-                max_downsize_rounds: usize::from(recovery),
+                max_timing_rounds: usize::from(!recovery),
+                max_recovery_rounds: usize::from(recovery),
                 ..options()
             };
             let mut actual = read_gv_from_str(&source)?;
@@ -1517,8 +1571,8 @@ fn incomplete_functional_timing_alternatives_are_skipped() -> Result<()> {
         );
 
         let opts = ResizeOptions {
-            max_upsize_rounds: 0,
-            max_downsize_rounds: 1,
+            max_timing_rounds: 0,
+            max_recovery_rounds: 1,
             resize_registers: false,
             ..options()
         };
@@ -1595,8 +1649,8 @@ fn five_input_candidate_with_missing_arc_is_rejected_and_rolled_back() -> Result
     let source = "module m(input a, input b, input c, input d, input e, output y); AND5x2 gate(.A(a),.B(b),.C(c),.D(d),.E(e),.Y(y)); endmodule";
     let mut actual = read_gv_from_str(source)?;
     let opts = ResizeOptions {
-        max_upsize_rounds: 0,
-        max_downsize_rounds: 1,
+        max_timing_rounds: 0,
+        max_recovery_rounds: 1,
         ..options()
     };
     let mut sta = IncrementalSta::new(
@@ -1670,8 +1724,8 @@ fn equivalent_replacement_must_revalidate_downstream_constant_coverage() -> Resu
     // lets the downstream AND omit B's arc; substituting BUF2 loses that proof.
     let source = "module m(input a, input b, output y); wire n; BUF4 tied(.A(a),.Y(n)); AND1 gate(.A(b),.B(n),.Y(y)); endmodule";
     let opts = ResizeOptions {
-        max_upsize_rounds: 0,
-        max_downsize_rounds: 1,
+        max_timing_rounds: 0,
+        max_recovery_rounds: 1,
         ..options()
     };
     let mut actual = read_gv_from_str(source)?;
@@ -1774,8 +1828,8 @@ fn coverage_rescan_budget_limit_restores_trial_without_charging_unvisited_cells(
     drop(sta);
 
     let mut remaining = ResizeOptions {
-        max_upsize_rounds: 0,
-        max_downsize_rounds: 1,
+        max_timing_rounds: 0,
+        max_recovery_rounds: 1,
         recovery_evaluation_budget: Some(3),
         ..options()
     };
@@ -1785,7 +1839,6 @@ fn coverage_rescan_budget_limit_restores_trial_without_charging_unvisited_cells(
         &mut parsed.interner,
         &library,
         &mut remaining,
-        RecoveryWindowCheckpoint::Latest,
     )?;
     assert_eq!(
         report.downsize.stop_reason,
@@ -1810,8 +1863,8 @@ fn self_feedback_cannot_keep_a_stale_coverage_constant() -> Result<()> {
         &mut parsed,
         &library,
         &ResizeOptions {
-            max_upsize_rounds: 0,
-            max_downsize_rounds: 1,
+            max_timing_rounds: 0,
+            max_recovery_rounds: 1,
             ..options()
         },
     )?;
@@ -1870,8 +1923,8 @@ fn replacement_cannot_expose_uncovered_register_launch_downstream() -> Result<()
     );
     let source = "module m(input clk, input d, input a, output y); wire q,n; DFF1 launch(.CLK(clk),.D(d),.Q(q)); AND4 tied(.A(q),.B(1'bx),.Y(n)); AND1 gate(.A(a),.B(n),.Y(y)); endmodule";
     let opts = ResizeOptions {
-        max_upsize_rounds: 0,
-        max_downsize_rounds: 1,
+        max_timing_rounds: 0,
+        max_recovery_rounds: 1,
         resize_registers: false,
         ..options()
     };
@@ -1933,8 +1986,8 @@ fn replacement_that_changes_when_constants_is_skipped() -> Result<()> {
     let mut library = builder.finish();
     let source = "module m(input a, input b, output y); wire n; BUF4 tied(.A(a),.Y(n)); AND1 gate(.A(b),.B(n),.Y(y)); endmodule";
     let opts = ResizeOptions {
-        max_upsize_rounds: 0,
-        max_downsize_rounds: 1,
+        max_timing_rounds: 0,
+        max_recovery_rounds: 1,
         ..options()
     };
     let mut actual = read_gv_from_str(source)?;
@@ -2850,15 +2903,15 @@ fn recovery_menu_uses_loaded_delay_to_find_a_cheaper_equivalent_at_equal_width()
     let netlist = "module top(a, y); input a; output y; INV4 g (.A(a), .Y(y)); endmodule";
     for (menu, expected) in [
         (RecoveryCellMenu::Area, 10.0),
-        (RecoveryCellMenu::ElectricalMinArea, 3.0),
+        (RecoveryCellMenu::CheapestGroupsThenFastest, 3.0),
     ] {
         let mut net = read_gv_from_str(netlist)?;
         let report = resize(
             &mut net,
             &lib,
             &ResizeOptions {
-                max_upsize_rounds: 0,
-                max_downsize_rounds: 1,
+                max_timing_rounds: 0,
+                max_recovery_rounds: 1,
                 recovery_cell_menu: menu,
                 recovery_cell_limit: Some(2),
                 ..options()
@@ -2903,8 +2956,8 @@ fn timing_menu_can_improve_delay_with_the_same_trial_width_and_area() -> Result<
             &lib,
             &ResizeOptions {
                 max_area_growth: 0.0,
-                max_upsize_rounds: 1,
-                max_downsize_rounds: 0,
+                max_timing_rounds: 1,
+                max_recovery_rounds: 0,
                 max_cell_candidates: 2,
                 timing_cell_menu: menu,
                 ..options()
@@ -2965,17 +3018,15 @@ fn delay_band_nominees(lib: &Library, policy: TimingCellMenu, width: usize) -> R
     )?;
     let current = sta.cell_indices()[0];
     let families = CellFamilies::new(lib);
-    let mut family: Vec<_> = families
-        .alternatives(current)
+    let config = ResizeOptions {
+        max_cell_candidates: width,
+        ..config
+    };
+    let mut selector = menu::CandidateSelector::new(sta.prepared_library(), &families, &config);
+    Ok(selector
+        .timing_candidates(0, &sta, lib.cells[current].area, f64::INFINITY)
         .iter()
-        .copied()
-        .filter(|&cell| cell != current)
-        .collect();
-    super::menu::LoadedPaths::default().timing_shortlist(&mut family, width, &sta, 0, &config, lib);
-    Ok(family
-        .into_iter()
-        .take(width)
-        .map(|cell| lib.cells[cell].name.as_str())
+        .map(|&cell| lib.cells[cell].name.as_str())
         .collect())
 }
 
@@ -3015,8 +3066,8 @@ fn timing_delay_bands_accept_first_exact_improvement_in_selected_trial_order() -
         &ResizeOptions {
             timing_cell_menu: TimingCellMenu::DelayBandsFastestFirst,
             max_cell_candidates: 3,
-            max_upsize_rounds: 1,
-            max_downsize_rounds: 0,
+            max_timing_rounds: 1,
+            max_recovery_rounds: 0,
             ..options()
         },
     )?;
@@ -3067,10 +3118,10 @@ fn electrical_min_area_recovers_feasible_cell_omitted_by_band() -> Result<()> {
         &mut net,
         &lib,
         &ResizeOptions {
-            max_upsize_rounds: 0,
-            max_downsize_rounds: 1,
+            max_timing_rounds: 0,
+            max_recovery_rounds: 1,
             recovery_cell_limit: Some(2),
-            recovery_cell_menu: RecoveryCellMenu::ElectricalMinArea,
+            recovery_cell_menu: RecoveryCellMenu::CheapestGroupsThenFastest,
             ..options()
         },
     )?;
@@ -3100,19 +3151,14 @@ fn electrical_min_area_preserves_unique_trials_and_untruncated_order() -> Result
         (2, vec!["INV_min_fast", "INV2"]),
         (3, vec!["INV1", "INV_min_fast", "INV2"]),
     ] {
-        let mut menus = menu::RecoveryMenus::default();
-        let trial_cells = menus.shortlist(
-            families.alternatives(current),
-            current,
-            &sta,
-            0,
-            &ResizeOptions {
-                recovery_cell_limit: Some(width),
-                recovery_cell_menu: RecoveryCellMenu::ElectricalMinArea,
-                ..options()
-            },
-            &lib,
-        );
+        let config = ResizeOptions {
+            recovery_cell_limit: Some(width),
+            recovery_cell_menu: RecoveryCellMenu::CheapestGroupsThenFastest,
+            ..options()
+        };
+        let mut selector = menu::CandidateSelector::new(sta.prepared_library(), &families, &config);
+        let trial_cells =
+            selector.recovery_candidates(0, &sta, lib.cells[current].area, f64::INFINITY);
         let choices: Vec<_> = trial_cells
             .iter()
             .take(width)
@@ -3134,19 +3180,13 @@ fn electrical_min_area_preserves_unique_trials_and_untruncated_order() -> Result
         }
     }
     let sta = IncrementalSta::new(&net.modules[0], &net.nets, &net.interner, &lib, opts.timing)?;
-    let mut menus = menu::RecoveryMenus::default();
-    let chosen = menus.shortlist(
-        families.alternatives(current),
-        current,
-        &sta,
-        0,
-        &ResizeOptions {
-            recovery_cell_limit: Some(2),
-            recovery_cell_menu: RecoveryCellMenu::ElectricalMinArea,
-            ..options()
-        },
-        &lib,
-    );
+    let config = ResizeOptions {
+        recovery_cell_limit: Some(2),
+        recovery_cell_menu: RecoveryCellMenu::CheapestGroupsThenFastest,
+        ..options()
+    };
+    let mut selector = menu::CandidateSelector::new(sta.prepared_library(), &families, &config);
+    let chosen = selector.recovery_candidates(0, &sta, lib.cells[current].area, f64::INFINITY);
     let names: Vec<_> = chosen.iter().map(|&i| lib.cells[i].name.as_str()).collect();
     assert_eq!(names, ["INV1", "INV2"]);
     Ok(())
