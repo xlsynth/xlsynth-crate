@@ -21,7 +21,7 @@ use crate::ast::{BinaryOp, Param, SourceFile, Type, UnaryOp};
 use crate::bx_import::library_item;
 use crate::check::{
     CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind,
-    TypedMatchArm, literal_copy_work, output_ports,
+    TypedMatchArm, literal_copy_work, output_ports, port_names,
 };
 use crate::cycle_diagnostic::{CycleSources, WireDriver};
 use crate::import_link::link_imported_functions;
@@ -592,10 +592,58 @@ struct Register {
 #[derive(Default)]
 struct BlockResources {
     registers: BTreeMap<String, Register>,
+    /// BX binding to IR name, only for registers that need a new name.
+    register_renames: BTreeMap<String, String>,
     instances: BTreeMap<String, BInstantiation>,
     cycle_sources: CycleSources,
     asserted_reset: Option<BValue>,
     assertion_token: Option<BValue>,
+}
+
+/// XLS declares registers before output ports in Verilog. Keep the port name
+/// even when the BX register driving it has the same name.
+fn register_renames(block: &CheckedBlock) -> BTreeMap<String, String> {
+    let mut reserved: BTreeSet<_> = port_names(block).map(str::to_owned).collect();
+    let mut pending = vec![block.statements.as_slice()];
+    while let Some(statements) = pending.pop() {
+        for stmt in statements {
+            match stmt {
+                CheckedStmt::Inst { name, .. }
+                | CheckedStmt::Assert {
+                    label: Some(name), ..
+                } => {
+                    reserved.insert(name.clone());
+                }
+                CheckedStmt::If { body, .. } => pending.push(body),
+                _ => { /* Other statements have no fixed RTL name. */ }
+            }
+        }
+    }
+
+    // Reserve every original register name first. Renaming `valid` must
+    // leave a later `reg valid__1` alone.
+    let mut conflicts = Vec::new();
+    for stmt in &block.statements {
+        if let CheckedStmt::Reg { name, .. } = stmt
+            && !reserved.insert(name.clone())
+        {
+            conflicts.push(name);
+        }
+    }
+
+    let mut renames = BTreeMap::new();
+    for name in conflicts {
+        let mut suffix = 1usize;
+        loop {
+            let candidate = format!("{name}__{suffix}");
+            if reserved.insert(candidate.clone()) {
+                renames.insert(name.clone(), candidate);
+                break;
+            }
+            suffix += 1;
+        }
+    }
+    renames
 }
 
 /// The destination package and symbols reserved for user definitions and
@@ -824,7 +872,10 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
         symbols: &BlockSymbols,
         reset_behavior: ResetBehavior,
     ) -> Result<(BlockBuilder, CycleSources), BuilderError> {
-        let mut resources = BlockResources::default();
+        let mut resources = BlockResources {
+            register_renames: register_renames(block),
+            ..Default::default()
+        };
         if let Some(clock) = &block.clock {
             self.builder.clock_port(clock)?;
         }
@@ -958,8 +1009,10 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                         _ => value.clone(),
                     };
                     let register_reset = value.as_ref().and(reset);
+                    // Keep the BX name as the key for both reads and writes.
+                    let ir_name = resources.register_renames.get(name).unwrap_or(name);
                     let handle = self.builder.register(
-                        name,
+                        ir_name,
                         storage_type.as_ref().unwrap_or(&ty).clone(),
                         value,
                     )?;

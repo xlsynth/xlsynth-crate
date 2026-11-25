@@ -2667,11 +2667,8 @@ fn collect_assertion_labels<'a>(
     Ok(())
 }
 
-/// Port, register and instance names reserved in the block's hardware
-/// namespace.
-fn fixed_hardware_names(
-    block: &CheckedBlock,
-) -> impl Iterator<Item = (&str, &'static str)> + Clone {
+/// Physical names that must survive lowering, including any inferred reset.
+pub(crate) fn port_names(block: &CheckedBlock) -> impl Iterator<Item = &str> + Clone {
     block
         .clock
         .as_deref()
@@ -2684,6 +2681,13 @@ fn fixed_hardware_names(
                 .chain(&block.output_ports)
                 .map(|p| p.name.as_str()),
         )
+}
+
+/// Names to avoid when adding an assertion label or inferring a reset port.
+fn fixed_hardware_names(
+    block: &CheckedBlock,
+) -> impl Iterator<Item = (&str, &'static str)> + Clone {
+    port_names(block)
         .map(|name| (name, "port"))
         .chain(block.statements.iter().filter_map(|s| match s {
             CheckedStmt::Reg { name, .. } => Some((name.as_str(), "register")),
