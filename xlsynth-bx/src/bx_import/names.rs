@@ -49,7 +49,13 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
                 }
                 names.record_reference(Some(owner), head, name, None);
             } else {
-                bare_types.insert(names.resolve(name, None, Some(owner), ReferenceKind::Name)?);
+                bare_types.insert(names.resolve(
+                    name,
+                    None,
+                    Some(owner),
+                    ReferenceKind::Name,
+                    /* in_const_if_arm= */ false,
+                )?);
             }
         }
         out.overwritten_literal_types
@@ -331,6 +337,9 @@ struct Scope<'a> {
     introduced: Vec<(String, Option<Local>)>,
     hardware_callees: Option<&'a BTreeSet<&'a str>>,
     region: DeclarationRegion,
+    /// Branches retain type-qualified source names until the checker selects an
+    /// arm.
+    in_const_if_arm: bool,
     expression_depth: usize,
     guard_depth: usize,
 }
@@ -346,6 +355,7 @@ impl<'a> Scope<'a> {
             formals: BTreeSet::new(),
             hardware_callees: None,
             region: DeclarationRegion::Other,
+            in_const_if_arm: false,
             introduced: Vec::new(),
             expression_depth: 0,
             guard_depth: 0,
@@ -403,21 +413,27 @@ impl<'a> Scope<'a> {
                 .names
                 .unresolved(name, format!("invalid source reference '{name}'"));
         }
-        if let Some((head, _)) = name.split_once("::")
-            && let Some(binding) = self.locals.get(head)
-        {
-            if *binding == Local::TypeAlias {
-                // The checker resolves enum members against this lexical alias.
+        if let Some((head, _)) = name.split_once("::") {
+            if let Some(binding) = self.locals.get(head) {
+                if *binding == Local::TypeAlias || self.in_const_if_arm && *binding == Local::Formal
+                {
+                    // The checker determines which formals can qualify a
+                    // member.
+                    return Ok(name.to_owned());
+                }
+                return self
+                    .names
+                    .unresolved(name, format!("'{head}' names a local value here"));
+            }
+            if self.in_const_if_arm && crate::parser::fixed_width(head).is_some() {
                 return Ok(name.to_owned());
             }
-            return self
-                .names
-                .unresolved(name, format!("'{head}' names a local value here"));
         }
         if self.locals.contains_key(name) {
             Ok(name.to_owned())
         } else {
-            self.names.resolve(name, at, self.source_owner, kind)
+            self.names
+                .resolve(name, at, self.source_owner, kind, self.in_const_if_arm)
         }
     }
 
@@ -439,9 +455,13 @@ impl<'a> Scope<'a> {
             && self.names.definitions.contains(name)
             && self.locals.get(head) != Some(&Local::Formal)
         {
-            return self
-                .names
-                .resolve(name, self.at, self.source_owner, ReferenceKind::Name);
+            return self.names.resolve(
+                name,
+                self.at,
+                self.source_owner,
+                ReferenceKind::Name,
+                self.in_const_if_arm,
+            );
         }
         match self.locals.get(name) {
             Some(Local::Hardware)
@@ -450,8 +470,13 @@ impl<'a> Scope<'a> {
                         .hardware_callees
                         .is_some_and(|known| known.contains(name)) =>
             {
-                self.names
-                    .resolve(name, self.at, self.source_owner, ReferenceKind::Name)
+                self.names.resolve(
+                    name,
+                    self.at,
+                    self.source_owner,
+                    ReferenceKind::Name,
+                    self.in_const_if_arm,
+                )
             }
             Some(Local::Lexical | Local::Hardware | Local::TypeAlias)
                 if site == CallSite::Direct
@@ -499,8 +524,13 @@ impl<'a> Scope<'a> {
         } else {
             self.source_owner
         };
-        self.names
-            .resolve(name, at, owner, ReferenceKind::Builtin(fallback))
+        self.names.resolve(
+            name,
+            at,
+            owner,
+            ReferenceKind::Builtin(fallback),
+            self.in_const_if_arm,
+        )
     }
 
     /// A map target or named builtin callback can resolve to a later native
@@ -774,7 +804,13 @@ impl<'a> Scope<'a> {
         let stages = def.map_stages(
             |name| {
                 self.names
-                    .resolve(name, self.value_at, self.source_owner, ReferenceKind::Value)
+                    .resolve(
+                        name,
+                        self.value_at,
+                        self.source_owner,
+                        ReferenceKind::Value,
+                        self.in_const_if_arm,
+                    )
                     .map(StageAnnotation::Constant)
             },
             |name| self.callee(name, CallSite::Direct),
@@ -1321,6 +1357,23 @@ impl<'a> Scope<'a> {
                 then_value: Box::new(self.expr(then_value)?),
                 else_value: Box::new(self.expr(else_value)?),
             },
+            Expr::SelectedOperand(value) => Expr::SelectedOperand(Box::new(self.expr(value)?)),
+            Expr::ConstIf {
+                condition,
+                then_value,
+                else_value,
+            } => {
+                let condition = Box::new(self.expr(condition)?);
+                let enclosing = std::mem::replace(&mut self.in_const_if_arm, true);
+                let then_value = Box::new(self.expr(then_value)?);
+                let else_value = Box::new(self.expr(else_value)?);
+                self.in_const_if_arm = enclosing;
+                Expr::ConstIf {
+                    condition,
+                    then_value,
+                    else_value,
+                }
+            }
             Expr::Match { subject, arms } => Expr::Match {
                 subject: Box::new(self.expr(subject)?),
                 arms: arms

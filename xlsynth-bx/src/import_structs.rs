@@ -401,6 +401,24 @@ impl ImportedStructs {
             .is_some_and(dslx::Type::is_struct)
     }
 
+    /// Field names from the imported declaration, including through aliases,
+    /// without instantiating a parametric layout.
+    pub(crate) fn struct_field_names(
+        &self,
+        subject: &str,
+        member: &str,
+    ) -> Option<impl Iterator<Item = &str>> {
+        let ResolvedShape::Struct(id) = self.graph.named(subject, member)? else {
+            return None;
+        };
+        Some(
+            self.graph
+                .fields(&id)?
+                .iter()
+                .map(|(name, _)| name.as_str()),
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn type_witnesses(&self) -> usize {
         self.type_witnesses

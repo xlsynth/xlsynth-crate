@@ -11,6 +11,7 @@ use crate::typed::TEST_DISCARD_PREFIX;
 use crate::typed::{CONSTEXPR_PREFIX, ConstantBinding, ConstantUse, DEFERRED_CALLBACK_VALUE};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 use std::sync::Arc;
 use xlsynth_pir::IrValue;
 
@@ -26,6 +27,9 @@ pub(super) struct BindingInitializer {
 pub(super) struct LocalTypeAlias {
     pub(super) ty: Type,
     pub(super) can_construct: bool,
+    /// The record named by the written annotation, if known before generic
+    /// type arguments are bound.
+    pub(super) constructor: Option<Rc<str>>,
 }
 
 /// Bindings restored on scope exit and expression statements required by
@@ -194,8 +198,40 @@ impl BodyChecker<'_, '_> {
         result
     }
 
-    /// Evaluate a declaration in its lexical scope and erase its predicate's
-    /// temporary lets.
+    /// Evaluate a compile-time Boolean in its lexical scope without emitting
+    /// the predicate's temporary lets into the enclosing body.
+    fn constant_predicate(&mut self, predicate: &Expr) -> Result<bool, String> {
+        self.with_erased_declaration(|checker| {
+            let expr = checker.dslx_argument(predicate, &Type::Bool)?;
+            checker
+                .checked_constant_for(&expr, ConstantUse::Declaration)?
+                .ok_or("predicate must evaluate to a compile-time constant")?
+                .to_bool()
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Resolve the inactive arm's lexical names and expose only the active
+    /// expression to contextual type inference.
+    pub(super) fn const_if_arm<'e>(
+        &mut self,
+        condition: &Expr,
+        then_value: &'e Expr,
+        else_value: &'e Expr,
+    ) -> Result<&'e Expr, String> {
+        let take_then = self
+            .constant_predicate(condition)
+            .map_err(|e| format!("const if: {e}"))?;
+        let (selected, skipped) = if take_then {
+            (then_value, else_value)
+        } else {
+            (else_value, then_value)
+        };
+        self.check_const_if_arm_names(skipped)?;
+        Ok(selected)
+    }
+
+    /// Check a declaration in its lexical scope.
     pub(super) fn check_const_assert(&mut self, assertion: &ConstAssert) -> Result<(), String> {
         let result = if self.source_template.is_some() && self.function_spec.is_none() {
             // Callback-only templates have a checked abstract body. Its
@@ -203,17 +239,14 @@ impl BodyChecker<'_, '_> {
             // names can be required here.
             self.check_deferred_expr_names(&assertion.predicate)
         } else {
-            self.with_erased_declaration(|checker| {
-                let expr = checker.dslx_argument(&assertion.predicate, &Type::Bool)?;
-                let value = checker
-                    .checked_constant_for(&expr, ConstantUse::Declaration)?
-                    .ok_or("predicate must evaluate to a compile-time constant")?;
-                if value.to_bool().map_err(|e| e.to_string())? {
-                    Ok(())
-                } else {
-                    Err("predicate is false".to_owned())
-                }
-            })
+            self.constant_predicate(&assertion.predicate)
+                .and_then(|value| {
+                    if value {
+                        Ok(())
+                    } else {
+                        Err("predicate is false".to_owned())
+                    }
+                })
         };
         result.map_err(|e| {
             format!(
@@ -341,9 +374,20 @@ impl BodyChecker<'_, '_> {
                             None => self.type_bindings().is_some_and(|b| b.declares(name)),
                         };
                     }
+                    let constructor = alias
+                        .ty
+                        .constructor_head()
+                        .and_then(|name| self.source_constructor(name))
+                        .map(Rc::from);
                     self.shadow_scoped_name(&alias.name, &mut saved);
-                    self.local_type_aliases
-                        .insert(alias.name.clone(), LocalTypeAlias { ty, can_construct });
+                    self.local_type_aliases.insert(
+                        alias.name.clone(),
+                        LocalTypeAlias {
+                            ty,
+                            can_construct,
+                            constructor,
+                        },
+                    );
                     return Ok(());
                 }
                 ScopeStatement::ConstAssert(assertion) => {
@@ -467,6 +511,21 @@ impl BodyChecker<'_, '_> {
         })
     }
 
+    /// Resolve lexical scopes and compile-time branches in both operands
+    /// before either operand supplies the other's type.
+    pub(super) fn with_prepared_pair<T>(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        check: impl FnOnce(&mut Self, &Expr, &Expr) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.with_scope_aliases(|checker| {
+            let left = checker.prepare_value(left)?;
+            let right = checker.prepare_value(right)?;
+            check(checker, &left, &right)
+        })
+    }
+
     /// Keep all aliases made during a group of checks alive through its final
     /// elaboration, then release them on success or failure.
     pub(super) fn with_scope_aliases<T>(
@@ -496,6 +555,28 @@ impl BodyChecker<'_, '_> {
         self.prepare_scopes(expr, false, &mut |_| Ok(()))
     }
 
+    /// Keep an implicit selected value available as a parametric witness.
+    pub(super) fn prepare_function_operand<'e>(
+        &mut self,
+        source: &'e Expr,
+        infer_type_parameters: bool,
+    ) -> Result<Cow<'e, Expr>, String> {
+        match self.prepare_value(source)? {
+            Cow::Owned(value)
+                if infer_type_parameters
+                    && super::has_aggregate_literal(&value)
+                    && crate::infer_literal::has_const_if_result(source)
+                    && !self.contains_type_struct_constructor(&value) =>
+            {
+                Ok(Cow::Owned(Expr::SelectedOperand(Box::new(value))))
+            }
+            Cow::Owned(value) => {
+                crate::infer_literal::prepared_inference_operand(source, value).map(Cow::Owned)
+            }
+            value => Ok(value),
+        }
+    }
+
     /// Retain the checked values of concrete constructor members while
     /// inferring their siblings. The caller consumes the aliases in this scope.
     pub(super) fn with_aggregate_operands<T>(
@@ -521,6 +602,20 @@ impl BodyChecker<'_, '_> {
         capture_anchors: bool,
         before_scope: &mut dyn FnMut(&mut Self) -> Result<(), String>,
     ) -> Result<Cow<'e, Expr>, String> {
+        if let Expr::ConstIf {
+            condition,
+            then_value,
+            else_value,
+        } = expr
+        {
+            before_scope(self)?;
+            let arm = self.const_if_arm(condition, then_value, else_value)?;
+            // Parents use Cow::Owned to detect that their child was replaced.
+            return Ok(Cow::Owned(
+                self.prepare_scopes(arm, capture_anchors, before_scope)?
+                    .into_owned(),
+            ));
+        }
         // Constructors and branches share their members' contexts. A
         // self-determined leaf such as a function call can supply its actual
         // type now and use the same checked value during final elaboration.
@@ -540,6 +635,7 @@ impl BodyChecker<'_, '_> {
             && !super::has_aggregate_literal(expr)
             && self.contextual_struct_constructor(expr).is_none()
             && self.reference_type(expr).is_none()
+            && !crate::infer_literal::has_const_if_result(expr)
             && self.has_concrete_element_type(expr)?
         {
             before_scope(self)?;
@@ -588,7 +684,18 @@ impl BodyChecker<'_, '_> {
                         unreachable!()
                     };
                     fold.iterable = ForIterable::Array(Expr::Name(alias));
-                    fold.seed = seed.into_owned();
+                    fold.seed = crate::infer_literal::prepared_inference_operand(
+                        &fold.seed,
+                        seed.into_owned(),
+                    )?;
+                }
+            }
+            Expr::UnrollFor(fold) if fold.annotation.is_none() => {
+                if let Cow::Owned(seed) = self.prepare_scopes(&fold.seed, false, before_scope)? {
+                    let Expr::UnrollFor(fold) = prepared.to_mut() else {
+                        unreachable!()
+                    };
+                    fold.seed = crate::infer_literal::prepared_inference_operand(&fold.seed, seed)?;
                 }
             }
             Expr::Scope { statements, result } if !expr.needs_scope_preparation() => {
@@ -743,6 +850,15 @@ impl BodyChecker<'_, '_> {
     ) -> Result<Vec<Cow<'e, Expr>>, String> {
         let mut prepared = Vec::with_capacity(items.len());
         for &expr in items {
+            let mut expr = expr;
+            while let Expr::ConstIf {
+                condition,
+                then_value,
+                else_value,
+            } = expr
+            {
+                expr = self.const_if_arm(condition, then_value, else_value)?;
+            }
             let Expr::Scope { statements, result } = expr else {
                 prepared.push(Cow::Borrowed(expr));
                 continue;
@@ -1482,6 +1598,11 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             condition,
             then_value,
             else_value,
+        }
+        | Expr::ConstIf {
+            condition,
+            then_value,
+            else_value,
         } => {
             capture_names(condition, aliases);
             capture_names(then_value, aliases);
@@ -1512,6 +1633,7 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             capture_names(result, aliases);
             aliases.extend(hidden);
         }
+        Expr::SelectedOperand(value) => capture_names(value, aliases),
         Expr::UnrollFor(fold) => {
             if let Some((i, a)) = &mut fold.annotation {
                 rename_type(i, aliases);

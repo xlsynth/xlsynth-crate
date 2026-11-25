@@ -79,9 +79,9 @@ impl BodyChecker<'_, '_> {
         })
     }
 
-    /// Preserve literal evidence when an explicit binding can supply an
-    /// operand's width, for example math::resize<8>(3).
-    pub(super) fn explicit_import_call(
+    /// Let native formals or sibling arguments determine a contextual
+    /// operand's width, including width evidence from compile-time branches.
+    pub(super) fn contextual_import_call(
         &mut self,
         module: &str,
         function: &str,
@@ -89,18 +89,30 @@ impl BodyChecker<'_, '_> {
         args: &[Expr],
     ) -> Result<TypedExpr, String> {
         let values = self.imported_value_parametrics(module, function, actuals)?;
-        let args = args.iter().collect::<Vec<_>>();
+        let source_args = args.iter().collect::<Vec<_>>();
         self.with_parametric_context(|checker| {
-            checker.with_aggregate_operands(&args, |checker, args| {
+            checker.with_aggregate_operands(&source_args, |checker, args| {
                 let mut evidence = Vec::with_capacity(args.len());
                 let mut checked = Vec::with_capacity(args.len());
-                for arg in args {
+                for (arg, source) in args.iter().zip(&source_args) {
                     match checker.import_operand(arg, MAX_ELABORATION_DEPTH)? {
                         ImportOperand::Checked(value) => {
                             evidence.push(NativeDataArg::Typed(value.ty.clone()));
                             checked.push(Some(value));
                         }
                         ImportOperand::Contextual(witness) => {
+                            let witness = if let NativeDataArg::Inferred(literal) = &witness
+                                && crate::infer_literal::supplies_selected_minimum(source)?
+                            {
+                                // Native DSLX uses a selected literal as an
+                                // independent width witness until an earlier
+                                // argument binds its width.
+                                NativeDataArg::Inferred(format!(
+                                    "const if true {{ {literal} }} else {{ false }}"
+                                ))
+                            } else {
+                                witness
+                            };
                             evidence.push(witness);
                             checked.push(None);
                         }

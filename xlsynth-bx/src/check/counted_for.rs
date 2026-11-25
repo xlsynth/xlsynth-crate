@@ -78,13 +78,13 @@ impl BodyChecker<'_, '_> {
             annotation.as_ref().map(|(_, a)| a),
             context,
             |checker, carry_hint| {
+                if carry_hint.is_none() && minimum_type(&fold.seed)?.is_some() {
+                    return Err(
+                        "for needs a typed seed or accumulator for an implicit literal result"
+                            .into(),
+                    );
+                }
                 checker.with_prepared_value(&fold.seed, |checker, seed| {
-                    if carry_hint.is_none() && minimum_type(seed)?.is_some() {
-                        return Err(
-                            "for needs a typed seed or accumulator for an implicit literal result"
-                                .into(),
-                        );
-                    }
                     checker.elaborate_result(seed, carry_hint, false)
                 })
             },

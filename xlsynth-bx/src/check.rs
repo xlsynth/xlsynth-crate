@@ -862,7 +862,7 @@ struct StructTable<'m> {
     imported_count: usize,
     /// Ordinary BX declarations, including records whose layout is still
     /// pending.
-    declared_records: BTreeSet<&'m str>,
+    declared_records: BTreeMap<&'m str, &'m StructDef>,
     templates: BTreeMap<&'m str, &'m StructDef>,
     instances: BTreeMap<String, struct_parametrics::StructInstance<'m>>,
     /// Explicit prefixes whose trailing defaults have already been evaluated.
@@ -2126,7 +2126,7 @@ pub(crate) fn check_sources_with_tests(
         }
         structs.register_template(def)?;
         if !def.is_parametric() {
-            structs.declared_records.insert(&def.name);
+            structs.declared_records.insert(&def.name, def);
         }
         structs.definitions.push(StructDef {
             name: def.name.clone(),
@@ -2246,7 +2246,7 @@ pub(crate) fn check_sources_with_tests(
                 None => {
                     declarations.type_aliases.contains_key(name.as_str())
                         || structs.enums.contains_key(name)
-                        || structs.declared_records.contains(name.as_str())
+                        || structs.declared_records.contains_key(name.as_str())
                         || structs.template(name).is_some()
                 }
             };
@@ -4027,7 +4027,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Result<scope::BindingInitializer, String> {
         // Preparing a lexical scope exposes its trailing expression, which
         // still occupies a pure value position inside the original scope.
-        let structural = structural && !matches!(initializer, Expr::Scope { .. });
+        let structural =
+            structural && !matches!(initializer, Expr::Scope { .. } | Expr::ConstIf { .. });
         self.annotated_binding_initializer(initializer, annotation, |checker, expr, ty| {
             checker.let_value(name, expr, ty, structural)
         })
@@ -4085,6 +4086,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::UnrollFor(fold) => {
                 return self.unroll(fold, CarryContext::Expected(expected), false);
             }
+            Expr::SelectedOperand(value) => return self.scoped_result(value, expected, false),
             Expr::For(fold) => {
                 return self.with_dslx_value_context(|checker| {
                     checker.counted_for(fold, CarryContext::Expected(expected))
@@ -4184,6 +4186,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 Ok((value.ty, value.kind))
             }),
             Expr::Cast { value, ty } => self.cast(value, ty),
+            Expr::ConstIf {
+                condition,
+                then_value,
+                else_value,
+            } => {
+                let arm = self.const_if_arm(condition, then_value, else_value)?;
+                return self.scoped_result(arm, expected, false);
+            }
             Expr::If {
                 condition,
                 then_value,
@@ -5705,6 +5715,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     "{kind} '{spelling}' cannot be called as a function"
                 ));
             }
+            if args.iter().any(crate::infer_literal::has_const_if_result) {
+                let value = self.contextual_import_call(&subject, &function, &[], args)?;
+                return Ok((value.ty, value.kind));
+            }
             let args = args
                 .iter()
                 .enumerate()
@@ -5786,6 +5800,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// evaluation.
     fn dimension_expr(&mut self, expr: &Expr, context_width: usize) -> Result<TypedExpr, String> {
         match expr {
+            Expr::ConstIf {
+                condition,
+                then_value,
+                else_value,
+            } => {
+                let arm = self.const_if_arm(condition, then_value, else_value)?;
+                self.dimension_expr(arm, context_width)
+            }
             Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
                 let selector = checker.match_selector(subject, arms)?;
                 let subject = checker
@@ -5942,14 +5964,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         left: &Expr,
         right: &Expr,
     ) -> Result<(TypedExpr, TypedExpr), String> {
-        if self.dslx_widths().is_some() {
-            return self.with_prepared_value(left, |checker, lhs| {
-                checker.with_prepared_value(right, |checker, rhs| checker.pair(lhs, rhs, None))
-            });
-        }
-        let (l, r) = self.pair(left, right, None)?;
-        check_result_width(&[left, right], &l.ty, None, &|| self.zero_calls_function())?;
-        Ok((l, r))
+        self.with_prepared_pair(left, right, |checker, lhs, rhs| {
+            let (l, r) = checker.pair(lhs, rhs, None)?;
+            if checker.dslx_widths().is_none() {
+                check_result_width(&[lhs, rhs], &l.ty, None, &|| checker.zero_calls_function())?;
+            }
+            Ok((l, r))
+        })
     }
 
     /// Use the index context's standard width only when all its operands are
@@ -5959,14 +5980,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         expr: &Expr,
         standard_width: Option<usize>,
     ) -> Result<TypedExpr, String> {
-        let hint = match standard_width {
-            Some(width) => {
-                let operands = context_operands(expr, &self.inferred_bindings, width)?;
-                (operands == ContextOperands::Inline).then_some(Type::unsigned(width))
-            }
-            None => minimum_type(expr)?,
-        };
-        let v = self.expr(expr, hint.as_ref())?;
+        let v = self.with_prepared_value(expr, |checker, expr| {
+            let hint = match standard_width {
+                Some(width) => {
+                    let operands = context_operands(expr, &checker.inferred_bindings, width)?;
+                    (operands == ContextOperands::Inline).then_some(Type::unsigned(width))
+                }
+                None => minimum_type(expr)?,
+            };
+            checker.expr(expr, hint.as_ref())
+        })?;
         if !bits(&v.ty).is_some_and(|(s, _)| !s) {
             return Err(format!("expected unsigned index, got {}", v.ty));
         }

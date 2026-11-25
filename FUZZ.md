@@ -358,6 +358,12 @@ For let-bound `ceillog2` predicates the target compares BX IR with concrete DSLX
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_const_assert -- -max_len=14 -len_control=0`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_const_if.rs
+
+Compares `const if` chains in parametric BX functions and blocks with pinned DSLX functions. Calls vary Boolean flags and widths through 129 bits and select between scalars, arrays, and tuples. Comparisons, indices, loop bounds, accumulator seeds, and inferred parametric arguments exercise contextual typing of the selected expression. The target checks acceptance and compares BX block outputs with both DSLX IR and DSLX constexpr results. Cases in skipped arms distinguish unknown names and malformed struct constructors from deferred lookup of members on a visible type.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_const_if -- -max_len=12 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_local_declarations.rs
 
 Generates function-local constants and type aliases in nested blocks and conditional branches. Cases vary lexical shadowing, constexpr lets, alias chains, signed and unsigned widths, aggregate types, and successive value and type parameter bindings. For each accepted case the BX block returns results from both the local function and a concrete function with its declarations hoisted to module scope under fresh names. Compiled DSLX IR and concrete DSLX calls evaluate the local function on the same inputs and supply the expected value for both BX results. Rejection cases check runtime-dependent initializers and dimensions, mismatched annotations, forward references, and references outside a declaration's scope.

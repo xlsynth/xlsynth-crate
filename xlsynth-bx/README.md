@@ -28,7 +28,7 @@ pub block transform_pipe(clk, valid_in: bool, x: u8) -> ResultPorts {
 
 BX supports concrete bit types, booleans, numeric enums, tuples, named structs, and fixed-size arrays. Bit types of width 1 through 64 have shorthand names `u1` through `u64` and `s1` through `s64`. For width zero or widths above 64, use `uN[width]` or `sN[width]`, as in `uN[0]` or `sN[84]`.
 
-The expression subset includes arithmetic, comparisons, bitwise and logical operations, shifts, concatenation, bit casts, field selection, array indexing, value-producing `if` expressions, and width slices such as `word[offset+:u8]`. See the manual’s [width slice examples](https://google.github.io/xls/dslx_reference/#width-slice).
+The expression subset includes arithmetic, comparisons, bitwise and logical operations, shifts, concatenation, bit casts, field selection, array indexing, value-producing `if` and `const if` expressions, and width slices such as `word[offset+:u8]`. See the manual’s [width slice examples](https://google.github.io/xls/dslx_reference/#width-slice).
 
 Use `++` to concatenate arrays with the same element type. The result length is the sum of the operand lengths, and the left operand's elements come first. Each operand is typed independently. For example, `[u8:1, u8:2] ++ [u8:3]` produces a `u8[3]`.
 
@@ -161,6 +161,44 @@ compile-time arguments. For example, after `use config;`, a block can write
 `reg q: u8 = config::initial_value();`. DSLX evaluates the imported helper
 using its own constexpr rules. Extern calls require runtime evaluation.
 
+### Compile-time conditionals
+
+`const if` selects a function or block expression at compile time. BX follows
+the rules exercised by the pinned DSLX implementation.
+
+- BX parses both arms. Even a skipped arm must use valid syntax and refer to
+  names visible in its lexical scope. For a known struct, BX also rejects
+  unknown or duplicate field names and checks that a
+  constructor without a splat supplies every field.
+- For each set of parametric bindings, BX evaluates the predicate as a
+  compile-time `bool`. It typechecks and evaluates an `else if` predicate only
+  when all preceding predicates were false. Omitting the final `else` gives
+  that path the value `()`.
+- Only the selected arm must typecheck for those bindings. It supplies the
+  result type and emits IR, and its value can depend on runtime inputs.
+  The skipped arm contributes no IR and its expressions are never evaluated.
+
+For example, `const if true { u8:7 } else { u8:1 + u16:1 }` produces
+`u8:7` even though the skipped addition has incompatible widths. Replacing
+the addition with an undeclared name is an error. The pinned DSLX sources show
+how the conditional is processed by the [parser](https://github.com/xlsynth/xlsynth/blob/v0.65.2/xls/dslx/frontend/parser.cc#L1479-L1511),
+[typechecker](https://github.com/xlsynth/xlsynth/blob/v0.65.2/xls/dslx/type_system_v2/inference_table_converter_impl.cc#L471-L489),
+and [IR converter](https://github.com/xlsynth/xlsynth/blob/v0.65.2/xls/dslx/ir_convert/function_converter.cc#L5674-L5687).
+
+```text
+block stage<T, BYPASS: bool>(clk, data: T) -> T {
+    reg held: T = zero!();
+    held := data;
+    const if BYPASS { data } else { held }
+}
+```
+
+For `stage<false>(data)`, the output comes directly from the register.
+A deferred wire can feed `data` from this output without creating a same-cycle
+dependency. For `stage<true>(data)`, the output comes directly from the input,
+so that feedback would form a combinational cycle. An ordinary `if` emits a
+runtime select whose dependencies include both arms.
+
 ### Compile-time assertions
 
 Use `const_assert!(predicate);` at module scope, inside a pure function, or
@@ -180,8 +218,9 @@ fn widen<N: u32>(x: uN[N]) -> u16 {
 ```
 
 Here `widen(u8:1)` compiles, while `widen(u32:1)` fails at the assertion.
-BX also checks assertions in untaken `if` and `match` arms. A predicate that
-depends on runtime data is a compile error. When a predicate calls a BX helper,
+BX also checks assertions in untaken arms of ordinary `if` and `match`
+expressions. A predicate that depends on runtime data is a compile error.
+When a predicate calls a BX helper,
 DSLX constexpr rules require the initializers on the helper's selected path to
 evaluate successfully, including an array read whose result is discarded.
 A successful assertion emits no hardware.

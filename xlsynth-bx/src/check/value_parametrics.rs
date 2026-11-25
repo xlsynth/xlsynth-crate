@@ -903,7 +903,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 // signature.
                 let prepared = args
                     .iter()
-                    .map(|expr| checker.prepare_value(expr))
+                    .map(|expr| checker.prepare_function_operand(expr, !f.type_params.is_empty()))
                     .collect::<Result<Vec<_>, _>>()?;
                 let args = prepared
                     .iter()
