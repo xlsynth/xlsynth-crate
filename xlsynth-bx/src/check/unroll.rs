@@ -136,13 +136,8 @@ impl BodyChecker<'_, '_> {
             && self.decls.is_block(target)
             && self.callback_index(target).is_none()
         {
-            if self.kind == BodyKind::Function {
-                return Err(format!("pure function cannot call block '{target}'"));
-            }
-            if !structural {
-                return Err(format!(
-                    "call to block '{target}' requires an unconditional top-level let or unrolled let"
-                ));
+            if self.kind == BodyKind::Function || !structural {
+                return Err(self.block_in_value_error(target));
             }
             if self.loop_values.contains_key(target) {
                 return Err(format!("'{target}' names a loop-local value"));
@@ -471,14 +466,24 @@ impl BodyChecker<'_, '_> {
                     );
                 };
                 let ty = ty.as_ref().map(|t| self.source_type(t)).transpose()?;
-                let value = self
-                    .let_value(Some(name), expr, ty.as_ref(), structural)
-                    .map_err(|e| format!("unroll_for! iteration {ordinal}, let '{name}': {e}"))?;
-                let widths = if ty.is_none() {
-                    binding_widths(expr, &value.ty, &self.inferred_bindings)?
-                } else {
-                    None
-                };
+                let binding_error =
+                    |e| format!("unroll_for! iteration {ordinal}, let '{name}': {e}");
+                let (selected, structural) = self
+                    .select_let_initializer(expr, structural)
+                    .map_err(binding_error)?;
+                // Capture the selected result's widths before its lexical
+                // bindings leave scope, including widths of tuple members.
+                let (value, widths) = self
+                    .with_prepared_value(selected, |checker, expr| {
+                        let value = checker.let_value(Some(name), expr, ty.as_ref(), structural)?;
+                        let widths = if ty.is_none() {
+                            binding_widths(expr, &value.ty, &checker.inferred_bindings)?
+                        } else {
+                            None
+                        };
+                        Ok((value, widths))
+                    })
+                    .map_err(binding_error)?;
                 let value = self.share_loop_value(value);
                 self.bind_scoped_value(name, value, widths, &mut saved);
             }
@@ -1205,6 +1210,24 @@ impl BodyChecker<'_, '_> {
         Err(format!("unknown value '{name}'"))
     }
 
+    /// A skipped compile-time branch resolves the child name without requiring
+    /// its clock or binding its parametric signature.
+    fn check_lexical_block_call(
+        &self,
+        name: &str,
+        parametric_count: usize,
+        hidden: bool,
+        locals: &LexicalScope<'_>,
+    ) -> Result<(), String> {
+        if locals.in_const_if_arm && self.kind == BodyKind::Block && !locals.in_lambda && !hidden {
+            self.reject_type_parameter_value(name)?;
+        } else {
+            self.check_block_call_signature(name, parametric_count, hidden)?;
+        }
+        self.has_block_only_behavior.set(true);
+        Ok(())
+    }
+
     fn check_expr_names(&self, expr: &Expr, locals: &LexicalScope<'_>) -> Result<(), String> {
         self.with_template_name_depth(|| self.check_expr_names_at_depth(expr, locals))
     }
@@ -1333,8 +1356,7 @@ impl BodyChecker<'_, '_> {
                             if self.kind == BodyKind::Function || locals.in_lambda {
                                 return Err(format!("pure function cannot call block '{name}'"));
                             }
-                            self.check_block_call_signature(name, 0, false)?;
-                            self.has_block_only_behavior.set(true);
+                            self.check_lexical_block_call(name, 0, false, locals)?;
                         } else if self.kind != BodyKind::Function
                             && !locals.in_lambda
                             && local.is_some_and(|scope| scope.parent.is_none())
@@ -1344,8 +1366,7 @@ impl BodyChecker<'_, '_> {
                             // A hardware port or wire can share the structural
                             // child's name. A nearer lexical or iteration
                             // binder shadows it.
-                            self.check_block_call_signature(name, 0, false)?;
-                            self.has_block_only_behavior.set(true);
+                            self.check_lexical_block_call(name, 0, false, locals)?;
                         }
                     }
                     if self.callback_index(name).is_none() || local.is_some() {
@@ -1364,12 +1385,12 @@ impl BodyChecker<'_, '_> {
                 let block = self.decls.is_block(name) && self.callback_index(name).is_none();
                 let template = self.decls.function_templates.get(name.as_str());
                 if block {
-                    self.check_block_call_signature(
+                    self.check_lexical_block_call(
                         name,
                         parametrics.len(),
                         locals.contains(name),
+                        locals,
                     )?;
-                    self.has_block_only_behavior.set(true);
                     if self.kind == BodyKind::Function || locals.in_lambda {
                         return Err(format!("pure function cannot call block '{name}'"));
                     }
@@ -1383,8 +1404,19 @@ impl BodyChecker<'_, '_> {
                     .into_iter()
                     .flat_map(|t| t.block.parametric_bindings())
                     .chain(template.into_iter().flat_map(|f| f.parametric_bindings()));
+                let skipped_child = block && locals.in_const_if_arm;
                 for actual in parametrics {
-                    if matches!(formals.next(), Some(FunctionParametricRef::Callback(_))) {
+                    if skipped_child
+                        && let Expr::Name(name) = actual
+                        && self.callback_index(name).is_some()
+                        && !locals.contains(name)
+                    {
+                        // The caller's callback is in scope. Forwarding it is
+                        // checked when a selected child binds its arguments.
+                        locals.visited.set(locals.visited.get().saturating_add(1));
+                    } else if !skipped_child
+                        && matches!(formals.next(), Some(FunctionParametricRef::Callback(_)))
+                    {
                         self.check_callback_argument_names(actual, locals)?;
                     } else {
                         self.check_expr_names(actual, locals)?;

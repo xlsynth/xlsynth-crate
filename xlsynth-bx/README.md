@@ -1431,6 +1431,24 @@ stages 1 and 0, and BX reports the mismatch at the adder.
 
 An unconditional `let` with a child-block call as its initializer creates one persistent child instance. Pass the data inputs in declaration order. Either kind of parent can instantiate a clockless child. A clocked child requires a clocked parent, and BX connects the child's clock and any required reset automatically. Reading the binding multiple times reads the same instance's outputs.
 
+A `const if` can choose the child at compile time. This stage uses a one-cycle
+child with the signature `block pipe_reg(clk, x: u8) -> u8`.
+
+```text
+#[allow(combinational_block)]
+block stage<PIPE: bool>(clk, x: u8) -> u8 {
+    let y = const if PIPE { pipe_reg(x) } else { x };
+    y
+}
+```
+
+`stage<true>` contains one `pipe_reg` instance named `y`.
+`stage<false>` wires `x` directly to its output and contains no child or mux.
+The `allow` attribute permits a design that uses only this bypass specialization
+under the default warnings-as-errors setting.
+Each arm can choose a different child. The call must be the whole selected
+arm of an unconditional block `let` or a `let` in a structural `unroll_for!`.
+
 An ordinary block `let` or a tuple pattern can shadow a data input or an earlier `let`. The initializer reads the bindings visible before the statement. For example, `let previous = x; let x = x + u8:1;` keeps the original input in `previous` and makes the sum available as `x`. A binding inside a guarded update is visible only in that guard's body. Clock, reset, register, and deferred wire names remain reserved.
 
 Block lets accept DSLX tuple patterns. For example, `let (valid, (first, .., last)) = packet;` binds the valid bit and the first and last members of the nested tuple. Use `_` to discard one member and `..` to skip zero or more members at that tuple level. An optional annotation after the pattern gives the type of the entire initializer. Each nested pattern must match a tuple of the corresponding shape. In `let (x, previous) = (x + u8:1, x);`, both uses on the right read the previous `x`.

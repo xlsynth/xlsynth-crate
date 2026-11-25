@@ -516,6 +516,136 @@ pub block pair(clk, a: u8, b: u8) -> (u8, u8) {
 }
 
 #[test]
+fn structural_const_if_selects_one_child_or_forwards_its_input() -> Result<(), String> {
+    let source = r#"
+block pipe_reg(clk, x: u8) -> u8 { reg q: u8; q := x; q }
+block invert_reg(clk, x: u8) -> u8 { reg q: u8; q := !x; q }
+#[allow(combinational_block)]
+block stage<PIPE: bool, INVERT: bool>(clk, x: u8) -> u8 {
+    let y: u8 = const if PIPE { pipe_reg(x) } else if INVERT { invert_reg(x) } else { x };
+    y
+}
+pub block lanes(clk, x: u8) -> (u8, u8, u8) {
+    let piped = stage<true, true>(x);
+    let inverted = stage<false, true>(x);
+    let direct = stage<false, false>(x);
+    (piped, inverted, direct)
+}
+"#;
+    let package = compile_design(source)?;
+    let lanes = package.get_top_block().ok_or("missing lanes")?;
+    assert_eq!(lanes.instantiations.len(), 3);
+    for (instance, expected_child) in
+        lanes
+            .instantiations
+            .iter()
+            .zip([Some("pipe_reg"), Some("invert_reg"), None])
+    {
+        let stage = package.get_block(&instance.block).ok_or("missing stage")?;
+        let x = stage.get_input_port("x").ok_or("missing input")?;
+        let output = stage.output_value(stage.get_output_port("out").ok_or("missing output")?);
+        let Some(expected_child) = expected_child else {
+            assert!(stage.instantiations.is_empty());
+            assert_eq!(output, x);
+            continue;
+        };
+        let [child] = stage.instantiations.as_slice() else {
+            return Err(format!("expected one child in '{}'", instance.name));
+        };
+        assert_eq!(
+            (child.name.as_str(), child.block.as_str()),
+            ("y", expected_child)
+        );
+        assert!(stage.nodes.iter().any(|node| matches!(
+            &node.payload, NodePayload::InstantiationInput { instantiation, port_name, arg }
+            if instantiation == "y" && port_name == "x" && *arg == x)));
+        assert!(matches!(
+            &stage.get_node(output).payload, NodePayload::InstantiationOutput { instantiation, port_name }
+            if instantiation == "y" && port_name == "out"));
+    }
+    Ok(())
+}
+
+#[test]
+fn unrolled_lets_instantiate_only_the_selected_iteration() -> Result<(), String> {
+    for (binding, result) in [("(next, _)", "next"), ("next", "next.0")] {
+        let source = format!(
+            r#"
+block sample(clk, x: u8) -> (u8, u8) {{ reg q: u8; q := x; (q, x) }}
+pub block pipeline(clk, x: u8) -> u8 {{
+    unroll_for! (i, a) in u32:0..u32:3 {{
+        let {binding}: (u8, u8) = const if i == u32:1 {{ sample(a) }} else {{ (a, a) }};
+        {result}
+    }}(x)
+}}
+"#
+        );
+        let package = compile_design(&source)?;
+        let pipeline = package.get_top_block().ok_or("missing pipeline")?;
+        let [child] = pipeline.instantiations.as_slice() else {
+            return Err(format!("expected one selected iteration for '{binding}'"));
+        };
+        assert_eq!(child.block, "sample");
+        if binding == "next" {
+            assert_eq!(child.name, "next_1");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn unrolled_bypass_literal_retains_its_inferred_width() -> Result<(), String> {
+    let source = r#"
+block pipe_reg(clk, x: u8) -> u8 { reg q: u8; q := x; q }
+#[allow(combinational_block)]
+pub block sum(clk, x: u8) -> u8 {
+    unroll_for! (_, a) in u32:0..u32:1 {
+        let z = BYPASS;
+        a + RESULT
+    }(x)
+}
+"#;
+    for (bypass, direct, result) in [
+        ("1", "1", "z"),
+        ("let t = 1; t", "1", "z"),
+        ("let t = 1; (t, a)", "(1, a)", "z.0"),
+        ("(const if true { 1 } else { a }, a)", "(1, a)", "z.0"),
+    ] {
+        let source = source.replace("RESULT", result);
+        let conditional = format!("const if false {{ pipe_reg(a) }} else {{ {bypass} }}");
+        assert_eq!(
+            compile_design(&source.replace("BYPASS", &conditional))?.to_string(),
+            compile_design(&source.replace("BYPASS", direct))?.to_string(),
+            "{bypass}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn child_in_const_if_requires_a_structural_let_initializer() {
+    for body in [
+        "if enable { let y = const if true { pipe_reg(x) } else { x }; } x",
+        "let y = if enable { const if true { pipe_reg(x) } else { x } } else { x }; y",
+        "let y = { let a = x; const if true { pipe_reg(a) } else { a } }; y",
+        "let y = const if true { let a = x; pipe_reg(a) } else { x }; y",
+        "let y = const if true { pipe_reg(x) + x } else { x }; y",
+        "let y = const if true { unroll_for! (_, a) in u32:0..u32:1 { let q = pipe_reg(a); q }(x) } else { x }; y",
+        "const if true { pipe_reg(x) } else { x }",
+    ] {
+        let source = format!(
+            "block pipe_reg(clk, x: u8) -> u8 {{ reg q: u8; q := x; q }}
+             pub block parent(clk, x: u8, enable: bool) -> u8 {{ {body} }}"
+        );
+        let error = compile_design(&source).unwrap_err();
+        assert!(
+            error.contains("call to block 'pipe_reg'"),
+            "{body}: {error}"
+        );
+    }
+}
+
+#[test]
 fn conditional_loop_seeds_infer_a_default_and_accept_a_contextual_width()
 -> Result<(), Box<dyn Error>> {
     for keyword in ["for", "unroll_for!"] {
@@ -552,6 +682,62 @@ fn sample() -> (u16, u16, u16, u16) {{
             );
             assert!(compile_design(&source).is_err(), "{source}");
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn skipped_child_calls_check_names_and_defer_the_hardware_signature() -> Result<(), String> {
+    let source = |selected: bool, child: &str| {
+        format!(
+            r#"
+fn identity(x: u8) -> u8 {{ x }}
+block clocked(clk, x: u8) -> u8 {{ reg q: u8; q := x; q }}
+#[allow(combinational_block)]
+block apply_child<F: fn(u8) -> u8>(x: u8) -> u8 {{ F(x) }}
+#[allow(combinational_block)]
+block parent<G: fn(u8) -> u8>(x: u8) -> u8 {{
+    let y = const if {selected} {{ {child} }} else {{ x }};
+    y
+}}
+pub block wrapper(x: u8) -> u8 {{ let p = parent<identity>(x); p }}
+"#
+        )
+    };
+    let instance_count = |selected, child: &str| -> Result<usize, String> {
+        let package = compile_design(&source(selected, child))?;
+        let wrapper = package.get_top_block().ok_or("missing wrapper")?;
+        let [call] = wrapper.instantiations.as_slice() else {
+            return Err("expected wrapper to instantiate parent".into());
+        };
+        let parent = package.get_block(&call.block).ok_or("missing parent")?;
+        Ok(parent.instantiations.len())
+    };
+    assert_eq!(instance_count(true, "apply_child<identity>(x)")?, 1);
+    for (child, diagnostic) in [
+        ("clocked(x)", "clockless block cannot call clocked block"),
+        ("apply_child(x)", "expects 1 callable arguments, got 0"),
+        (
+            "apply_child<identity, true>(x)",
+            "expects 1 callable arguments, got 2",
+        ),
+        (
+            "apply_child<u8:7>(x)",
+            "callable argument must name a function",
+        ),
+        ("apply_child<x>(x)", "'x' names a local value here"),
+        ("apply_child<G>(x)", "cannot forward callable parameter 'G'"),
+    ] {
+        assert_eq!(instance_count(false, child)?, 0, "{child}");
+        let error = compile_design(&source(true, child)).unwrap_err();
+        assert!(error.contains(diagnostic), "{child}: {error}");
+    }
+    for (child, name) in [
+        ("clocked(missing_data)", "missing_data"),
+        ("apply_child<missing_callback, true>(x)", "missing_callback"),
+    ] {
+        let error = compile_design(&source(false, child)).unwrap_err();
+        assert!(error.contains(name), "{child}: {error}");
     }
     Ok(())
 }
