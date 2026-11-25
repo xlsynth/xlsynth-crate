@@ -39,6 +39,54 @@ struct EnteredScope {
     operands: Vec<TypedExpr>,
 }
 
+/// Maps tuple-pattern positions to fields, accounting for a rest marker.
+struct TuplePatternLayout {
+    rest: Option<usize>,
+    rest_fields: usize,
+}
+
+impl TuplePatternLayout {
+    fn new(patterns: &[BindingPattern], field_count: usize) -> Result<Self, String> {
+        let rest = patterns
+            .iter()
+            .position(|p| matches!(p, BindingPattern::Rest));
+        let required = patterns.len() - usize::from(rest.is_some());
+        if required > field_count || rest.is_none() && required != field_count {
+            return Err(format!(
+                "tuple pattern with {required} fields cannot bind a {field_count}-element tuple"
+            ));
+        }
+        Ok(Self {
+            rest,
+            rest_fields: field_count - required,
+        })
+    }
+
+    fn field_index(&self, position: usize) -> usize {
+        if self.rest.is_some_and(|rest| position > rest) {
+            position - 1 + self.rest_fields
+        } else {
+            position
+        }
+    }
+}
+
+/// Check the binder shape when an empty iterable has no value to project.
+pub(super) fn check_empty_binder_type(pattern: &BindingPattern, ty: &Type) -> Result<(), String> {
+    if let BindingPattern::Tuple(patterns) = pattern {
+        let Type::Tuple(fields) = ty else {
+            return Err(format!("tuple pattern requires a tuple, got {ty}"));
+        };
+        let layout = TuplePatternLayout::new(patterns, fields.len())?;
+        for (position, nested) in patterns.iter().enumerate() {
+            if matches!(nested, BindingPattern::Tuple(_)) {
+                check_empty_binder_type(nested, &fields[layout.field_index(position)])?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The runtime aggregate to project and its shared DSLX constexpr operands.
 pub(super) struct ProjectionInput {
     pub(super) value: TypedExpr,
@@ -104,6 +152,17 @@ fn checked_sequence(operands: Vec<TypedExpr>, result: TypedExpr, bytecode_only: 
 }
 
 impl BodyChecker<'_, '_> {
+    /// Keep an otherwise erased computation in the IR executed by pure tests.
+    pub(super) fn observe_pure_test_discard(&mut self, value: TypedExpr) {
+        if !matches!(value.kind, K::Literal(_) | K::Name(_)) {
+            self.decls.has_test_discards.set(true);
+            self.statements.push(CheckedStmt::Let {
+                name: format!("{TEST_DISCARD_PREFIX}{}", self.statements.len()),
+                value,
+            });
+        }
+    }
+
     /// Keep erased type and specialization operands with their own value so
     /// that assertion replay follows the same branch as the original operand.
     pub(super) fn with_assert_operands(
@@ -557,7 +616,7 @@ impl BodyChecker<'_, '_> {
             self.loop_values.remove(&name);
             self.names.remove(&name);
             self.inferred_bindings.remove(&name);
-            self.prepared_counted_iterables.remove(&name);
+            self.prepared_loop_iterables.remove(&name);
             self.local_type_aliases.remove(&name);
             self.constant_pattern_names.remove(&name);
         }
@@ -679,40 +738,31 @@ impl BodyChecker<'_, '_> {
         let mut prepared = Cow::Borrowed(expr);
         match expr {
             Expr::For(fold) if fold.annotation.is_none() => {
-                let mut iteration = None;
-                let seed = self.with_dslx_value_context(|checker| {
-                    checker.prepare_scopes(&fold.seed, false, &mut |checker| {
-                        if iteration.is_none() {
-                            before_scope(checker)?;
-                            checker.validate_counted_binders(fold)?;
-                            iteration = Some(checker.counted_iteration(&fold.iterable, None)?);
-                        }
-                        Ok(())
+                let operands = self.with_dslx_value_context(|checker| {
+                    checker.prepare_loop_seed(&fold.seed, before_scope, |checker| {
+                        checker.validate_loop_binders(&fold.element, &fold.accumulator)?;
+                        checker.counted_iteration(&fold.iterable, None)
                     })
                 })?;
-                if let Some(iteration) = iteration {
-                    // The enclosing inference scope owns both the checked
-                    // iterable and the lexical aliases in the seed.
-                    let alias = format!("$scope_{}", self.scope_alias_names.len());
-                    self.scope_alias_names.push(None);
-                    self.prepared_counted_iterables
-                        .insert(alias.clone(), iteration);
+                if let Some((iterable, seed)) = operands {
                     let Expr::For(fold) = prepared.to_mut() else {
                         unreachable!()
                     };
-                    fold.iterable = ForIterable::Array(Expr::Name(alias));
-                    fold.seed = crate::infer_literal::prepared_inference_operand(
-                        &fold.seed,
-                        seed.into_owned(),
-                    )?;
+                    fold.iterable = iterable;
+                    fold.seed = seed;
                 }
             }
             Expr::UnrollFor(fold) if fold.annotation.is_none() => {
-                if let Cow::Owned(seed) = self.prepare_scopes(&fold.seed, false, before_scope)? {
+                let operands = self.prepare_loop_seed(&fold.seed, before_scope, |checker| {
+                    checker.validate_loop_binders(&fold.element, &fold.accumulator)?;
+                    checker.unroll_iteration(&fold.iterable, None)
+                })?;
+                if let Some((iterable, seed)) = operands {
                     let Expr::UnrollFor(fold) = prepared.to_mut() else {
                         unreachable!()
                     };
-                    fold.seed = crate::infer_literal::prepared_inference_operand(&fold.seed, seed)?;
+                    fold.iterable = iterable;
+                    fold.seed = seed;
                 }
             }
             Expr::Scope { statements, result } if !expr.needs_scope_preparation() => {
@@ -859,6 +909,32 @@ impl BodyChecker<'_, '_> {
             _ => { /* This expression has no scopes sharing the parameter's type. */ }
         }
         Ok(prepared)
+    }
+
+    /// Check the loop iterable before entering any lexical scope needed to
+    /// infer the seed. Reuse the checked iterable when elaborating the loop.
+    fn prepare_loop_seed(
+        &mut self,
+        seed: &Expr,
+        before_scope: &mut dyn FnMut(&mut Self) -> Result<(), String>,
+        check_iteration: impl Fn(&mut Self) -> Result<super::counted_for::Iteration, String>,
+    ) -> Result<Option<(ForIterable, Expr)>, String> {
+        let mut iteration = None;
+        let prepared = self.prepare_scopes(seed, false, &mut |checker| {
+            if iteration.is_none() {
+                before_scope(checker)?;
+                iteration = Some(check_iteration(checker)?);
+            }
+            Ok(())
+        })?;
+        let Some(iteration) = iteration else {
+            return Ok(None);
+        };
+        let alias = self.new_scope_alias(None);
+        self.prepared_loop_iterables
+            .insert(alias.clone(), iteration);
+        let seed = crate::infer_literal::prepared_inference_operand(seed, prepared.into_owned())?;
+        Ok(Some((ForIterable::Array(Expr::Name(alias)), seed)))
     }
 
     fn capture_scoped_results<'e>(
@@ -1266,15 +1342,7 @@ impl BodyChecker<'_, '_> {
                     // a long wildcard pattern. Charge once for the traversal.
                     self.charge_expansion("tuple pattern", count.max(patterns.len()))?;
                 }
-                let rest = patterns
-                    .iter()
-                    .position(|p| matches!(p, BindingPattern::Rest));
-                let required = patterns.len() - usize::from(rest.is_some());
-                if required > count || rest.is_none() && required != count {
-                    return Err(format!(
-                        "tuple pattern with {required} fields cannot bind a {count}-element tuple"
-                    ));
-                }
+                let layout = TuplePatternLayout::new(patterns, count)?;
                 let mut widths = widths.map(|w| w.tuple_fields(count));
                 let literal_members = match &value.kind {
                     K::Literal(IrValue::Tuple(fields)) => Some(Arc::clone(fields)),
@@ -1283,7 +1351,7 @@ impl BodyChecker<'_, '_> {
                 // A constructor owns the field computations. A named tuple has
                 // already evaluated them and a literal has no runtime
                 // contracts.
-                let evaluate_discards = self.decls.evaluate_discarded_tuple_fields
+                let evaluate_discards = self.decls.evaluate_pure_test_discards
                     && self.source_kind == super::BodyKind::Function
                     && matches!(&value.kind, K::Tuple(_));
                 let mut fields: Box<dyn Iterator<Item = TypedExpr>> = match value.kind {
@@ -1312,33 +1380,18 @@ impl BodyChecker<'_, '_> {
                     {
                         if evaluate_discards {
                             let skipped = if matches!(pattern, BindingPattern::Rest) {
-                                count - required
+                                layout.rest_fields
                             } else {
                                 1
                             };
                             for field in fields.by_ref().take(skipped) {
-                                // Names were already evaluated and literals
-                                // have no contracts.
-                                if !matches!(field.kind, K::Name(_) | K::Literal(_)) {
-                                    self.decls.has_test_discards.set(true);
-                                    self.statements.push(CheckedStmt::Let {
-                                        name: format!(
-                                            "{TEST_DISCARD_PREFIX}{}",
-                                            self.statements.len()
-                                        ),
-                                        value: field,
-                                    });
-                                }
+                                self.observe_pure_test_discard(field);
                             }
                             cursor += skipped;
                         }
                         continue;
                     }
-                    let index = if rest.is_some_and(|r| i > r) {
-                        count - (patterns.len() - i)
-                    } else {
-                        i
-                    };
+                    let index = layout.field_index(i);
                     if let Some(members) = &literal_members {
                         // The iterator copies this selected literal into a
                         // new lexical binding; other tuple fields stay shared.
@@ -1453,6 +1506,27 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             }
             ForIterable::Array(array) => capture_names(array, aliases),
         }
+    }
+    /// Capture the operands that precede the loop scope, then hide aliases
+    /// shadowed by the binders until the caller finishes capturing its body.
+    fn capture_loop_inputs(
+        annotation: &mut Option<(Type, Type)>,
+        iterable: &mut ForIterable,
+        seed: &mut Expr,
+        patterns: [&BindingPattern; 2],
+        aliases: &mut BTreeMap<String, String>,
+    ) -> Vec<(String, String)> {
+        if let Some((element, carry)) = annotation {
+            rename_type(element, aliases);
+            rename_type(carry, aliases);
+        }
+        capture_iterable(iterable, aliases);
+        capture_names(seed, aliases);
+        let mut hidden = Vec::new();
+        for pattern in patterns {
+            pattern.visit_names(&mut |name| hidden.extend(aliases.remove_entry(name)));
+        }
+        hidden
     }
     fn capture_binding(
         binding: &mut LetBinding,
@@ -1644,16 +1718,13 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         }
         Expr::SelectedOperand(value) => capture_names(value, aliases),
         Expr::UnrollFor(fold) => {
-            if let Some((i, a)) = &mut fold.annotation {
-                rename_type(i, aliases);
-                rename_type(a, aliases);
-            }
-            capture_names(&mut fold.start, aliases);
-            capture_names(&mut fold.limit, aliases);
-            capture_names(&mut fold.seed, aliases);
-            let mut hidden = Vec::new();
-            hidden.extend(aliases.remove_entry(&fold.index));
-            hidden.extend(aliases.remove_entry(&fold.accumulator));
+            let mut hidden = capture_loop_inputs(
+                &mut fold.annotation,
+                &mut fold.iterable,
+                &mut fold.seed,
+                [&fold.element, &fold.accumulator],
+                aliases,
+            );
             for stmt in &mut fold.body {
                 // The checker accepts only lets in a fold body.
                 if let Stmt::Let { name, ty, value } = stmt {
@@ -1670,16 +1741,13 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             aliases.extend(hidden);
         }
         Expr::For(fold) => {
-            if let Some((element, carry)) = &mut fold.annotation {
-                rename_type(element, aliases);
-                rename_type(carry, aliases);
-            }
-            capture_iterable(&mut fold.iterable, aliases);
-            capture_names(&mut fold.seed, aliases);
-            let mut hidden = Vec::new();
-            for pattern in [&fold.element, &fold.accumulator] {
-                pattern.visit_names(&mut |name| hidden.extend(aliases.remove_entry(name)));
-            }
+            let hidden = capture_loop_inputs(
+                &mut fold.annotation,
+                &mut fold.iterable,
+                &mut fold.seed,
+                [&fold.element, &fold.accumulator],
+                aliases,
+            );
             capture_names(&mut fold.body, aliases);
             aliases.extend(hidden);
         }

@@ -7,6 +7,7 @@ use crate::ast::{
     StructLiteral, StructParametricRef, UnrollFor,
 };
 use crate::infer_literal::BindingWidths;
+use crate::typed::TypedIterable;
 use std::cell::Cell;
 use xlsynth_pir::IrBits;
 
@@ -18,6 +19,42 @@ pub(super) struct StaticRange {
     pub count: usize,
     pub widths: Option<BindingWidths>,
     pub operands: Vec<TypedExpr>,
+}
+
+/// Advance a full-width range index or project an element from a shared array.
+enum UnrollElements {
+    Range { next: IrBits, step: IrBits },
+    Array(TypedExpr),
+}
+
+impl UnrollElements {
+    fn next(&mut self, ordinal: usize, element_type: &Type) -> Result<TypedExpr, String> {
+        let kind = match self {
+            Self::Range { next, step } => {
+                let following = next.add(step);
+                K::Literal(IrValue::Bits(std::mem::replace(next, following)))
+            }
+            Self::Array(array) => match &array.kind {
+                K::Literal(value) => {
+                    K::Literal(value.get_element(ordinal).map_err(|e| e.to_string())?)
+                }
+                _ => K::Index {
+                    value: Box::new(array.clone()),
+                    index: Box::new(TypedExpr {
+                        ty: Type::unsigned(32),
+                        kind: K::Literal(
+                            IrValue::make_ubits(32, ordinal as u64).map_err(|e| e.to_string())?,
+                        ),
+                    }),
+                    constant_index: true,
+                },
+            },
+        };
+        Ok(TypedExpr {
+            ty: element_type.clone(),
+            kind,
+        })
+    }
 }
 
 /// State hidden by a loop-local name. Restore it when leaving the iteration.
@@ -182,7 +219,7 @@ impl BodyChecker<'_, '_> {
     /// Share a loop-local initializer across uses without copying its
     /// expression tree into the next iteration. Constant carries need no
     /// hardware binding.
-    fn share_loop_value(&mut self, value: TypedExpr) -> TypedExpr {
+    fn share_loop_value(&mut self, value: TypedExpr, observe_folded_array: bool) -> TypedExpr {
         if matches!(value.runtime_result().kind, K::Name(_) | K::Literal(_)) {
             return self.share_scoped_value(value);
         }
@@ -192,6 +229,9 @@ impl BodyChecker<'_, '_> {
         if constexpr {
             match constant {
                 Some(ConstantBinding::Known(v)) => {
+                    if observe_folded_array {
+                        self.observe_pure_test_discard(value);
+                    }
                     return TypedExpr {
                         ty,
                         kind: K::Literal(v),
@@ -206,8 +246,14 @@ impl BodyChecker<'_, '_> {
                         kind: K::Literal(folded),
                     };
                     if self.preserve_assert_inputs {
+                        if observe_folded_array {
+                            self.observe_pure_test_discard(value.clone());
+                        }
                         let operand = self.retain_constexpr_operand(value);
                         return scope::sequence(vec![operand], result);
+                    }
+                    if observe_folded_array {
+                        self.observe_pure_test_discard(value);
                     }
                     return result;
                 }
@@ -239,6 +285,24 @@ impl BodyChecker<'_, '_> {
             ty,
             kind: K::Name(name),
         }
+    }
+
+    /// Fold a pure BX array factory with the speculative budget before
+    /// building its projections. Runtime inputs and expensive factories can
+    /// still supply their elements through one shared array.
+    fn share_unroll_array(&mut self, array: TypedExpr, observe_folded_array: bool) -> TypedExpr {
+        if !array.has_constant_inputs(&self.constexpr_names)
+            || matches!(array.runtime_result().kind, K::Name(_) | K::Literal(_))
+        {
+            return self.share_loop_value(array, observe_folded_array);
+        }
+        let had_functions = self.constant_functions.is_some();
+        self.enable_constant_functions();
+        let shared = self.share_loop_value(array, observe_folded_array);
+        if !had_functions {
+            self.constant_functions = None;
+        }
+        shared
     }
 
     /// Install a source binding, preserving shadowed outer values and literal
@@ -381,34 +445,99 @@ impl BodyChecker<'_, '_> {
         })
     }
 
-    /// Fold a constant half-open range in source order. Bounds may be wider
-    /// than a host integer; only the iteration count needs to fit in memory.
+    /// Resolve an unrolled iterable outside the scope of its element and carry.
+    pub(super) fn unroll_iteration(
+        &mut self,
+        iterable: &ForIterable,
+        hint: Option<&Type>,
+    ) -> Result<counted_for::Iteration, String> {
+        match iterable {
+            ForIterable::Range {
+                start,
+                limit,
+                inclusive,
+            } => Ok(self
+                .static_range(start, limit, hint, *inclusive, "unroll_for!")?
+                .into()),
+            ForIterable::Array(Expr::Name(name))
+                if let Some(iteration) = self.prepared_loop_iterables.remove(name) =>
+            {
+                Ok(iteration)
+            }
+            ForIterable::Array(value) => {
+                let prior_callees = self.callee_specialization_count();
+                let iteration = self.array_iteration(value, hint, "unroll_for!")?;
+                if self.callee_specialization_count() > prior_callees {
+                    // A folded array, a wildcard, or a zero-trip loop can
+                    // consume a specialized factory entirely at compile time.
+                    self.decls.constexpr_instantiated_callee.set(true);
+                }
+                Ok(iteration)
+            }
+        }
+    }
+
+    /// Elaborate one body per element in source order, including structural
+    /// instances in a block. The ordinal identifies each copy independently
+    /// of the value bound to its element pattern.
     pub(super) fn unroll(
         &mut self,
         fold: &UnrollFor,
         context: CarryContext,
         structural: bool,
     ) -> Result<TypedExpr, String> {
-        if fold.index == fold.accumulator && fold.index != "_" {
-            return Err(format!("duplicate loop binding '{}'", fold.index));
-        }
+        self.validate_loop_binders(&fold.element, &fold.accumulator)?;
         let annotation = fold
             .annotation
             .as_ref()
             .map(|(i, a)| Ok::<_, String>((self.source_type(i)?, self.source_type(a)?)))
             .transpose()?;
-        let index_hint = annotation.as_ref().map(|(i, _)| i);
-        let range =
-            self.static_range(&fold.start, &fold.limit, index_hint, false, "unroll_for!")?;
-        let count = range.count;
-        let width = range.first.get_bit_count();
-        let mut index = range.first;
-        // Charge nested loops to the same block. A small inner range repeated
-        // many times consumes the same budget as a single large range.
+        let element_hint = annotation.as_ref().map(|(element, _)| element);
+        let iteration = self.unroll_iteration(&fold.iterable, element_hint)?;
+        let count = iteration.count;
+        let element_work = match &iteration.iterable {
+            TypedIterable::Range { start } => start.get_bit_count().div_ceil(64).max(1),
+            TypedIterable::Array(_) => {
+                // Each projection owns its IR type. A folded wide scalar
+                // element also owns the limbs that hold its value.
+                let nodes = self
+                    .structs
+                    .type_shape(&iteration.ty, MAX_ELABORATION_DEPTH)?
+                    .ir_nodes;
+                nodes.max(repr_bits(&iteration.ty).map_or(1, |(_, width)| width.div_ceil(64)))
+            }
+        };
         self.charge_expansion(
             "unroll_for!",
-            count.saturating_mul(fold.body.len().saturating_add(width.div_ceil(64).max(1))),
+            count.saturating_mul(fold.body.len().saturating_add(element_work)),
         )?;
+        let mut operands = iteration.operands;
+        let discard_element = matches!(&fold.element, BindingPattern::Name(name) if name == "_");
+        let observe_folded_array = self.decls.evaluate_pure_test_discards
+            && self.source_kind == BodyKind::Function
+            && !self.in_erased_operand;
+        let mut elements = if count == 0 || discard_element {
+            if observe_folded_array && let TypedIterable::Array(array) = iteration.iterable {
+                self.observe_pure_test_discard(array);
+            }
+            None
+        } else {
+            Some(match iteration.iterable {
+                TypedIterable::Range { start } => UnrollElements::Range {
+                    step: IrBits::from_lsb_fn(start.get_bit_count(), |i| i == 0),
+                    next: start,
+                },
+                TypedIterable::Array(array) => {
+                    let array = self.share_unroll_array(array, observe_folded_array);
+                    // The element binding uses the array even when its name
+                    // never occurs in the body.
+                    if self.preserve_assert_inputs && !matches!(array.kind, K::Literal(_)) {
+                        operands.push(array.clone());
+                    }
+                    UnrollElements::Array(array)
+                }
+            })
+        };
         let seed = self.loop_seed(
             &fold.seed,
             annotation.as_ref().map(|(_, a)| a),
@@ -423,29 +552,29 @@ impl BodyChecker<'_, '_> {
                 checker.scoped_result(&fold.seed, acc_hint, false)
             },
         )?;
-        let mut carry = self.share_loop_value(seed);
+        let mut carry = self.share_loop_value(seed, false);
         if count == 0 {
+            scope::check_empty_binder_type(&fold.element, &iteration.ty)?;
+            scope::check_empty_binder_type(&fold.accumulator, &carry.ty)?;
             self.check_empty_loop_names(fold)?;
-            return Ok(scope::sequence(range.operands, carry));
+            return Ok(scope::sequence(operands, carry));
         }
-        let one = IrBits::from_lsb_fn(width, |i| i == 0);
         let mut previous_carries = Vec::new();
         for ordinal in 0..count {
             self.iteration_path.push(ordinal);
             let mut saved = Vec::new();
-            let item = TypedExpr {
-                ty: range.ty.clone(),
-                kind: K::Literal(IrValue::Bits(index.clone())),
-            };
+            if let Some(elements) = &mut elements {
+                let item = elements.next(ordinal, &iteration.ty)?;
+                self.bind_pattern(&fold.element, item, iteration.widths.clone(), &mut saved)?;
+            }
             let acc_type = carry.ty.clone();
-            self.bind_scoped_value(&fold.index, item, range.widths.clone(), &mut saved);
             // A constexpr helper executes the seed and each iteration even
             // when the next iteration ignores its accumulator. Nonliteral
             // carries are already shared, so each reference is stored once.
             if self.preserve_assert_inputs && !matches!(carry.kind, K::Literal(_)) {
                 previous_carries.push(carry.clone());
             }
-            self.bind_scoped_value(&fold.accumulator, carry, None, &mut saved);
+            self.bind_pattern(&fold.accumulator, carry, None, &mut saved)?;
             for stmt in &fold.body {
                 if let Stmt::LetPattern(binding) = stmt {
                     let init = self
@@ -484,16 +613,15 @@ impl BodyChecker<'_, '_> {
                         Ok((value, widths))
                     })
                     .map_err(binding_error)?;
-                let value = self.share_loop_value(value);
+                let value = self.share_loop_value(value, false);
                 self.bind_scoped_value(name, value, widths, &mut saved);
             }
             let value = self
                 .scoped_result(&fold.result, Some(&acc_type), structural)
                 .map_err(|e| format!("unroll_for! iteration {ordinal}: {e}"))?;
-            carry = self.share_loop_value(value);
+            carry = self.share_loop_value(value, false);
             self.leave_scope(saved);
             self.iteration_path.pop();
-            index = index.add(&one);
         }
         let result = if previous_carries.is_empty() {
             carry
@@ -507,7 +635,7 @@ impl BodyChecker<'_, '_> {
                 },
             }
         };
-        Ok(scope::sequence(range.operands, result))
+        Ok(scope::sequence(operands, result))
     }
 }
 
@@ -893,11 +1021,9 @@ impl BodyChecker<'_, '_> {
         fold: &UnrollFor,
         locals: &mut LexicalScope<'_>,
     ) -> Result<(), String> {
-        if fold.index == fold.accumulator && fold.index != "_" {
-            return Err(format!("duplicate loop binding '{}'", fold.index));
-        }
-        locals.bind_pattern_name(&fold.index);
-        locals.bind_pattern_name(&fold.accumulator);
+        self.validate_loop_binders(&fold.element, &fold.accumulator)?;
+        locals.bind_pattern(&fold.element);
+        locals.bind_pattern(&fold.accumulator);
         for stmt in &fold.body {
             if let Stmt::LetPattern(binding) = stmt {
                 self.validate_source_pattern(&binding.pattern)?;
@@ -1528,8 +1654,7 @@ impl BodyChecker<'_, '_> {
             }
             Expr::SelectedOperand(value) => self.check_expr_names(value, locals)?,
             Expr::UnrollFor(fold) => {
-                self.check_expr_names(&fold.start, locals)?;
-                self.check_expr_names(&fold.limit, locals)?;
+                self.check_iterable_names(&fold.iterable, locals)?;
                 self.check_expr_names(&fold.seed, locals)?;
                 if let Some((index, acc)) = &fold.annotation {
                     self.check_type_names(index, locals)?;
@@ -1565,7 +1690,7 @@ impl BodyChecker<'_, '_> {
                 }
                 self.check_expr_names(&fold.seed, locals)?;
                 let mut names = locals.nested();
-                self.validate_counted_binders(fold)?;
+                self.validate_loop_binders(&fold.element, &fold.accumulator)?;
                 for pattern in [&fold.element, &fold.accumulator] {
                     names.bind_pattern(pattern);
                 }

@@ -67,6 +67,40 @@ fn unroll_for_arrays_use_the_previous_iteration_and_preserve_empty_seed() {
 }
 
 #[test]
+fn unroll_destructures_runtime_elements_and_the_previous_carry() {
+    let pairs = IrValue::parse_typed(
+        "[(bits[8]:1, bits[8]:4), (bits[8]:2, bits[8]:5), (bits[8]:3, bits[8]:6)]",
+    )
+    .unwrap();
+    for annotation in ["", ": ((u8, u8), (u8, u8))"] {
+        let body = format!(
+            r#"
+            unroll_for! ((lo', hi!), (a!, b')){annotation} in pairs {{
+                (a! * u8:3 + lo', b' + hi! + a!)
+            }}((seed, u8:0))
+        "#
+        );
+        assert_expr_matches_dslx(
+            "pairs: (u8, u8)[3], seed: u8",
+            "(u8, u8)",
+            &body,
+            [(
+                vec![pairs.clone(), IrValue::make_ubits(8, 2).unwrap()],
+                IrValue::parse_typed("(bits[8]:72, bits[8]:47)").unwrap(),
+            )],
+        );
+    }
+}
+
+#[test]
+fn empty_unrolled_tuple_array_preserves_the_seed_and_checks_body_names() {
+    let body = "unroll_for! ((x, y), acc) in zero!<(u8, u8)[0]>() { acc + x + y }(seed)";
+    let seed = IrValue::make_ubits(8, 42).unwrap();
+    assert_expr_matches_dslx("seed: u8", "u8", body, [(vec![seed.clone()], seed)]);
+    assert_expr_rejected_by_both("seed: u8", "u8", &body.replace("acc + x + y", "missing"));
+}
+
+#[test]
 fn unrolled_tuple_patterns_bind_and_shadow_each_iteration() {
     for (count, expected) in [(0, 5), (3, 8)] {
         let body = format!(
@@ -319,4 +353,51 @@ fn unroll_for_uses_iteration_values_for_shifts_and_width_dimensions() {
             )],
         );
     }
+}
+
+#[test]
+fn unroll_array_binders_validate_empty_shapes_and_constexpr_inputs() -> Result<(), String> {
+    for (element_type, length, element, acc, body, valid) in [
+        ("u8", 0, "item", "acc", "acc + item", true),
+        ("u8", 0, "(i, j)", "acc", "acc", false),
+        ("u8", 0, "item", "(a, b)", "a", false),
+        ("(u8, u8)", 0, "(_, (a, b))", "acc", "acc", false),
+        ("(u8, u8)", 0, "(a, ..)", "acc", "acc", true),
+        ("u8", 1, "_", "acc", "acc", true),
+        ("u8", 1, "item", "acc", "acc", false),
+        ("(u8, u8)", 1, "(_, _)", "acc", "acc", false),
+    ] {
+        let source = format!(
+            r#"
+            fn sample(xs: {element_type}[{length}]) -> bool {{
+                const_assert!((unroll_for! ({element}, {acc}) in xs {{ {body} }}(u8:1)) == u8:1);
+                true
+            }}
+            "#
+        );
+        let bx = check_module(&parse_module(&source)?);
+        let native =
+            dslx::parse_and_typecheck(&source, "oracle.x", "oracle", &mut ImportData::default());
+        assert_eq!(native.is_ok(), valid, "{source}: {:?}", native.err());
+        assert_eq!(bx.is_ok(), valid, "{source}: {:?}", bx.err());
+    }
+    Ok(())
+}
+
+#[test]
+fn erased_unroll_iterables_prune_unused_factory_specializations() -> Result<(), String> {
+    for (element, size) in [("item", 0), ("_", 2)] {
+        let source = format!(
+            r#"
+            fn values<N: u32>() -> u8[N] {{ zero!<u8[N]>() }}
+            fn folded(seed: u8) -> u8 {{
+                unroll_for! ({element}, acc) in values<{size}>() {{ acc }}(seed)
+            }}
+        "#
+        );
+        let module = check_module(&parse_module(&source)?)?;
+        let names: Vec<_> = module.functions().iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["folded"], "{source}");
+    }
+    Ok(())
 }

@@ -728,14 +728,15 @@ fn bits_copy_work(bits: &IrBits) -> usize {
 #[derive(Default)]
 struct Declarations<'a> {
     warnings: RefCell<WarningCollector<'a>>,
-    /// Pure tests observe IR contracts in evaluated but discarded tuple fields.
-    evaluate_discarded_tuple_fields: bool,
+    /// Pure tests observe IR contracts in discarded tuple fields and array
+    /// iterables erased during unrolling.
+    evaluate_pure_test_discards: bool,
     has_test_discards: Cell<bool>,
     /// A local declaration or assertion may need the constexpr operands of
     /// any visible pure helper.
     has_constexpr_declaration: bool,
-    /// A compile-time declaration or register reset instantiated a callee
-    /// whose body may have no hardware users.
+    /// A compile-time declaration, register reset, or unrolled iterable
+    /// instantiated a callee whose body may have no hardware users.
     constexpr_instantiated_callee: Cell<bool>,
     /// Clock requirements of all defined and external blocks, including
     /// templates.
@@ -2142,7 +2143,7 @@ pub(crate) fn check_sources_with_tests(
             module,
             tests.is_some(),
         ),
-        evaluate_discarded_tuple_fields: tests.is_some()
+        evaluate_pure_test_discards: tests.is_some()
             && module
                 .tests
                 .iter()
@@ -2864,7 +2865,7 @@ struct BodyChecker<'a, 'm> {
     /// iterables have no binding name.
     scope_alias_names: Vec<Option<String>>,
     /// Iterables checked before a scoped seed is prepared for result inference.
-    prepared_counted_iterables: BTreeMap<String, counted_for::Iteration>,
+    prepared_loop_iterables: BTreeMap<String, counted_for::Iteration>,
     /// Counted bodies bind runtime loop values even outside a structural
     /// unroll.
     in_counted_body: bool,
@@ -3264,7 +3265,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             loop_values: BTreeMap::new(),
             function_values: BTreeMap::new(),
             scope_alias_names: Vec::new(),
-            prepared_counted_iterables: BTreeMap::new(),
+            prepared_loop_iterables: BTreeMap::new(),
             in_counted_body: false,
             map_scope: None,
             next_map: 1,

@@ -862,8 +862,7 @@ pub struct ForLoop {
     pub seed: Expr,
 }
 
-/// A counted loop or map visits a statically bounded integer range or an array
-/// value.
+/// An integer range or array value visited by a loop or map.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ForIterable {
     Range {
@@ -874,15 +873,14 @@ pub enum ForIterable {
     Array(Expr),
 }
 
-/// A fold over a compile-time half-open range. Each iteration's local lets
-/// and result expression can use the index and accumulator bindings.
+/// A fold expanded once per element. Its local lets and result expression
+/// can use the element and accumulator bindings.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UnrollFor {
-    pub index: String,
-    pub accumulator: String,
+    pub element: BindingPattern,
+    pub accumulator: BindingPattern,
     pub annotation: Option<(Type, Type)>,
-    pub start: Expr,
-    pub limit: Expr,
+    pub iterable: ForIterable,
     pub body: Vec<Stmt>,
     pub result: Expr,
     pub seed: Expr,
