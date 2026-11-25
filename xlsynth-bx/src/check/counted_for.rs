@@ -4,7 +4,7 @@
 
 use super::struct_parametrics::BoundStructArgument;
 use super::{BodyChecker, CheckedBinding, CheckedStmt, K, Param, Type, TypedExpr, compatible};
-use crate::ast::{Expr, ForIterable, ForLoop};
+use crate::ast::{BindingPattern, Expr, ForIterable, ForLoop};
 use crate::infer_literal::{BindingWidths, Member, binding_widths, minimum_type};
 use crate::typed::{TypedFor, TypedIterable};
 use std::collections::BTreeSet;
@@ -16,6 +16,18 @@ pub(super) struct Iteration {
     pub(super) iterable: TypedIterable,
     pub(super) count: usize,
     pub(super) operands: Vec<TypedExpr>,
+}
+
+impl From<super::unroll::StaticRange> for Iteration {
+    fn from(range: super::unroll::StaticRange) -> Self {
+        Self {
+            ty: range.ty,
+            widths: range.widths,
+            iterable: TypedIterable::Range { start: range.first },
+            count: range.count,
+            operands: range.operands,
+        }
+    }
 }
 
 /// Carry type evidence from an expected type, a struct update's partial
@@ -65,7 +77,7 @@ impl BodyChecker<'_, '_> {
         fold: &ForLoop,
         context: CarryContext,
     ) -> Result<TypedExpr, String> {
-        self.validate_counted_binders(fold)?;
+        self.validate_loop_binders(&fold.element, &fold.accumulator)?;
         let annotation = fold
             .annotation
             .as_ref()
@@ -132,19 +144,23 @@ impl BodyChecker<'_, '_> {
                 inclusive,
             } => self.counted_range(start, limit, *inclusive, hint),
             ForIterable::Array(Expr::Name(name))
-                if let Some(iteration) = self.prepared_counted_iterables.remove(name) =>
+                if let Some(iteration) = self.prepared_loop_iterables.remove(name) =>
             {
                 Ok(iteration)
             }
-            ForIterable::Array(value) => self.counted_array(value, hint),
+            ForIterable::Array(value) => self.array_iteration(value, hint, "for"),
         }
     }
 
-    /// Both patterns introduce names in the same lexical scope.
-    pub(super) fn validate_counted_binders(&self, fold: &ForLoop) -> Result<(), String> {
+    /// Validate both patterns, including names repeated across the two binders.
+    pub(super) fn validate_loop_binders(
+        &self,
+        element: &BindingPattern,
+        accumulator: &BindingPattern,
+    ) -> Result<(), String> {
         let mut names = BTreeSet::new();
         let mut duplicate = None;
-        for pattern in [&fold.element, &fold.accumulator] {
+        for pattern in [element, accumulator] {
             self.validate_source_pattern(pattern)?;
             pattern.visit_names(&mut |name| {
                 if !names.insert(name.to_owned()) {
@@ -172,35 +188,36 @@ impl BodyChecker<'_, '_> {
             if i64::try_from(range.count).is_err() {
                 return Err("for range trip count exceeds XLS IR limits".into());
             }
-            Ok(Iteration {
-                ty: range.ty,
-                widths: range.widths,
-                iterable: TypedIterable::Range { start: range.first },
-                count: range.count,
-                operands: range.operands,
-            })
+            Ok(range.into())
         })
     }
 
     /// Use the binder's element annotation as context for array constructors.
     /// A signal, function call, or projection supplies its own array length.
-    fn counted_array(&mut self, expr: &Expr, hint: Option<&Type>) -> Result<Iteration, String> {
+    pub(super) fn array_iteration(
+        &mut self,
+        expr: &Expr,
+        hint: Option<&Type>,
+        keyword: &str,
+    ) -> Result<Iteration, String> {
         self.with_prepared_value(expr, |checker, expr| {
-            let length = checker.iterable_length(expr, &[])?;
+            let length = checker
+                .iterable_length(expr, &[])
+                .map_err(|e| format!("{keyword} {e}"))?;
             let array_hint = hint
                 .zip(length)
                 .map(|(ty, size)| Type::array(ty.clone(), size));
             let value = checker.elaborate_result(expr, array_hint.as_ref(), false)?;
             let Type::Array { element, size } = &value.ty else {
                 return Err(format!(
-                    "for iterable must be an array or range, got {}",
+                    "{keyword} iterable must be an array or range, got {}",
                     value.ty
                 ));
             };
             if let Some(hint) = hint
                 && !compatible(hint, element)
             {
-                return Err(format!("for element expects {hint}, got {element}"));
+                return Err(format!("{keyword} element expects {hint}, got {element}"));
             }
             let widths = if hint.is_none() {
                 binding_widths(expr, &value.ty, &checker.inferred_bindings)?
@@ -224,7 +241,7 @@ impl BodyChecker<'_, '_> {
     fn iterable_length(&self, expr: &Expr, path: &[Member]) -> Result<Option<usize>, String> {
         match expr {
             Expr::Array(items) if path.is_empty() && items.is_empty() => {
-                Err("for cannot infer the element type of an empty array literal".into())
+                Err("cannot infer the element type of an empty array literal".into())
             }
             Expr::Array(items) if path.is_empty() => Ok(Some(items.len())),
             Expr::Array(items) if let [Member::ArrayElement, rest @ ..] = path => {
@@ -249,6 +266,9 @@ impl BodyChecker<'_, '_> {
                 self.iterable_length(value, &source_path)
             }
             Expr::For(fold) if fold.annotation.is_none() => self.iterable_length(&fold.seed, path),
+            Expr::UnrollFor(fold) if fold.annotation.is_none() => {
+                self.iterable_length(&fold.seed, path)
+            }
             Expr::If {
                 then_value,
                 else_value,

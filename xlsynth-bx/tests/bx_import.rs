@@ -1438,6 +1438,34 @@ fn __chip__invert(x: bits[8] id=1) -> bits[8] { ret v: bits[8] = not(x, id=2) }
 }
 
 #[test]
+fn imported_unroll_resolves_the_iterable_and_seed_before_tuple_binders()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "folds.bx",
+        r#"
+const pairs = [(u8:2, u8:3), (u8:4, u8:5)];
+fn seed(x: u8) -> (u8, u8) { (x, u8:0) }
+pub fn folded(x: u8) -> u8 {
+    let (sum, last) = unroll_for! ((pairs, item), (seed, _)) in pairs {
+        (seed + pairs, item)
+    }(seed(x));
+    sum + last
+}
+"#,
+    )?;
+    let root = r#"
+use folds::folded;
+#[allow(combinational_block)]
+pub block circuit(clk, x: u8) -> u8 { folded(x) }
+"#;
+    let package = compile_design(root, &search_paths(&[dir.path()]))?;
+    assert_eq!(run(package, 7)?, IrValue::make_ubits(8, 18)?);
+    Ok(())
+}
+
+#[test]
 fn calls_on_local_values_are_checked_when_a_loop_iteration_elaborates() -> Result<(), Box<dyn Error>>
 {
     let dir = tempdir()?;

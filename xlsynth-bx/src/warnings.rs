@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Block, Expr, Module, ScopeStatement, SourceNode, SourcePosition, Stmt};
+use crate::ast::{
+    BindingPattern, Block, Expr, Module, ScopeStatement, SourceNode, SourcePosition, Stmt,
+};
 use crate::bx_import::{LibraryModuleInfo, LinkedSources, UnlinkedBlockScope, library_item};
 
 /// A BX warning category, also used in source-level `#[allow(...)]` attributes.
@@ -268,6 +270,11 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
     let mut pending = vec![SourceNode::Expression(&block.output)];
     pending.extend(block.statements.iter().map(SourceNode::Statement));
     while let Some(node) = pending.pop() {
+        let mut bind_pattern = |pattern: &BindingPattern| {
+            pattern.visit_names(&mut |name| {
+                binders.insert(name.to_owned());
+            });
+        };
         match node {
             SourceNode::Statement(Stmt::ConstAssert(_)) => {
                 // Compile-time predicates cannot instantiate hardware.
@@ -280,9 +287,7 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                 binders.insert(name.clone());
             }
             SourceNode::Statement(Stmt::LetPattern(binding)) => {
-                binding.pattern.visit_names(&mut |name| {
-                    binders.insert(name.to_owned());
-                });
+                bind_pattern(&binding.pattern);
             }
             SourceNode::Expression(
                 Expr::Call { name, .. }
@@ -299,15 +304,12 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                 }
             }
             SourceNode::Expression(Expr::UnrollFor(fold)) => {
-                binders.insert(fold.index.clone());
-                binders.insert(fold.accumulator.clone());
+                bind_pattern(&fold.element);
+                bind_pattern(&fold.accumulator);
             }
             SourceNode::Expression(Expr::For(fold)) => {
-                for pattern in [&fold.element, &fold.accumulator] {
-                    pattern.visit_names(&mut |name| {
-                        binders.insert(name.to_owned());
-                    });
-                }
+                bind_pattern(&fold.element);
+                bind_pattern(&fold.accumulator);
             }
             SourceNode::Expression(Expr::Map(map)) => {
                 binders.insert(map.parameter.clone());
@@ -315,9 +317,7 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
             SourceNode::Expression(Expr::Scope { statements, .. }) => {
                 for statement in statements {
                     if let ScopeStatement::Let(binding) = statement {
-                        binding.pattern.visit_names(&mut |name| {
-                            binders.insert(name.to_owned());
-                        });
+                        bind_pattern(&binding.pattern);
                     }
                 }
             }

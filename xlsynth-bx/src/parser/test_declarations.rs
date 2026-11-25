@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use super::{Braces, Parser, ValueContext, diagnostic, is_identifier};
+use super::{Braces, Parser, PatternSite, ValueContext, diagnostic, is_identifier};
 use crate::ast::{Expr, QuickCheckSignature, TestDecl, TestKind, TestStmt, TestStmtKind, Type};
 
 impl Parser<'_> {
@@ -209,7 +209,11 @@ impl Parser<'_> {
         }
         if self.eat("for") {
             let mut names = BTreeSet::new();
-            let pattern = self.binding_pattern(&mut names, self.identifier_predicate())?;
+            let pattern = self.binding_pattern(
+                &mut names,
+                self.identifier_predicate(),
+                PatternSite::Binding,
+            )?;
             self.expect("in")?;
             let iterable = self.for_iterable(Braces::Body)?.into_ast().0;
             self.expect("{")?;

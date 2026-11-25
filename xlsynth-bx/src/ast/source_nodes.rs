@@ -93,7 +93,7 @@ impl<'a> SourceNode<'a> {
             },
             Iterable(ForIterable::Array(expr)) => pending.push(Expression(expr)),
             Iterable(ForIterable::Range { start, limit, .. }) => {
-                pending.extend([start, limit].map(Expression));
+                pending.extend([limit, start].map(Expression));
             }
             Annotation(ty) => match ty {
                 Type::ParametricBits { signed, width } => {
@@ -149,23 +149,24 @@ impl<'a> SourceNode<'a> {
                     pending.leave_scope();
                     pending.push(Expression(&fold.result));
                     pending.extend(fold.body.iter().rev().map(Statement));
-                    pending.bind_name(&fold.accumulator);
-                    pending.bind_name(&fold.index);
-                    pending.extend([&fold.seed, &fold.limit, &fold.start].map(Expression));
-                    if let Some((element, accumulator)) = &fold.annotation {
-                        pending.extend([accumulator, element].map(Annotation));
-                    }
+                    pending.push_loop_inputs(
+                        &fold.element,
+                        &fold.accumulator,
+                        &fold.annotation,
+                        &fold.iterable,
+                        &fold.seed,
+                    );
                 }
                 Expr::For(fold) => {
                     pending.leave_scope();
                     pending.push(Expression(&fold.body));
-                    pending.bind_pattern(&fold.accumulator);
-                    pending.bind_pattern(&fold.element);
-                    pending.push(Expression(&fold.seed));
-                    pending.push(Iterable(&fold.iterable));
-                    if let Some((element, accumulator)) = &fold.annotation {
-                        pending.extend([accumulator, element].map(Annotation));
-                    }
+                    pending.push_loop_inputs(
+                        &fold.element,
+                        &fold.accumulator,
+                        &fold.annotation,
+                        &fold.iterable,
+                        &fold.seed,
+                    );
                 }
                 Expr::Map(map) => {
                     pending.leave_scope();
@@ -358,6 +359,25 @@ trait SourceQueue<'a>: Extend<SourceNode<'a>> {
         self.bind_pattern(&binding.pattern);
         self.push(Expression(&binding.value));
         self.extend(binding.ty.iter().map(Annotation));
+    }
+
+    /// Visit the iterable and seed in the enclosing scope before binding the
+    /// element and accumulator for the loop body.
+    fn push_loop_inputs(
+        &mut self,
+        element: &'a BindingPattern,
+        accumulator: &'a BindingPattern,
+        annotation: &'a Option<(Type, Type)>,
+        iterable: &'a ForIterable,
+        seed: &'a Expr,
+    ) {
+        self.bind_pattern(accumulator);
+        self.bind_pattern(element);
+        self.push(Expression(seed));
+        self.push(Iterable(iterable));
+        if let Some((element, accumulator)) = annotation {
+            self.extend([accumulator, element].map(Annotation));
+        }
     }
 
     fn bind_name(&mut self, name: &'a str);

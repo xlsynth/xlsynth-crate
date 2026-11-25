@@ -367,6 +367,35 @@ block split(clk, x:u8) -> (u8, u8) { (x, x + u8:1) }
 }
 
 #[test]
+fn unrolled_grid_creates_one_specialized_child_per_coordinate() -> Result<(), String> {
+    for (rows, columns) in [(0, 3), (2, 0), (32, 32)] {
+        let source = format!(
+            r#"{}
+block cell<R: u32, C: u32>(clk, x: u32) -> u32 {{
+    reg q: u32 = 0;
+    q := x + R + C;
+    q
+}}
+#[allow(combinational_block)]
+pub block grid(clk, x: u32) -> u32 {{
+    unroll_for! ((r, c), a) in product<{rows}, {columns}>() {{
+        let lane = cell<r, c>(a);
+        lane
+    }}(x)
+}}"#,
+            include_str!("../examples/grid.bx")
+        );
+        let package = compile(&source, empty_package("design"), ResetBehavior::default())?;
+        let children = &package.get_block("grid").unwrap().instantiations;
+        assert_eq!(children.len(), rows * columns);
+        for (ordinal, child) in children.iter().enumerate() {
+            assert_eq!(child.name, format!("lane_{ordinal}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn block_call_results_retain_their_declared_shapes() {
     let source = r#"
 struct Bundle { data: u8, flags: (bool, bool) }

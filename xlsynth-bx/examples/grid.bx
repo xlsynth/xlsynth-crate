@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Row-major coordinates for a rectangular grid.
+pub fn product<ROWS: u32, COLS: u32>() -> (u32, u32)[ROWS * COLS] {
+    const_assert!((ROWS as u64) * (COLS as u64) <= u64:0xffff_ffff);
+    const POINTS = const if ROWS * COLS == u32:0 {
+        zero!<(u32, u32)[0]>()
+    } else {
+        map(u32:0..(ROWS * COLS), |i| (i / COLS, i % COLS))
+    };
+    POINTS
+}

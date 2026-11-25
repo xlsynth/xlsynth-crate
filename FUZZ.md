@@ -237,6 +237,12 @@ leaf signedness.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_tuple_match`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_unroll_arrays.rs
+
+Compares BX structural and counted array folds with the same `unroll_for!` in pinned DSLX IR and constexpr execution. Runtime seeds and arrays exercise signed and unsigned elements, nested tuple binders, tuple carries, and order-sensitive arithmetic. The BX `product<X, Y>()` example supplies coordinates for runtime array reads and value-parametric calls. A nested DSLX loop supplies the reference coordinates for empty, singleton, and nonsquare grids. The target detects element reordering, incorrect tuple projections, lost constexpr coordinates, and changes to the seed on empty folds.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_unroll_arrays -- -max_len=13 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_unroll_types.rs
 
 Compares the inferred type of an unannotated BX binding to native DSLX

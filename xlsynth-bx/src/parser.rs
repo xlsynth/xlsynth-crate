@@ -678,6 +678,23 @@ struct LetHead {
     names: BTreeSet<String>,
 }
 
+/// Both loop spellings parse their patterns together so the element and carry
+/// cannot bind the same name.
+struct LoopHead {
+    element: BindingPattern,
+    accumulator: BindingPattern,
+    names: BTreeSet<String>,
+    annotation: Option<(Type, Type)>,
+}
+
+/// Unrolled loops report duplicate binders at the repeated name. Other
+/// binding sites retain their pattern diagnostic.
+#[derive(Clone, Copy)]
+enum PatternSite {
+    UnrolledLoop,
+    Binding,
+}
+
 /// A block's inferred types and explicit value and callable formals.
 #[derive(Default)]
 struct BlockParametrics {
@@ -755,6 +772,7 @@ enum ConditionalKind {
 enum Braces {
     Struct,
     Body,
+    UnrollIterable,
     MatchArms,
 }
 
@@ -1051,6 +1069,18 @@ impl<'s> Parser<'s> {
             is_function_identifier
         } else {
             is_identifier
+        }
+    }
+
+    /// Simple block binders can name hardware. Tuple members are lexical
+    /// values and can use primes and bangs in either dialect.
+    fn pattern_identifier_predicate(&self, dslx_tuple_patterns: bool) -> fn(&str) -> bool {
+        if self.peek(0) != "(" {
+            self.identifier_predicate()
+        } else if dslx_tuple_patterns {
+            is_function_identifier
+        } else {
+            is_value_identifier
         }
     }
 
@@ -1945,6 +1975,7 @@ impl<'s> Parser<'s> {
         &mut self,
         names: &mut BTreeSet<String>,
         valid_name: fn(&str) -> bool,
+        site: PatternSite,
     ) -> Result<BindingPattern, String> {
         if self.eat("(") {
             return self.nested(|parser| {
@@ -1957,15 +1988,25 @@ impl<'s> Parser<'s> {
                         rest = true;
                         Ok(BindingPattern::Rest)
                     } else {
-                        p.binding_pattern(names, valid_name)
+                        p.binding_pattern(names, valid_name, site)
                     }
                 })?;
                 Ok(BindingPattern::Tuple(fields))
             });
         }
+        let offset = self.tokens[self.pos].start;
         let name = self.take_identifier(valid_name)?;
         if name != "_" && !names.insert(name.clone()) {
-            return Err(self.error(&format!("duplicate name '{name}' in binding pattern")));
+            return Err(match site {
+                PatternSite::UnrolledLoop => diagnostic(
+                    self.source,
+                    offset,
+                    &format!("duplicate loop binding '{name}'"),
+                ),
+                PatternSite::Binding => {
+                    self.error(&format!("duplicate name '{name}' in binding pattern"))
+                }
+            });
         }
         Ok(BindingPattern::Name(name))
     }
@@ -2828,17 +2869,9 @@ impl<'s> Parser<'s> {
     /// Parse a let pattern and its optional type without binding its names.
     fn let_head(&mut self, dslx_tuple_patterns: bool) -> Result<LetHead, String> {
         let mut names = BTreeSet::new();
-        // Simple block lets can name child instances. Tuple members are
-        // lexical values and can use primes and bangs in either dialect.
         let tuple_pattern = self.peek(0) == "(";
-        let valid_name = if !tuple_pattern {
-            self.identifier_predicate()
-        } else if dslx_tuple_patterns {
-            is_function_identifier
-        } else {
-            is_value_identifier
-        };
-        let pattern = self.binding_pattern(&mut names, valid_name)?;
+        let valid_name = self.pattern_identifier_predicate(dslx_tuple_patterns);
+        let pattern = self.binding_pattern(&mut names, valid_name, PatternSite::Binding)?;
         let ty = if self.eat(":") {
             // DSLX treats `(T)` as a singleton tuple at every nesting level.
             // Ordinary BX annotations retain their parenthesized type grammar.
@@ -3108,6 +3141,27 @@ impl<'s> Parser<'s> {
         match braces {
             Braces::Struct => true,
             Braces::Body => false,
+            // An unrolled range can begin with a struct projection. The
+            // iteration body's closing brace is followed by the seed.
+            Braces::UnrollIterable => {
+                if !matches!(self.peek(1), "}" | "..") && !matches!(self.peek(2), "," | ":" | "}") {
+                    return false;
+                }
+                let mut depth = 0;
+                for (offset, token) in self.tokens[self.pos..].iter().enumerate() {
+                    match token.text {
+                        "{" => depth += 1,
+                        "}" => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return self.peek(offset + 1) != "(";
+                            }
+                        }
+                        _ => { /* Only braces delimit the struct literal or loop body. */ }
+                    }
+                }
+                false
+            }
             Braces::MatchArms => {
                 let first = self.peek(1);
                 let next = self.peek(2);
@@ -3207,20 +3261,34 @@ impl<'s> Parser<'s> {
         self.with_value_grammar(Self::counted_for_contents)
     }
 
-    fn counted_for_contents(&mut self) -> Result<ParsedExpr, String> {
+    /// Parse the two patterns and annotation before introducing their names.
+    fn loop_head(&mut self, site: PatternSite) -> Result<LoopHead, String> {
         self.expect("(")?;
         let mut names = BTreeSet::new();
-        let element = self.binding_pattern(&mut names, self.identifier_predicate())?;
+        let dslx = self.dslx_value_grammar();
+        let element =
+            self.binding_pattern(&mut names, self.pattern_identifier_predicate(dslx), site)?;
         self.expect(",")?;
-        let accumulator = self.binding_pattern(&mut names, self.identifier_predicate())?;
+        let accumulator =
+            self.binding_pattern(&mut names, self.pattern_identifier_predicate(dslx), site)?;
         self.eat(",");
         self.expect(")")?;
         let annotation = self.loop_annotation(names.iter().map(String::as_str))?;
         self.expect("in")?;
+        Ok(LoopHead {
+            element,
+            accumulator,
+            names,
+            annotation,
+        })
+    }
+
+    fn counted_for_contents(&mut self) -> Result<ParsedExpr, String> {
+        let head = self.loop_head(PatternSite::Binding)?;
         let (iterable, height) = self.for_iterable(Braces::Body)?.into_ast();
         self.expect("{")?;
         let body = self.with_name_scope(|p| {
-            for name in names {
+            for name in head.names {
                 p.shadow_callable(&name);
             }
             p.value_scope()
@@ -3231,9 +3299,9 @@ impl<'s> Parser<'s> {
         self.compose(
             height.max(body.height).max(seed.height),
             Expr::For(Box::new(ForLoop {
-                element,
-                accumulator,
-                annotation,
+                element: head.element,
+                accumulator: head.accumulator,
+                annotation: head.annotation,
                 iterable,
                 body: body.value,
                 seed: seed.value,
@@ -3282,6 +3350,13 @@ impl<'s> Parser<'s> {
             };
             value.spelling = ExprSpelling::Parenthesized;
             self.expr_tail(value, 0, braces)?
+        } else if self.eat("{") {
+            // A braced iterable introduces its own lexical expression scope.
+            self.nested(Self::expression_scope)?
+        } else if braces == Braces::UnrollIterable {
+            // A fold at the start of an unrolled range is an operand, so its
+            // postfix or binary operators still belong to that endpoint.
+            self.expr_at(0, braces)?
         } else {
             self.full_expr(braces)?
         };
@@ -3290,7 +3365,14 @@ impl<'s> Parser<'s> {
         }
         let inclusive = self.peek(0) == "..=";
         self.pos += 1;
-        let limit = self.expr_at(0, braces)?;
+        let limit = self.expr_at(
+            0,
+            if braces == Braces::UnrollIterable {
+                Braces::Body
+            } else {
+                braces
+            },
+        )?;
         Ok(ParsedIterable::Range {
             start,
             limit,
@@ -3323,36 +3405,17 @@ impl<'s> Parser<'s> {
         false
     }
 
-    /// Parse the binders, range, iteration body, and initial accumulator of
+    /// Parse the binders, iterable, iteration body, and initial accumulator of
     /// a DSLX-style unrolled fold.
     fn unroll_for(&mut self) -> Result<ParsedExpr, String> {
-        self.expect("(")?;
-        let index = self.ident()?;
-        self.expect(",")?;
-        let accumulator_offset = self.tokens[self.pos].start;
-        let accumulator = self.ident()?;
-        if index == accumulator && index != "_" {
-            return Err(diagnostic(
-                self.source,
-                accumulator_offset,
-                &format!("duplicate loop binding '{accumulator}'"),
-            ));
-        }
-        self.eat(",");
-        self.expect(")")?;
-        let annotation = self.loop_annotation([index.as_str(), accumulator.as_str()])?;
-        self.expect("in")?;
-        // Range endpoints are operands of '..', even at the start of the
-        // iterable.
-        let start = self.expr_at(0, Braces::Struct)?;
-        self.expect("..")?;
-        let limit = self.expr_at(0, Braces::Body)?;
+        let head = self.loop_head(PatternSite::UnrolledLoop)?;
+        let (iterable, mut height) = self.for_iterable(Braces::UnrollIterable)?.into_ast();
         self.expect("{")?;
         let mut body = Vec::new();
-        let mut height = start.height.max(limit.height);
         let result = self.with_name_scope(|p| {
-            p.hide_pattern_name(&index);
-            p.hide_pattern_name(&accumulator);
+            for name in head.names {
+                p.shadow_callable(&name);
+            }
             if p.in_value_body() {
                 return p.expression_scope();
             }
@@ -3372,11 +3435,10 @@ impl<'s> Parser<'s> {
         self.compose(
             height.max(result.height).max(seed.height),
             Expr::UnrollFor(Box::new(UnrollFor {
-                index,
-                accumulator,
-                annotation,
-                start: start.value,
-                limit: limit.value,
+                element: head.element,
+                accumulator: head.accumulator,
+                annotation: head.annotation,
+                iterable,
                 body,
                 result: result.value,
                 seed: seed.value,
@@ -8116,11 +8178,12 @@ block wrapper(clk, xs: u8[2]) -> u8 {
             width: 8,
         };
         let array = &module.blocks[0].result;
-        assert_eq!(fold.index, "_");
-        assert_eq!(fold.accumulator, "acc");
+        assert_eq!(fold.element, BindingPattern::Name("_".into()));
+        assert_eq!(fold.accumulator, BindingPattern::Name("acc".into()));
         assert_eq!(fold.annotation, Some((byte.clone(), array.clone())));
-        assert!(matches!(&fold.start, Expr::Field { name, .. } if name == "0"));
-        assert!(matches!(&fold.limit, Expr::Field { name, .. } if name == "1"));
+        assert!(matches!(&fold.iterable, ForIterable::Range {
+            start: Expr::Field { name: start, .. }, limit: Expr::Field { name: limit, .. }, inclusive: false
+        } if start == "0" && limit == "1"));
         let [
             Stmt::Let {
                 name,
@@ -8133,8 +8196,8 @@ block wrapper(clk, xs: u8[2]) -> u8 {
         };
         assert_eq!(name, "value");
         assert_eq!(ty, &Some(byte));
-        assert_eq!(inner.index, "i");
-        assert_eq!(inner.accumulator, "sum");
+        assert_eq!(inner.element, BindingPattern::Name("i".into()));
+        assert_eq!(inner.accumulator, BindingPattern::Name("sum".into()));
         assert_eq!(inner.annotation, None);
         assert!(
             matches!(&fold.result, Expr::Call { name, args } if name == "update" && args.len() == 3)
@@ -8157,12 +8220,51 @@ block wrapper(clk, xs: u8[2]) -> u8 {
     }
 
     #[test]
+    fn unrolled_ranges_keep_projections_and_fold_operators_in_the_start_operand()
+    -> Result<(), String> {
+        for start in [
+            "Bounds { first: u8:1 }.first",
+            "({ let p = (u8:1, u8:2); p }).0",
+            "unroll_for! (_, a) in u8:0..u8:1 { a }(u8:0) + u8:1",
+        ] {
+            let source = format!(
+                "struct Bounds {{ first: u8 }} fn f() -> u8 {{ unroll_for! (i, a) in {start}..=u8:3 {{ i + a }}(u8:0) }}"
+            );
+            let module = parse_module(&source)?;
+            let Expr::UnrollFor(fold) = &module.functions[0].body else {
+                panic!("expected an unrolled range");
+            };
+            assert!(matches!(
+                &fold.iterable,
+                ForIterable::Range {
+                    start: Expr::Field { .. } | Expr::Binary { .. },
+                    inclusive: true,
+                    ..
+                }
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn rejects_malformed_folds_and_zeros() {
+        let truncated = "block b(clk) -> u32 { unroll_for! ((i,";
+        assert_eq!(
+            parse_module(truncated).unwrap_err(),
+            format!(
+                "1:{}: expected identifier, found 'end of input'",
+                truncated.len() + 1
+            ),
+        );
         for expr in [
             "0..2",
             "unroll_for! (i) in 0..2 { i }(0)",
+            "unroll_for! (i', a) in 0..2 { i' + a }(0)",
+            "unroll_for! (i, a!) in 0..2 { i + a! }(0)",
             "unroll_for! (i, a): (u32,) in 0..2 { a }(0)",
-            "unroll_for! (i, a) in 0..=2 { a }(0)",
+            "unroll_for! ((i, .., ..), a) in xs { a }(0)",
+            "unroll_for! ((i, j), (j, acc)) in xs { acc }(0)",
+            "unroll_for! (i, a) in { let p = (u8:1, u8:2); p }.0..u8:3 { i + a }(u8:0)",
             "unroll_for! (i, a) in 0 . . 2 { a }(0)",
             "unroll_for! (i, a) in 0..2 { a := 0; a }(0)",
             "unroll_for! (i, a) in 0..2 { reg r: u32; r }(0)",

@@ -74,6 +74,12 @@ fn strict_modules_require_earlier_block_dependencies() -> Result<(), String> {
             "step",
         ),
         (
+            "fn pairs(x: u8) -> (u8, u8)[1] { [(x, x)] }",
+            "block top(clk, x: u8) -> u8 { unroll_for! ((pairs, _), acc) in pairs(x) { pairs + acc }(x) }",
+            "top",
+            "pairs",
+        ),
+        (
             helper,
             "fn apply<F: fn(u8) -> u8>(x: u8) -> u8 { F(x) }\nblock top(clk, x: u8) -> u8 { apply<step>(x) }",
             "top",
@@ -170,7 +176,10 @@ fn strict_module_preserves_local_bindings_and_deferred_wires() -> Result<(), Str
 fn f(port: u8, xs: u8[2]) -> u8 {
     let (left, right) = (port, xs[0]);
     let row = map(xs, |lane| lane + left);
-    right + row[0]
+    let sums = unroll_for! ((left, .., right), (lane, wire)) in [(port, (), row[0])] {
+        (lane + left, wire + right)
+    }((right, u8:0));
+    sums.0 + sums.1
 }
 block delay<T>(clk, data: T) -> T {
     reg q: T;

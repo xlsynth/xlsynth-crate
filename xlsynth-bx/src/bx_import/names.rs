@@ -1445,12 +1445,13 @@ impl<'a> Scope<'a> {
     /// Resolve an unrolled body's lets in iteration order before its result.
     fn unrolled_fold(&mut self, fold: &UnrollFor) -> Result<UnrollFor, String> {
         let annotation = self.loop_annotation(&fold.annotation)?;
-        let start = self.expr(&fold.start)?;
-        let limit = self.expr(&fold.limit)?;
+        let iterable = self.iterable(&fold.iterable)?;
         let seed = self.expr(&fold.seed)?;
+        let element = copy_pattern(&fold.element, 0)?;
+        let accumulator = copy_pattern(&fold.accumulator, 0)?;
         let (body, result) = self.nested(|scope| {
-            scope.bind(&fold.index);
-            scope.bind(&fold.accumulator);
+            scope.bind_pattern(&element);
+            scope.bind_pattern(&accumulator);
             Ok((
                 fold.body
                     .iter()
@@ -1460,11 +1461,10 @@ impl<'a> Scope<'a> {
             ))
         })?;
         Ok(UnrollFor {
-            index: fold.index.clone(),
-            accumulator: fold.accumulator.clone(),
+            element,
+            accumulator,
             annotation,
-            start,
-            limit,
+            iterable,
             body,
             result,
             seed,
@@ -1472,7 +1472,7 @@ impl<'a> Scope<'a> {
     }
 }
 
-/// Clone one let or counted-loop pattern within the syntax nesting limit.
+/// Clone a binding pattern within the syntax nesting limit.
 fn copy_pattern(pattern: &BindingPattern, depth: usize) -> Result<BindingPattern, String> {
     if depth > MAX_SYNTAX_DEPTH {
         return Err(format!(

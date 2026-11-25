@@ -58,6 +58,98 @@ block delay<T>(clk, x: T) -> T {
 }
 
 #[test]
+fn unrolled_product_specializes_clocked_cells_like_nested_ranges() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let cells = r#"
+use grid;
+
+block cell<R: u32, C: u32>(clk, value: u8, enable: bool) -> u8 {
+    reg q: u8 = u8:0;
+    if enable { q := value + ((R * u32:10 + C) as u8); }
+    q
+}
+pub block mapped(clk, data: u8[3][2], enable: bool[3][2]) -> u8[3][2] {
+    unroll_for! ((r, c), acc) in grid::product<2, 3>() {
+        let lane = cell<r, c>(data[r][c], enable[r][c]);
+        update(acc, (r, c), lane)
+    }(zero!<u8[3][2]>())
+}
+pub block nested(clk, data: u8[3][2], enable: bool[3][2]) -> u8[3][2] {
+    unroll_for! (r, rows) in u32:0..u32:2 {
+        unroll_for! (c, acc) in u32:0..u32:3 {
+            let lane = cell<r, c>(data[r][c], enable[r][c]);
+            update(acc, (r, c), lane)
+        }(rows)
+    }(zero!<u8[3][2]>())
+}"#;
+    let source = r#"
+use cells;
+#[test] block lanes() {
+    reg data: u8[3][2];
+    reg enable: bool[3][2];
+    let flat = cells::mapped(data, enable);
+    let nested = cells::nested(data, enable);
+    tick!(rst: true);
+    assert_eq(flat, nested);
+    data := [[u8:1, u8:2, u8:3], [u8:4, u8:5, u8:6]];
+    enable := [[true, false, true], [false, true, false]];
+    tick!();
+    assert_eq(flat, nested);
+    assert_eq(flat, [[u8:1, u8:0, u8:5], [u8:0, u8:16, u8:0]]);
+    data := zero!<u8[3][2]>();
+    enable := [[false, true, false], [true, false, true]];
+    tick!();
+    assert_eq(flat, nested);
+    assert_eq(flat, [[u8:1, u8:1, u8:5], [u8:10, u8:16, u8:12]]);
+}"#;
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    for mapped in [
+        cells.to_owned(),
+        cells.replace(
+            "unroll_for! ((r, c), acc) in grid::product<2, 3>()",
+            "let coordinates = grid::product<2, 3>(); unroll_for! ((r, c), acc) in coordinates",
+        ),
+    ] {
+        fs::write(dir.path().join("cells.bx"), mapped)?;
+        let report = run_tests(
+            source,
+            &dir.path().join("test_grid.bx"),
+            empty_package("grid_test"),
+            ResetBehavior::default(),
+            &search_paths(&[dir.path(), &examples]),
+            true,
+        )?;
+        assert_eq!(report.tests.len(), 1);
+        assert_eq!(report.tests[0].failure, None);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_constant_array_factory_can_use_counted_for_inside_a_clocked_fold() -> Result<(), String> {
+    let report = run(r#"
+fn offsets<N: u32>() -> u8[N] {
+    for (i, xs) in u32:0..N { update(xs, i, (i as u8) + u8:1) }(zero!<u8[N]>())
+}
+block fold(clk, x: u8) -> u8 {
+    reg q: u8 = 0;
+    q := unroll_for! (n, acc) in offsets<3>() { acc * u8:2 + n }(x);
+    q
+}
+#[test] block trial() {
+    reg x: u8;
+    let folded = fold(x);
+    x := u8:2;
+    tick!();
+    assert_eq(folded, u8:27);
+}
+"#)?;
+    assert_eq!(report.tests.len(), 1);
+    assert_eq!(report.tests[0].failure, None);
+    Ok(())
+}
+
+#[test]
 fn pure_tests_run_scoped_table_loops_and_report_the_executed_assertion() -> Result<(), String> {
     let source = r#"fn bx_test_pure(x: u4) -> u4 { x + u4:1 }
 #[test] fn pure() {
@@ -275,6 +367,54 @@ fn last_item(index: u8) -> u8 {
     }
     assert_eq!(report.tests[6].failure, None);
     assert_eq!(report.tests[9].failure, None);
+    Ok(())
+}
+
+#[test]
+fn pure_tests_execute_folded_and_discarded_unroll_array_factories() -> Result<(), String> {
+    let ir = r#"package linked
+fn lookup(a: bits[8][2] id=1, i: bits[8] id=2) -> bits[8] {
+    ret selected: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=3)
+}"#;
+    for binding in [
+        "let bad = lookup(DATA, index);",
+        "let (_, keep) = (lookup(DATA, index), u8:0);",
+    ] {
+        for (size, element, step) in [
+            (2, "item", "acc + item"),
+            (2, "_", "acc"),
+            (0, "item", "acc + item"),
+        ] {
+            let source = format!(
+                r#"extern fn lookup(a: u8[2], i: u8) -> u8;
+const DATA: u8[2] = [u8:17, u8:29];
+fn build<N: u32>(index: u8) -> u8[N] {{ {binding} zero!<u8[N]>() }}
+fn folded() -> u8 {{
+    unroll_for! ({element}, acc) in build<{size}>(u8:2) {{ {step} }}(u8:0)
+}}
+#[test] fn pure() {{ assert_eq(folded(), u8:0); }}
+#[test] block hardware() {{ assert_eq(folded(), u8:0); }}
+"#
+            );
+            let package = parse_xls_ir_package(ir).map_err(|e| e.to_string())?;
+            let report = run_tests(
+                &source,
+                Path::new("suite.bx"),
+                package,
+                ResetBehavior::default(),
+                &ImportOptions::default(),
+                false,
+            )?;
+            assert_eq!(
+                report.tests[0].failure.as_deref(),
+                Some(
+                    "suite.bx:7:21: test 'pure': IR array_index at node 3 was out of bounds despite assumed_in_bounds=true"
+                ),
+                "{source}"
+            );
+            assert_eq!(report.tests[1].failure, None, "{source}");
+        }
+    }
     Ok(())
 }
 

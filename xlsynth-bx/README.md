@@ -1610,13 +1610,14 @@ The same syntax accepts local BX functions and signature-checked externs. For ex
 
 ### Replicating child blocks
 
-`unroll_for!` folds a half-open integer range at compile time. The initializer
-after the body supplies the first accumulator. Each iteration binds the current
-index and accumulator, evaluates its local lets, and supplies the body result
-to the next iteration. An empty range returns the initializer. BX must be
-able to evaluate both bounds at compile time using literals, prior constant
-lets, and its built-in value operations. The accumulator and the other values
-used in the body can depend on input ports.
+`unroll_for!` expands one copy of its body for each element of a fixed-length
+array or integer range. Array elements and the accumulator can depend on input
+ports. A range requires compile-time bounds and supports `lo..hi` and
+`lo..=hi`. Each iteration binds the element and the previous accumulator,
+evaluates its local lets, and supplies the body result to the next iteration.
+Either binder can destructure a tuple. The expression in `}(seed)` supplies
+the initial accumulator. An empty iterable returns that seed and creates no
+child instances.
 
 ```text
 block delay(clk, enable: bool, x: u8) -> u8 {
@@ -1636,6 +1637,23 @@ pub block delay_array(clk, enables: bool[4], xs: u8[4]) -> u8[4] {
 
 This block elaborates four independently enabled instances named `element_0`
 through `element_3`. Nested loops append one iteration ordinal per level.
+To visit a rectangular grid with one loop, supply an array of coordinate
+pairs. The example library's `product<ROWS, COLS>()` function returns those
+pairs in row-major order. [grid.bx](examples/grid.bx)
+
+```text
+use grid;
+
+pub block delay_grid(clk, data: u8[3][2], enable: bool[3][2]) -> u8[3][2] {
+    unroll_for! ((r, c), acc) in grid::product<2, 3>() {
+        let element = delay(enable[r][c], data[r][c]);
+        update(acc, (r, c), element)
+    }(zero!<u8[3][2]>())
+}
+```
+
+With the `delay` block above, this creates six instances. A coordinate from
+this constant array can also supply a child block's value parameter.
 BX disambiguates generated names that collide with other declarations.
 An unconditional let initializer or block result can elaborate children in
 its loop body. Pure loops can also appear inside other value expressions.

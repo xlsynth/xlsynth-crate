@@ -350,16 +350,18 @@ fn signed_aggregate_carry_has_the_same_shift_semantics_at_every_trip_count()
 #[test]
 fn inclusive_ranges_visit_the_maximum_representable_endpoint() -> Result<(), Box<dyn Error>> {
     for (range, expected) in [("u2:0..=u2:3", 6), ("u8:255..=u8:255", 255)] {
-        let fold = format!("for (i, a) in {range} {{ a + (i as u8) }}(x)");
-        assert_expr_matches_dslx(
-            "x: u8",
-            "u8",
-            &fold,
-            [(
-                vec![IrValue::make_ubits(8, 0)?],
-                IrValue::make_ubits(8, expected)?,
-            )],
-        );
+        for keyword in ["for", "unroll_for!"] {
+            let fold = format!("{keyword} (i, a) in {range} {{ a + (i as u8) }}(x)");
+            assert_expr_matches_dslx(
+                "x: u8",
+                "u8",
+                &fold,
+                [(
+                    vec![IrValue::make_ubits(8, 0)?],
+                    IrValue::make_ubits(8, expected)?,
+                )],
+            );
+        }
     }
     Ok(())
 }
