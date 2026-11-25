@@ -243,6 +243,18 @@ Compares BX structural and counted array folds with the same `unroll_for!` in pi
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_unroll_arrays -- -max_len=13 -len_control=0`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_unroll_map.rs
+
+Compares a pure BX `unroll_map!` in a length-parametric function with an ordinary map in pinned DSLX. Four runtime input sets select between arrays of scalars or nested tuples. BX either binds the array elements directly or indexes the array from an inclusive or exclusive range with a compile-time start and length. DSLX maps directly over the selected array in both cases. The body captures a runtime bias and returns a scalar, tuple, or array. Comparing the complete results against both native IR and native constexpr execution detects differences in range bounds, lane order, tuple projections, captured values, and width conversion. Pinned DSLX rejects an ordinary map over an empty array, and its IR value API cannot construct empty arrays. The zero-length case therefore compares the size of a typed BX result with DSLX constexpr evaluation of the corresponding typed empty array.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_unroll_map -- -max_len=12 -len_control=0`.
+
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_unroll_map_clocked.rs
+
+Compares a BX `unroll_map!` over row-major grid coordinates with an explicit `unroll_for!` over flat indices. Both instantiate a register per coordinate on rectangular grids up to 3 by 3. Each clock edge drives independent lane data, enables, and clears. A host model checks all output lanes across resets, held values, and enabled updates that depend on the previous register value. Comparing the complete arrays after every edge detects reordered outputs, crossed inputs, or shared state between child instances.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_unroll_map_clocked -- -max_len=128 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_unroll_types.rs
 
 Compares the inferred type of an unannotated BX binding to native DSLX

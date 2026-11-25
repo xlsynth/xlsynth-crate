@@ -42,7 +42,7 @@ pub fn check_clocked_test(data: &[u8]) -> Result<(), String> {
 
 /// Require one BX test to pass or to report an equality failure at the
 /// selected clock edge.
-fn run_clocked_rows(
+pub(crate) fn run_clocked_rows(
     source: &str,
     active_low: bool,
     expected_failure: Option<usize>,

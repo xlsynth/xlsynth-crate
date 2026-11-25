@@ -704,6 +704,7 @@ pub enum Expr {
         arms: Vec<MatchArm>,
     },
     UnrollFor(Box<UnrollFor>),
+    UnrollMap(Box<UnrollMap>),
     For(Box<ForLoop>),
 }
 
@@ -884,6 +885,16 @@ pub struct UnrollFor {
     pub body: Vec<Stmt>,
     pub result: Expr,
     pub seed: Expr,
+}
+
+/// An array built from the result of a separate body expansion for each
+/// element.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct UnrollMap {
+    pub element: BindingPattern,
+    pub iterable: ForIterable,
+    pub body: Vec<Stmt>,
+    pub result: Expr,
 }
 
 /// The result type in `value[start+:type]`, before resolving its constant

@@ -17,7 +17,7 @@ use crate::ast::{
     Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function, InvariantDecl, InvariantLemma,
     LetBinding, MapExpr, MatchArm, MatchPattern, Module, OutputCycles, Param, ParametricBinding,
     SourceFile, SourcePosition, SourceSpan, StageAnnotation, Stmt, StructArgument, StructDef,
-    StructParametricKind, StructSplat, Type, TypeAlias, UnaryOp, UnrollFor, UsePath,
+    StructParametricKind, StructSplat, Type, TypeAlias, UnaryOp, UnrollFor, UnrollMap, UsePath,
     WidthSliceType,
 };
 use crate::ast::{ConstAssert, ScopeStatement};
@@ -685,6 +685,14 @@ struct LoopHead {
     accumulator: BindingPattern,
     names: BTreeSet<String>,
     annotation: Option<(Type, Type)>,
+}
+
+/// Local statements and the final expression expanded in each unrolled
+/// iteration.
+struct UnrolledBody {
+    statements: Vec<Stmt>,
+    result: Expr,
+    height: usize,
 }
 
 /// Unrolled loops report duplicate binders at the repeated name. Other
@@ -3409,41 +3417,87 @@ impl<'s> Parser<'s> {
     /// a DSLX-style unrolled fold.
     fn unroll_for(&mut self) -> Result<ParsedExpr, String> {
         let head = self.loop_head(PatternSite::UnrolledLoop)?;
-        let (iterable, mut height) = self.for_iterable(Braces::UnrollIterable)?.into_ast();
-        self.expect("{")?;
-        let mut body = Vec::new();
-        let result = self.with_name_scope(|p| {
-            for name in head.names {
-                p.shadow_callable(&name);
-            }
-            if p.in_value_body() {
-                return p.expression_scope();
-            }
-            while p.eat("let") {
-                let (stmt, initializer_height) = p.let_stmt(/* allow_wire= */ false)?;
-                p.expect(";")?;
-                height = height.max(initializer_height);
-                body.push(stmt);
-            }
-            let value = p.expr()?;
-            p.expect("}")?;
-            Ok(value)
-        })?;
+        let (iterable, height) = self.for_iterable(Braces::UnrollIterable)?.into_ast();
+        let body = self.unrolled_body(head.names)?;
         self.expect("(")?;
         let seed = self.expr()?;
         self.expect(")")?;
         self.compose(
-            height.max(result.height).max(seed.height),
+            height.max(body.height).max(seed.height),
             Expr::UnrollFor(Box::new(UnrollFor {
                 element: head.element,
                 accumulator: head.accumulator,
                 annotation: head.annotation,
                 iterable,
-                body,
-                result: result.value,
+                body: body.statements,
+                result: body.result,
                 seed: seed.value,
             })),
         )
+    }
+
+    /// The element pattern followed by `in` distinguishes the map from a
+    /// value reference or ordinary call to a function named `unroll_map!`.
+    fn starts_unroll_map(&self) -> bool {
+        self.peek(0) == "unroll_map!"
+            && if self.peek(1) == "(" {
+                self.delimited_followed_by(2, "(", ")", "in")
+            } else {
+                is_value_identifier(self.peek(1)) && self.peek(2) == "in"
+            }
+    }
+
+    /// Parse the iterable outside the element's scope, followed by its body.
+    fn unroll_map(&mut self) -> Result<ParsedExpr, String> {
+        let mut names = BTreeSet::new();
+        let element = self.binding_pattern(
+            &mut names,
+            self.pattern_identifier_predicate(self.dslx_value_grammar()),
+            PatternSite::UnrolledLoop,
+        )?;
+        self.expect("in")?;
+        let (iterable, height) = self.for_iterable(Braces::Body)?.into_ast();
+        let body = self.unrolled_body(names)?;
+        self.compose(
+            height.max(body.height),
+            Expr::UnrollMap(Box::new(UnrollMap {
+                element,
+                iterable,
+                body: body.statements,
+                result: body.result,
+            })),
+        )
+    }
+
+    /// Parse lexical declarations in a value scope, or structural lets in a
+    /// block.
+    fn unrolled_body(&mut self, names: BTreeSet<String>) -> Result<UnrolledBody, String> {
+        self.expect("{")?;
+        self.with_name_scope(|p| {
+            for name in names {
+                p.shadow_callable(&name);
+            }
+            let mut statements = Vec::new();
+            let mut height = 0;
+            let result = if p.in_value_body() {
+                p.expression_scope()?
+            } else {
+                while p.eat("let") {
+                    let (stmt, initializer_height) = p.let_stmt(/* allow_wire= */ false)?;
+                    p.expect(";")?;
+                    height = height.max(initializer_height);
+                    statements.push(stmt);
+                }
+                let result = p.expr()?;
+                p.expect("}")?;
+                result
+            };
+            Ok(UnrolledBody {
+                statements,
+                result: result.value,
+                height: height.max(result.height),
+            })
+        })
     }
 
     /// Parse the remaining arms, inheriting compile-time evaluation through
@@ -3672,6 +3726,10 @@ impl<'s> Parser<'s> {
         }
         if self.eat("unroll_for!") {
             return self.unroll_for();
+        }
+        if self.starts_unroll_map() {
+            self.pos += 1;
+            return stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || self.unroll_map());
         }
         if self.starts_counted_for() {
             self.pos += 1;
@@ -5030,6 +5088,67 @@ mod tests {
 
     fn names<const N: usize>(names: [&str; N]) -> [Expr; N] {
         names.map(|name| Expr::Name(name.to_owned()))
+    }
+
+    #[test]
+    fn unroll_map_distinguishes_element_patterns_from_calls_and_body_braces() -> Result<(), String>
+    {
+        let module = parse_module(
+            r#"
+fn unroll_map!(x: u8) -> u8 { x }
+fn first(xs: (u8, u8)[1]) -> u8 {
+    unroll_map! (left, _) in xs { unroll_map!(left) }[u32:0]
+}
+block nested(xs: u8[1]) -> u8[1][1] {
+    unroll_map! row in xs {
+        let singleton = [row];
+        unroll_map! col in singleton { col }
+    }
+}
+"#,
+        )?;
+        let Expr::Index { value, .. } = &module.functions[1].body else {
+            panic!("expected indexing of the mapped array");
+        };
+        let Expr::UnrollMap(map) = value.as_ref() else {
+            panic!("expected an unrolled map");
+        };
+        assert_eq!(
+            map.element,
+            BindingPattern::Tuple(vec![
+                BindingPattern::Name("left".into()),
+                BindingPattern::Name("_".into()),
+            ])
+        );
+        assert_eq!(
+            map.result,
+            Expr::Call {
+                name: "unroll_map!".into(),
+                args: names(["left"]).into(),
+            }
+        );
+        let Expr::UnrollMap(outer) = &module.blocks[0].output else {
+            panic!("expected an outer map");
+        };
+        assert!(matches!(&outer.body[..], [Stmt::Let { name, .. }] if name == "singleton"));
+        let Expr::UnrollMap(inner) = &outer.result else {
+            panic!("expected a nested map");
+        };
+        assert_eq!(
+            inner.iterable,
+            ForIterable::Array(Expr::Name("singleton".into()))
+        );
+        assert_eq!(inner.result, Expr::Name("col".into()));
+        let legacy =
+            parse_module("const unroll_map! = u8:2; block sum(in: u8) -> u8 { unroll_map! + in }")?;
+        assert!(matches!(
+            legacy.blocks[0].output,
+            Expr::Binary {
+                op: BinaryOp::Add,
+                ..
+            }
+        ));
+        Ok(())
     }
 
     #[test]

@@ -606,6 +606,7 @@ impl<'m> BodyChecker<'_, 'm> {
                     return Ok(pattern.contextual(arg));
                 }
                 if !matches!(arg, Expr::SelectedOperand(_))
+                    && !matches!(pattern, InputPattern::Function(Some(_)))
                     && !self.has_concrete_element_type(arg)?
                 {
                     return Ok(pattern.contextual(arg));

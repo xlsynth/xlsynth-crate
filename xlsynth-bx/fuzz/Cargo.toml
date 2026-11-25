@@ -180,6 +180,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_unroll_map"
+path = "fuzz_targets/fuzz_bx_dslx_unroll_map.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_bx_unroll_map_clocked"
+path = "fuzz_targets/fuzz_bx_unroll_map_clocked.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_unroll_types"
 path = "fuzz_targets/fuzz_bx_dslx_unroll_types.rs"
 test = false

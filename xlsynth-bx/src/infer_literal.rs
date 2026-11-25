@@ -170,7 +170,7 @@ impl<'a> WidthLookup<'a> {
     }
 
     /// A new lexical scope may shadow an outer binding's minimum.
-    fn without_names(self) -> Option<Self> {
+    pub(crate) fn without_names(self) -> Option<Self> {
         match self {
             Self::DslxLiterals(_) => Some(Self::DslxLiterals(None)),
             Self::Bindings { .. } => None,
@@ -1245,60 +1245,18 @@ pub(crate) fn check_argument_array_sizes(arg: &Expr) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether this element's type is fully specified without any of its array
-/// siblings. In that case checking the elements in source order suffices.
-pub(crate) fn has_concrete_element_type(
+/// Whether a leaf expression can provide a concrete sibling type on its own.
+pub(crate) fn has_concrete_leaf_type(
     expr: &Expr,
     locals: Option<WidthLookup<'_>>,
     needs_result: &dyn Fn(&str, usize) -> Result<bool, String>,
 ) -> Result<bool, String> {
-    if let Expr::SelectedOperand(selected) = expr {
-        return has_concrete_element_type(selected, locals, needs_result);
-    }
-    if let Some(seed) = expr.unannotated_loop_seed() {
-        return has_concrete_element_type(seed, None, needs_result);
-    }
-    match expr {
-        Expr::If {
-            then_value,
-            else_value,
-            ..
-        } => Ok(has_concrete_element_type(then_value, locals, needs_result)?
-            || has_concrete_element_type(else_value, locals, needs_result)?),
-        Expr::Match { arms, .. } => {
-            for arm in arms {
-                if has_concrete_element_type(&arm.value, locals, needs_result)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        Expr::Tuple(fields) => {
-            for field in fields {
-                if !has_concrete_element_type(field, locals, needs_result)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        Expr::Array(elements) => {
-            for element in elements {
-                if has_concrete_element_type(element, locals, needs_result)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        // An ellipsis without an annotation needs another operand or its
-        // enclosing declaration to supply the full array length.
-        Expr::ArrayLiteral { annotation, .. } => Ok(annotation.is_some()),
-        _ => Ok(!collect_minimum_with_calls(
-            expr,
-            locals,
-            &mut None,
-            MinimumContext::Siblings(needs_result),
-        )?),
-    }
+    Ok(!collect_minimum_with_calls(
+        expr,
+        locals,
+        &mut None,
+        MinimumContext::Siblings(needs_result),
+    )?)
 }
 
 /// A result-inferred expression with no literal width must wait for a typed
@@ -1332,6 +1290,7 @@ pub(crate) fn common_type_hint(
             expr,
             Expr::Tuple(_)
                 | Expr::Array(_)
+                | Expr::UnrollMap(_)
                 | Expr::ArrayLiteral {
                     annotation: None,
                     ..

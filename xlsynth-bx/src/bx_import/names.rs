@@ -10,7 +10,7 @@ use crate::ast::{
     ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, InvariantDecl, LetBinding,
     MapExpr, MatchArm, MatchPattern, Module, Param, ParametricBinding, QuickCheckSignature,
     StageAnnotation, Stmt, StructArgument, StructDef, StructParametricRef, StructSplat, TestDecl,
-    TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor, WidthSliceType,
+    TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor, UnrollMap, WidthSliceType,
 };
 use crate::ast::{ConstAssert, ScopeStatement};
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
@@ -1393,6 +1393,20 @@ impl<'a> Scope<'a> {
             },
             Expr::For(fold) => Expr::For(Box::new(self.fold(fold)?)),
             Expr::UnrollFor(fold) => Expr::UnrollFor(Box::new(self.unrolled_fold(fold)?)),
+            Expr::UnrollMap(map) => {
+                let iterable = self.iterable(&map.iterable)?;
+                let element = copy_pattern(&map.element, 0)?;
+                let (body, result) = self.nested(|scope| {
+                    scope.bind_pattern(&element);
+                    scope.unrolled_body(&map.body, &map.result)
+                })?;
+                Expr::UnrollMap(Box::new(UnrollMap {
+                    element,
+                    iterable,
+                    body,
+                    result,
+                }))
+            }
         })
     }
 
@@ -1452,13 +1466,7 @@ impl<'a> Scope<'a> {
         let (body, result) = self.nested(|scope| {
             scope.bind_pattern(&element);
             scope.bind_pattern(&accumulator);
-            Ok((
-                fold.body
-                    .iter()
-                    .map(|stmt| scope.statement(stmt, Local::Lexical))
-                    .collect::<Result<_, _>>()?,
-                scope.expr(&fold.result)?,
-            ))
+            scope.unrolled_body(&fold.body, &fold.result)
         })?;
         Ok(UnrollFor {
             element,
@@ -1469,6 +1477,15 @@ impl<'a> Scope<'a> {
             result,
             seed,
         })
+    }
+
+    /// Qualify each local initializer before making its pattern visible.
+    fn unrolled_body(&mut self, body: &[Stmt], result: &Expr) -> Result<(Vec<Stmt>, Expr), String> {
+        let statements = body
+            .iter()
+            .map(|stmt| self.statement(stmt, Local::Lexical))
+            .collect::<Result<_, _>>()?;
+        Ok((statements, self.expr(result)?))
     }
 }
 

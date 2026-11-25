@@ -1466,6 +1466,35 @@ pub block circuit(clk, x: u8) -> u8 { folded(x) }
 }
 
 #[test]
+fn imported_unroll_map_resolves_iterables_before_patterns_and_preserves_outer_scope()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "lanes.bx",
+        r#"
+const pairs = [(u8:2, u8:3), (u8:4, u8:5)];
+fn add(x: u8, y: u8) -> u8 { x + y }
+#[allow(combinational_block)]
+pub block mapped(clk, x: u8) -> u8 {
+    let sums = unroll_map! (pairs, item) in pairs {
+        let add = add(pairs, x);
+        add + item
+    };
+    add(sums[0], sums[1])
+}
+"#,
+    )?;
+    let root = r#"
+use lanes::mapped;
+pub block circuit(clk, x: u8) -> u8 { let result = mapped(x); result }
+"#;
+    let package = compile_design(root, &search_paths(&[dir.path()]))?;
+    assert_eq!(run(package, 7)?, IrValue::make_ubits(8, 28)?);
+    Ok(())
+}
+
+#[test]
 fn calls_on_local_values_are_checked_when_a_loop_iteration_elaborates() -> Result<(), Box<dyn Error>>
 {
     let dir = tempdir()?;
