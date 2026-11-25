@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Experimental timing checks on lowered, unoptimized XLS Block IR.
+//!
+//! A register's stage describes its normal update path. Holding or resetting
+//! the register does not guarantee fresh data or a particular transaction.
 
 use std::collections::BTreeMap;
 use xlsynth_pir::ir::{Block, NodePayload, Unop};
@@ -31,7 +34,8 @@ enum Timing {
 }
 
 impl Timing {
-    /// Combine values used together: cycles must agree, and constants fit any cycle.
+    /// Combine values used together: cycles must agree, and constants fit any
+    /// cycle.
     fn join(a: Option<Self>, b: Option<Self>) -> Result<Option<Self>, (u64, u64)> {
         match (a, b) {
             // x@0 and y@1 cannot be used by the same operation.
@@ -87,14 +91,14 @@ pub(crate) fn check_block(block: &Block, contract: &Contract<'_>) -> Result<Chec
     // A register read has no operands in Block IR. For timing, it also needs
     // its write to have been visited: q := x + y must check the addition
     // before assigning q its cycle. This adds an edge only to our traversal.
-    let order = match get_topological_with_extra_dependencies(&block.graph, |node_ref| {
-        match &block.get_node(node_ref).payload {
-            NodePayload::RegisterRead { register } => registers.unique_write(register).ok(),
-            _ => None,
-        }
-    }) {
+    let write_dependency = |node_ref| match &block.get_node(node_ref).payload {
+        NodePayload::RegisterRead { register } => registers.unique_write(register).ok(),
+        _ => None,
+    };
+    let order = match get_topological_with_extra_dependencies(&block.graph, write_dependency) {
         Ok(order) => order,
-        // Feedback such as q := q + x has no fixed dependency order.
+        // Feedback such as q := q + x has no fixed dependency order. We
+        // cannot check the rest of the block until we can order its nodes.
         Err(TopologicalSortError::Cycle { .. }) => return Ok(CheckResult::Unsupported),
         Err(error) => return Err(error.to_string()),
     };
@@ -113,15 +117,14 @@ pub(crate) fn check_block(block: &Block, contract: &Contract<'_>) -> Result<Chec
             }
             // Addition, comparison, and other two-input operations all need
             // their changing inputs to belong to the same cycle.
-            NodePayload::Binop(_, lhs, rhs) => {
-                Timing::join(timings[lhs.index], timings[rhs.index]).map_err(|(a, b)| {
+            NodePayload::Binop(_, lhs, rhs) => Timing::join(timings[lhs.index], timings[rhs.index])
+                .map_err(|(a, b)| {
                     format!(
                         "timing mismatch at {}.{}: operands are at stages {a} and {b}",
                         node.payload.get_operator(),
                         node.text_id
                     )
-                })?
-            }
+                })?,
             // Nested `if` guards become an AND of their conditions. AND, OR,
             // and XOR can have any number of operands; all must align.
             NodePayload::Nary(_, operands) => operands

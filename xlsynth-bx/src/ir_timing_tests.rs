@@ -114,8 +114,7 @@ fn checks_an_ordinary_register() -> Result<(), String> {
 
 #[test]
 fn checks_a_register_after_its_input_expression() -> Result<(), String> {
-    let source =
-        "block sum(clk, x: u32 @0, y: u32 @0) -> u32 @1 { reg q: u32; q := x + y; q }";
+    let source = "block sum(clk, x: u32 @0, y: u32 @0) -> u32 @1 { reg q: u32; q := x + y; q }";
     assert_eq!(check_ir(source)?, CheckResult::Checked);
     Ok(())
 }
@@ -203,7 +202,10 @@ block reset_value(clk, rst) -> bool @0 { rst }"#;
         active_low: true,
         ..ResetBehavior::default()
     };
-    assert_eq!(check_ir_with_reset(source, reset)?, CheckResult::Unsupported);
+    assert_eq!(
+        check_ir_with_reset(source, reset)?,
+        CheckResult::Unsupported
+    );
     Ok(())
 }
 
