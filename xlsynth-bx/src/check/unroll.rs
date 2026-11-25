@@ -4,7 +4,7 @@ use super::generic_blocks::callback_argument_name;
 use super::*;
 use crate::ast::{
     BindingPattern, ForIterable, FunctionParametricRef, MapExpr, ScopeStatement, StructArgumentRef,
-    StructParametricRef, UnrollFor,
+    StructLiteral, StructParametricRef, UnrollFor,
 };
 use crate::infer_literal::BindingWidths;
 use std::cell::Cell;
@@ -335,12 +335,16 @@ impl BodyChecker<'_, '_> {
         inclusive: bool,
         keyword: &str,
     ) -> Result<StaticRange, String> {
-        let (lo, hi) = self.pair(start, limit, hint)?;
+        let (lo, hi, inferred) =
+            self.with_prepared_pair(start, limit, |checker, start, limit| {
+                let (lo, hi) = checker.pair(start, limit, hint)?;
+                let inferred = hint.is_none()
+                    && binding_widths(start, &lo.ty, &checker.inferred_bindings)?.is_some()
+                    && binding_widths(limit, &hi.ty, &checker.inferred_bindings)?.is_some();
+                Ok((lo, hi, inferred))
+            })?;
         let (signed, width) =
             bits(&lo.ty).ok_or_else(|| format!("{keyword} range requires integer bounds"))?;
-        let inferred = hint.is_none()
-            && binding_widths(start, &lo.ty, &self.inferred_bindings)?.is_some()
-            && binding_widths(limit, &hi.ty, &self.inferred_bindings)?.is_some();
         let mut constant = |bound: &TypedExpr| {
             if bound.has_constant_inputs(&self.constexpr_names)
                 && let Some(value) = self.checked_constant(bound)?
@@ -504,11 +508,14 @@ impl BodyChecker<'_, '_> {
 
 /// Declaration kinds needed for type and match-pattern lookup during a
 /// lexical walk without evaluation.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum LexicalKind {
     Value,
     Constant,
-    TypeAlias { can_construct: bool },
+    TypeAlias {
+        can_construct: bool,
+        constructor: Option<Rc<str>>,
+    },
 }
 
 /// Names visible during lexical checking, including zero-trip bodies.
@@ -519,6 +526,9 @@ struct LexicalScope<'a> {
     declarations: BTreeMap<String, LexicalKind>,
     parent: Option<&'a LexicalScope<'a>>,
     in_lambda: bool,
+    /// A const conditional resolves the qualifying type in either arm.
+    /// Member lookup on that type waits until the arm is selected.
+    in_const_if_arm: bool,
     /// Shared across nested scopes in this one lexical walk, including
     /// zero-trip bodies that will never produce a typed expression.
     visited: &'a Cell<usize>,
@@ -531,6 +541,7 @@ impl<'a> LexicalScope<'a> {
             declarations: BTreeMap::new(),
             parent: None,
             in_lambda: false,
+            in_const_if_arm: false,
             visited,
         }
     }
@@ -541,6 +552,7 @@ impl<'a> LexicalScope<'a> {
             declarations: BTreeMap::new(),
             parent: Some(self),
             in_lambda: self.in_lambda,
+            in_const_if_arm: self.in_const_if_arm,
             visited: self.visited,
         }
     }
@@ -596,10 +608,11 @@ impl BodyChecker<'_, '_> {
     /// enclosing scope, preserving lexical shadowing of either kind.
     fn lexical_kind(&self, locals: &LexicalScope<'_>, name: &str) -> Option<LexicalKind> {
         let scope = locals.lookup(name)?;
-        Some(scope.declarations.get(name).copied().unwrap_or_else(|| {
+        Some(scope.declarations.get(name).cloned().unwrap_or_else(|| {
             if let Some(alias) = self.local_type_aliases.get(name) {
                 LexicalKind::TypeAlias {
                     can_construct: alias.can_construct,
+                    constructor: alias.constructor.clone(),
                 }
             } else if self.constant_pattern_names.contains(name) {
                 LexicalKind::Constant
@@ -854,6 +867,22 @@ impl BodyChecker<'_, '_> {
         self.check_expr_names(expr, &LexicalScope::root(&self.names, &visited))
     }
 
+    /// Keep skipped arms lexically well formed without resolving their types.
+    pub(super) fn check_const_if_arm_names(&mut self, arm: &Expr) -> Result<(), String> {
+        let visited = Cell::new(0);
+        let mut scope = LexicalScope::root(&self.names, &visited);
+        scope.in_const_if_arm = true;
+        let hardware = self.has_block_only_behavior.get();
+        let result = self.check_expr_names(arm, &scope);
+        // An inactive reference does not instantiate hardware.
+        self.has_block_only_behavior.set(hardware);
+        result?;
+        if self.replaying_body() {
+            self.charge_expansion("const if", visited.get())?;
+        }
+        Ok(())
+    }
+
     fn check_body_names(
         &self,
         fold: &UnrollFor,
@@ -915,6 +944,7 @@ impl BodyChecker<'_, '_> {
                 }
                 LexicalKind::TypeAlias {
                     can_construct: false,
+                    ..
                 } if usage == NominalUse::Constructor => {
                     Err(format!("type alias '{name}' does not name a struct"))
                 }
@@ -975,7 +1005,7 @@ impl BodyChecker<'_, '_> {
             Ok(())
         } else if usage == NominalUse::AppliedStruct {
             Err(format!("'{name}' requires a struct template"))
-        } else if self.structs.declared_records.contains(name) {
+        } else if self.structs.declared_records.contains_key(name) {
             // Name verification only needs the declaration. A specialization
             // that uses this layout will resolve its fields during elaboration.
             Ok(())
@@ -1070,6 +1100,7 @@ impl BodyChecker<'_, '_> {
             return Err("cannot read the wildcard binding '_'".into());
         }
         let head = name.split_once("::").map_or(name, |(head, _)| head);
+        let qualifier = name.rsplit_once("::").map(|(prefix, _)| prefix);
         if matches!(
             self.lexical_kind(locals, head),
             Some(LexicalKind::TypeAlias { .. })
@@ -1077,13 +1108,13 @@ impl BodyChecker<'_, '_> {
             if head == name && !callee {
                 return Err(format!("type alias '{name}' cannot be used as a value"));
             }
-            if name
-                .rsplit_once("::")
-                .is_some_and(|(prefix, _)| prefix != head)
-            {
+            if qualifier.is_some_and(|prefix| prefix != head) {
                 return Err(format!(
                     "a member of type alias '{head}' cannot be a qualifier"
                 ));
+            }
+            if locals.in_const_if_arm && qualifier.is_some() {
+                crate::parser::validate_dslx_value_path(name)?;
             }
             return Ok(());
         }
@@ -1097,6 +1128,18 @@ impl BodyChecker<'_, '_> {
             return Err(format!(
                 "callable parameter '{head}' may only be used as a callee"
             ));
+        }
+        if locals.in_const_if_arm
+            && qualifier == Some(head)
+            && !locals.contains(head)
+            && (self
+                .type_bindings()
+                .is_some_and(|bindings| bindings.declares(head))
+                || crate::parser::fixed_width(head).is_some())
+        {
+            // A type formal is visible even when a later module declaration
+            // shares its name. Its concrete members depend on specialization.
+            return crate::parser::validate_dslx_value_path(name);
         }
         self.reject_type_parameter_value(name)?;
         if callee
@@ -1118,6 +1161,26 @@ impl BodyChecker<'_, '_> {
                     .visible(name, self.function_position.or(self.block_position))
         {
             return Ok(());
+        }
+        if locals.in_const_if_arm
+            && let Some(qualifier) = qualifier
+            && !locals.contains(head)
+            && (self.decls.type_aliases.contains_key(qualifier)
+                || self.structs.local_enum(qualifier).is_some()
+                || self.structs.declared_records.contains_key(qualifier)
+                || self.structs.template(qualifier).is_some()
+                || self
+                    .resolver
+                    .lookup_enum_prefix(qualifier)?
+                    .is_some_and(|(module, member)| {
+                        self.resolver.has_public_type(&module, &member)
+                    }))
+        {
+            crate::parser::validate_dslx_value_path(name)?;
+            return self.decls.check_type_name_visibility(
+                qualifier,
+                self.function_position.or(self.block_position),
+            );
         }
         if self.is_enum_member_name(name)? {
             if locals.contains(head) {
@@ -1187,7 +1250,18 @@ impl BodyChecker<'_, '_> {
                                 | Type::ParametricStruct { .. } => true,
                                 _ => false,
                             };
-                            names.bind(&alias.name, LexicalKind::TypeAlias { can_construct });
+                            let constructor = alias
+                                .ty
+                                .constructor_head()
+                                .and_then(|name| self.lexical_constructor(name, &names))
+                                .map(Rc::from);
+                            names.bind(
+                                &alias.name,
+                                LexicalKind::TypeAlias {
+                                    can_construct,
+                                    constructor,
+                                },
+                            );
                         }
                         ScopeStatement::ConstAssert(assertion) => {
                             self.check_expr_names(&assertion.predicate, &names)?;
@@ -1333,6 +1407,9 @@ impl BodyChecker<'_, '_> {
                 };
                 self.check_nominal_name(literal.name, usage, locals)?;
                 self.check_struct_argument_names(literal.args, locals, NominalUse::Annotation)?;
+                if locals.in_const_if_arm {
+                    self.check_constructor_field_names(&literal, locals)?;
+                }
                 for (_, value) in literal.fields {
                     self.check_expr_names(value, locals)?;
                 }
@@ -1379,6 +1456,17 @@ impl BodyChecker<'_, '_> {
                 self.check_expr_names(then_value, locals)?;
                 self.check_expr_names(else_value, locals)?;
             }
+            Expr::ConstIf {
+                condition,
+                then_value,
+                else_value,
+            } => {
+                self.check_expr_names(condition, locals)?;
+                let mut arm = locals.nested();
+                arm.in_const_if_arm = true;
+                self.check_expr_names(then_value, &arm)?;
+                self.check_expr_names(else_value, &arm)?;
+            }
             Expr::Match { subject, arms } => {
                 for operand in super::match_operands(subject, arms, |name| {
                     let head = name.split_once("::").map_or(name, |(head, _)| head);
@@ -1388,6 +1476,11 @@ impl BodyChecker<'_, '_> {
                         } else {
                             matches!(kind, LexicalKind::TypeAlias { .. })
                         });
+                    }
+                    // The lexical walk below resolves the qualifier. Checking
+                    // which enum member it denotes requires the active arm.
+                    if locals.in_const_if_arm && head != name {
+                        return Ok(true);
                     }
                     Ok(self.callback_index(head).is_none() && self.is_constant_pattern(name)?)
                 })? {
@@ -1401,6 +1494,7 @@ impl BodyChecker<'_, '_> {
                     self.check_expr_names(&arm.value, locals)?;
                 }
             }
+            Expr::SelectedOperand(value) => self.check_expr_names(value, locals)?,
             Expr::UnrollFor(fold) => {
                 self.check_expr_names(&fold.start, locals)?;
                 self.check_expr_names(&fold.limit, locals)?;
@@ -1449,6 +1543,66 @@ impl BodyChecker<'_, '_> {
         Ok(())
     }
 
+    /// Capture the constructor's declaration identity before specializing a
+    /// type formal or introducing a shadowing name.
+    pub(super) fn source_constructor<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        if let Some(alias) = self.local_type_aliases.get(name) {
+            alias.constructor.as_deref()
+        } else if self.type_bindings().is_some_and(|b| b.declares(name)) {
+            None
+        } else if let Some(alias) = self.decls.type_aliases.get(name) {
+            alias.ty.constructor_head()
+        } else {
+            Some(name)
+        }
+    }
+
+    /// Consult aliases introduced in the lexical walk before its enclosing
+    /// concrete scope.
+    fn lexical_constructor<'a>(
+        &'a self,
+        name: &'a str,
+        locals: &'a LexicalScope<'_>,
+    ) -> Option<&'a str> {
+        if let Some(kind) = locals.lookup(name).and_then(|s| s.declarations.get(name)) {
+            return match kind {
+                LexicalKind::TypeAlias { constructor, .. } => constructor.as_deref(),
+                _ => None,
+            };
+        }
+        self.source_constructor(name)
+    }
+
+    /// DSLX checks the declared field names of a known record even when its
+    /// constructor is in an inactive branch. Field types can still depend on
+    /// the specialized branch.
+    fn check_constructor_field_names(
+        &self,
+        literal: &StructLiteral<'_>,
+        locals: &LexicalScope<'_>,
+    ) -> Result<(), String> {
+        let Some(name) = self.lexical_constructor(literal.name, locals) else {
+            // A type formal's record declaration is unknown at the source use.
+            return Ok(());
+        };
+        if let Some(def) = self
+            .structs
+            .declared_records
+            .get(name)
+            .copied()
+            .or_else(|| self.structs.template(name))
+            .or_else(|| self.structs.definition(name).ok())
+        {
+            return check_supplied_fields(literal, def.fields.iter().map(|p| p.name.as_str()));
+        }
+        if let Some((module, member)) = self.resolver.lookup(name)?
+            && let Some(fields) = self.resolver.struct_field_names(&module, &member)
+        {
+            return check_supplied_fields(literal, fields);
+        }
+        Ok(())
+    }
+
     fn check_map_callee_name(
         &self,
         callback: &str,
@@ -1488,11 +1642,96 @@ impl BodyChecker<'_, '_> {
     }
 }
 
+/// Compare constructor field names without instantiating the record or
+/// checking the values supplied for its fields.
+fn check_supplied_fields<'a>(
+    literal: &StructLiteral<'_>,
+    declared: impl Iterator<Item = &'a str>,
+) -> Result<(), String> {
+    let source = StructApplication::Named(literal.name);
+    let mut supplied = struct_parametrics::struct_field_map(source, literal.fields)?;
+    for name in declared {
+        if supplied.remove(name).is_none() && literal.base.is_none() {
+            return Err(format!("missing field '{source}.{name}'"));
+        }
+    }
+    if let Some(field) = supplied.keys().next() {
+        return Err(format!("unknown field '{source}.{field}'"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{ImportOptions, check_module, check_module_with_options, parse_module};
     use std::fs;
     use xlsynth::dslx::{ImportData, parse_and_typecheck};
+
+    #[test]
+    fn inactive_const_if_checks_declared_struct_fields() {
+        let decls = "struct Header { a:u8, b:u8 } struct Packet<N:u32> { a:uN[N], b:u8 } type BytePacket = Packet<8>;";
+        for (body, valid) in [
+            ("Header { a:u8:3 }", false),
+            ("Packet<8> { a:u8:3 }", false),
+            ("Packet<8> { a:u8:3, b:u8:4, c:u8:5 }", false),
+            ("BytePacket { a:u8:3, a:u8:4, b:u8:5 }", false),
+            ("type Local = BytePacket; Local { a:u8:3 }", false),
+            ("type Local = Packet<8>; Local { c:u8:3, ..true }", false),
+            ("type Local = Packet<8>; Local { a:true, ..true }", true),
+            ("Packet<8> { a:(), b:(true,false) }", true),
+        ] {
+            let source =
+                format!("{decls}\nfn f() -> u8 {{ const if true {{ u8:7 }} else {{ {body} }} }}");
+            let native =
+                parse_and_typecheck(&source, "fields.x", "fields", &mut ImportData::default());
+            let bx = parse_module(&source).and_then(|module| check_module(&module));
+            assert_eq!(native.is_ok(), valid, "{source}: {:?}", native.err());
+            assert_eq!(bx.is_ok(), valid, "{source}: {:?}", bx.err());
+        }
+    }
+
+    #[test]
+    fn inactive_const_if_keeps_type_formal_constructor_fields_deferred() -> Result<(), String> {
+        let source = r#"
+            struct Packet { a:u8, b:u8 }
+            fn choose<T:type>(x:T) -> u8 {
+                type Alias = T;
+                const if true { u8:7 } else { Alias { a:u8:1, a:u8:3 }.a }
+            }
+            fn run() -> u8 { choose(Packet { a:u8:0, b:u8:0 }) }
+        "#;
+        let dslx = format!("#![feature(generics)]\n{source}");
+        parse_and_typecheck(&dslx, "fields.x", "fields", &mut ImportData::default())
+            .map_err(|e| e.to_string())?;
+        check_module(&parse_module(source)?)?;
+        Ok(())
+    }
+
+    #[test]
+    fn inactive_const_if_checks_imported_struct_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("packets.x"),
+            "pub struct Packet<N:u32> { a:uN[N], b:u8 } pub type BytePacket = Packet<8>;",
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        for (ty, fields, valid) in [
+            ("packets::Packet<8>", "a:u8:0", false),
+            ("packets::BytePacket", "c:u8:0, ..true", false),
+            ("packets::BytePacket", "b:true, ..true", true),
+        ] {
+            let source = format!(
+                "use packets; fn f() -> u8 {{ const if true {{ u8:7 }} else {{ {ty} {{ {fields} }} }} }}"
+            );
+            let bx = parse_module(&source)
+                .and_then(|module| check_module_with_options(&module, &options));
+            assert_eq!(bx.is_ok(), valid, "{source}: {:?}", bx.err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn unelaborated_function_scopes_resolve_local_declarations_in_order() {

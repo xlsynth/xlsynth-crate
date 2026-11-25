@@ -382,6 +382,15 @@ impl ImportResolver {
         self.structs.is_struct_type(subject, member)
     }
 
+    /// Borrow declared field names when validating an inactive constructor.
+    pub(crate) fn struct_field_names(
+        &self,
+        subject: &str,
+        member: &str,
+    ) -> Option<impl Iterator<Item = &str>> {
+        self.structs.struct_field_names(subject, member)
+    }
+
     /// Check a static callback's declaration even when an empty structural
     /// loop skips invocation and signature resolution.
     pub(crate) fn check_function_name(&self, subject: &str, member: &str) -> Result<(), String> {

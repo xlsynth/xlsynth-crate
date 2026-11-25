@@ -283,6 +283,41 @@ pub(crate) fn has_common_bit_type(op: BinaryOp) -> bool {
     )
 }
 
+/// Whether a compile-time branch contributes to an operand's result type.
+/// Calls, casts, indices and branch selectors determine their own operands.
+pub(crate) fn has_const_if_result(expr: &Expr) -> bool {
+    if let Some(seed) = expr.unannotated_loop_seed() {
+        return has_const_if_result(seed);
+    }
+    match expr {
+        Expr::ConstIf { .. } => true,
+        Expr::Scope { result, .. }
+        | Expr::Unary { value: result, .. }
+        | Expr::Binary {
+            op: BinaryOp::Shl | BinaryOp::Shr,
+            left: result,
+            ..
+        } => has_const_if_result(result),
+        Expr::Binary { op, left, right } if has_common_bit_type(*op) => {
+            has_const_if_result(left) || has_const_if_result(right)
+        }
+        Expr::Array(items)
+        | Expr::Tuple(items)
+        | Expr::ArrayLiteral {
+            annotation: None,
+            members: items,
+            ..
+        } => items.iter().any(has_const_if_result),
+        Expr::If {
+            then_value,
+            else_value,
+            ..
+        } => has_const_if_result(then_value) || has_const_if_result(else_value),
+        Expr::Match { arms, .. } => arms.iter().any(|arm| has_const_if_result(&arm.value)),
+        _ => false,
+    }
+}
+
 /// Accumulate literal constraints in source order. A concrete type encountered
 /// along a same-type edge takes precedence over minimum-width inference.
 fn collect_minimum(
@@ -308,14 +343,19 @@ enum MinimumContext<'a> {
     },
 }
 
-/// An implicit scalar seed contributes literal constraints to its enclosing
-/// expression, but cannot by itself establish the accumulator's type.
+/// Merge a scalar seed's minimum into the surrounding expression. A source
+/// literal needs an accumulator type, while a conditional seed can supply
+/// its own minimum after branch selection.
 fn collect_fold_seed(
     seed: &Expr,
     fold_name: &'static str,
     minimum: &mut Option<Minimum>,
     calls: MinimumContext<'_>,
 ) -> Result<bool, String> {
+    let (seed, needs_context) = match seed {
+        Expr::SelectedOperand(selected) => (selected.as_ref(), false),
+        seed => (seed, true),
+    };
     let mut seed_minimum = None;
     if !collect_minimum_with_calls(seed, None, &mut seed_minimum, calls)? {
         return Ok(false);
@@ -326,7 +366,9 @@ fn collect_fold_seed(
             MinimumContext::Deferred { .. } | MinimumContext::Siblings(_)
         ));
     };
-    seed.needs_accumulator_type = Some(fold_name);
+    if needs_context {
+        seed.needs_accumulator_type = Some(fold_name);
+    }
     *minimum = Some(match minimum.take() {
         Some(prior) => prior.merge(seed),
         None => seed,
@@ -446,6 +488,22 @@ pub(crate) fn minimum_type(expr: &Expr) -> Result<Option<Type>, String> {
     expression_minimum(expr, None)?
         .map(Minimum::inferred_type)
         .transpose()
+}
+
+/// Retain the independent type witness lost when selecting a compile-time
+/// branch on a loop seed's or function argument's common-type edges.
+pub(crate) fn prepared_inference_operand(source: &Expr, rewritten: Expr) -> Result<Expr, String> {
+    if expression_minimum(&rewritten, None)?.is_some() && supplies_selected_minimum(source)? {
+        Ok(Expr::SelectedOperand(Box::new(rewritten)))
+    } else {
+        Ok(rewritten)
+    }
+}
+
+/// Called after preparation identified an implicit scalar. A source operand
+/// with no implicit minimum had an independent type before branch selection.
+pub(crate) fn supplies_selected_minimum(source: &Expr) -> Result<bool, String> {
+    Ok(expression_minimum(source, None)?.is_none())
 }
 
 /// Supply the literal constraints of a BX data operand to a native DSLX
@@ -938,6 +996,9 @@ fn check_projected_argument(
     zero_is_call: Option<&dyn Fn() -> Result<bool, String>>,
 ) -> Result<(), String> {
     match (expr, path.split_first()) {
+        (Expr::SelectedOperand(value), _) => {
+            return check_projected_argument(value, path, ty, width, bindings, zero_is_call);
+        }
         (Expr::Scope { result, .. }, _) => {
             return check_projected_argument(result, path, ty, width, None, zero_is_call);
         }
@@ -1191,6 +1252,9 @@ pub(crate) fn has_concrete_element_type(
     locals: Option<WidthLookup<'_>>,
     needs_result: &dyn Fn(&str, usize) -> Result<bool, String>,
 ) -> Result<bool, String> {
+    if let Expr::SelectedOperand(selected) = expr {
+        return has_concrete_element_type(selected, locals, needs_result);
+    }
     if let Some(seed) = expr.unannotated_loop_seed() {
         return has_concrete_element_type(seed, None, needs_result);
     }

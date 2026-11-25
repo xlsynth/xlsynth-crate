@@ -457,6 +457,11 @@ impl<'m> BodyChecker<'_, 'm> {
             // Bound formals give their arguments context for literal widths.
             return Ok(pattern.contextual(arg));
         }
+        if let Expr::SelectedOperand(value) = arg
+            && super::has_aggregate_literal(value)
+        {
+            return self.infer_selected_members(formal, value, bindings, pattern);
+        }
         let branches = matches!(arg, Expr::If { .. } | Expr::Match { .. });
         let partial_constructor = branches
             && !matches!(pattern, InputPattern::Function(Some(_)))
@@ -600,7 +605,9 @@ impl<'m> BodyChecker<'_, 'm> {
                     // from another argument or from the constructor group.
                     return Ok(pattern.contextual(arg));
                 }
-                if !self.has_concrete_element_type(arg)? {
+                if !matches!(arg, Expr::SelectedOperand(_))
+                    && !self.has_concrete_element_type(arg)?
+                {
                     return Ok(pattern.contextual(arg));
                 }
                 let checked = match &mut pattern {
@@ -642,6 +649,53 @@ impl<'m> BodyChecker<'_, 'm> {
             expr: arg,
             members,
             charged_fill,
+        })
+    }
+
+    /// Infer variables from a selected constructor while leaving fields with
+    /// a bound type free to evaluate their arithmetic at the completed width.
+    fn infer_selected_members<'e>(
+        &mut self,
+        formal: &Type,
+        expr: &'e Expr,
+        bindings: &mut Bindings,
+        mut pattern: InputPattern,
+    ) -> Result<Input<'e>, String> {
+        if !bindings.has_unbound_variable(formal) {
+            return Ok(pattern.contextual(expr));
+        }
+        if let (Type::Tuple(types), Expr::Tuple(fields)) = (formal, expr)
+            && types.len() == fields.len()
+        {
+            let mut checked = pattern.take_members();
+            let members = types
+                .iter()
+                .zip(fields)
+                .map(|(ty, field)| {
+                    self.infer_selected_members(ty, field, bindings, pattern.child(checked.next()))
+                })
+                .collect::<Result<_, _>>()?;
+            return Ok(Input::Aggregate {
+                expr,
+                members,
+                charged_fill: 0,
+            });
+        }
+        // An array's element type reflects every row, even if the selected
+        // expression appears in just one of them.
+        let value = match pattern {
+            InputPattern::Function(Some(value)) => value,
+            _ => self.inferred_expr(expr)?,
+        };
+        bindings.infer_source_type(
+            formal,
+            &value.ty,
+            self.structs,
+            /* contextual_projection= */ true,
+        )?;
+        Ok(Input::Contextual {
+            expr,
+            prepared: Some(value),
         })
     }
 

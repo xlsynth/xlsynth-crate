@@ -24,7 +24,11 @@ impl StructTable<'_> {
     }
 
     /// A BX alias can qualify a member of either a local or an imported enum.
-    fn enum_subject(&self, prefix: &str, decls: &Declarations<'_>) -> Option<&CheckedEnum> {
+    pub(super) fn enum_subject(
+        &self,
+        prefix: &str,
+        decls: &Declarations<'_>,
+    ) -> Option<&CheckedEnum> {
         match decls.type_aliases.get(prefix).map(|alias| &alias.ty) {
             Some(Type::Enum { name, .. }) => self.enums.get(name),
             Some(_) => None,

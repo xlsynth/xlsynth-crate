@@ -465,7 +465,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             && let CallbackSource::Imported { module, member } =
                 self.callback_source(name, |head| self.has_local_name(head))?
         {
-            let value = self.explicit_import_call(&module, &member, parametrics, args)?;
+            let value = self.contextual_import_call(&module, &member, parametrics, args)?;
             return Ok((value.ty, value.kind));
         }
         let template =

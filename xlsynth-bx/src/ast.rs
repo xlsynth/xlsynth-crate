@@ -156,6 +156,14 @@ impl StructArgument {
 }
 
 impl Type {
+    /// The source name that could supply fields for a struct constructor.
+    pub(crate) fn constructor_head(&self) -> Option<&str> {
+        match self {
+            Self::Named(name) => Some(name),
+            _ => self.struct_application().map(|(name, _)| name),
+        }
+    }
+
     /// Borrow the argument list from any spelling of a struct application.
     pub(crate) fn struct_application(&self) -> Option<(&str, StructLiteralArgs<'_>)> {
         match self {
@@ -681,6 +689,16 @@ pub enum Expr {
         then_value: Box<Expr>,
         else_value: Box<Expr>,
     },
+    /// A DSLX conditional whose predicate selects a branch during elaboration.
+    ConstIf {
+        condition: Box<Expr>,
+        then_value: Box<Expr>,
+        else_value: Box<Expr>,
+    },
+    /// A prepared operand whose compile-time branch supplies a default type
+    /// when neither an enclosing annotation nor an earlier argument binds it.
+    #[doc(hidden)]
+    SelectedOperand(Box<Expr>),
     Match {
         subject: Box<Expr>,
         arms: Vec<MatchArm>,
@@ -742,11 +760,18 @@ pub(crate) struct StructLiteral<'a> {
 }
 
 impl Expr {
-    /// Prepared scopes have already replaced their discarded expressions with
-    /// lexical aliases. Only the trailing result still needs contextual typing.
+    /// Select compile-time branches and prepare scopes whose discarded
+    /// expressions have yet to be replaced with lexical aliases.
     pub(crate) fn needs_scope_preparation(&self) -> bool {
-        matches!(self, Self::Scope { statements, .. } if statements.is_empty() || !statements.iter().all(|s|
-            matches!(s, ScopeStatement::Expression(Expr::Name(name)) if name.starts_with("$scope_"))))
+        match self {
+            Self::ConstIf { .. } => true,
+            Self::Scope { statements, .. } => {
+                statements.is_empty() || !statements.iter().all(|s| {
+                    matches!(s, ScopeStatement::Expression(Expr::Name(name)) if name.starts_with("$scope_"))
+                })
+            }
+            _ => false,
+        }
     }
 
     /// Borrow the common parts of a struct literal, preserving its argument

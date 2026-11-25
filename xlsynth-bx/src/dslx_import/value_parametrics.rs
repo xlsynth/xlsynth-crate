@@ -307,21 +307,27 @@ impl ImportResolver {
                 .filter_map(|i| graph.get_callee(&probe, i))
                 .find(|f| f.get_identifier() == function)
                 .ok_or("missing native invocation target")?;
-            let sites = root
-                .get_all_invocation_callee_data(&callee)
-                .ok_or("missing native call sites")?;
-            let info = (0..sites.len())
-                .rev()
-                .filter_map(|i| sites.get(i))
-                .find_map(|site| {
-                    let caller = root
-                        .get_root_invocation_data(&site.invocation()?)?
-                        .caller()?;
-                    (caller == probe)
-                        .then(|| site.derived_type_info())
-                        .flatten()
-                })
-                .ok_or("missing type information for specialized native call")?;
+            let info = if callee.is_parametric() {
+                let sites = root
+                    .get_all_invocation_callee_data(&callee)
+                    .ok_or("missing native call sites")?;
+                (0..sites.len())
+                    .rev()
+                    .filter_map(|i| sites.get(i))
+                    .find_map(|site| {
+                        let caller = root
+                            .get_root_invocation_data(&site.invocation()?)?
+                            .caller()?;
+                        (caller == probe)
+                            .then(|| site.derived_type_info())
+                            .flatten()
+                    })
+                    .ok_or("missing type information for specialized native call")?
+            } else {
+                checked
+                    .get_type_info_for_module(&callee.get_body().get_owner_module())
+                    .ok_or("missing type information for native function")?
+            };
             args.iter()
                 .enumerate()
                 .map(|(i, arg)| {

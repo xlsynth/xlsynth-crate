@@ -738,6 +738,15 @@ enum ExprSpelling {
     Ordinary,
     Parenthesized,
     AnnotatedLiteral,
+    /// A unary operator's conditional operand permits a trailing projection.
+    ConditionalUnaryOperand,
+}
+
+/// The evaluation mode inherited by every condition in an else-if chain.
+#[derive(Clone, Copy, PartialEq)]
+enum ConditionalKind {
+    Runtime,
+    Const,
 }
 
 /// Distinguishes a struct constructor from a brace terminating the subject
@@ -1844,7 +1853,7 @@ impl<'s> Parser<'s> {
                 height = height.max(initializer_height);
                 statements.push(ScopeStatement::Let(binding));
                 self.expect(";")?;
-            } else if self.in_function_body && self.eat("const") {
+            } else if self.in_function_body && !self.starts_const_if() && self.eat("const") {
                 if self.peek(0) == "_" {
                     return Err(self.error("a local constant requires a name"));
                 }
@@ -2715,8 +2724,7 @@ impl<'s> Parser<'s> {
                 let condition = self.condition()?;
                 if self.delimited_followed_by(0, "{", "}", "else") {
                     let then_value = self.nested(Self::expression_scope)?;
-                    self.expect("else")?;
-                    let expr = self.if_tail(condition, then_value)?;
+                    let expr = self.if_tail(condition, then_value, ConditionalKind::Runtime)?;
                     let output = self.expr_tail(expr, 0, Braces::Struct)?;
                     let span = self.span_since(start);
                     self.expect("}")?;
@@ -2900,21 +2908,16 @@ impl<'s> Parser<'s> {
         Ok(condition)
     }
 
-    fn if_expr(&mut self) -> Result<ParsedExpr, String> {
+    /// In a function scope `const` also introduces a declaration. In block
+    /// expressions the word alone remains a legal BX identifier.
+    fn starts_const_if(&self) -> bool {
+        self.peek(0) == "const" && self.peek(1) == "if"
+    }
+
+    fn if_expr(&mut self, kind: ConditionalKind) -> Result<ParsedExpr, String> {
         let condition = self.condition()?;
         let then_value = self.expression_scope()?;
-        if self.in_value_body() && self.peek(0) != "else" {
-            return self.compose(
-                condition.height.max(then_value.height),
-                Expr::If {
-                    condition: Box::new(condition.value),
-                    then_value: Box::new(then_value.value),
-                    else_value: Box::new(Expr::Tuple(Vec::new())),
-                },
-            );
-        }
-        self.expect("else")?;
-        self.if_tail(condition, then_value)
+        self.if_tail(condition, then_value, kind)
     }
 
     /// Enable DSLX tuple lets in a block's pure expression scope while
@@ -3381,28 +3384,46 @@ impl<'s> Parser<'s> {
         )
     }
 
+    /// Parse the remaining arms, inheriting compile-time evaluation through
+    /// an else-if chain.
     fn if_tail(
         &mut self,
         condition: ParsedExpr,
         then_value: ParsedExpr,
+        kind: ConditionalKind,
     ) -> Result<ParsedExpr, String> {
-        let else_value = if self.eat("if") {
-            self.nested(Self::if_expr)?
+        let else_value = if self.eat("else") {
+            if self.eat("if") {
+                self.nested(|p| p.if_expr(kind))?
+            } else {
+                self.expect("{")?;
+                self.expression_scope()?
+            }
+        } else if kind == ConditionalKind::Const || self.in_value_body() {
+            ParsedExpr::leaf(Expr::Tuple(Vec::new()))
         } else {
-            self.expect("{")?;
-            self.expression_scope()?
+            return Err(self.error("expected 'else'"));
         };
-        self.compose(
-            condition
-                .height
-                .max(then_value.height)
-                .max(else_value.height),
-            Expr::If {
-                condition: Box::new(condition.value),
-                then_value: Box::new(then_value.value),
-                else_value: Box::new(else_value.value),
+        let height = condition
+            .height
+            .max(then_value.height)
+            .max(else_value.height);
+        let condition = Box::new(condition.value);
+        let then_value = Box::new(then_value.value);
+        let else_value = Box::new(else_value.value);
+        let expr = match kind {
+            ConditionalKind::Const => Expr::ConstIf {
+                condition,
+                then_value,
+                else_value,
             },
-        )
+            ConditionalKind::Runtime => Expr::If {
+                condition,
+                then_value,
+                else_value,
+            },
+        };
+        self.compose(height, expr)
     }
 
     /// Check each new node before it can become part of a deeper tree. Thus
@@ -3455,8 +3476,8 @@ impl<'s> Parser<'s> {
                     .error("parenthesize a typed array literal before field access or indexing"));
             }
             if self.dslx_value_grammar()
-                && left.spelling != ExprSpelling::Parenthesized
-                && matches!(left.value, Expr::If { .. })
+                && left.spelling == ExprSpelling::Ordinary
+                && matches!(left.value, Expr::If { .. } | Expr::ConstIf { .. })
                 && matches!(self.peek(0), "." | "[")
             {
                 return Err(
@@ -3523,8 +3544,8 @@ impl<'s> Parser<'s> {
     /// offset expression shared by both.
     fn subscript(&mut self, left: ParsedExpr) -> Result<ParsedExpr, String> {
         let needs_parens = left.spelling == ExprSpelling::AnnotatedLiteral
-            || (left.spelling != ExprSpelling::Parenthesized
-                && matches!(left.value, Expr::If { .. }));
+            || (left.spelling == ExprSpelling::Ordinary
+                && matches!(left.value, Expr::If { .. } | Expr::ConstIf { .. }));
         self.expect("[")?;
         let subscript = self.expr()?;
         let mut height = left.height.max(subscript.height);
@@ -3557,7 +3578,10 @@ impl<'s> Parser<'s> {
         if self.eat("[") {
             return self.array_literal(None);
         }
-        if self.starts_bit_literal()? || self.starts_array_literal_type() {
+        let fixed_width_qualifier = self.peek(1) == "::" && fixed_width(text).is_some();
+        if !fixed_width_qualifier
+            && (self.starts_bit_literal()? || self.starts_array_literal_type())
+        {
             return self.parse_annotated_literal();
         }
         if self.dslx_value_grammar()
@@ -3574,7 +3598,11 @@ impl<'s> Parser<'s> {
             return Ok(expr);
         }
         if self.eat("if") {
-            return self.if_expr();
+            return self.if_expr(ConditionalKind::Runtime);
+        }
+        if self.starts_const_if() {
+            self.pos += 2;
+            return self.if_expr(ConditionalKind::Const);
         }
         if text == "match" && (self.dslx_value_grammar() || self.block_match_ahead()) {
             self.pos += 1;
@@ -3607,7 +3635,7 @@ impl<'s> Parser<'s> {
         }
         if let Some(op) = UnaryOp::from_spelling(text) {
             self.pos += 1;
-            let value = self.expr_at(11, braces)?;
+            let value = self.unary_operand(braces)?;
             return self.compose(
                 value.height,
                 Expr::Unary {
@@ -3632,7 +3660,13 @@ impl<'s> Parser<'s> {
             self.pos += 1;
             return Ok(ParsedExpr::leaf(Expr::ByteString(bytes)));
         }
-        let name = self.name_or_qualified_member()?;
+        let name = if fixed_width_qualifier {
+            self.pos += 2;
+            let member = self.take_identifier(is_use_identifier)?;
+            format!("{text}::{member}")
+        } else {
+            self.name_or_qualified_member()?
+        };
         let turbofish = self.eat_turbofish();
         let type_struct = self.type_structs.contains_key(&name);
         let typed_struct_args = (turbofish && type_struct)
@@ -3733,6 +3767,25 @@ impl<'s> Parser<'s> {
             return Err(self.error("parenthesize the struct literal in this expression"));
         }
         Ok(ParsedExpr::leaf(self.named_value(name)?))
+    }
+
+    /// DSLX parses a bare conditional under a unary operator as a full
+    /// expression. An immediate field or index instead ends that expression
+    /// and attaches to the conditional before applying the unary operator.
+    fn unary_operand(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
+        if !self.starts_const_if() {
+            return self.expr_at(11, braces);
+        }
+        self.pos += 2;
+        self.nested(|p| {
+            let mut conditional = p.if_expr(ConditionalKind::Const)?;
+            if matches!(p.peek(0), "." | "[") {
+                conditional.spelling = ExprSpelling::ConditionalUnaryOperand;
+                p.expr_tail(conditional, 11, braces)
+            } else {
+                p.expr_tail(conditional, 0, braces)
+            }
+        })
     }
 
     /// Parse fields and an optional DSLX-style splat before the closing brace.
@@ -4761,7 +4814,7 @@ fn number_token(text: &str) -> bool {
 }
 
 /// DSLX reserves only u1 through u64 and s1 through s64 as bit type keywords.
-fn fixed_width(spelling: &str) -> Option<usize> {
+pub(crate) fn fixed_width(spelling: &str) -> Option<usize> {
     let digits = spelling.strip_prefix(['u', 's'])?;
     if digits.len() > 2 || !is_canonical_decimal(digits) {
         return None;
@@ -4917,6 +4970,105 @@ mod tests {
         names.map(|name| Expr::Name(name.to_owned()))
     }
 
+    #[test]
+    fn const_if_parses_alongside_local_constants_and_inherits_else_if() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+            fn f(x: bool) -> bool {
+                const YES = true;
+                const if false { x };
+                const if YES { if x { YES } else { false } } else if false { x }
+            }
+            block b(const: bool) -> bool {
+                const if true { const } else { false }
+            }
+            "#,
+        )?;
+        let Expr::Scope { statements, result } = &module.functions[0].body else {
+            panic!("expected function scope");
+        };
+        let [
+            ScopeStatement::Const(def),
+            ScopeStatement::Expression(Expr::ConstIf { else_value, .. }),
+        ] = statements.as_slice()
+        else {
+            panic!("expected a constant declaration and a discarded conditional");
+        };
+        assert_eq!(def.name, "YES");
+        assert_eq!(**else_value, Expr::Tuple(vec![]));
+        let Expr::ConstIf {
+            condition,
+            then_value,
+            else_value,
+        } = result.as_ref()
+        else {
+            panic!("expected compile-time conditional");
+        };
+        assert_eq!(**condition, Expr::Name("YES".into()));
+        assert!(matches!(then_value.as_ref(), Expr::If { .. }));
+        assert_eq!(
+            **else_value,
+            Expr::ConstIf {
+                condition: Box::new(Expr::Bool(false)),
+                then_value: Box::new(Expr::Name("x".into())),
+                else_value: Box::new(Expr::Tuple(vec![])),
+            }
+        );
+        let Expr::ConstIf { then_value, .. } = &module.blocks[0].output else {
+            panic!("expected compile-time block output");
+        };
+        assert_eq!(**then_value, Expr::Name("const".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn const_if_obeys_dslx_operand_precedence() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+            const X = u8:1 + const if true { u8:2 } else { u8:3 } as u8;
+            fn f() -> bool { !const if true { false } else { true } || true }
+            fn index() -> bool { (const if false { [false] } else { [true] })[u32:0] }
+            fn projected() -> bool { !const if true { [false] } else { [true] }[u32:0] || true }
+            fn grouped() -> bool { (!(const if true { [false] } else { [true] })[u32:0]) || true }
+            "#,
+        )?;
+        let Expr::Binary {
+            op: BinaryOp::Add,
+            right,
+            ..
+        } = &module.constants[0].value
+        else {
+            panic!("expected addition");
+        };
+        assert!(
+            matches!(right.as_ref(), Expr::Cast { value, .. } if matches!(value.as_ref(), Expr::ConstIf { .. }))
+        );
+        let Expr::Unary {
+            op: UnaryOp::Not,
+            value,
+        } = &module.functions[0].body
+        else {
+            panic!("expected negation of the full conditional operand");
+        };
+        assert!(
+            matches!(value.as_ref(), Expr::Binary { left, .. } if matches!(left.as_ref(), Expr::ConstIf { .. }))
+        );
+        assert!(
+            matches!(&module.functions[1].body, Expr::Index { value, .. } if matches!(value.as_ref(), Expr::ConstIf { .. }))
+        );
+        assert_eq!(module.functions[2].body, module.functions[3].body);
+        for body in [
+            "const if true { [true] } else { [false] }[u32:0]",
+            "const if true { (true,) } else { (false,) }.0",
+            "const if true { true } else const if false { false }",
+        ] {
+            assert!(
+                parse_module(&format!("fn invalid() -> bool {{ {body} }}")).is_err(),
+                "{body}"
+            );
+        }
+        Ok(())
+    }
     #[test]
     fn block_assertion_statements_preserve_value_calls_and_decode_labels() -> Result<(), String> {
         let module = parse_module(
