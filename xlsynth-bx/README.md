@@ -1536,17 +1536,13 @@ in its body. For a block declared as `route<SPLIT: bool = {false}>`,
 `true`. Omitted trailing value arguments use their braced defaults, evaluated
 in the block's declaration scope with preceding value parameters in scope.
 Input ports, results, and registers can use a `u32` constexpr expression for
-a bit width or array length. For example, a crossbar can declare its
-destination input as `dest_id: uN[ceillog2(NumOutputs)]`. With
-`NumOutputs = 1` that input has zero bits, with 8 it has three bits, and
-with 9 it has four. The caller supplies `NumOutputs` or uses its default.
-Several output counts can produce the same input width.
+a bit width or array length. For example, `xs: uN[ceillog2(N)][N + u32:1]`
+has type `u4[10]` when `N = 9`. The caller supplies `N` or uses its default.
 
 BX resolves names in the block's declaration scope. At each call it infers
 type parameters from data inputs, including the element type of `T[N]`,
 then evaluates dependent dimensions and checks the concrete port types.
-For example, a length can use `N + u32:1` or a width can use `bit_count<T>()`
-when another input supplies `T`.
+A width can also use `bit_count<T>()` when another input supplies `T`.
 
 ```text
 block storage<W: u32, N: u32>(clk, data: bits[W][N]) -> bits[W][N] {
