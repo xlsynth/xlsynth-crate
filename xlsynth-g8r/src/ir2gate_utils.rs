@@ -1372,6 +1372,7 @@ mod tests {
                                 );
                                 gb.add_output("result".into(), result);
                                 let f = gb.build();
+                                let mut sim = gate_sim::PreparedGateSim::new(&f);
                                 for shift in 0..(1usize << k) {
                                     let bits = (0..width)
                                         .map(|i| (i * 13 + shift * 7) % 11 < 5)
@@ -1387,16 +1388,12 @@ mod tests {
                                             mask[j] && source.is_some_and(|i| bits[i])
                                         })
                                         .collect::<Vec<_>>();
-                                    let actual = gate_sim::eval(
-                                        &f,
-                                        &[
-                                            IrBits::from_lsb_is_0(&bits),
-                                            IrBits::make_ubits(k, shift as u64).unwrap(),
-                                        ],
-                                        gate_sim::Collect::None,
-                                    );
+                                    let actual = sim.eval_outputs(&[
+                                        IrBits::from_lsb_is_0(&bits),
+                                        IrBits::make_ubits(k, shift as u64).unwrap(),
+                                    ]);
                                     assert_eq!(
-                                        actual.outputs,
+                                        actual,
                                         vec![IrBits::from_lsb_is_0(&expected)],
                                         "width={width} direction={direction:?} mask={pattern} reverse={reverse} shift={shift}"
                                     );
