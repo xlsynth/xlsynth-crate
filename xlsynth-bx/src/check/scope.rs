@@ -231,6 +231,23 @@ impl BodyChecker<'_, '_> {
         Ok(selected)
     }
 
+    /// Select leading compile-time branches while preserving the active arm's
+    /// lexical scope for the caller.
+    pub(super) fn selected_const_if_value<'e>(
+        &mut self,
+        mut expr: &'e Expr,
+    ) -> Result<&'e Expr, String> {
+        while let Expr::ConstIf {
+            condition,
+            then_value,
+            else_value,
+        } = expr
+        {
+            expr = self.const_if_arm(condition, then_value, else_value)?;
+        }
+        Ok(expr)
+    }
+
     /// Check a declaration in its lexical scope.
     pub(super) fn check_const_assert(&mut self, assertion: &ConstAssert) -> Result<(), String> {
         let result = if self.source_template.is_some() && self.function_spec.is_none() {
@@ -850,15 +867,7 @@ impl BodyChecker<'_, '_> {
     ) -> Result<Vec<Cow<'e, Expr>>, String> {
         let mut prepared = Vec::with_capacity(items.len());
         for &expr in items {
-            let mut expr = expr;
-            while let Expr::ConstIf {
-                condition,
-                then_value,
-                else_value,
-            } = expr
-            {
-                expr = self.const_if_arm(condition, then_value, else_value)?;
-            }
+            let expr = self.selected_const_if_value(expr)?;
             let Expr::Scope { statements, result } = expr else {
                 prepared.push(Cow::Borrowed(expr));
                 continue;

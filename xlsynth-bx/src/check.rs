@@ -4025,13 +4025,30 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         initializer: &Expr,
         structural: bool,
     ) -> Result<scope::BindingInitializer, String> {
-        // Preparing a lexical scope exposes its trailing expression, which
-        // still occupies a pure value position inside the original scope.
-        let structural =
-            structural && !matches!(initializer, Expr::Scope { .. } | Expr::ConstIf { .. });
+        let (initializer, structural) = self.select_let_initializer(initializer, structural)?;
         self.annotated_binding_initializer(initializer, annotation, |checker, expr, ty| {
             checker.let_value(name, expr, ty, structural)
         })
+    }
+
+    /// A leading `const if` can supply a direct child call at a structural let.
+    /// Decide this before value preparation strips lexical scopes.
+    fn select_let_initializer<'e>(
+        &mut self,
+        initializer: &'e Expr,
+        structural: bool,
+    ) -> Result<(&'e Expr, bool), String> {
+        if !structural {
+            return Ok((initializer, false));
+        }
+        let value = self.selected_const_if_value(initializer)?;
+        let structural = match value {
+            Expr::Scope { .. } => false,
+            // Child-producing loops must themselves occupy a structural site.
+            Expr::UnrollFor(_) => matches!(initializer, Expr::UnrollFor(_)),
+            _ => true,
+        };
+        Ok((value, structural))
     }
 
     /// Propagate expected types to literals, aggregate members, and pure call
@@ -5640,7 +5657,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             format!("pure function cannot call block '{name}'")
         } else {
             format!(
-                "call to block '{name}' must be the entire right-hand side of an unconditional top-level let"
+                "call to block '{name}' must directly initialize an unconditional top-level let or unrolled let, optionally through const if"
             )
         }
     }
