@@ -933,6 +933,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 }
                 CheckedStmt::Reg {
                     name,
+                    ir_name,
                     ty,
                     reset: value,
                 } => {
@@ -958,8 +959,9 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                         _ => value.clone(),
                     };
                     let register_reset = value.as_ref().and(reset);
+                    // Keep the BX name as the key for both reads and writes.
                     let handle = self.builder.register(
-                        name,
+                        ir_name.as_deref().unwrap_or(name),
                         storage_type.as_ref().unwrap_or(&ty).clone(),
                         value,
                     )?;

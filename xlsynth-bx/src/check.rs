@@ -2721,8 +2721,7 @@ fn inferred_reset_port<'a>(names: impl Iterator<Item = &'a str> + Clone) -> Stri
     }
 }
 
-/// Reserve source bindings and assertion labels before allocating instance
-/// or observation port names.
+/// Reserve bindings and assertion labels before naming hardware.
 fn block_binding_names(block: &Block) -> BTreeSet<String> {
     let mut names: BTreeSet<_> = block
         .clock
@@ -2839,6 +2838,7 @@ struct BodyChecker<'a, 'm> {
     /// source order.
     block_position: Option<usize>,
     local_callees: BTreeSet<String>,
+    /// Names bound in the source body. Output fields are not bindings.
     names: BTreeSet<String>,
     /// Lexical constants and value parametrics eligible as named match
     /// patterns.
@@ -2848,6 +2848,7 @@ struct BodyChecker<'a, 'm> {
     /// Bare dimension bindings in a struct declaration can have any integer
     /// type.
     in_struct_definition: bool,
+    /// Physical output names take precedence over internal hardware names.
     outputs: BTreeSet<String>,
     reserved_hardware_names: BTreeSet<String>,
     values: BTreeMap<String, Type>,
@@ -3409,16 +3410,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
         }
         if let Some(clock) = &block.clock {
-            c.hardware_name(clock)?;
+            declare(&mut c.names, clock)?;
         } else {
             c.clockless_block = Some(block);
         }
         if let Some(rst) = &block.reset {
-            c.hardware_name(rst)?;
+            declare(&mut c.names, rst)?;
             c.values.insert(rst.clone(), Type::Bool);
         }
         for p in &interface.params {
-            c.hardware_name(&p.name)?;
+            declare(&mut c.names, &p.name)?;
             c.values.insert(p.name.clone(), p.ty.clone());
         }
         c.body(block, &block.statements, false)?;
@@ -3546,11 +3547,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         resolve(&mut types, dimensions, bindings)
     }
 
-    fn hardware_name(&mut self, name: &str) -> Result<(), String> {
-        if self.outputs.contains(name) {
-            return Err(format!("name '{name}' collides with an output port"));
+    /// Reserve the first free numbered name, skipping even later declarations.
+    fn suffixed_hardware_name(&mut self, base: &str, separator: &str) -> String {
+        let mut suffix = 1usize;
+        loop {
+            let name = format!("{base}{separator}{suffix}");
+            if self.reserved_hardware_names.insert(name.clone()) {
+                return name;
+            }
+            suffix += 1;
         }
-        declare(&mut self.names, name)
     }
 
     /// Keep the source binding as the generated instance name when available
@@ -3561,13 +3567,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return binding.to_owned();
         }
         let base = format!("{binding}_inst");
-        let mut name = base.clone();
-        let mut suffix = 0;
-        while !self.reserved_hardware_names.insert(name.clone()) {
-            suffix += 1;
-            name = format!("{base}_{suffix}");
+        if self.reserved_hardware_names.insert(base.clone()) {
+            return base;
         }
-        name
+        self.suffixed_hardware_name(&base, "_")
     }
 
     /// Elaborate a call to static hardware, then assemble its outputs into a BX
@@ -3804,7 +3807,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         return Err(format!("conditional declaration of register '{name}'"));
                     }
                     let ty = self.source_type(ty)?;
-                    self.hardware_name(name)?;
+                    declare(&mut self.names, name)?;
                     let reset = match reset {
                         None => None,
                         Some(expr) => {
@@ -3826,8 +3829,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     };
                     self.regs.insert(name.clone(), ty.clone());
                     self.values.insert(name.clone(), ty.clone());
+                    // XLS emits registers before output ports. Give the
+                    // register a suffix so the port keeps its public name.
+                    let ir_name = self
+                        .outputs
+                        .contains(name)
+                        .then(|| self.suffixed_hardware_name(name, "__"));
                     CheckedStmt::Reg {
                         name: name.clone(),
+                        ir_name,
                         ty: ty.clone(),
                         reset,
                     }
