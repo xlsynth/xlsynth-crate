@@ -47,14 +47,39 @@ fn packet_case(data: &[u8]) -> PacketCase {
         (format!(" = {{u32:{b}}}"), format!("{typed}{a}"))
     };
     let right_args = format!("{typed}{right_a}, {typed}{right_b}");
+    let right_type = format!("Packet<u32:{right_a}, u32:{right_b}>");
+    let (update_helpers, make_right) = if byte() & 1 == 0 {
+        (
+            String::new(),
+            format!(
+                "{right_type} {{ payload: x as {sign}N[{concrete_width}], stamp: x ^ u32:{right_b} }}"
+            ),
+        )
+    } else {
+        let (binding, base) = if flags & 128 == 0 {
+            ("let base = seed<A, B>(x);\n    ", "base")
+        } else {
+            ("", "seed<A, B>(x)")
+        };
+        let helpers = format!(
+            r#"fn seed<A: u32, B: u32>(x: u32) -> Packet<A, B> {{
+    Packet<A, B> {{ payload: (!x) as {sign}N[{width_expression}], stamp: x ^ B }}
+}}
+fn update<A: u32, B: u32>(x: u32) -> Packet<A, B> {{
+    {binding}Packet<A, B> {{ payload: x as {sign}N[{width_expression}], ..{base} }}
+}}
+"#
+        );
+        (helpers, format!("update<u32:{right_a}, u32:{right_b}>(x)"))
+    };
     let module = format!(
-        r#"pub struct Packet<A: u32, B: u32{default}> {{ payload: {sign}N[{width_expression}] }}
+        r#"pub struct Packet<A: u32, B: u32{default}> {{ payload: {sign}N[{width_expression}], stamp: u32 }}
 pub type Left = Packet<u32:{a}, u32:{b}>;
 pub fn make_left(x: u32) -> Left {{
-    Left {{ payload: x as {sign}N[{concrete_width}] }}
+    Left {{ payload: x as {sign}N[{concrete_width}], stamp: x }}
 }}
-pub fn make_right(x: u32) -> Packet<u32:{right_a}, u32:{right_b}> {{
-    Packet<u32:{right_a}, u32:{right_b}> {{ payload: x as {sign}N[{concrete_width}] }}
+{update_helpers}pub fn make_right(x: u32) -> {right_type} {{
+    {make_right}
 }}
 pub fn observe<A: u32, B: u32>(p: Packet<A, B>) -> u32 {{
     (p.payload as u32) ^ ((A << u32:16) | B)
@@ -86,14 +111,15 @@ fn compare_packets(root: &Path, seed: u64, case: &PacketCase) -> Result<(), Box<
         &left
     };
     let params = format!("input: {input}, x: u32");
-    let result = "(u32, u32, u32)";
-    let helper =
-        format!("fn copy(p: packets::Left) -> {left} {{ {left} {{ payload: p.payload }} }}");
+    let result = "(u32, u32, u32, u32)";
+    let helper = format!(
+        "fn copy(p: packets::Left) -> {left} {{ {left} {{ payload: p.payload, stamp: p.stamp }} }}"
+    );
     let body = format!(
         r#"let left: {left} = if (x & u32:1) == u32:0 {{ input }} else {{ packets::make_left(x) }};
 let right: {right} = packets::make_right(x);
-let other = {right} {{ payload: right.payload }};
-(facade::read(copy(left)), packets::observe(other), packets::observe(input))"#
+let other = {right} {{ payload: right.payload, stamp: right.stamp }};
+(facade::read(copy(left)), packets::observe(other), packets::observe(input), other.stamp)"#
     );
     // The pinned DSLX parser accepts a use-bound type annotation but requires
     // a qualified name to recognize an imported struct construction.
@@ -160,7 +186,7 @@ mod tests {
     #[test]
     fn replay_same_layout_specializations() -> Result<(), String> {
         check_imported_struct_parametrics(&[])?;
-        check_imported_struct_parametrics(&[7, 255, 195, 133])?;
-        check_imported_struct_parametrics(&[120, 22, 15, 0])
+        check_imported_struct_parametrics(&[135, 255, 195, 133, 1])?;
+        check_imported_struct_parametrics(&[120, 22, 15, 0, 1])
     }
 }
