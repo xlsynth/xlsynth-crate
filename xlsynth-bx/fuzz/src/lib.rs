@@ -2,6 +2,7 @@
 
 mod array_concat;
 mod array_literals;
+mod bit_type_attributes;
 mod bits_array_casts;
 mod block_callbacks;
 mod block_let_patterns;
@@ -47,6 +48,7 @@ mod unroll_types;
 
 pub use array_concat::check_array_concat;
 pub use array_literals::check_array_literals;
+pub use bit_type_attributes::check_bit_type_attributes;
 pub use bits_array_casts::check_bits_array_casts;
 pub use block_callbacks::check_block_callbacks;
 pub use block_let_patterns::check_block_let_patterns;

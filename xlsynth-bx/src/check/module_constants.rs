@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
 
-use crate::ast::{Block, BlockStages, ConstDef, Expr, SourceNode, Type};
+use crate::ast::{BitTypeAttribute, Block, BlockStages, ConstDef, Expr, SourceNode, Type};
 use crate::infer_literal::has_implicit_constant_type;
 use crate::typed::bits;
 
@@ -150,11 +150,14 @@ impl<'m> ModuleDimensions<'_, 'm> {
         bindings: Option<&Bindings>,
         types: &mut TypeResolver<'_, 'm>,
     ) -> Result<IrValue, String> {
-        let Expr::Name(name) = expr else {
-            let mut checker = types.struct_scope(*self);
-            checker.enclosing_type_locals = Some(is_local);
-            checker.function_type_bindings = bindings.cloned();
-            return checker.parametric_value(expr, expected);
+        let name = match expr {
+            Expr::Name(name) if BitTypeAttribute::qualified(name).is_none() => name,
+            _ => {
+                let mut checker = types.struct_scope(*self);
+                checker.enclosing_type_locals = Some(is_local);
+                checker.function_type_bindings = bindings.cloned();
+                return checker.parametric_value(expr, expected);
+            }
         };
         let head = name
             .split_once("::")

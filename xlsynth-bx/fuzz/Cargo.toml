@@ -30,6 +30,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_bit_type_attributes"
+path = "fuzz_targets/fuzz_bx_dslx_bit_type_attributes.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_bits_array_casts"
 path = "fuzz_targets/fuzz_bx_dslx_bits_array_casts.rs"
 test = false

@@ -4307,7 +4307,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             self.structs.update_imports(self.resolver)?;
             return self.constant_literal(&value);
         }
-        if let Some((ty, value)) = self.enum_member(name)? {
+        if let Some((ty, value)) = self.type_member(name)? {
             return Ok((ty, K::Literal(IrValue::Bits(value))));
         }
         Err(format!("unknown value '{name}'"))
@@ -4370,7 +4370,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .decls
                 .visible(name, self.function_position.or(self.block_position))
                 && self.resolver.constant_binding(name).is_some()
-            || self.is_enum_member_name(name)?)
+            || self.is_type_member_name(name)?)
     }
 
     /// Resolve zero! to its local function or construct the intrinsic zero
@@ -5673,7 +5673,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         return Ok(checker.constant_pattern_names.contains(name)
                             || (head != name
                                 && checker.local_type_aliases.contains_key(head)
-                                && checker.is_enum_member_name(name)?));
+                                && checker.is_type_member_name(name)?));
                     }
                     Ok(checker.callback_index(head).is_none()
                         && checker.is_constant_pattern(name)?)

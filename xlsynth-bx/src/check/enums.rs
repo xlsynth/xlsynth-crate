@@ -11,7 +11,7 @@ use xlsynth_pir::IrBits;
 use super::{
     BodyChecker, CheckedEnum, Declarations, StructTable, bits, dependency_order, type_dependencies,
 };
-use crate::ast::{EnumDef, Expr, Module, ScopedSourceNodes, SourceNode, Type};
+use crate::ast::{BitTypeAttribute, EnumDef, Expr, Module, ScopedSourceNodes, SourceNode, Type};
 
 impl StructTable<'_> {
     /// Only BX declarations have unqualified keys. Imported enum references
@@ -442,13 +442,62 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
     }
 
-    /// Resolve an enum member name even in a skipped loop without converting
+    /// Look up a fixed-width keyword or a BX alias whose checked type is bits.
+    fn local_bit_attribute_type(&self, prefix: &str) -> Option<Type> {
+        if let Some(width) = crate::parser::fixed_width(prefix) {
+            return Some(Type::Bits {
+                signed: prefix.starts_with('s'),
+                width,
+            });
+        }
+        let ty = self
+            .local_type_aliases
+            .get(prefix)
+            .map(|alias| &alias.ty)
+            .or_else(|| self.decls.type_aliases.get(prefix).map(|alias| &alias.ty))?;
+        bits(ty).map(|_| ty.clone())
+    }
+
+    /// Materialize a scalar attribute at the qualifier's concrete width and
+    /// signedness.
+    fn bit_type_attribute(
+        &self,
+        name: &str,
+        ty: Type,
+        attribute: BitTypeAttribute,
+    ) -> Result<(Type, IrBits), String> {
+        crate::parser::validate_dslx_value_path(name)?;
+        let (signed, width) =
+            bits(&ty).ok_or_else(|| format!("'{name}' requires a bit type, got {ty}"))?;
+        self.structs.validate_type(&ty)?;
+        let value = match (attribute, signed) {
+            (BitTypeAttribute::Min, true) => IrBits::signed_min_value(width),
+            (BitTypeAttribute::Max, true) => IrBits::signed_max_value(width),
+            (BitTypeAttribute::Max, false) => IrBits::all_ones(width),
+            (BitTypeAttribute::Min, false) | (BitTypeAttribute::Zero, _) => IrBits::zero(width),
+        };
+        self.charge_reference_copy(super::bits_copy_work(&value))?;
+        Ok((ty, value))
+    }
+
+    /// Resolve a type member name even in a skipped loop without converting
     /// any imported functions or forcing evaluation of the enclosing
     /// expression.
-    pub(super) fn is_enum_member_name(&self, name: &str) -> Result<bool, String> {
+    pub(super) fn is_type_member_name(&self, name: &str) -> Result<bool, String> {
         let Some((prefix, member)) = name.rsplit_once("::") else {
             return Ok(false);
         };
+        let attribute = BitTypeAttribute::parse(member);
+        if attribute.is_some() && self.local_bit_attribute_type(prefix).is_some() {
+            crate::parser::validate_dslx_value_path(name)?;
+            if !self.local_type_aliases.contains_key(prefix) {
+                self.decls.check_type_name_visibility(
+                    prefix,
+                    self.function_position.or(self.block_position),
+                )?;
+            }
+            return Ok(true);
+        }
         let local = self.local_enum_alias(prefix)?;
         if let Some(def) = local.or_else(|| self.structs.enum_subject(prefix, self.decls)) {
             crate::parser::validate_dslx_value_path(name)?;
@@ -469,6 +518,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 prefix,
                 self.function_position.or(self.block_position),
             )?;
+            if attribute.is_some()
+                && self.resolver.has_public_type(&subject, &ty)
+                && !self.resolver.is_enum_type(&subject, &ty)
+            {
+                return Ok(true);
+            }
             self.resolver
                 .check_enum_member_name(&subject, &ty, member)?;
             return Ok(true);
@@ -476,32 +531,41 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         Ok(false)
     }
 
-    /// A member is a compile-time value with the nominal type of its
-    /// declaration.
-    pub(super) fn enum_member(&mut self, name: &str) -> Result<Option<(Type, IrBits)>, String> {
+    /// Resolve a qualified value as a bit attribute or a declared enum member.
+    pub(super) fn type_member(&mut self, name: &str) -> Result<Option<(Type, IrBits)>, String> {
         let Some((prefix, member)) = name.rsplit_once("::") else {
             return Ok(None);
         };
         let head = prefix.split("::").next().unwrap_or(prefix);
-        if !self.local_type_aliases.contains_key(prefix)
-            && (self.names.contains(head) || self.callback_index(head).is_some())
-        {
-            return Err(format!("'{head}' names a local value here"));
-        }
-        let local = self.local_enum_alias(prefix)?;
-        if local.is_none() {
+        if !self.local_type_aliases.contains_key(prefix) {
+            if self.has_local_name(head) || self.callback_index(head).is_some() {
+                return Err(format!("'{head}' names a local value here"));
+            }
             self.reject_type_parameter_value(head)?;
             self.decls.check_type_name_visibility(
                 prefix,
                 self.function_position.or(self.block_position),
             )?;
         }
+        let attribute = BitTypeAttribute::parse(member);
+        if let Some(attribute) = attribute
+            && let Some(ty) = self.local_bit_attribute_type(prefix)
+        {
+            return self.bit_type_attribute(name, ty, attribute).map(Some);
+        }
+        let local = self.local_enum_alias(prefix)?;
         let canonical;
         let def = if let Some(def) = local.or_else(|| self.structs.enum_subject(prefix, self.decls))
         {
             def
-        } else if let Some((subject, ty)) = self.resolver.lookup_enum_prefix(prefix)? {
-            let Type::Enum { name, .. } = self.resolver.resolve_named(&subject, &ty)? else {
+        } else if let Some((subject, member_type)) = self.resolver.lookup_enum_prefix(prefix)? {
+            let ty = self.resolver.resolve_named(&subject, &member_type)?;
+            let Type::Enum { name, .. } = ty else {
+                if let Some(attribute) = attribute
+                    && self.resolver.has_public_type(&subject, &member_type)
+                {
+                    return self.bit_type_attribute(name, ty, attribute).map(Some);
+                }
                 return Err(format!("'{prefix}' is not a numeric enum"));
             };
             canonical = name;

@@ -59,7 +59,8 @@ enum ParametricKind {
 }
 
 impl Export {
-    /// Qualify enum members and defer struct member lookup in const-if arms.
+    /// Qualify members of enums and aliases, and defer struct member lookup in
+    /// const-if arms.
     fn reference(&self, member: Option<&str>, in_const_if_arm: bool) -> Option<String> {
         match member {
             None => Some(self.name.clone()),
@@ -110,7 +111,8 @@ struct Names {
     verification_only: bool,
     zero_binding: ZeroBinding,
     definitions: BTreeSet<String>,
-    /// A type alias can qualify a member if the checker resolves it to an enum.
+    /// The checker resolves alias members against the underlying enum or bit
+    /// type.
     enums_or_aliases: BTreeSet<String>,
     structs: BTreeSet<String>,
     type_structs: BTreeMap<String, Vec<StructParametricKind>>,

@@ -6,11 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{BUILTIN_MAP, Binding, Names, ParametricKind, ReferenceKind, ZeroBinding};
 use crate::ast::{
-    BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
-    ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, InvariantDecl, LetBinding,
-    MapExpr, MatchArm, MatchPattern, Module, Param, ParametricBinding, QuickCheckSignature,
-    StageAnnotation, Stmt, StructArgument, StructDef, StructParametricRef, StructSplat, TestDecl,
-    TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor, UnrollMap, WidthSliceType,
+    BindingPattern, BitTypeAttribute, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr,
+    ExternBlock, ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, InvariantDecl,
+    LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param, ParametricBinding,
+    QuickCheckSignature, StageAnnotation, Stmt, StructArgument, StructDef, StructParametricRef,
+    StructSplat, TestDecl, TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor, UnrollMap,
+    WidthSliceType,
 };
 use crate::ast::{ConstAssert, ScopeStatement};
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
@@ -413,7 +414,7 @@ impl<'a> Scope<'a> {
                 .names
                 .unresolved(name, format!("invalid source reference '{name}'"));
         }
-        if let Some((head, _)) = name.split_once("::") {
+        if let Some((head, member)) = name.split_once("::") {
             if let Some(binding) = self.locals.get(head) {
                 if *binding == Local::TypeAlias || self.in_const_if_arm && *binding == Local::Formal
                 {
@@ -425,7 +426,11 @@ impl<'a> Scope<'a> {
                     .names
                     .unresolved(name, format!("'{head}' names a local value here"));
             }
-            if self.in_const_if_arm && crate::parser::fixed_width(head).is_some() {
+            if crate::parser::fixed_width(head).is_some()
+                && (self.in_const_if_arm
+                    || matches!(kind, ReferenceKind::Value)
+                        && BitTypeAttribute::parse(member).is_some())
+            {
                 return Ok(name.to_owned());
             }
         }
