@@ -155,7 +155,10 @@ pub(super) fn check_enum_patterns(
                     }
                     patterns.push(TypedMatchPattern::Literal(value));
                 }
-                MatchPattern::Literal(_) | MatchPattern::Range { .. } | MatchPattern::Tuple(_) => {
+                MatchPattern::Literal(_)
+                | MatchPattern::Range { .. }
+                | MatchPattern::Tuple(_)
+                | MatchPattern::Binding(_) => {
                     return Err(format!(
                         "enum match pattern must name a value of {subject_ty}"
                     ));
@@ -228,6 +231,9 @@ pub(super) fn check_patterns(
                 }
                 MatchPattern::Tuple(_) => {
                     return Err("tuple pattern requires a tuple subject".into());
+                }
+                MatchPattern::Binding(_) => {
+                    return Err("match bindings require a tuple pattern".into());
                 }
             });
         }

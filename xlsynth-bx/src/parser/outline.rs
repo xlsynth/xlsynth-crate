@@ -226,6 +226,7 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
         hidden_templates: Vec::new(),
         visible_names: Default::default(),
         local_names: Vec::new(),
+        match_module_names: BTreeSet::new(),
         literal_type_context: super::LiteralTypeContext::Live,
         block_map_shadowed: false,
         forward_map_import: false,

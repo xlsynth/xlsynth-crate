@@ -226,9 +226,12 @@ impl<'a> SourceNode<'a> {
                     pending.extend([condition.as_ref(), then_value, else_value].map(Expression));
                 }
                 Expr::Match { subject, arms } => {
-                    pending.push(Expression(subject));
-                    for arm in arms {
+                    for arm in arms.iter().rev() {
+                        pending.leave_scope();
                         pending.push(Expression(&arm.value));
+                        for name in arm.binding_names() {
+                            pending.bind_name(name);
+                        }
                         pending.extend(
                             arm.patterns
                                 .iter()
@@ -236,6 +239,7 @@ impl<'a> SourceNode<'a> {
                                 .map(Expression),
                         );
                     }
+                    pending.push(Expression(subject));
                 }
                 Expr::Struct { fields, base, .. }
                 | Expr::AppliedStruct { fields, base, .. }

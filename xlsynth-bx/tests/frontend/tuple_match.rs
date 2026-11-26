@@ -2,11 +2,230 @@
 
 use std::error::Error;
 use xlsynth::dslx::{self, ImportData};
-use xlsynth_bx::{ImportOptions, check_module, parse_module};
+use xlsynth_bx::{
+    ImportOptions, ResetBehavior, check_module, compile, empty_package, parse_module,
+};
 use xlsynth_pir::IrValue;
+use xlsynth_pir::ir::NodePayload;
 
 use super::directed_expr_eval::{compile_dslx, compile_dslx_module};
 use super::expr_eval::ExpressionEvaluator;
+
+#[test]
+fn tuple_match_shares_a_call_subject_across_projected_arm_bindings() -> Result<(), Box<dyn Error>> {
+    let key = r#"
+        fn key(first: bool, x: u8) -> (bool, (u8[2], u8)) {
+            (first, ([x, x + u8:1], u8:3))
+        }
+    "#;
+    let body = r#"
+        match key(first, x) {
+            (true, (lanes, bias)) => {
+                let bumped = map(lanes, |element| element + bias);
+                bumped[u32:0] + bias
+            },
+            (false, (lanes, bias)) => {
+                for (i, acc) in u32:0..u32:2 { acc + lanes[i] }(bias)
+            },
+        }
+    "#;
+    let functions = format!("{key} fn classify(first: bool, x: u8) -> u8 {{ {body} }}");
+    let dslx = format!("{functions} fn sample(first: bool, x: u8) -> u8 {{ classify(first, x) }}");
+    for block_body in [body, "classify(first, x)"] {
+        let bx = format!(
+            "{functions} #[allow(combinational_block)] block sample(clk, first: bool, x: u8) -> u8 {{ {block_body} }}"
+        );
+        let eval = ExpressionEvaluator::compile_block(
+            &bx,
+            &ImportOptions::default(),
+            compile_dslx_module(&dslx, &[]),
+        )?;
+        for (first, expected) in [(true, 16), (false, 24)] {
+            assert_eq!(
+                eval.compare(&[IrValue::bool(first), IrValue::make_ubits(8, 10)?])?,
+                IrValue::make_ubits(8, expected)?,
+            );
+        }
+        let package = compile(
+            &bx,
+            empty_package("match_bindings"),
+            ResetBehavior::default(),
+        )?;
+        let nodes = if block_body == body {
+            &package.get_block("sample").unwrap().nodes
+        } else {
+            &package.get_fn("classify").unwrap().nodes
+        };
+        let subject_calls = nodes.iter().filter(|node| {
+            matches!(&node.payload, NodePayload::Invoke { to_apply, .. } if to_apply == "key")
+        });
+        assert_eq!(subject_calls.count(), 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn tuple_match_bindings_fold_on_the_selected_arm() -> Result<(), Box<dyn Error>> {
+    let helper = r#"
+        fn read_at(i: u32) -> bool { [true][i] }
+        fn check(p: (bool, (u32, u32))) -> bool {
+            match p {
+                (true, (i, _)) => { let read = read_at(i); read },
+                (false, (_, i)) => read_at(i),
+            }
+        }
+    "#;
+    for (flag, left, right, valid) in [
+        (true, 0, 5, true),
+        (false, 5, 0, true),
+        (true, 5, 0, false),
+        (false, 0, 5, false),
+    ] {
+        let source = format!("{helper} const_assert!(check(({flag}, (u32:{left}, u32:{right}))));");
+        let native = dslx::parse_and_typecheck(
+            &source,
+            "tuple_assert.x",
+            "tuple_assert",
+            &mut ImportData::default(),
+        );
+        assert_eq!(native.is_ok(), valid, "{source}\nDSLX {:?}", native.err());
+        let bx = check_module(&parse_module(&source)?);
+        assert_eq!(bx.is_ok(), valid, "{source}\nBX {:?}", bx.err());
+    }
+    let runtime = r#"
+        fn check(p: (bool, bool)) -> bool {
+            match p { (true, b) => { const_assert!(b); b }, (false, _) => false }
+        }
+    "#;
+    assert!(check_module(&parse_module(runtime)?).is_err());
+    let literal = r#"
+        fn check() -> bool {
+            match (true, true) {
+                (true, b) => { const_assert!(b); const if b { true } else { false } },
+                (false, _) => false,
+            }
+        }
+        const_assert!(check());
+    "#;
+    check_module(&parse_module(literal)?)?;
+    Ok(())
+}
+
+#[test]
+fn tuple_match_binders_retain_unsized_field_constraints() -> Result<(), Box<dyn Error>> {
+    for (subject, explicit_subject, arms, result, expected) in [
+        ("(1,)", "(u8:1,)", "(v,) => v", "u8", 1),
+        (
+            "(b, 0xff)",
+            "(b, s8:-1)",
+            "(true,v) => v, _ => s8:0",
+            "s8",
+            255,
+        ),
+        (
+            "(b, 1)",
+            "(b, u8:1)",
+            "(false,128) => u8:0, (_,v) => v",
+            "u8",
+            1,
+        ),
+        (
+            "(b, (1, 2))",
+            "(b, (u3:1, u8:2))",
+            "(false, (u3:0, _)) => u8:0, (_, pair) => pair.1",
+            "u8",
+            2,
+        ),
+    ] {
+        let body = format!("match {subject} {{ {arms} }}");
+        let source = format!("fn sample(b: bool) -> {result} {{ {body} }}");
+        dslx::parse_and_typecheck(
+            &source,
+            "tuple_width.x",
+            "tuple_width",
+            &mut ImportData::default(),
+        )?;
+        // The pinned DSLX converter materializes unsized subject fields at
+        // their minimum width even after typechecking a wider match result.
+        let reference = format!("match {explicit_subject} {{ {arms} }}");
+        let bx = super::expr_eval::bx_source("b: bool", result, &body);
+        let eval = ExpressionEvaluator::compile_block(
+            &bx,
+            &ImportOptions::default(),
+            compile_dslx("b: bool", result, &reference),
+        )?;
+        assert_eq!(
+            eval.compare(&[IrValue::bool(true)])?,
+            IrValue::make_ubits(8, expected)?
+        );
+    }
+    for (subject, first_pattern, result) in [
+        ("1", "u3:1", "u8"),
+        ("1", "KEY", "u8"),
+        ("1", "u3:1..u3:3", "u8"),
+        ("1", "128", "u7"),
+        ("0xff", "255", "s8"),
+        ("u2:1", "1", "u8"),
+    ] {
+        let source = format!(
+            "const KEY = u3:1; fn f(b: bool) -> {result} {{ match (b, {subject}) {{
+                (false, {first_pattern}) => {result}:0, (_,v) => v
+            }} }}"
+        );
+        assert!(
+            dslx::parse_and_typecheck(
+                &source,
+                "tuple_width.x",
+                "tuple_width",
+                &mut ImportData::default(),
+            )
+            .is_err(),
+            "{source}"
+        );
+        assert!(check_module(&parse_module(&source)?).is_err(), "{source}");
+    }
+    Ok(())
+}
+
+#[test]
+fn tuple_match_bindings_respect_module_names_and_builtin_names() -> Result<(), String> {
+    let source = r#"
+const TAG = u8:3;
+fn pick(p: (u8, u8)) -> u8 {
+    match p { (TAG, value) => value, (_, _) => u8:0 }
+}
+const_assert!(pick((u8:3, u8:9)) == u8:9);
+const_assert!(pick((u8:4, u8:9)) == u8:0);
+"#;
+    check_module(&parse_module(source)?)?;
+    let parametric = r#"
+struct R<T: type> { val: uN[match (u32:4, true) { (T, _) => T }] }
+fn read(x: R<u8>) -> u4 { x.val }
+"#;
+    assert!(
+        parse_module(parametric)
+            .and_then(|m| check_module(&m))
+            .is_err()
+    );
+    let port = r#"
+#[allow(combinational_block)]
+block route(x: u32, data: uN[match (u32:3, true) { (x, _) => x }]) -> u3 { data }
+"#;
+    assert!(parse_module(port).and_then(|m| check_module(&m)).is_err());
+    for name in ["self", "Source", "rev"] {
+        let source = format!("fn f(p: (u8,)) -> u8 {{ match p {{ ({name},) => {name} }} }}");
+        assert!(
+            parse_module(&source)
+                .and_then(|m| check_module(&m))
+                .is_err(),
+            "{name}"
+        );
+    }
+    assert!(
+        parse_module("fn f(p: (u8, u8)) -> u8 { match p { (x, x) => x, _ => u8:0 } }").is_err()
+    );
+    Ok(())
+}
 
 #[test]
 fn tuple_match_can_dispatch_on_rounding_flags() -> Result<(), Box<dyn Error>> {

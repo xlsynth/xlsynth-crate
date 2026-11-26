@@ -158,6 +158,12 @@ fn strict_functions_require_earlier_helpers_and_types() -> Result<(), String> {
             "BIAS",
         ),
         (
+            "const FLAG = true;",
+            "fn pick(p: (bool, u8)) -> u8 { match p { (FLAG, byte) => byte, _ => u8:0 } }",
+            "pick",
+            "FLAG",
+        ),
+        (
             "enum Tag: u1 { A = 0 }",
             "fn tag() -> Tag { Tag::A }",
             "tag",

@@ -228,12 +228,16 @@ XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run fuzz_bx_dslx_scalar_
 Compares tuple `match` in BX blocks and local functions with pinned DSLX
 source checking, concrete execution, and compiled IR. The generator varies
 nested tuple shapes, singleton and unit patterns, alternatives, and leaves
-with booleans, wildcards, constants, and signed or unsigned ranges. Generated
+with booleans, wildcards, constants, fresh bindings, and signed or unsigned ranges. Generated
 coverage partitions, gaps, and overlaps detect exhaustiveness and first-match
 priority errors. Concrete inputs cross range endpoints with the Boolean
-combinations to exercise overlapping arms and nested field projections.
-Rejected programs exercise redundant patterns and incorrect tuple arity or
-leaf signedness.
+combinations to exercise overlapping arms. Some arms compute their result
+from a bound scalar or tuple, including in the final catch-all pattern. Reusing
+names for different fields in successive arms checks that projections are scoped
+to the selected arm. Calls on constant tuples compare BX and DSLX compile-time
+results for the same bindings. Rejected programs exercise redundant patterns, incorrect
+tuple arity or leaf signedness, bindings in alternatives, and a binding used
+outside its arm.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_tuple_match`.
 

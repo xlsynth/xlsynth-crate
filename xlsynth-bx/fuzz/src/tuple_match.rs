@@ -58,11 +58,86 @@ impl Shape {
     }
 }
 
+/// Generate arm bodies that read projected scalar or tuple fields and cases
+/// that reject bindings outside their single-pattern arm.
+fn binding_arms(
+    mode: u8,
+    layout: u8,
+    flags: u8,
+    shape: &Shape,
+    numeric_ty: &str,
+    pivot_pattern: &str,
+) -> String {
+    let aggregate = flags & 16 != 0;
+    let pattern = |first, second, numeric| shape.render(&[first, second, numeric]);
+    let arm = |pattern: String, value: &str, flag: &str| {
+        if aggregate {
+            format!("{pattern} => ({value}, {flag})")
+        } else {
+            format!("{pattern} => {value}")
+        }
+    };
+    let arms = match mode {
+        11 => vec![
+            arm(
+                pattern("false", "carried", pivot_pattern),
+                &format!("carried as {numeric_ty}"),
+                "carried",
+            ),
+            arm(
+                pattern("carried", "false", "word"),
+                &format!("word + (carried as {numeric_ty})"),
+                "carried",
+            ),
+            arm(
+                pattern("_", "tag", "carried"),
+                &format!("carried ^ (tag as {numeric_ty})"),
+                "tag",
+            ),
+        ],
+        12 => {
+            let pair_pattern = |tag: &str| {
+                if layout & 1 == 0 {
+                    format!("({tag}, pair)")
+                } else {
+                    format!("(pair, {tag})")
+                }
+            };
+            vec![
+                arm(pair_pattern("false"), "pair.1", "pair.0"),
+                arm(
+                    pair_pattern("_"),
+                    &format!("pair.1 + (pair.0 as {numeric_ty})"),
+                    "!pair.0",
+                ),
+            ]
+        }
+        13 => {
+            let first = if flags & 4 != 0 { "word" } else { "_" };
+            let alternatives =
+                [pattern("false", "_", first), pattern("true", "_", "word")].join(" | ");
+            let result = if flags & 8 == 0 {
+                "word"
+            } else {
+                pivot_pattern
+            };
+            vec![arm(alternatives, result, "true")]
+        }
+        _ => {
+            vec![
+                arm(pattern("false", "_", "word"), "word", "false"),
+                arm("_".into(), "word", "true"),
+            ]
+        }
+    };
+    arms.join(", ")
+}
+
 /// Generate tuple patterns and sample the cross product of the Boolean
 /// leaves and the numeric range boundaries, including overlapping arms.
 pub fn check_tuple_match(data: &[u8]) -> Result<(), String> {
     let mut bytes = data.iter().copied().chain(std::iter::repeat(0));
-    let mode = bytes.next().unwrap() % 11;
+    let mode = bytes.next().unwrap() % 15;
     let layout = bytes.next().unwrap();
     let width_selector = bytes.next().unwrap();
     let flags = bytes.next().unwrap();
@@ -112,6 +187,14 @@ pub fn check_tuple_match(data: &[u8]) -> Result<(), String> {
         8 if layout & 1 == 0 => Shape::Tuple(vec![]),
         8 => Shape::Tuple(vec![Shape::Tuple(vec![])]),
         10 => Shape::Tuple(vec![Shape::Leaf(0), Shape::Leaf(1)]),
+        12 => {
+            let pair = Tuple(vec![Leaf(1), Leaf(2)]);
+            if layout & 1 == 0 {
+                Tuple(vec![Leaf(0), pair])
+            } else {
+                Tuple(vec![pair, Leaf(0)])
+            }
+        }
         _ => Shape::product(layout),
     };
     let pattern = |first, second, numeric| shape.render(&[first, second, numeric]);
@@ -119,122 +202,134 @@ pub fn check_tuple_match(data: &[u8]) -> Result<(), String> {
     let through_pivot = format!("{min_text}..={pivot_text}");
     let high = format!("{pivot_text}..={max_text}");
     let mut valid = Some(true);
-    let mut arms = match mode {
-        0 => {
-            valid = None;
-            let mut patterns = Vec::new();
-            for _ in 0..(1 + bytes.next().unwrap() % 4) {
-                let mut alternatives = Vec::new();
-                for _ in 0..(1 + bytes.next().unwrap() % 3) {
-                    let mut boolean =
-                        || ["false", "true", "_"][usize::from(bytes.next().unwrap()) % 3];
-                    let first = boolean();
-                    let second = boolean();
-                    let numeric = ["_", &min_text, pivot_pattern, &max_text, &low, &high]
-                        [usize::from(bytes.next().unwrap()) % 6];
-                    alternatives.push(pattern(first, second, numeric));
-                }
-                patterns.push(alternatives.join(" | "));
-            }
-            if flags & 4 == 0 {
-                patterns.push("_".into());
-            }
-            patterns
-        }
-        1 => {
-            let mut overlapping = vec![
-                pattern("false", "_", &through_pivot),
-                pattern("_", "false", &high),
-            ];
-            if flags & 4 != 0 {
-                overlapping.reverse();
-            }
-            overlapping.push("_".into());
-            overlapping
-        }
-        2 | 3 => {
-            let mut partition = vec![
-                [pattern("false", "_", "_"), pattern("true", "false", "_")].join(" | "),
-                pattern("true", "true", &low),
-                pattern("true", "true", &high),
-            ];
-            if mode == 3 {
-                partition.remove(usize::from(layout) % partition.len());
-                valid = Some(false);
-            }
-            partition
-        }
-        4 => {
-            valid = Some(false);
-            if flags & 4 == 0 {
-                vec![
-                    pattern("false", "_", "_"),
-                    pattern("false", "true", pivot_pattern),
-                    "_".into(),
-                ]
-            } else {
-                vec![
-                    pattern("false", "true", pivot_pattern),
-                    "_".into(),
-                    pattern("false", "true", &format!("{pivot_text}..={pivot_text}")),
-                ]
-            }
-        }
-        5 => {
-            valid = Some(false);
-            vec!["()".into(), "_".into()]
-        }
-        6 => {
-            valid = Some(false);
-            let wrong = format!("{}N[{width}]:0", if signed { 'u' } else { 's' });
-            vec![pattern("false", "_", &wrong), "_".into()]
-        }
-        7 => {
-            let pattern = |numeric: &str| {
-                if flags & 4 == 0 {
-                    format!("({numeric})")
-                } else {
-                    format!("({numeric},)")
-                }
-            };
-            vec![
-                pattern(&low),
-                pattern(pivot_pattern),
-                pattern(&format!("{}..={max_text}", literal(&pivot.add(&one)))),
-            ]
-        }
-        8 => vec![pattern("_", "_", "_")],
-        9 => {
-            let mut single_value = vec![pattern("_", "_", pivot_pattern)];
-            if flags & 4 != 0 {
-                single_value.push(pattern("_", "_", &through_pivot));
-                valid = Some(false);
-            }
-            single_value
-        }
-        _ => vec![
-            pattern("false", "_", "_"),
-            pattern("_", "false", "_"),
-            pattern("true", "true", "_"),
-        ],
-    };
-    if flags & 8 != 0 && matches!(mode, 2 | 7) {
-        arms.reverse();
-    }
     let aggregate = flags & 16 != 0;
-    let result = if aggregate { "(u8, bool)" } else { "u8" };
-    let arms = arms
-        .iter()
-        .enumerate()
-        .map(|(i, arm)| {
-            if aggregate {
-                format!("{arm} => (u8:{i}, {})", i % 2 == 0)
-            } else {
-                format!("{arm} => u8:{i}")
+    let (result, arms) = if mode >= 11 {
+        valid = Some(matches!(mode, 11 | 12));
+        let result = if aggregate {
+            format!("({numeric_ty}, bool)")
+        } else {
+            numeric_ty.clone()
+        };
+        let arms = binding_arms(mode, layout, flags, &shape, &numeric_ty, pivot_pattern);
+        (result, arms)
+    } else {
+        let mut arms = match mode {
+            0 => {
+                valid = None;
+                let mut patterns = Vec::new();
+                for _ in 0..(1 + bytes.next().unwrap() % 4) {
+                    let mut alternatives = Vec::new();
+                    for _ in 0..(1 + bytes.next().unwrap() % 3) {
+                        let mut boolean =
+                            || ["false", "true", "_"][usize::from(bytes.next().unwrap()) % 3];
+                        let first = boolean();
+                        let second = boolean();
+                        let numeric = ["_", &min_text, pivot_pattern, &max_text, &low, &high]
+                            [usize::from(bytes.next().unwrap()) % 6];
+                        alternatives.push(pattern(first, second, numeric));
+                    }
+                    patterns.push(alternatives.join(" | "));
+                }
+                if flags & 4 == 0 {
+                    patterns.push("_".into());
+                }
+                patterns
             }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+            1 => {
+                let mut overlapping = vec![
+                    pattern("false", "_", &through_pivot),
+                    pattern("_", "false", &high),
+                ];
+                if flags & 4 != 0 {
+                    overlapping.reverse();
+                }
+                overlapping.push("_".into());
+                overlapping
+            }
+            2 | 3 => {
+                let mut partition = vec![
+                    [pattern("false", "_", "_"), pattern("true", "false", "_")].join(" | "),
+                    pattern("true", "true", &low),
+                    pattern("true", "true", &high),
+                ];
+                if mode == 3 {
+                    partition.remove(usize::from(layout) % partition.len());
+                    valid = Some(false);
+                }
+                partition
+            }
+            4 => {
+                valid = Some(false);
+                if flags & 4 == 0 {
+                    vec![
+                        pattern("false", "_", "_"),
+                        pattern("false", "true", pivot_pattern),
+                        "_".into(),
+                    ]
+                } else {
+                    vec![
+                        pattern("false", "true", pivot_pattern),
+                        "_".into(),
+                        pattern("false", "true", &format!("{pivot_text}..={pivot_text}")),
+                    ]
+                }
+            }
+            5 => {
+                valid = Some(false);
+                vec!["()".into(), "_".into()]
+            }
+            6 => {
+                valid = Some(false);
+                let wrong = format!("{}N[{width}]:0", if signed { 'u' } else { 's' });
+                vec![pattern("false", "_", &wrong), "_".into()]
+            }
+            7 => {
+                let pattern = |numeric: &str| {
+                    if flags & 4 == 0 {
+                        format!("({numeric})")
+                    } else {
+                        format!("({numeric},)")
+                    }
+                };
+                vec![
+                    pattern(&low),
+                    pattern(pivot_pattern),
+                    pattern(&format!("{}..={max_text}", literal(&pivot.add(&one)))),
+                ]
+            }
+            8 => vec![pattern("_", "_", "_")],
+            9 => {
+                let mut single_value = vec![pattern("_", "_", pivot_pattern)];
+                if flags & 4 != 0 {
+                    single_value.push(pattern("_", "_", &through_pivot));
+                    valid = Some(false);
+                }
+                single_value
+            }
+            _ => vec![
+                pattern("false", "_", "_"),
+                pattern("_", "false", "_"),
+                pattern("true", "true", "_"),
+            ],
+        };
+        if flags & 8 != 0 && matches!(mode, 2 | 7) {
+            arms.reverse();
+        }
+        let result = if aggregate { "(u8, bool)" } else { "u8" };
+        let arms = arms
+            .iter()
+            .enumerate()
+            .map(|(i, arm)| {
+                if aggregate {
+                    format!("{arm} => (u8:{i}, {})", i % 2 == 0)
+                } else {
+                    format!("{arm} => u8:{i}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        (result.to_owned(), arms)
+    };
     let ty = shape.render(&["bool", "bool", &numeric_ty]);
     let params = format!("x: {ty}");
     let subject = if flags & 32 == 0 {
@@ -244,9 +339,16 @@ pub fn check_tuple_match(data: &[u8]) -> Result<(), String> {
         "key(x)"
     };
     let mut body = format!("match {subject} {{ {arms} }}");
-    if flags & 64 != 0 {
+    let check_constant = flags & 128 != 0 && matches!(mode, 11 | 12);
+    if flags & 64 != 0 || check_constant {
         functions.push_str(&format!("fn classify({params}) -> {result} {{ {body} }}\n"));
         body = "classify(x)".into();
+        if check_constant {
+            let first = if layout & 1 == 0 { "false" } else { "true" };
+            let second = if flags & 4 == 0 { "false" } else { "true" };
+            let value = shape.render(&[first, second, &pivot_text]);
+            functions.push_str(&format!("const SELECTED = classify({value});\n"));
+        }
     }
 
     let mut inputs = Vec::new();
@@ -269,7 +371,7 @@ pub fn check_tuple_match(data: &[u8]) -> Result<(), String> {
         FunctionProgram {
             functions,
             params,
-            result: result.into(),
+            result,
             body,
             valid,
             dslx_ir: true,
@@ -306,6 +408,16 @@ mod tests {
             (9, 0, 0, 0, 0),
             (9, 0, 0, 4, 0),
             (10, 0, 0, 96, 0),
+            (11, 1, 8, 115, 0xa5),
+            (11, 5, 10, 2, 0xff),
+            (11, 3, 10, 150, 0xc2),
+            (12, 0, 2, 0, 0x7f),
+            (12, 1, 10, 113, 0x80),
+            (12, 0, 8, 129, 0x21),
+            (13, 1, 2, 0, 3),
+            (13, 2, 2, 116, 3),
+            (13, 4, 5, 8, 9),
+            (14, 3, 4, 16, 0),
         ] {
             check_tuple_match(&[mode, layout, width, flags, entropy])?;
         }

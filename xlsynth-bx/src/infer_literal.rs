@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use num_bigint::BigUint;
 
-use crate::ast::{BinaryOp, Expr, Type};
+use crate::ast::{BinaryOp, Expr, MatchArm, MatchPattern, Type};
 use crate::parser::radix_digits;
 use crate::typed::bits;
 
@@ -48,6 +48,42 @@ pub(crate) struct BindingWidths {
 }
 
 impl BindingWidths {
+    /// Tuple match literals constrain the same field as a binder in another
+    /// arm. A typed pattern fixes that field; unsized endpoints add minima.
+    pub(crate) fn constrain_match_fields(&mut self, arms: &[MatchArm]) -> Result<(), String> {
+        fn visit(
+            widths: &mut BindingWidths,
+            pattern: &MatchPattern,
+            path: &mut Vec<Member>,
+        ) -> Result<(), String> {
+            if let MatchPattern::Tuple(fields) = pattern {
+                for (i, field) in fields.iter().enumerate() {
+                    path.push(Member::TupleField(i));
+                    visit(widths, field, path)?;
+                    path.pop();
+                }
+            } else if let MatchPattern::Literal(_) | MatchPattern::Range { .. } = pattern
+                && let Some(mut minimum) = widths.members.remove(path)
+            {
+                for endpoint in pattern.literals() {
+                    let Expr::Literal { ty: None, text } = endpoint else {
+                        // A named constant, bool or typed literal fixes the
+                        // field.
+                        return Ok(());
+                    };
+                    minimum = minimum.merge(Minimum::from_literal(text)?);
+                }
+                widths.members.insert(path.clone(), minimum);
+            }
+            Ok(())
+        }
+        let mut path = Vec::new();
+        for pattern in arms.iter().flat_map(|arm| &arm.patterns) {
+            visit(self, pattern, &mut path)?;
+        }
+        Ok(())
+    }
+
     /// Distribute the inferred widths of a destructured tuple to its members.
     pub(crate) fn tuple_fields(self, count: usize) -> Vec<Option<Self>> {
         let mut fields = (0..count).map(|_| None).collect::<Vec<_>>();

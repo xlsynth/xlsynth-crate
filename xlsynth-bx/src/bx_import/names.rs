@@ -988,6 +988,7 @@ impl<'a> Scope<'a> {
         }
         Ok(match pattern {
             MatchPattern::Wildcard => MatchPattern::Wildcard,
+            MatchPattern::Binding(name) => MatchPattern::Binding(name.clone()),
             MatchPattern::Literal(value) => MatchPattern::Literal(self.expr(value)?),
             MatchPattern::Range {
                 start,
@@ -1384,10 +1385,13 @@ impl<'a> Scope<'a> {
                             .iter()
                             .map(|pattern| self.match_pattern(pattern, 1))
                             .collect::<Result<_, String>>()?;
-                        Ok(MatchArm {
-                            patterns,
-                            value: self.expr(&arm.value)?,
-                        })
+                        let value = self.nested(|scope| {
+                            for name in arm.binding_names() {
+                                scope.bind(name);
+                            }
+                            scope.expr(&arm.value)
+                        })?;
+                        Ok(MatchArm { patterns, value })
                     })
                     .collect::<Result<_, String>>()?,
             },

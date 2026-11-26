@@ -199,6 +199,33 @@ fn pure_tests_run_scoped_table_loops_and_report_the_executed_assertion() -> Resu
 }
 
 #[test]
+fn procedural_tests_and_quickcheck_properties_read_matched_fields() -> Result<(), String> {
+    let source = r#"
+        #![require_define_before_use]
+        #[test] fn pure() {
+            let picked = match (true, (u8:3, u8:4)) {
+                (true, (word, _)) => word,
+                (false, (_, word)) => word,
+            };
+            assert_eq(picked, u8:3);
+        }
+        #[quickcheck] block selects_member(left: bool, a: u8) -> bool {
+            tick!();
+            match (left, (a, !a)) {
+                (true, (word, _)) => word == a,
+                (false, (_, word)) => word != a,
+            }
+        }
+    "#;
+    let report = run(source)?;
+    assert_eq!(report.tests.len(), 2);
+    for test in report.tests {
+        assert_eq!(test.failure, None, "{}", test.name);
+    }
+    Ok(())
+}
+
+#[test]
 fn clocked_test_preserves_procedural_constants_as_range_bounds() -> Result<(), String> {
     let source = r#"#[test] block count() {
     reg edges: u8;

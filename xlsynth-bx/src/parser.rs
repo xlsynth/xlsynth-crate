@@ -140,6 +140,15 @@ fn is_function_identifier(text: &str) -> bool {
     is_use_identifier(text) || text == "self"
 }
 
+/// DSLX match patterns introduce fresh identifiers outside the builtin
+/// namespace.
+pub(crate) fn is_match_binding_name(name: &str) -> bool {
+    name != "_"
+        && is_use_identifier(name)
+        && !crate::check::is_dslx_builtin_type(name)
+        && !crate::check::is_dslx_builtin_value(name)
+}
+
 /// DSLX permits `self` only at the head of a value path and `_` only after
 /// a qualifier. Both spellings are valid in declarations.
 pub(crate) fn validate_dslx_value_path(name: &str) -> Result<(), String> {
@@ -544,6 +553,9 @@ struct Parser<'s> {
     /// Names in source scope, including imports. An overwritten literal type
     /// needs lexical resolution while its syntax is still available.
     visible_names: HashMap<String, NameKind>,
+    /// Module declarations that a tuple pattern can reference before their
+    /// definition.
+    match_module_names: BTreeSet<&'s str>,
     /// Previous bindings hidden by currently active lexical declarations.
     local_names: Vec<(String, Option<NameKind>)>,
     literal_type_context: LiteralTypeContext,
@@ -725,6 +737,7 @@ struct MatchPatternSpellings {
     current: String,
     contains_range: bool,
     seen: BTreeSet<String>,
+    bindings: BTreeSet<String>,
 }
 
 /// An iterable being parsed, retaining expression heights through parentheses.
@@ -890,6 +903,7 @@ impl<'s> Parser<'s> {
             overwritten_literal_types: BTreeSet::new(),
             hidden_templates: Vec::new(),
             visible_names: HashMap::new(),
+            match_module_names: BTreeSet::new(),
             local_names: Vec::new(),
             literal_type_context: LiteralTypeContext::Live,
         })
@@ -1106,7 +1120,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// Find top-level imports and bare callable declarations that shadow map.
+    /// Find imports and module names visible to map calls and tuple patterns.
     fn scan_module_bindings(
         &mut self,
         mut visit: impl FnMut(UsePath, usize),
@@ -1130,12 +1144,18 @@ impl<'s> Parser<'s> {
                     // builtin.
                     self.pos += 4;
                 }
-                "fn" | "block" | "struct"
-                    if depth == 0
-                        && self.peek(0) == "map"
-                        && matches!(self.peek(1), "(" | "<" | "{") =>
+                "fn" | "block" | "struct" | "const" | "enum" | "type"
+                    if depth == 0 && is_function_identifier(self.peek(0)) =>
                 {
-                    self.block_map_shadowed = true;
+                    if self.peek(1) != "::" {
+                        self.match_module_names.insert(self.peek(0));
+                    }
+                    if matches!(token.text, "fn" | "block" | "struct")
+                        && self.peek(0) == "map"
+                        && matches!(self.peek(1), "(" | "<" | "{")
+                    {
+                        self.block_map_shadowed = true;
+                    }
                 }
                 // A use can start the file or follow a declaration or module
                 // attribute.
@@ -1167,7 +1187,7 @@ impl<'s> Parser<'s> {
         if self
             .tokens
             .iter()
-            .any(|token| matches!(token.text, "<" | "map" | "use"))
+            .any(|token| matches!(token.text, "<" | "map" | "use" | "match"))
         {
             let mut imports = BTreeMap::new();
             self.scan_module_bindings(|mut path, start| {
@@ -1327,14 +1347,15 @@ impl<'s> Parser<'s> {
                     .error("replace `import` with `use` and separate path components with `::`"));
             } else if self.eat("extern") {
                 if self.eat("fn") {
-                    let function = self.extern_fn()?;
+                    let function = self.with_name_scope(Self::extern_fn)?;
                     module.declaration_order.push(function.name.clone());
                     module.externs.push(function);
                 } else if self.eat("block") {
                     let name = self.ident()?;
                     // TODO: 2026-11-06 Parse extern input and output cycles
                     // for checking timing across block instances.
-                    let signature = self.block_signature(name, Self::param)?;
+                    let signature =
+                        self.with_name_scope(|p| p.block_signature(name, Self::param))?;
                     module.declaration_order.push(signature.name.clone());
                     self.expect(";")?;
                     module.extern_blocks.push(signature);
@@ -1586,6 +1607,12 @@ impl<'s> Parser<'s> {
         Ok(items)
     }
 
+    /// Each function parameter is visible from its own annotation onwards.
+    fn function_param(&mut self) -> Result<Param, String> {
+        self.bind_local_name(self.peek(0));
+        self.param()
+    }
+
     fn param(&mut self) -> Result<Param, String> {
         let name = if self.dslx_value_grammar() {
             // A self parameter is reserved for DSLX impl and trait methods.
@@ -1659,7 +1686,7 @@ impl<'s> Parser<'s> {
         }
         let name = self.name_or_qualified_member()?;
         self.expect("(")?;
-        let params = self.list(")", Self::param)?;
+        let params = self.list(")", Self::function_param)?;
         self.expect("->")?;
         let result = self.ty()?;
         let symbol = if self.eat("=") {
@@ -1795,10 +1822,7 @@ impl<'s> Parser<'s> {
             })?;
         }
         self.expect("(")?;
-        let params = self.list(")", |p| {
-            p.bind_local_name(p.peek(0));
-            p.param()
-        })?;
+        let params = self.list(")", Self::function_param)?;
         let result = if self.eat("->") {
             self.ty()?
         } else {
@@ -2039,10 +2063,14 @@ impl<'s> Parser<'s> {
                 }
             }
         }
+        for name in clock.iter().chain(&reset) {
+            self.bind_local_name(name);
+        }
         let params = self.list(")", |parser| {
             if matches!(parser.peek(0), "clk" | "rst") {
                 return Err(parser.error("clock and reset roles cannot be data ports"));
             }
+            parser.bind_local_name(parser.peek(0));
             data_param(parser)
         })?;
         self.expect("->")?;
@@ -3032,7 +3060,8 @@ impl<'s> Parser<'s> {
         let first = self.pos;
         spellings.current.clear();
         spellings.contains_range = false;
-        let pattern = self.match_pattern(spellings)?;
+        spellings.bindings.clear();
+        let pattern = self.match_pattern(spellings, false)?;
         let tuple = matches!(pattern, MatchPattern::Tuple(_));
         if (tuple || spellings.contains_range) && !spellings.seen.insert(spellings.current.clone())
         {
@@ -3050,6 +3079,7 @@ impl<'s> Parser<'s> {
     fn match_pattern(
         &mut self,
         spellings: &mut MatchPatternSpellings,
+        tuple_field: bool,
     ) -> Result<MatchPattern, String> {
         if self.eat("_") {
             spellings.current.push('_');
@@ -3059,7 +3089,7 @@ impl<'s> Parser<'s> {
             spellings.current.push('(');
             return self.nested(|parser| {
                 let fields = parser.list(")", |parser| {
-                    let field = parser.match_pattern(spellings)?;
+                    let field = parser.match_pattern(spellings, true)?;
                     spellings.current.push(',');
                     Ok(field)
                 })?;
@@ -3076,6 +3106,24 @@ impl<'s> Parser<'s> {
         {
             // The checker resolves a scalar constant, value parametric, or enum
             // member. DSLX requires numeric literals on both sides of a range.
+            let token = self.peek(0);
+            if tuple_field && end == 1 && spellings.bindings.contains(token) {
+                return Err(self.error(&format!("repeated match binding '{token}' is unsupported")));
+            }
+            if tuple_field
+                && end == 1
+                && !self.visible_names.contains_key(token)
+                && !self.has_type_parameter(token)
+                && !self.match_module_names.contains(token)
+                && !self.literal_type_heads.contains(token)
+                && is_match_binding_name(token)
+            {
+                self.shadow_callable(token);
+                spellings.current.push_str(token);
+                spellings.bindings.insert(token.to_owned());
+                self.pos += 1;
+                return Ok(MatchPattern::Binding(token.to_owned()));
+            }
             if self.in_discarded_function_dimension()
                 && end == 1
                 && !self.visible_names.contains_key(self.peek(0))

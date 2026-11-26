@@ -6,6 +6,7 @@ use crate::ast::{
     CallbackParam, Expr, MatchArm, MatchPattern, Module, Param, ParametricBinding, ScopeStatement,
     SourceNode, Stmt, Type,
 };
+use std::collections::HashSet;
 
 /// Bound match patterns throughout a supplied AST before any recursive clones.
 pub(super) fn validate_source_match_patterns(module: &Module) -> Result<(), String> {
@@ -13,8 +14,48 @@ pub(super) fn validate_source_match_patterns(module: &Module) -> Result<(), Stri
     while let Some(node) = pending.pop() {
         if let Expression(Expr::Match { arms, .. }) = node {
             validate_match_pattern_size(arms)?;
+            validate_tuple_pattern_bindings(arms)?;
         }
         node.push_children(&mut pending);
+    }
+    Ok(())
+}
+
+/// Validate arm-local names and irrefutable tuple spellings before replacing
+/// name bindings with wildcards for coverage and lowering.
+pub(super) fn validate_tuple_pattern_bindings(arms: &[MatchArm]) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for arm in arms {
+        let mut bindings = HashSet::new();
+        for pattern in &arm.patterns {
+            let mut irrefutable = true;
+            for (depth, node) in pattern.nodes() {
+                match node {
+                    MatchPattern::Binding(name) => {
+                        if depth == 1 {
+                            return Err("match bindings require a tuple pattern".into());
+                        }
+                        if arm.patterns.len() != 1 {
+                            return Err(format!(
+                                "cannot bind '{name}' in a match arm with multiple patterns"
+                            ));
+                        }
+                        if !crate::parser::is_match_binding_name(name) {
+                            return Err(format!("invalid tuple match binding '{name}'"));
+                        }
+                        if !bindings.insert(name) {
+                            return Err(format!("repeated match binding '{name}' is unsupported"));
+                        }
+                    }
+                    MatchPattern::Literal(_) | MatchPattern::Range { .. } => irrefutable = false,
+                    MatchPattern::Wildcard | MatchPattern::Tuple(_) => { /* No name or predicate at this node. */
+                    }
+                }
+            }
+            if irrefutable && matches!(pattern, MatchPattern::Tuple(_)) && !seen.insert(pattern) {
+                return Err("exact-duplicate match pattern".into());
+            }
+        }
     }
     Ok(())
 }

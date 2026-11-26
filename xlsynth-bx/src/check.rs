@@ -4222,6 +4222,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 self.parametric_call(name, parametrics, args, expected)
             }
             Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
+                if arms.iter().any(MatchArm::has_bindings) {
+                    return checker.with_scope_aliases(|checker| {
+                        let value = checker.prepare_bound_match(subject, arms)?;
+                        let value = checker.expr_in_group(&value, expected)?;
+                        Ok((value.ty, value.kind))
+                    });
+                }
                 let selector = checker.match_selector(subject, arms)?;
                 let results: Vec<_> = arms.iter().map(|arm| &arm.value).collect();
                 let values = checker
@@ -5940,6 +5947,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 self.dimension_expr(arm, context_width)
             }
             Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
+                if arms.iter().any(MatchArm::has_bindings) {
+                    return checker.with_scope_aliases(|checker| {
+                        let value = checker.prepare_bound_match(subject, arms)?;
+                        checker.dimension_expr(&value, context_width)
+                    });
+                }
                 let selector = checker.match_selector(subject, arms)?;
                 let subject = checker
                     .checked_constant(&selector.subject)?
