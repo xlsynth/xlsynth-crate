@@ -14,7 +14,7 @@ use crate::parser::{is_identifier, is_use_identifier};
 use crate::typed::BoundParametricValue;
 
 use super::module_constants::BlockDimensionFormals;
-use super::struct_parametrics::BoundStructArgument;
+use super::struct_parametrics::{BoundStructArgument, references_formal};
 use super::{
     BlockCallbackFormal, BlockInterface, BlockTemplate, BodyChecker, MAX_ELABORATION_DEPTH,
     ModuleDimensions, StructTable, TypeResolver, TypeShape, compatible, resolve_signature,
@@ -341,17 +341,33 @@ impl<'m> BlockTemplate<'m> {
                     &callback.name
                 }
                 FunctionParametricRef::Value(value) => {
+                    // Value formal types are concrete at declaration. Hide
+                    // the block's names while resolving the written type so
+                    // expanding a module alias cannot capture a type formal.
+                    if !block.type_params.is_empty()
+                        && references_formal(SourceNode::Annotation(&value.ty), |name| {
+                            bindings.declares(name)
+                        })
+                    {
+                        return Err(format!(
+                            "block value parametric '{}' requires a concrete type independent of the block's type parameters",
+                            value.name
+                        ));
+                    }
                     let ty = resolve_type(
                         &value.ty,
-                        &|name| preceding.contains(name),
-                        Some(bindings),
+                        &|name| preceding.contains(name) || bindings.declares(name),
+                        None,
                         dimensions,
                         types,
                         MAX_ELABORATION_DEPTH,
                     )?;
-                    if !matches!(crate::typed::bits(&ty), Some((false, 1 | 32))) {
+                    if matches!(&ty, Type::Named(_)) {
+                        types.structs.update_imports(types.resolver)?;
+                        types.structs.validate_type(&ty)?;
+                    } else if !matches!(crate::typed::bits(&ty), Some((false, 1 | 32))) {
                         return Err(format!(
-                            "block value parametric '{}' must have type u32 or bool",
+                            "block value parametric '{}' must have type u32, bool, or a concrete struct",
                             value.name
                         ));
                     }
@@ -953,6 +969,39 @@ mod tests {
     };
     use crate::parser::parse_module;
     use xlsynth_pir::IrValue;
+
+    #[test]
+    fn block_record_formal_respects_the_type_parameter_scope() -> Result<(), String> {
+        let source = r#"
+struct T { depth: u32 }
+type Options = T;
+struct Wrapped<E> { options: E }
+const DEFAULT = T { depth: 3 };
+const CONFIG = Wrapped<Options> { options: DEFAULT };
+fn size<O: Options>(xs: u8[O.depth]) -> u32 { array_size(xs) }
+block stage<T, O: Wrapped<Options>>(clk, x: T, xs: u8[O.options.depth]) -> (T, u32) {
+    reg q: T = zero!();
+    q := x;
+    (q, size<{O.options}>(xs))
+}
+pub block circuit(clk, x: bool, xs: u8[3]) -> (bool, u32) {
+    let y = stage<CONFIG>(x, xs);
+    y
+}
+"#;
+        crate::check_module(&parse_module(source)?)?;
+        for ty in ["T", "Wrapped<T>"] {
+            let symbolic = source.replace(
+                "stage<T, O: Wrapped<Options>>",
+                &format!("stage<T, O: {ty}>"),
+            );
+            assert_eq!(
+                crate::check_module(&parse_module(&symbolic)?).map(|_| ()),
+                Err("block 'stage': block value parametric 'O' requires a concrete type independent of the block's type parameters".into())
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn distinct_block_port_bindings_share_the_constant_evaluation_budget() -> Result<(), String> {

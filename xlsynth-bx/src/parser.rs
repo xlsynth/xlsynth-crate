@@ -2143,10 +2143,12 @@ impl<'s> Parser<'s> {
                     let formal = p.value_parametric(
                         params.value_parametrics.len() + params.callback_params.len(),
                     )?;
-                    if !matches!(formal.ty, Type::Named(_))
+                    if formal.ty.constructor_head().is_none()
                         && !matches!(crate::typed::bits(&formal.ty), Some((false, 1 | 32)))
                     {
-                        return Err(p.error("block value parameters require type 'u32' or 'bool'"));
+                        return Err(p.error(
+                            "block value parameters require type 'u32', 'bool', or a concrete struct",
+                        ));
                     }
                     params.value_parametrics.push(formal);
                 }

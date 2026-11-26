@@ -561,6 +561,22 @@ impl<'m> BlockSpecializations<'m> {
             values,
             callbacks,
         } = arguments;
+        // Even a cache hit hashes the record's contents and nominal name.
+        // A specialized struct name can contain large phantom arguments.
+        for value in &values {
+            let Type::Named(name) = &value.ty else {
+                continue;
+            };
+            let work = name
+                .len()
+                .saturating_add(crate::typed::constant_work(&value.value));
+            self.expansion_work = self.expansion_work.saturating_add(work);
+            if self.expansion_work > MAX_TYPE_SIZE {
+                return Err(format!(
+                    "block value bindings exceed the generic block specialization expansion limit of {MAX_TYPE_SIZE}"
+                ));
+            }
+        }
         let parametric_values: Rc<[_]> = values.into();
         let key = BlockKey {
             name,
@@ -6242,16 +6258,90 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BodyChecker, BodyKind, CheckedModule, CheckedStmt, ConstantBinding, Declarations,
-        ImportOptions, ImportResolver, MAX_ELABORATION_DEPTH, StructTable, check_module,
+        Bindings, BlockParametricArguments, BlockSpecializations, BlockTemplate, BodyChecker,
+        BodyKind, BoundParametricValue, CheckedModule, CheckedStmt, ConstantBinding, Declarations,
+        ImportOptions, ImportResolver, MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, StructTable,
+        TypeResolver, check_module,
     };
     use crate::ast::{BindingPattern, Expr, ScopeStatement, Type};
     use crate::parser::parse_module;
     use crate::{ResetBehavior, compile, empty_package};
+    use std::rc::Rc;
     use xlsynth_pir::IrValue;
 
     fn check_bx(source: &str) -> Result<CheckedModule, String> {
         check_module(&parse_module(source)?)
+    }
+
+    #[test]
+    fn cached_block_specializations_charge_the_record_value() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+struct Config { count: u32, enabled: bool }
+block stage<C: Config>() -> bool { C.enabled }
+block scalar<N: u32>() -> bool { true }
+"#,
+        )?;
+        let decls = Declarations::default();
+        let mut resolver = ImportResolver::new(&[], &ImportOptions::default())?;
+        let mut structs = StructTable {
+            definitions: module.structs.clone(),
+            ..Default::default()
+        };
+        structs.index(0)?;
+        let mut types = TypeResolver {
+            resolver: &mut resolver,
+            structs: &mut structs,
+            functions: None,
+        };
+        let record = IrValue::make_tuple(&[IrValue::u32(4), IrValue::bool(true)]);
+        let cases = [
+            // The third lookup of the same record exceeds the budget.
+            (
+                record.clone(),
+                record,
+                "Config".len() + 3,
+                "block value bindings exceed",
+            ),
+            // A scalar cache hit is free. Only a new scalar specialization
+            // needs additional budget.
+            (
+                IrValue::u32(4),
+                IrValue::u32(5),
+                0,
+                "block signature exceeds",
+            ),
+        ];
+        for (block, (value, final_value, lookup_work, diagnostic)) in
+            module.blocks.iter().zip(cases)
+        {
+            let dimensions = decls.module_dimensions(&block.name);
+            let bindings = Bindings::new(&block.type_params);
+            let template = BlockTemplate::new(block, &bindings, dimensions, &mut types)?;
+            let mut blocks = BlockSpecializations::new(Default::default());
+            // One stored argument, one output port, and two lookups fit.
+            blocks.expansion_work = MAX_TYPE_SIZE - 2 - 2 * lookup_work;
+            let mut intern = |value| {
+                let args = BlockParametricArguments {
+                    bindings: bindings.clone(),
+                    values: vec![BoundParametricValue {
+                        ty: template.value_types[0].clone(),
+                        value,
+                    }],
+                    callbacks: Vec::new(),
+                };
+                blocks.intern(&template, args, &[], dimensions, &mut types)
+            };
+            let first = intern(value.clone())?;
+            assert!(Rc::ptr_eq(&first, &intern(value)?));
+            assert_eq!(
+                intern(final_value).map(|_| ()),
+                Err(format!(
+                    "{diagnostic} the generic block specialization expansion limit of {MAX_TYPE_SIZE}"
+                ))
+            );
+        }
+        Ok(())
     }
 
     #[test]
