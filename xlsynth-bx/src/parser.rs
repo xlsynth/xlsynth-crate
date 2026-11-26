@@ -309,14 +309,14 @@ fn lex(
             // Separate closing angles in nested parametric type arguments.
             // Expressions in an outline retain their source spelling.
             i += 1;
-        } else if dialect == Dialect::Bx && (rest.starts_with("..=") || rest.starts_with("...")) {
+        } else if rest.starts_with("..=") || rest.starts_with("...") {
             i += 3;
         } else if rest.starts_with(":=")
             || rest.starts_with("+:")
             || rest.starts_with("::")
             || rest.starts_with("->")
             || rest.starts_with("=>")
-            || (dialect == Dialect::Bx && rest.starts_with(".."))
+            || rest.starts_with("..")
             || rest.get(..2).and_then(BinaryOp::from_spelling).is_some()
         {
             i += 2;
@@ -4995,18 +4995,13 @@ pub(crate) fn fixed_width(spelling: &str) -> Option<usize> {
 /// Prove that a checked DSLX literal range executes its loop body at least
 /// once.
 pub(crate) fn nonempty_literal_range(tokens: &[Token<'_>]) -> bool {
-    // The DSLX outline lexer keeps each dot and the optional '=' separate.
-    let Some(separator) = tokens
-        .windows(2)
-        .position(|t| t[0].text == "." && t[1].text == ".")
-    else {
+    let Some(separator) = tokens.iter().position(|t| matches!(t.text, ".." | "..=")) else {
         return false;
     };
-    let upper = &tokens[separator + 2..];
-    let inclusive = upper.first().is_some_and(|t| t.text == "=");
+    let inclusive = tokens[separator].text == "..=";
     let (Some(lower), Some(upper)) = (
         range_literal(&tokens[..separator]),
-        range_literal(&upper[usize::from(inclusive)..]),
+        range_literal(&tokens[separator + 1..]),
     ) else {
         return false;
     };

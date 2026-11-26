@@ -1053,6 +1053,46 @@ fn inferred_parametric_struct_result_exposes_its_specialized_field() -> Result<(
 }
 
 #[test]
+fn imported_parametric_struct_updates_accept_direct_and_let_bound_bases()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::write(
+        root.path().join("records.x"),
+        r#"
+pub struct Record<N: u32> { value: uN[N], width: u32 }
+fn base<N: u32>() -> Record<N> { Record<N> { value: uN[N]:0, width: N } }
+pub fn direct<N: u32>(value: uN[N]) -> Record<N> { Record<N> { value, ..base<N>() } }
+pub fn bound<N: u32>(value: uN[N]) -> Record<N> {
+    let original = base<N>();
+    Record<N> { value, ..original }
+}
+"#,
+    )?;
+    for width in [3, 9] {
+        let expr = struct_expression(
+            root.path(),
+            "use records;",
+            "import records;",
+            &format!("x: u{width}"),
+            &format!("(u{width}, u32, u{width}, u32)"),
+            r#"
+let d = records::direct(x);
+let b = records::bound(x);
+(d.value, d.width, b.value, b.width)"#,
+        )?;
+        for input in [0, 2, (1 << width) - 1] {
+            let value = IrValue::make_ubits(width, input)?;
+            let inherited = IrValue::make_ubits(32, width as u64)?;
+            assert_eq!(
+                expr.compare(std::slice::from_ref(&value))?,
+                IrValue::make_tuple(&[value.clone(), inherited.clone(), value, inherited])
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn apfloat_arithmetic_infers_a_new_format_from_concrete_alias_ports() -> Result<(), Box<dyn Error>>
 {
     let source = r#"
