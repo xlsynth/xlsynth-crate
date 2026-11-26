@@ -1531,8 +1531,8 @@ Use a call binding to supply the arguments for inference. When a payload literal
 
 ### Value parametrics on blocks
 
-A block can take `bool` and `u32` value parametrics for compile-time expressions
-in its body. For a block declared as `route<SPLIT: bool = {false}>`,
+A block can take `bool`, `u32`, and concrete struct values as parametrics.
+For a block declared as `route<SPLIT: bool = {false}>`,
 `route(data)` binds `SPLIT` to `false` and `route<true>(data)` binds it to
 `true`. Omitted trailing value arguments use their braced defaults, evaluated
 in the block's declaration scope with preceding value parameters in scope.
@@ -1544,6 +1544,27 @@ BX resolves names in the block's declaration scope. At each call it infers
 type parameters from data inputs, including the element type of `T[N]`,
 then evaluates dependent dimensions and checks the concrete port types.
 A width can also use `bit_count<T>()` when another input supplies `T`.
+
+Group named settings in a struct to pass them as a single compile-time
+argument. Its fields can determine port dimensions and select block behavior.
+
+```text
+struct BufferOpts { depth: u32, register_pop: bool }
+const BUFFER_OPTS = BufferOpts { depth: 3, register_pop: false };
+
+block buffer<OPTS: BufferOpts>(clk, xs: u8[OPTS.depth]) -> u8 {
+    const_assert!(OPTS.depth > u32:0);
+    let last = xs[OPTS.depth - u32:1];
+    reg prev: u8 = zero!();
+    prev := last;
+    const if OPTS.register_pop { prev } else { last }
+}
+
+pub block circuit(clk, xs: u8[3]) -> u8 {
+    let buffer = buffer<BUFFER_OPTS>(xs);
+    buffer
+}
+```
 
 ```text
 block storage<W: u32, N: u32>(clk, data: bits[W][N]) -> bits[W][N] {

@@ -311,15 +311,17 @@ Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dsl
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_block_value_parametrics.rs
 
-Compares explicit `u32` value parametrics on BX blocks with DSLX functions.
-Calls vary literal, named and braced constant arguments, inferred payload
-types, and forwarding through a second template. A structural unroll uses
-the value as its bound. Repeated calls at equal and distinct bounds exercise
-specialization reuse with unchanged port types. Invalid samples cover missing,
-extra, mistyped, and runtime arguments. The target checks source acceptance
-and compares flattened BX Block IR with both compiled and constexpr DSLX.
+Compares scalar and record-valued parametrics on BX blocks with DSLX functions.
+Scalar bindings drive structural unrolls with inferred payload types. Record
+bindings set the length of array ports and expose both fields in the result.
+Calls vary defaults, module and local constants, inline values, forwarding,
+and repeated specializations with equal or different field values. The DSLX
+function derives a scalar dimension from the record through a defaulted formal.
+Invalid samples cover missing, extra, mistyped, runtime, and wrong nominal
+arguments as well as mismatched array ports. Accepted samples compare flattened
+BX Block IR with compiled and constexpr DSLX values.
 
-Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_value_parametrics --sanitizer none`.
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_block_value_parametrics -- -max_len=13 -len_control=0`.
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_clocked_test.rs
 

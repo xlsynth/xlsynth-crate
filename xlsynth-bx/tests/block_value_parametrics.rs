@@ -233,6 +233,150 @@ fn step(rst: bool, x: u8, y: u8, prev: (u8[1], u8[3], u8[3])) -> (u8[1], u8[3], 
 }
 
 #[test]
+fn record_block_options_specialize_array_ports_and_register_behavior() -> Result<(), Box<dyn Error>>
+{
+    let directory = tempdir()?;
+    fs::write(
+        directory.path().join("buffers.bx"),
+        r#"
+pub struct BufferOpts { depth: u32, bypass: bool }
+type Options = BufferOpts;
+const DEFAULT = BufferOpts { depth: u32:2, bypass: false };
+
+block hold<T>(clk, data: T, enable: bool) -> T {
+    reg saved: T = zero!<T>();
+    if enable { saved := data; }
+    saved
+}
+#[allow(combinational_block)]
+pub block buffer<OPTS: Options = {DEFAULT}>(clk, data: u8[OPTS.depth], enable: bool) -> u8[OPTS.depth] {
+    let result = const if OPTS.bypass { data } else { hold(data, enable) };
+    result
+}
+"#,
+    )?;
+    let source = r#"
+use buffers::BufferOpts;
+use buffers::buffer;
+const PIPE = BufferOpts { bypass: false, depth: u32:2 };
+const DEFAULT = BufferOpts { bypass: true, depth: u32:2 };
+const WIDE = BufferOpts { depth: u32:3, bypass: false };
+pub block circuit(clk, a: u8[2], b: u8[3], enable: bool) -> (u8[2], u8[2], u8[2], u8[3]) {
+    let implicit = buffer(a, enable);
+    let explicit = buffer<PIPE>(a, enable);
+    let direct = buffer<DEFAULT>(a, enable);
+    let wide = buffer<WIDE>(b, enable);
+    (implicit, explicit, direct, wide)
+}
+"#;
+    let mut package = compile_with_options(
+        source,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &search_paths(&[directory.path()]),
+    )?;
+    let top = package.get_top_block().ok_or("missing circuit")?;
+    let [implicit, explicit, direct, wide] = top.instantiations.as_slice() else {
+        panic!("expected four buffer instances");
+    };
+    assert_eq!(implicit.block, explicit.block);
+    assert_ne!(implicit.block, direct.block);
+    assert_ne!(implicit.block, wide.block);
+    for (instance, depth, children) in [(implicit, 2, 1), (direct, 2, 0), (wide, 3, 1)] {
+        let buffer = package.get_block(&instance.block).ok_or("missing buffer")?;
+        let data = buffer.get_input_port("data").ok_or("missing data")?;
+        let out = buffer.get_output_port("out").ok_or("missing out")?;
+        let ty = Type::new_array(Type::Bits(8), depth);
+        assert_eq!(buffer.port_type(data), &ty);
+        assert_eq!(buffer.port_type(out), &ty);
+        assert_eq!(buffer.instantiations.len(), children);
+    }
+
+    inline_all_blocks_in_package(&mut package)?;
+    let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default())?;
+    let module = compile_pipeline_module(&rtl.system_verilog).unwrap();
+    let mut runner = FixtureRunner::new(&module).unwrap();
+    let ports = runner.port_bindings();
+    let reset = ports.input("rst").unwrap();
+    let enable = ports.input("enable").unwrap();
+    let a = ports.input("a").unwrap();
+    let b = ports.input("b").unwrap();
+    for (rst, en, words, wide_words, saved, wide_saved) in [
+        (true, true, 0x1234, 0xabcdef, 0, 0),
+        (false, true, 0x5678, 0x010203, 0x5678, 0x010203),
+        (false, false, 0x9abc, 0x040506, 0x5678, 0x010203),
+        (false, true, 0xff00, 0x070809, 0xff00, 0x070809),
+        (true, false, 0x4321, 0x654321, 0, 0),
+    ] {
+        let edge = runner
+            .step_cycle_with_drive(&mut [], |drive| {
+                drive.set_bool(&reset, rst)?;
+                drive.set_bool(&enable, en)?;
+                drive.set_u64(&a, words)?;
+                drive.set_u64(&b, wide_words)
+            })
+            .unwrap();
+        let actual =
+            ["out_0", "out_1", "out_2", "out_3"].map(|port| edge.outputs[port].to_u64_if_known());
+        assert_eq!(actual, [saved, saved, words, wide_saved].map(Some));
+    }
+    Ok(())
+}
+
+#[test]
+fn record_block_actuals_require_nominally_typed_constants() -> Result<(), String> {
+    for (arg, diagnostic) in [
+        ("OTHER", "expected BufferOpts, got Other"),
+        (
+            "runtime",
+            "value parametric requires a compile-time constant",
+        ),
+    ] {
+        let source = format!(
+            r#"
+struct BufferOpts {{ depth: u32 }}
+struct Other {{ depth: u32 }}
+const OTHER = Other {{ depth: u32:3 }};
+block buffer<C: BufferOpts>(x: u32) -> u32 {{ C.depth + x }}
+pub block circuit(runtime: BufferOpts, x: u32) -> u32 {{ let result = buffer<{arg}>(x); result }}
+"#
+        );
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "block 'circuit': let 'result': value parametric 'C' of block 'buffer': {diagnostic}"
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn concrete_record_block_parametrics_preserve_wide_fields() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+struct Mask<N: u32> { value: bits[N] }
+const LOW = Mask<128> { value: uN[128]:1 };
+const HIGH = Mask<128> { value: uN[128]:0x10000000000000001 };
+#[allow(combinational_block)]
+block masked<M: Mask<128>>(x: uN[128]) -> uN[128] { x ^ M.value }
+pub block circuit(x: uN[128]) -> (uN[128], uN[128]) {
+    let a = masked<LOW>(x);
+    let b = masked<HIGH>(x);
+    (a, b)
+}
+"#;
+    let mut package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    inline_all_blocks_in_package(&mut package)?;
+    let function = combinational_block_to_fn(package.get_top_block().ok_or("missing circuit")?)?;
+    assert_eq!(
+        eval_fn_in_package_value(&package, &function, &[IrValue::make_ubits(128, 3)?]),
+        IrValue::parse_typed("(bits[128]:2, bits[128]:0x10000000000000002)")?
+    );
+    Ok(())
+}
+
+#[test]
 fn value_and_callable_arguments_follow_declaration_order() -> Result<(), Box<dyn Error>> {
     let source = r#"
 fn inc(x: u8) -> u8 { x + u8:1 }
@@ -311,7 +455,6 @@ block circuit(clk, x:u32) -> u32 { let q = relay<3, u32:5>(x); q }
     );
     for source in [
         "type Dim = s32; block b<N:Dim>(clk, x:u32)->u32 { x }",
-        "type Dim = (u32,); block b<N:Dim>(clk, x:u32)->u32 { x }",
         "type Dim = u32; block b<Dim,N:Dim>(clk,x:Dim)->Dim { x }",
         "use shape; block b<shape:u32,N:shape::Dim>(clk,x:u32)->u32 { x }",
         "use shape; block b<shape:fn(u8)->u8,N:shape::Dim>(clk,x:u32)->u32 { x }",
@@ -323,6 +466,11 @@ block circuit(clk, x:u32) -> u32 { let q = relay<3, u32:5>(x); q }
             "{source}"
         );
     }
+    let tuple = "type Dim = (u32,); block b<N:Dim>(clk, x:u32)->u32 { x }";
+    assert_eq!(
+        check_module(&parse_module(tuple)?).unwrap_err(),
+        "block 'b': block value parametric 'N' must have type u32, bool, or a concrete struct"
+    );
     let forward = "block b<N:Dim>(clk,x:u32)->u32 { x } type Dim=u32;";
     check_module(&parse_module(forward)?)?;
     assert_eq!(
