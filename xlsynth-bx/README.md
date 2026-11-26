@@ -129,6 +129,25 @@ fn round_to_even(guard: bool, sticky: bool, odd: bool) -> bool {
 }
 ```
 
+A fresh name in a tuple pattern binds that field for the arm's result.
+Each arm has its own scope, so the same name can select different fields.
+
+```text
+fn pick(input: (bool, u8, u8)) -> u8 {
+    match input {
+        (true, value, _) => value,
+        (false, _, value) => value,
+    }
+}
+```
+
+Bindings can select nested tuple fields or whole aggregate values. Use
+distinct fresh names within a pattern. Arms joined with `|` can use
+wildcards and constant patterns. A visible constant in a tuple pattern
+continues to match its value. In BX, a field bound from a compile-time tuple
+can also be used in an arm's `const_assert!` or `const if`, just like a
+destructured `let`. Pinned DSLX v0.65.2 rejects that direct use.
+
 ## Module constants
 
 Declare a value with `const NAME = expression;` or `pub const NAME: Type = expression;`.

@@ -35,6 +35,43 @@ fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, 
 }
 
 #[test]
+fn imported_match_function_resolves_tuple_bindings_in_each_arm() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(dir.path(), "flags.bx", "pub const SELECT = true;")?;
+    write_module(
+        dir.path(),
+        "select.bx",
+        r#"
+        #![require_define_before_use]
+        use flags::SELECT;
+        pub fn select(pair: (bool, (u8, u8))) -> u8 {
+            match pair {
+                (SELECT, (byte, _)) => byte,
+                (_, (_, byte)) => byte,
+            }
+        }
+        "#,
+    )?;
+    let source = r#"
+        use select;
+        const SELECT = false;
+        const byte = u8:99;
+        fn sample(flag: bool) -> u8 {
+            select::select((flag, (u8:17, u8:42)))
+        }
+    "#;
+    let package = compile_design(source, &search_paths(&[dir.path()]))?;
+    let sample = package.get_fn("sample").ok_or("missing sample")?;
+    for (flag, expected) in [(0, 42), (1, 17)] {
+        assert_eq!(
+            eval_fn_in_package_value(&package, sample, &[IrValue::make_ubits(1, flag)?]),
+            IrValue::make_ubits(8, expected)?
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn imported_block_specializes_its_dslx_reset_helper_by_boolean_parameter()
 -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;

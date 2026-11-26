@@ -3,8 +3,8 @@
 use super::unroll::Shadowed;
 use super::{BodyChecker, CheckedStmt, K, TemporaryConstantBindings, Type, TypedExpr};
 use crate::ast::{
-    BinaryOp, BindingPattern, ConstAssert, ConstDef, Expr, ForIterable, LetBinding, ScopeStatement,
-    Stmt, StructArgument, UnrollMap, WidthSliceType,
+    BinaryOp, BindingPattern, ConstAssert, ConstDef, Expr, ForIterable, LetBinding, MatchArm,
+    MatchPattern, ScopeStatement, Stmt, StructArgument, UnrollMap, WidthSliceType,
 };
 use crate::infer_literal::{BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type};
 use crate::typed::TEST_DISCARD_PREFIX;
@@ -67,6 +67,32 @@ impl TuplePatternLayout {
             position - 1 + self.rest_fields
         } else {
             position
+        }
+    }
+}
+
+/// Move the field names out of a match predicate into its destructuring
+/// pattern. Only subtrees that introduce names need tuple projections.
+fn take_match_bindings(pattern: &mut MatchPattern) -> BindingPattern {
+    match pattern {
+        MatchPattern::Binding(name) => {
+            let binding = BindingPattern::Name(std::mem::take(name));
+            *pattern = MatchPattern::Wildcard;
+            binding
+        }
+        MatchPattern::Tuple(fields) => {
+            let bindings: Vec<_> = fields.iter_mut().map(take_match_bindings).collect();
+            if bindings
+                .iter()
+                .any(|p| !matches!(p, BindingPattern::Name(n) if n == "_"))
+            {
+                BindingPattern::Tuple(bindings)
+            } else {
+                BindingPattern::Name("_".into())
+            }
+        }
+        MatchPattern::Wildcard | MatchPattern::Literal(_) | MatchPattern::Range { .. } => {
+            BindingPattern::Name("_".into())
         }
     }
 }
@@ -845,7 +871,7 @@ impl BodyChecker<'_, '_> {
                     });
                 }
             }
-            Expr::Scope { .. } => {
+            Expr::Scope { .. } | Expr::Match { .. } if expr.needs_scope_preparation() => {
                 before_scope(self)?;
                 let mut result = self
                     .capture_scoped_results(&[expr])?
@@ -981,6 +1007,48 @@ impl BodyChecker<'_, '_> {
         Ok(prepared)
     }
 
+    /// Give each arm aliases for its own projected fields. The subject and
+    /// all projections share one checked value through result inference.
+    pub(super) fn prepare_bound_match(
+        &mut self,
+        subject: &Expr,
+        arms: &[MatchArm],
+    ) -> Result<Expr, String> {
+        self.with_dslx_value_context(|checker| {
+            checker.with_match_bytecode(|checker| {
+                let init = checker.bound_match_subject(subject, arms)?;
+                let shared = checker.share_scoped_value(init.value);
+                let subject = Expr::Name(checker.capture_value_alias(None, shared, None));
+                let mut prepared_arms = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    if !arm.has_bindings() {
+                        prepared_arms.push(arm.clone());
+                        continue;
+                    }
+                    let [pattern] = arm.patterns.as_slice() else {
+                        return Err("match alternatives cannot introduce bindings".into());
+                    };
+                    let mut pattern = pattern.clone();
+                    let bindings = take_match_bindings(&mut pattern);
+                    let value = checker.expr(&subject, None)?;
+                    let mut saved = Vec::new();
+                    let bound = checker
+                        .bind_pattern(&bindings, value, init.widths.clone(), &mut saved)
+                        .map(|()| checker.capture_iteration_result(&saved, &arm.value));
+                    checker.leave_scope(saved);
+                    prepared_arms.push(MatchArm {
+                        patterns: vec![pattern],
+                        value: bound?,
+                    });
+                }
+                Ok(Expr::Match {
+                    subject: Box::new(subject),
+                    arms: prepared_arms,
+                })
+            })
+        })
+    }
+
     /// Retain the checked input so its length can guide type inference before
     /// elaborating the body. An empty map needs its element type from context.
     fn prepare_map_input(&mut self, map: &UnrollMap) -> Result<Expr, String> {
@@ -1029,6 +1097,12 @@ impl BodyChecker<'_, '_> {
         let mut prepared = Vec::with_capacity(items.len());
         for &expr in items {
             let expr = self.selected_const_if_value(expr)?;
+            if let Expr::Match { subject, arms } = expr
+                && arms.iter().any(MatchArm::has_bindings)
+            {
+                prepared.push(Cow::Owned(self.prepare_bound_match(subject, arms)?));
+                continue;
+            }
             let Expr::Scope { statements, result } = expr else {
                 prepared.push(Cow::Borrowed(expr));
                 continue;
@@ -1787,7 +1861,12 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                 for literal in arm.patterns.iter_mut().flat_map(|p| p.literals_mut()) {
                     capture_names(literal, aliases);
                 }
+                let hidden: Vec<_> = arm
+                    .binding_names()
+                    .filter_map(|name| aliases.remove_entry(name))
+                    .collect();
                 capture_names(&mut arm.value, aliases);
+                aliases.extend(hidden);
             }
         }
         Expr::If {

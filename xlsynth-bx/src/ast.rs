@@ -376,11 +376,30 @@ pub struct MatchArm {
     pub value: Expr,
 }
 
-/// A tuple of patterns or a leaf matching a wildcard, literal, value
-/// parametric, module constant, enum member, or literal range.
+impl MatchArm {
+    /// Names introduced by this arm, in tuple field order.
+    pub(crate) fn binding_names(&self) -> impl Iterator<Item = &str> {
+        self.patterns
+            .iter()
+            .flat_map(MatchPattern::nodes)
+            .filter_map(|(_, pattern)| match pattern {
+                MatchPattern::Binding(name) => Some(name.as_str()),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn has_bindings(&self) -> bool {
+        self.binding_names().next().is_some()
+    }
+}
+
+/// A tuple of patterns or a leaf matching a binding, wildcard, literal,
+/// value parametric, module constant, enum member, or literal range.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum MatchPattern {
     Wildcard,
+    /// Introduce the matched tuple field as a lexical value in this arm.
+    Binding(String),
     Literal(Expr),
     Range {
         start: Expr,
@@ -416,7 +435,7 @@ impl MatchPattern {
     pub(crate) fn literals(&self) -> impl Iterator<Item = &Expr> {
         self.nodes()
             .flat_map(|(_, pattern)| match pattern {
-                Self::Wildcard | Self::Tuple(_) => [None, None],
+                Self::Wildcard | Self::Binding(_) | Self::Tuple(_) => [None, None],
                 Self::Literal(value) => [Some(value), None],
                 Self::Range { start, end, .. } => [Some(start), Some(end)],
             })
@@ -431,7 +450,7 @@ impl MatchPattern {
             loop {
                 if let Some(pattern) = next.take() {
                     match pattern {
-                        Self::Wildcard => { /* No literal expressions to visit. */ }
+                        Self::Wildcard | Self::Binding(_) => { /* No literal expressions to visit. */ }
                         Self::Literal(value) => return Some([Some(value), None]),
                         Self::Range { start, end, .. } => return Some([Some(start), Some(end)]),
                         Self::Tuple(fields) => pending.push(fields.iter_mut()),
@@ -761,11 +780,12 @@ pub(crate) struct StructLiteral<'a> {
 }
 
 impl Expr {
-    /// Select compile-time branches and prepare scopes whose discarded
-    /// expressions have yet to be replaced with lexical aliases.
+    /// Select compile-time branches and prepare scopes whose expressions or
+    /// pattern bindings have yet to be replaced with lexical aliases.
     pub(crate) fn needs_scope_preparation(&self) -> bool {
         match self {
             Self::ConstIf { .. } => true,
+            Self::Match { arms, .. } => arms.iter().any(MatchArm::has_bindings),
             Self::Scope { statements, .. } => {
                 statements.is_empty() || !statements.iter().all(|s| {
                     matches!(s, ScopeStatement::Expression(Expr::Name(name)) if name.starts_with("$scope_"))

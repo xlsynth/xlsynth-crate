@@ -104,6 +104,23 @@ fn unselected_branches_resolve_names_and_skip_typechecking() -> Result<(), Strin
 }
 
 #[test]
+fn skipped_matches_resolve_tuple_bindings_only_inside_their_arm() -> Result<(), String> {
+    for body in [
+        "const if true { x } else { match (true, x) { (true, byte) => byte + false, _ => x } }",
+        "unroll_for! (_, acc) in u32:0..u32:0 { match (true, acc) { (true, byte) => byte + false, _ => x } }(x)",
+    ] {
+        let source = format!("fn sample(x: u8) -> u8 {{ {body} }}");
+        compile_design(&source)?;
+        let unbound = source.replace("_ => x", "_ => byte");
+        assert_eq!(
+            compile_design(&unbound).unwrap_err(),
+            "fn 'sample': result: unknown value 'byte'"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn inactive_type_members_resolve_the_qualifier() -> Result<(), String> {
     for source in [
         "struct P { v: u8 } type Alias = P; fn run(x: u8) -> u8 { const if true { x } else { Alias::Missing } }",

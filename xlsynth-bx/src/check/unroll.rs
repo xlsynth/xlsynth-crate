@@ -2003,12 +2003,19 @@ impl BodyChecker<'_, '_> {
                 })? {
                     self.check_expr_names(operand, locals)?;
                 }
+                if arms.iter().any(MatchArm::has_bindings) {
+                    super::source_patterns::validate_tuple_pattern_bindings(arms)?;
+                }
                 for arm in arms {
                     let pattern_nodes = arm.patterns.iter().flat_map(MatchPattern::nodes).count();
                     locals
                         .visited
                         .set(locals.visited.get().saturating_add(pattern_nodes));
-                    self.check_expr_names(&arm.value, locals)?;
+                    let mut scope = locals.nested();
+                    for name in arm.binding_names() {
+                        scope.bind_pattern_name(name);
+                    }
+                    self.check_expr_names(&arm.value, &scope)?;
                 }
             }
             Expr::SelectedOperand(value) => self.check_expr_names(value, locals)?,

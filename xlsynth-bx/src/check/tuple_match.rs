@@ -9,6 +9,7 @@ use num_bigint::BigUint;
 use xlsynth_pir::IrBits;
 
 use super::match_patterns::{nonempty_range, pattern_bits};
+use super::scope::BindingInitializer;
 use super::{BodyChecker, MAX_TYPE_SIZE, MatchSelector, StructTable};
 use crate::ast::{Expr, MatchArm, MatchPattern, Type};
 use crate::infer_literal::check_inferred_signed_width;
@@ -224,14 +225,41 @@ fn region_for(
 }
 
 impl BodyChecker<'_, '_> {
+    /// Infer the subject from its value and the literals in the tuple patterns.
+    fn tuple_match_subject(
+        &mut self,
+        subject: &Expr,
+        arms: &[MatchArm],
+    ) -> Result<TypedExpr, String> {
+        let patterns: Vec<_> = arms.iter().flat_map(|arm| &arm.patterns).collect();
+        let subject = self.tuple_match_subjects(&[subject], &patterns)?.remove(0);
+        self.structs.validate_type(&subject.ty)?;
+        Ok(subject)
+    }
+
+    /// Resolve the original subject before capturing any arm-local projections.
+    pub(super) fn bound_match_subject(
+        &mut self,
+        subject: &Expr,
+        arms: &[MatchArm],
+    ) -> Result<BindingInitializer, String> {
+        super::source_patterns::validate_match_pattern_size(arms)?;
+        super::source_patterns::validate_tuple_pattern_bindings(arms)?;
+        let mut init = self.binding_initializer(subject, None, |checker, subject| {
+            checker.tuple_match_subject(subject, arms)
+        })?;
+        if let Some(widths) = &mut init.widths {
+            widths.constrain_match_fields(arms)?;
+        }
+        Ok(init)
+    }
+
     pub(super) fn tuple_match_selector(
         &mut self,
         subject: &Expr,
         arms: &[MatchArm],
     ) -> Result<MatchSelector, String> {
-        let patterns: Vec<_> = arms.iter().flat_map(|arm| &arm.patterns).collect();
-        let subject = self.tuple_match_subjects(&[subject], &patterns)?.remove(0);
-        self.structs.validate_type(&subject.ty)?;
+        let subject = self.tuple_match_subject(subject, arms)?;
         self.finish_tuple_match(subject, arms)
     }
 
@@ -330,7 +358,7 @@ impl BodyChecker<'_, '_> {
         )?;
         let mut coverage = Coverage::new(domain, budget);
         let empty_domain = coverage.remaining.is_empty();
-        let mut seen_irrefutable = HashSet::new();
+        let mut saw_wildcard = false;
         let mut patterns = Vec::with_capacity(arms.len());
         for (index, arm) in arms.iter().enumerate() {
             let was_exhaustive = coverage.remaining.is_empty();
@@ -341,7 +369,9 @@ impl BodyChecker<'_, '_> {
                     continue;
                 };
                 if pattern.is_irrefutable() {
-                    if !seen_irrefutable.insert(source) {
+                    if matches!(source, MatchPattern::Wildcard)
+                        && std::mem::replace(&mut saw_wildcard, true)
+                    {
                         return Err("exact-duplicate match pattern".into());
                     }
                     coverage.remaining.clear();
@@ -385,7 +415,7 @@ impl BodyChecker<'_, '_> {
         ty: &Type,
     ) -> Result<Option<TypedMatchPattern>, String> {
         Ok(Some(match pattern {
-            MatchPattern::Wildcard => TypedMatchPattern::Wildcard,
+            MatchPattern::Wildcard | MatchPattern::Binding(_) => TypedMatchPattern::Wildcard,
             MatchPattern::Tuple(fields) => {
                 let Type::Tuple(types) = ty else {
                     return Err(format!("tuple pattern requires a tuple subject, got {ty}"));
