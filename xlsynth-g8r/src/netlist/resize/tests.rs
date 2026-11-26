@@ -264,8 +264,8 @@ fn phase_stop_reasons_report_independent_work_limits() -> Result<()> {
     let timed = "module m(input a, output y); BUF1 b(.A(a),.Y(y)); endmodule";
     for (
         timing_budget,
-        max_upsize_rounds,
-        max_downsize_rounds,
+        max_timing_rounds,
+        max_recovery_rounds,
         expected_timing,
         expected_area,
         exhausted,
@@ -310,8 +310,8 @@ fn phase_stop_reasons_report_independent_work_limits() -> Result<()> {
             &ResizeOptions {
                 timing_evaluation_budget: Some(timing_budget),
                 recovery_evaluation_budget: Some(1000),
-                max_upsize_rounds,
-                max_downsize_rounds,
+                max_timing_rounds,
+                max_recovery_rounds,
                 ..options()
             },
         )?;
@@ -369,6 +369,230 @@ fn default_work_limits_scale_with_instances_and_saturate() {
     );
 }
 
+// Make the early area candidates exhaust the first work window. A productive
+// search can renew its budget and resume at the next untried strength.
+#[test]
+fn productive_recovery_windows_resume_the_pending_strength_without_losing_timing() -> Result<()> {
+    let lib = library()?;
+    let net = read_gv_from_str(
+        "module m(input clk, input a, output y);
+         wire p,q,r,s;
+         BUF4 b0(.A(a),.Y(p)); BUF4 b1(.A(a),.Y(q));
+         BUF4 b2(.A(a),.Y(r)); BUF4 b3(.A(a),.Y(s));
+         DFF1 launch(.CLK(clk),.D(a),.Q(y)); endmodule",
+    )?;
+    let opts = ResizeOptions {
+        resize_registers: false,
+        ..Default::default()
+    };
+    let mut sta =
+        IncrementalSta::new(&net.modules[0], &net.nets, &net.interner, &lib, opts.timing)?;
+    let checkpoint = sta.score();
+    let initial_area = sta.cell_indices().iter().map(|&i| lib.cells[i].area).sum();
+    let families = CellFamilies::new(&lib);
+    let mut search = ResizeSearch {
+        library: &lib,
+        options: &opts,
+        families: &families,
+        initial_delay: checkpoint,
+        timing_checkpoint: checkpoint,
+        area: initial_area,
+        area_limit: initial_area,
+        work_limits: ResizeWorkLimits {
+            timing_evaluations: 0,
+            timing_candidate_sites: 1,
+            recovery_evaluations: 3,
+        },
+    };
+    let stats = search.run_phase_with_windows(
+        SearchPhase::AreaRecovery,
+        &mut sta,
+        1,
+        Some(1),
+        RecoveryWindowCheckpoint::Latest,
+    );
+    assert_eq!(
+        (
+            stats.accepted,
+            stats.renewed_windows,
+            stats.propagated_instances
+        ),
+        (3, 2, 3)
+    );
+    assert_eq!(stats.stop_reason, ResizeStopReason::PropagationLimit);
+    assert_eq!(sta.score(), checkpoint);
+    assert_eq!(search.area, initial_area - 9.0);
+    Ok(())
+}
+
+#[test]
+fn renewed_limits_preserve_independent_improvements_across_windows() {
+    let epsilon = TIMING_COMPARISON_TOLERANCE;
+    let original = BoundaryDelays {
+        input_to_output: 1.0,
+        input_to_register: 2.0,
+        register_to_output: 3.0,
+        register_to_register: 4.0,
+    };
+    // One path spends some tolerance while the other three improve or stay
+    // flat.
+    let first = BoundaryDelays {
+        input_to_output: 0.75,
+        input_to_register: 2.0 + 0.5 * epsilon,
+        register_to_output: 2.75,
+        ..original
+    };
+    assert!(first.within(original));
+    let limit = original.tightened_with(first);
+    assert_eq!(
+        limit,
+        BoundaryDelays {
+            input_to_register: 2.0,
+            ..first
+        }
+    );
+    // A small reversal in the improved path remains legal. The next window
+    // must retain the improvement when a different path improves at renewal.
+    let second = BoundaryDelays {
+        input_to_output: first.input_to_output + 0.75 * epsilon,
+        input_to_register: 1.8,
+        register_to_register: 3.5,
+        ..first
+    };
+    assert!(second.within(limit));
+    let next_limit = limit.tightened_with(second);
+    assert!(second.within(next_limit));
+    assert_eq!(next_limit.input_to_output, first.input_to_output);
+    let cumulative_backslide = BoundaryDelays {
+        input_to_output: first.input_to_output + 1.5 * epsilon,
+        ..second
+    };
+    assert!(cumulative_backslide.within(original.tightened_with(second)));
+    assert!(!cumulative_backslide.within(next_limit));
+}
+
+// A productive area window changes timing before it renews. Check that the
+// next window uses the chosen entry or tightest-achieved delay limits.
+#[test]
+fn recovery_checkpoint_modes_at_work_window_renewal() -> Result<()> {
+    let mut proto = crate::liberty::model::library_to_proto(library()?)?;
+    proto
+        .cells
+        .retain(|c| matches!(c.name.as_str(), "DFF1" | "BUF1" | "BUF4"));
+    // With flat tables, each BUF4 -> BUF1 substitution adds three quarters
+    // of the timing tolerance to the same register-to-register path.
+    for cell in &mut proto.cells {
+        let value = 1.0e-4
+            + if cell.name == "BUF1" {
+                0.75 * TIMING_COMPARISON_TOLERANCE
+            } else {
+                0.0
+            };
+        for pin in &mut cell.pins {
+            for arc in &mut pin.timing_arcs {
+                for table in &mut arc.tables {
+                    table.values.fill(value as f32);
+                }
+            }
+        }
+    }
+    let lib = crate::liberty::model::library_from_proto(proto)?;
+    let net = read_gv_from_str(
+        r#"module m(input clk, input d, output q);
+        wire a,b,c;
+        DFF1 launch(.CLK(clk),.D(d),.Q(a));
+        BUF4 b0(.A(a),.Y(b));
+        BUF4 b1(.A(b),.Y(c));
+        DFF1 capture(.CLK(clk),.D(c),.Q(q));
+        endmodule"#,
+    )?;
+    let families = CellFamilies::new(&lib);
+    // The shorter window renews between the two downsizes. The most recent
+    // checkpoint can then spend timing tolerance twice on the same path.
+    for (checkpoint_mode, window, renewals, accepted) in [
+        (RecoveryWindowCheckpoint::Latest, 3, 1, 2),
+        (RecoveryWindowCheckpoint::Tightest, 3, 1, 1),
+        (RecoveryWindowCheckpoint::Latest, 5, 0, 1),
+        (RecoveryWindowCheckpoint::Tightest, 5, 0, 1),
+    ] {
+        let opts = ResizeOptions {
+            resize_registers: false,
+            ..Default::default()
+        };
+        let mut sta =
+            IncrementalSta::new(&net.modules[0], &net.nets, &net.interner, &lib, opts.timing)?;
+        let checkpoint = sta.score();
+        let area = sta.cell_indices().iter().map(|&i| lib.cells[i].area).sum();
+        let mut search = ResizeSearch {
+            library: &lib,
+            options: &opts,
+            families: &families,
+            initial_delay: checkpoint,
+            timing_checkpoint: checkpoint,
+            area,
+            area_limit: area,
+            work_limits: opts.work_limits(net.modules[0].instances.len()),
+        };
+        let stats = search.run_phase_with_windows(
+            SearchPhase::AreaRecovery,
+            &mut sta,
+            1,
+            Some(window),
+            checkpoint_mode,
+        );
+        assert_eq!(stats.renewed_windows, renewals);
+        assert_eq!(stats.accepted, accepted);
+        assert!(sta.score().register_to_register > checkpoint.register_to_register);
+        assert_eq!(sta.score().within(checkpoint), accepted == 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_work_policy_controls_renewal_independently_of_checkpoint() -> Result<()> {
+    let lib = library()?;
+    let source = "module m(input clk,input d,output q); wire a; BUF1 b(.A(d),.Y(a)); DFF1 f(.CLK(clk),.D(a),.Q(q)); endmodule";
+    for (policy, explicit_budget, expected_work) in [
+        (RecoveryWorkPolicy::HardCap, None, 100_000),
+        (
+            RecoveryWorkPolicy::Renewable {
+                checkpoint: RecoveryWindowCheckpoint::Latest,
+            },
+            None,
+            200_000,
+        ),
+        (
+            RecoveryWorkPolicy::Renewable {
+                checkpoint: RecoveryWindowCheckpoint::Tightest,
+            },
+            None,
+            200_000,
+        ),
+        (
+            RecoveryWorkPolicy::Renewable {
+                checkpoint: RecoveryWindowCheckpoint::Tightest,
+            },
+            Some(7),
+            7,
+        ),
+    ] {
+        let mut net = read_gv_from_str(source)?;
+        let report = resize(
+            &mut net,
+            &lib,
+            &ResizeOptions {
+                max_timing_rounds: 0,
+                max_recovery_rounds: 0,
+                recovery_evaluation_budget: explicit_budget,
+                recovery_work_policy: policy,
+                ..options()
+            },
+        )?;
+        assert_eq!(report.work_limits.recovery_evaluations, expected_work);
+    }
+    Ok(())
+}
+
 #[test]
 fn phase_budgets_do_not_reset_per_round_or_borrow_from_each_other() -> Result<()> {
     let library = library()?;
@@ -408,7 +632,7 @@ fn phase_budgets_do_not_reset_per_round_or_borrow_from_each_other() -> Result<()
         &mut parsed,
         &library,
         &ResizeOptions {
-            max_upsize_rounds: 0,
+            max_timing_rounds: 0,
             timing_evaluation_budget: Some(1000),
             recovery_evaluation_budget: Some(1),
             ..options()
@@ -469,8 +693,8 @@ fn negative_arrival_paths_remain_eligible_for_area_neutral_timing_improvement() 
     let mut file = NamedTempFile::new()?;
     file.write_all(text.as_bytes())?;
     let library = parse_liberty_files(&[file.path()]).map_err(anyhow::Error::msg)?;
-    let mut parsed =
-        read_gv_from_str("module m(input a, output y); BUF1 b(.A(a),.Y(y)); endmodule")?;
+    let gv = "module m(input a, output y, output z); BUF1 b(.A(a),.Y(y)); BUF1 c(.A(a),.Y(z)); endmodule";
+    let mut parsed = read_gv_from_str(gv)?;
     let report = resize(&mut parsed, &library, &options())?;
     assert_eq!(report.initial_delay.input_to_output, -1.0);
     assert_eq!(report.final_delay.input_to_output, -2.0);
@@ -496,8 +720,8 @@ fn final_area_is_recomputed_without_incremental_cancellation() -> Result<()> {
             &mut parsed,
             &library,
             &ResizeOptions {
-                max_upsize_rounds: usize::from(timing_phase),
-                max_downsize_rounds: usize::from(!timing_phase),
+                max_timing_rounds: usize::from(timing_phase),
+                max_recovery_rounds: usize::from(!timing_phase),
                 ..options()
             },
         )?;
@@ -519,7 +743,7 @@ fn downsize_uses_fixed_worst_endpoint_limit() -> Result<()> {
         "module m(input a, output y, output z); BUF1 slow(.A(a),.Y(y)); BUF4 fast(.A(a),.Y(z)); endmodule",
     )?;
     let options = ResizeOptions {
-        max_upsize_rounds: 0,
+        max_timing_rounds: 0,
         ..options()
     };
     let report = resize(&mut parsed, &library, &options)?;
@@ -570,7 +794,7 @@ fn recovery_keeps_zero_headroom_candidates_with_identical_timing() -> Result<()>
         &mut parsed,
         &library,
         &ResizeOptions {
-            max_upsize_rounds: 0,
+            max_timing_rounds: 0,
             ..options()
         },
     )?;
@@ -617,8 +841,8 @@ fn fixed_capture_registers_do_not_consume_timing_candidate_slots() -> Result<()>
         &ResizeOptions {
             resize_registers: false,
             max_candidate_sites: Some(1),
-            max_upsize_rounds: 1,
-            max_downsize_rounds: 0,
+            max_timing_rounds: 1,
+            max_recovery_rounds: 0,
             ..options()
         },
     )?;
@@ -649,8 +873,8 @@ fn unaffordable_cells_do_not_hide_area_neutral_timing_candidates() -> Result<()>
         &ResizeOptions {
             max_area_growth: 0.0,
             max_candidate_sites: Some(1),
-            max_upsize_rounds: 1,
-            max_downsize_rounds: 0,
+            max_timing_rounds: 1,
+            max_recovery_rounds: 0,
             ..options()
         },
     )?;
@@ -683,8 +907,8 @@ fn unaffordable_alternatives_do_not_consume_per_cell_candidate_limit() -> Result
         &ResizeOptions {
             max_area_growth: 0.0,
             max_cell_candidates: 1,
-            max_upsize_rounds: 1,
-            max_downsize_rounds: 0,
+            max_timing_rounds: 1,
+            max_recovery_rounds: 0,
             ..options()
         },
     )?;
@@ -716,8 +940,8 @@ fn cells_without_alternatives_do_not_hide_resizable_fanin() -> Result<()> {
         &library,
         &ResizeOptions {
             max_candidate_sites: Some(1),
-            max_upsize_rounds: 1,
-            max_downsize_rounds: 0,
+            max_timing_rounds: 1,
+            max_recovery_rounds: 0,
             ..options()
         },
     )?;
@@ -925,11 +1149,20 @@ fn critical_candidates_do_not_cross_launch_register_data_boundaries() -> Result<
         &library,
         options().timing,
     )?;
-    assert_eq!(sta.objective(), 3);
-    let mut candidates = sta.critical_instances(3, usize::MAX, |_| true);
+    assert_eq!(sta.objective(), timing::TimingBoundary::RegisterToRegister);
+    let mut candidates = sta.critical_instances(
+        timing::TimingBoundary::RegisterToRegister,
+        usize::MAX,
+        |_| true,
+    );
     candidates.sort_unstable();
     assert_eq!(candidates, vec![1, 2, 3]);
-    assert_eq!(sta.critical_instances(2, usize::MAX, |_| true), vec![3]);
+    assert_eq!(
+        sta.critical_instances(timing::TimingBoundary::RegisterToOutput, usize::MAX, |_| {
+            true
+        }),
+        vec![3]
+    );
     Ok(())
 }
 
@@ -1255,8 +1488,8 @@ fn unusable_combinational_alternatives_do_not_abort_either_phase() -> Result<()>
                 "module m(input a, output y, output z); {start} b(.A(a),.Y(y)); INV1 guard(.A(a),.Y(z)); endmodule"
             );
             let opts = ResizeOptions {
-                max_upsize_rounds: usize::from(!recovery),
-                max_downsize_rounds: usize::from(recovery),
+                max_timing_rounds: usize::from(!recovery),
+                max_recovery_rounds: usize::from(recovery),
                 ..options()
             };
             let mut actual = read_gv_from_str(&source)?;
@@ -1338,8 +1571,8 @@ fn incomplete_functional_timing_alternatives_are_skipped() -> Result<()> {
         );
 
         let opts = ResizeOptions {
-            max_upsize_rounds: 0,
-            max_downsize_rounds: 1,
+            max_timing_rounds: 0,
+            max_recovery_rounds: 1,
             resize_registers: false,
             ..options()
         };
@@ -1416,8 +1649,8 @@ fn five_input_candidate_with_missing_arc_is_rejected_and_rolled_back() -> Result
     let source = "module m(input a, input b, input c, input d, input e, output y); AND5x2 gate(.A(a),.B(b),.C(c),.D(d),.E(e),.Y(y)); endmodule";
     let mut actual = read_gv_from_str(source)?;
     let opts = ResizeOptions {
-        max_upsize_rounds: 0,
-        max_downsize_rounds: 1,
+        max_timing_rounds: 0,
+        max_recovery_rounds: 1,
         ..options()
     };
     let mut sta = IncrementalSta::new(
@@ -1491,8 +1724,8 @@ fn equivalent_replacement_must_revalidate_downstream_constant_coverage() -> Resu
     // lets the downstream AND omit B's arc; substituting BUF2 loses that proof.
     let source = "module m(input a, input b, output y); wire n; BUF4 tied(.A(a),.Y(n)); AND1 gate(.A(b),.B(n),.Y(y)); endmodule";
     let opts = ResizeOptions {
-        max_upsize_rounds: 0,
-        max_downsize_rounds: 1,
+        max_timing_rounds: 0,
+        max_recovery_rounds: 1,
         ..options()
     };
     let mut actual = read_gv_from_str(source)?;
@@ -1595,8 +1828,8 @@ fn coverage_rescan_budget_limit_restores_trial_without_charging_unvisited_cells(
     drop(sta);
 
     let mut remaining = ResizeOptions {
-        max_upsize_rounds: 0,
-        max_downsize_rounds: 1,
+        max_timing_rounds: 0,
+        max_recovery_rounds: 1,
         recovery_evaluation_budget: Some(3),
         ..options()
     };
@@ -1630,8 +1863,8 @@ fn self_feedback_cannot_keep_a_stale_coverage_constant() -> Result<()> {
         &mut parsed,
         &library,
         &ResizeOptions {
-            max_upsize_rounds: 0,
-            max_downsize_rounds: 1,
+            max_timing_rounds: 0,
+            max_recovery_rounds: 1,
             ..options()
         },
     )?;
@@ -1690,8 +1923,8 @@ fn replacement_cannot_expose_uncovered_register_launch_downstream() -> Result<()
     );
     let source = "module m(input clk, input d, input a, output y); wire q,n; DFF1 launch(.CLK(clk),.D(d),.Q(q)); AND4 tied(.A(q),.B(1'bx),.Y(n)); AND1 gate(.A(a),.B(n),.Y(y)); endmodule";
     let opts = ResizeOptions {
-        max_upsize_rounds: 0,
-        max_downsize_rounds: 1,
+        max_timing_rounds: 0,
+        max_recovery_rounds: 1,
         resize_registers: false,
         ..options()
     };
@@ -1753,8 +1986,8 @@ fn replacement_that_changes_when_constants_is_skipped() -> Result<()> {
     let mut library = builder.finish();
     let source = "module m(input a, input b, output y); wire n; BUF4 tied(.A(a),.Y(n)); AND1 gate(.A(b),.B(n),.Y(y)); endmodule";
     let opts = ResizeOptions {
-        max_upsize_rounds: 0,
-        max_downsize_rounds: 1,
+        max_timing_rounds: 0,
+        max_recovery_rounds: 1,
         ..options()
     };
     let mut actual = read_gv_from_str(source)?;
@@ -2647,5 +2880,314 @@ fn topology_commit_refreshes_electrical_fanout_before_resize_policy() -> Result<
             "resize accepts an unchanged existing violation after topology commit"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn recovery_menu_uses_loaded_delay_to_find_a_cheaper_equivalent_at_equal_width() -> Result<()> {
+    // Only the third area rank has the incumbent's timing. Neither the two
+    // cheapest nor the two ends of the family can preserve it.
+    let mut lib = library()?;
+    lib.reference_buffer_cell = Some("BUF1".to_string());
+    let inv1 = lib.cells.iter().find(|c| c.name == "INV1").unwrap().clone();
+    let incumbent = lib.cells.iter_mut().find(|c| c.name == "INV4").unwrap();
+    let mut fast = incumbent.clone();
+    fast.name = "INV_fast".to_string();
+    fast.area = 3.0;
+    incumbent.area = 10.0;
+    let mut slow = inv1;
+    slow.name = "INV_expensive_slow".to_string();
+    slow.area = 4.0;
+    lib.cells.extend([fast, slow]);
+
+    let netlist = "module top(a, y); input a; output y; INV4 g (.A(a), .Y(y)); endmodule";
+    for (menu, expected) in [
+        (RecoveryCellMenu::Area, 10.0),
+        (RecoveryCellMenu::CheapestGroupsThenFastest, 3.0),
+    ] {
+        let mut net = read_gv_from_str(netlist)?;
+        let report = resize(
+            &mut net,
+            &lib,
+            &ResizeOptions {
+                max_timing_rounds: 0,
+                max_recovery_rounds: 1,
+                recovery_cell_menu: menu,
+                recovery_cell_limit: Some(2),
+                ..options()
+            },
+        )?;
+        assert_eq!(report.final_area, expected, "{menu:?}");
+        assert_eq!(
+            report.final_delay.input_to_output,
+            report.initial_delay.input_to_output
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn timing_menu_can_improve_delay_with_the_same_trial_width_and_area() -> Result<()> {
+    let mut lib = library()?;
+    lib.reference_buffer_cell = Some("BUF1".into());
+    let slow = lib.cells.iter().find(|c| c.name == "INV1").unwrap().clone();
+    let fast = lib.cells.iter().find(|c| c.name == "INV4").unwrap().clone();
+    // All four alternatives cost the same area. The first two have identical
+    // delay to the incumbent. Only the third can improve timing.
+    for (name, template) in [
+        ("A_slow", &slow),
+        ("B_slow", &slow),
+        ("C_fast", &fast),
+        ("D_slow", &slow),
+    ] {
+        let mut cell = template.clone();
+        cell.area = slow.area;
+        cell.name = name.into();
+        lib.cells.push(cell);
+    }
+    for (menu, trials, accepted) in [
+        (TimingCellMenu::NearestArea, 2, 0),
+        (TimingCellMenu::DelayBandsFastestFirst, 1, 1),
+    ] {
+        let mut net =
+            read_gv_from_str("module top(input a, output y); INV1 g(.A(a), .Y(y)); endmodule")?;
+        let report = resize(
+            &mut net,
+            &lib,
+            &ResizeOptions {
+                max_area_growth: 0.0,
+                max_timing_rounds: 1,
+                max_recovery_rounds: 0,
+                max_cell_candidates: 2,
+                timing_cell_menu: menu,
+                ..options()
+            },
+        )?;
+        assert_eq!(report.upsize.trials, trials);
+        assert_eq!(report.upsize.accepted, accepted);
+        assert_eq!(report.final_area, report.initial_area);
+        assert_eq!(
+            report.final_delay.input_to_output < report.initial_delay.input_to_output,
+            accepted > 0
+        );
+    }
+    Ok(())
+}
+
+/// Eight faster inverters have distinct arc delays in rank order and
+/// deliberately nonmonotonic areas.
+fn delay_band_test_library() -> Result<Library> {
+    let mut lib = crate::liberty::model::library_to_proto(library()?)?;
+    let fast = lib.cells.iter().find(|c| c.name == "INV4").unwrap().clone();
+    lib.cells.retain(|c| c.name != "INV4" && c.name != "INV2");
+    for (rank, area) in [5.0, 8.0, 1.5, 6.0, 1.25, 7.0, 2.0, 4.0]
+        .into_iter()
+        .enumerate()
+    {
+        let mut equivalent = fast.clone();
+        equivalent.name = format!("rank{rank}");
+        equivalent.area = area;
+        for pin in &mut equivalent.pins {
+            for arc in &mut pin.timing_arcs {
+                for table in &mut arc.tables {
+                    for value in &mut table.values {
+                        *value *= 1.0 + rank as f32 * 0.01;
+                    }
+                }
+            }
+        }
+        lib.cells.push(equivalent);
+    }
+    Ok(crate::liberty::model::library_from_proto(lib)?)
+}
+
+/// Return the nominees in the exact order offered to the bounded STA trial
+/// loop.
+fn delay_band_nominees(lib: &Library, policy: TimingCellMenu, width: usize) -> Result<Vec<&str>> {
+    let net = read_gv_from_str("module top(input a, output y); INV1 g(.A(a), .Y(y)); endmodule")?;
+    let config = ResizeOptions {
+        timing_cell_menu: policy,
+        ..options()
+    };
+    let sta = IncrementalSta::new(
+        &net.modules[0],
+        &net.nets,
+        &net.interner,
+        lib,
+        config.timing,
+    )?;
+    let current = sta.cell_indices()[0];
+    let families = CellFamilies::new(lib);
+    let config = ResizeOptions {
+        max_cell_candidates: width,
+        ..config
+    };
+    let mut selector = menu::CandidateSelector::new(sta.prepared_library(), &families, &config);
+    Ok(selector
+        .timing_candidates(0, &sta, lib.cells[current].area, f64::INFINITY)
+        .iter()
+        .map(|&cell| lib.cells[cell].name.as_str())
+        .collect())
+}
+
+// Give the candidates a different area order from their delay order.
+// The shortlist should include the fastest cell and a cheap choice
+// from each remaining portion of the delay ranking.
+#[test]
+fn timing_delay_bands_anchor_fastest_then_choose_cheapest_in_each_residual_band() -> Result<()> {
+    let lib = delay_band_test_library()?;
+    // Seven residual ranks split [1,2,3] and [4,5,6,7]. Their minima are 2 and
+    // 4.
+    let fastest = TimingCellMenu::DelayBandsFastestFirst;
+    assert_eq!(
+        delay_band_nominees(&lib, fastest, 3)?,
+        ["rank0", "rank2", "rank4"]
+    );
+    assert_eq!(delay_band_nominees(&lib, fastest, 1)?, ["rank0"]);
+    assert_eq!(
+        delay_band_nominees(&lib, fastest, 9)?,
+        [
+            "rank0", "rank1", "rank2", "rank3", "rank4", "rank5", "rank6", "rank7"
+        ]
+    );
+    Ok(())
+}
+
+// A narrow trial budget makes order observable. The estimated ranking
+// nominates the first cell, and incremental STA decides its acceptance.
+#[test]
+fn timing_delay_bands_accept_first_exact_improvement_in_selected_trial_order() -> Result<()> {
+    let lib = delay_band_test_library()?;
+    let mut net =
+        read_gv_from_str("module top(input a, output y); INV1 g(.A(a), .Y(y)); endmodule")?;
+    let report = resize(
+        &mut net,
+        &lib,
+        &ResizeOptions {
+            timing_cell_menu: TimingCellMenu::DelayBandsFastestFirst,
+            max_cell_candidates: 3,
+            max_timing_rounds: 1,
+            max_recovery_rounds: 0,
+            ..options()
+        },
+    )?;
+    assert_eq!(report.upsize.trials, 1);
+    assert_eq!(report.upsize.accepted, 1);
+    assert!(report.final_delay.input_to_output < report.initial_delay.input_to_output);
+    assert_eq!(
+        net.interner.resolve(net.modules[0].instances[0].type_name),
+        Some("rank0")
+    );
+    Ok(())
+}
+
+// All delay estimates are unavailable. The fallback still gives eligible
+// cells a chance through the ordinary area-ordered menu.
+#[test]
+fn timing_delay_bands_fall_back_to_nearest_area_when_no_alternative_has_timing() -> Result<()> {
+    let mut lib = delay_band_test_library()?;
+    for cell in lib.cells.iter_mut().filter(|c| c.name.starts_with("rank")) {
+        for pin in &mut cell.pins {
+            pin.timing_arcs.clear();
+        }
+    }
+    assert_eq!(
+        delay_band_nominees(&lib, TimingCellMenu::DelayBandsFastestFirst, 3)?,
+        ["rank4", "rank2", "rank6"]
+    );
+    Ok(())
+}
+
+// Two minimum-area cells compete for a small shortlist. The faster one
+// must get a trial when only one representative fits at that cost.
+#[test]
+fn electrical_min_area_recovers_feasible_cell_omitted_by_band() -> Result<()> {
+    let mut lib = library()?;
+    lib.reference_buffer_cell = Some("BUF1".to_string());
+    let incumbent = lib.cells.iter_mut().find(|c| c.name == "INV2").unwrap();
+    let mut feasible = incumbent.clone();
+    incumbent.area = 10.0;
+    feasible.name = "INV_min_feasible".to_string();
+    feasible.area = 1.0;
+    lib.cells.push(feasible);
+    let source = "module top(input a, output y); INV2 dut (.A(a), .Y(y)); endmodule";
+    // INV1 ties for the smallest area but misses timing. The shortlist
+    // must try the other minimum-area cell before the stronger INV4.
+    let mut net = read_gv_from_str(source)?;
+    let report = resize(
+        &mut net,
+        &lib,
+        &ResizeOptions {
+            max_timing_rounds: 0,
+            max_recovery_rounds: 1,
+            recovery_cell_limit: Some(2),
+            recovery_cell_menu: RecoveryCellMenu::CheapestGroupsThenFastest,
+            ..options()
+        },
+    )?;
+    assert_eq!(report.final_area, 1.0);
+    assert!(report.final_delay.within(report.initial_delay));
+    Ok(())
+}
+
+// With two trials, take one representative per cost group. With
+// three, the entire input list fits so its ordering is preserved.
+#[test]
+fn electrical_min_area_preserves_unique_trials_and_untruncated_order() -> Result<()> {
+    let mut lib = library()?;
+    let incumbent = lib.cells.iter_mut().find(|c| c.name == "INV4").unwrap();
+    let mut fast = incumbent.clone();
+    incumbent.area = 10.0;
+    fast.name = "INV_min_fast".into();
+    fast.area = 1.0;
+    lib.cells.push(fast);
+    let net = read_gv_from_str("module m(input a, output y); INV4 dut(.A(a), .Y(y)); endmodule")?;
+    let opts = options();
+    let sta = IncrementalSta::new(&net.modules[0], &net.nets, &net.interner, &lib, opts.timing)?;
+    let current = sta.cell_indices()[0];
+    let families = CellFamilies::new(&lib);
+    for (width, expected) in [
+        (1, vec!["INV1"]),
+        (2, vec!["INV_min_fast", "INV2"]),
+        (3, vec!["INV1", "INV_min_fast", "INV2"]),
+    ] {
+        let config = ResizeOptions {
+            recovery_cell_limit: Some(width),
+            recovery_cell_menu: RecoveryCellMenu::CheapestGroupsThenFastest,
+            ..options()
+        };
+        let mut selector = menu::CandidateSelector::new(sta.prepared_library(), &families, &config);
+        let trial_cells =
+            selector.recovery_candidates(0, &sta, lib.cells[current].area, f64::INFINITY);
+        let choices: Vec<_> = trial_cells
+            .iter()
+            .take(width)
+            .map(|&c| lib.cells[c].name.as_str())
+            .collect();
+        assert_eq!(choices, expected);
+    }
+    // This STA owns prepared timing data for the characterized library.
+    drop(sta);
+    // Uncharacterized alternatives retain the ordinary first name. The second
+    // slot goes to the first alternative in the next cost group.
+    for cell in lib
+        .cells
+        .iter_mut()
+        .filter(|c| c.name.starts_with("INV") && c.name != "INV4")
+    {
+        for pin in &mut cell.pins {
+            pin.timing_arcs.clear();
+        }
+    }
+    let sta = IncrementalSta::new(&net.modules[0], &net.nets, &net.interner, &lib, opts.timing)?;
+    let config = ResizeOptions {
+        recovery_cell_limit: Some(2),
+        recovery_cell_menu: RecoveryCellMenu::CheapestGroupsThenFastest,
+        ..options()
+    };
+    let mut selector = menu::CandidateSelector::new(sta.prepared_library(), &families, &config);
+    let chosen = selector.recovery_candidates(0, &sta, lib.cells[current].area, f64::INFINITY);
+    let names: Vec<_> = chosen.iter().map(|&i| lib.cells[i].name.as_str()).collect();
+    assert_eq!(names, ["INV1", "INV2"]);
     Ok(())
 }

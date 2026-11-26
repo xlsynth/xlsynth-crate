@@ -1796,12 +1796,35 @@ timing conditions are skipped.
   timing rounds; defaults to `max(50000, 4 * N)` for `N` mapped instances,
   including FFs. Explicit `0` permits no evaluation work.
 - `--recovery-evaluation-budget <COUNT>`: instance evaluation visits across all
-  recovery rounds; defaults to `max(100000, 8 * N)`. Independent of the timing
-  budget; explicit `0` permits no evaluation work. Exhaustion rolls back the
-  unfinished trial and keeps verified work.
+  recovery rounds. With a registered stage, the automatic search starts with
+  `max(100000, 8 * N)` visits and renews that allowance while it continues to
+  reduce area, up to `1 + floor(log2(max(1, N)))` windows. Each renewal
+  preserves all four achieved boundary delays. A combinational circuit gets
+  one window. An explicit count sets a hard total, including zero.
 - `--upsize-rounds <COUNT>`, `--downsize-rounds <COUNT>`: default `4` and `2`;
   `0` disables that phase. Evaluation budgets do not reset each round or borrow
   unused work from the other phase.
+- `--timing-cell-menu <nearest-area|delay-bands-fastest-first>` selects timing
+  trials. The default, `nearest-area`, tries cells closest to the current area
+  first. `delay-bands-fastest-first` tries the fastest predicted cell, then the
+  smallest cell in each successive band by predicted delay. Estimates use the
+  configured input transition and actual output load. The menu falls back to
+  nearest-area order when no estimate is available.
+- `--recovery-cell-menu <area|electrical-min-area>` selects downsizing trials.
+  The default, `area`, tries the smallest cells first. With a bounded shortlist,
+  `electrical-min-area` visits the smallest area groups in order. It tries
+  the fastest cell in each group and reserves the last trial for the fastest
+  remaining alternative. Exact timing checks decide whether the replacement
+  is acceptable, including its effect on the upstream driver.
+- `--recovery-cell-limit <COUNT>`: maximum alternatives considered per site
+  in area recovery. The limit must be positive and defaults to 8. Use
+  `--downsize-rounds=0` to disable the standalone area-recovery phase.
+  The timing-search shortlist has its own limit.
+- `--monotone-recovery-checkpoint`: keep the lowest delay observed for each
+  timing boundary when an automatic registered area-recovery window renews.
+  This prevents each new window from adding another timing tolerance. By
+  default the renewed window uses the latest observed delays. This flag
+  applies to standalone `gv-resize`.
 - `--no-register-resize`: leave FF cells fixed; default permits resizing.
 - `--report-json <PATH>`: deterministic before/after boundary timing, cell area,
   accepted moves, propagation counts, resolved `work_limits`, per-phase stopping
@@ -1811,7 +1834,7 @@ timing conditions are skipped.
 
 Search defaults come from the library's `ResizeOptions`. Timing visits up to
 `max(64, ceil(N / 512))` candidate sites per round; recovery has no site cap.
-Both phases try up to eight alternative sizes per site. Evaluation visits count
+By default, both phases try up to eight alternative sizes per site. Evaluation visits count
 timing propagation and, when a replacement may change inferred Boolean constants,
 functional timing-coverage propagation; both are included in the report's
 `propagated_instances` count. One trial can require many instance visits. There
@@ -1830,6 +1853,8 @@ xlsynth-driver gv-stats --netlist resized.gv \
 
 ### `g8r2gv`: G8R to mapped gate-level netlist
 
+Registered native delay mapping runs the complete adaptive sizing flow in this command. The [registered fixture example](../docs/registered-native.md) shows the clock, boundary registers, and timing library used to map a circuit with boundary registers.
+
 Maps a `.g8r` or `.g8rbin` design to a flat gate-level netlist. With
 `--liberty-proto` alone, g8r delay-maps the combinational logic natively.
 To use standalone ABC for that logic, specify `--mapper=abc` and supply
@@ -1837,11 +1862,12 @@ the matching raw `--liberty` files.
 ABC's default speed flow also buffers and resizes combinational cells.
 Both paths use g8r to legalize synchronous reset and enable controls, select
 physical flip-flops and clock gates, and assemble the netlist.
-Native delay mapping and ABC mapping then resize the assembled logic and
-compatible flops by default, using the same search as `gv-resize`. Native
-area mapping skips this stage by default. A fixed `--register-cell` remains fixed.
-Delay mapping, native cover optimization and final resizing require a timing-enabled
-proto. For a timing-free native area flow, use `--strategy=area`.
+Native mapping optimizes the combinational cover, attaches the physical
+registers and buffers overloaded launch outputs. Full sizing runs on the
+assembled netlist. For registered delay mapping, adaptive sizing alternates timing and area recovery. It writes the finished gates to the requested output. ABC uses a separate final `gv-resize` pass by default.
+A fixed `--register-cell` remains fixed. Delay mapping and electrical
+optimization require a timing-enabled proto. For timing-free native area
+mapping, use `--strategy=area`.
 
 Existing direct input-to-register and register-to-output connections remain
 wires, without added buffers or inverters. FFs are selected per bit by minimum
@@ -1874,16 +1900,41 @@ Use `--clock-gating=false` to generate an ungated baseline.
   register data outputs using the actual launch and capture cells. Defaults
   to true for native delay mapping and false for native area mapping.
   See [Buffering register outputs](../xlsynth-g8r/docs/registered_fanout.md) for the strategy.
+- `--adaptive-resize-report <PATH>` writes the sizing decisions and gate hashes for the adaptive flow. Gate checkpoint hashes
+  refer to Verilog text. The `output_sha256` field hashes the output file's
+  bytes in the chosen format. The report also identifies the sizing library
+  by its content hash.
+- `--resize-liberty-proto <PATH>` selects a separate timing view for adaptive
+  sizing. By default, sizing uses the mapping proto. The sizing view must
+  contain every mapped master and may supply additional cells. For each shared
+  master the driver checks pin names, directions, clock roles and output
+  functions. Sequential and clock-gate metadata must match exactly. A conflict
+  on a mapped master is an error. The driver excludes other conflicting masters
+  before sizing so the search can choose a compatible replacement.
+  The top module name must be distinct from every master in both views.
 - `--area-recovery <BOOL>` – recover area on the combinational cover after
   internal fanout optimization, before attaching flops. Defaults to true for
   native delay mapping and false for native area mapping. The ABC mapper
   rejects explicit `--strategy`, `--fanout-opt`, and `--area-recovery` options.
-- `--g8r-resize <BOOL>` – resize the complete mapped netlist. Defaults to
-  true for native delay and ABC, false for native area. An explicit value overrides the default.
-  This setting controls the final resizing pass independently of native fanout
-  optimization, native cover area recovery, and sizing within an ABC script.
-- `--primary-input-transition <SLEW>` – input slew in library time units for
-  native delay mapping and electrical optimization (default: 0.01).
+- `--g8r-resize <BOOL>` – permit timing-driven cell sizing and area recovery
+  on combinational cells and compatible flops. Defaults to true for native
+  delay and ABC, false for native area. With native delay mapping, registered
+  inputs also run adaptive sizing, even if cleanup removes the registers.
+  To disable full sizing and area recovery, set both sizing flags to false.
+- `--timing-cell-menu <nearest-area|delay-bands-fastest-first>`
+  selects the timing-search shortlist and trial order during final sizing.
+  The adaptive timing phase defaults to `delay-bands-fastest-first`. Ordinary
+  sizing defaults to `nearest-area`. See [gv-resize](#gv-resize-native-timing-driven-cell-resizing)
+  for the nomination and ordering rules.
+- `--recovery-cell-menu <area|electrical-min-area>`,
+  `--recovery-cell-limit <COUNT>` – select the area-recovery shortlist in the
+  assembled netlist's final sizing when `--g8r-resize=true`. Defaults to
+  `electrical-min-area` and 12 cells per site in the adaptive flow. Ordinary
+  sizing defaults to `area` and 8 cells per site. See [gv-resize](#gv-resize-native-timing-driven-cell-resizing)
+  for each policy.
+- `--primary-input-transition <SLEW>` – input slew in the mapping proto's
+  time units for native delay mapping and electrical optimization. Defaults
+  to 0.01. Adaptive sizing converts this slew into its own library's units.
 - `--liberty-proto <PATH>` – required normalized library for cell selection.
   Accepts binary or text proto, optionally gzip-compressed.
 - `--liberty <PATH>` – required raw, uncompressed Liberty file for ABC. Repeat
@@ -1899,8 +1950,9 @@ Use `--clock-gating=false` to generate an ungated baseline.
   Verilog export. The trusted script must preserve the combinational boundary
   and leave a mapped network in ABC's main workspace (`&put` after GIA commands).
 - `--driving-cell <CELL>` – override ABC's input driver, which defaults to the proto's `reference_buffer_cell`.
-- `--output-load-ff <FF>` – override the output load for native timing and ABC **in femtofarads**. Otherwise
-  use the proto's `default_output_load`, converted from library capacitance units.
+- `--output-load-ff <FF>` – override the output load for native timing and ABC **in femtofarads**.
+  Defaults to the mapping proto's `default_output_load`. Adaptive sizing uses
+  the same physical load, converted into its library's capacitance units.
   Each override is independent; missing/invalid defaults are errors only when
   needed. The resolved driver/load must be valid. There is no unconstrained mode.
 - `--timeout-seconds <SECONDS>` – positive ABC mapping timeout; default `180`.
