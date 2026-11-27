@@ -283,6 +283,28 @@ fn compare_declarations(
     Ok(())
 }
 
+/// Run both frontends and their evaluation oracles against the same native
+/// import.
+pub(crate) fn compare_imported_program(
+    name: &str,
+    library: &str,
+    bx: &str,
+    program: FunctionProgram,
+    seed: u64,
+) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    fs::write(dir.path().join(format!("{name}.x")), library).map_err(|e| e.to_string())?;
+    compare_bx_program(
+        bx,
+        program,
+        seed,
+        DslxExecution::ConcreteConstants,
+        Vec::new(),
+        &[dir.path()],
+    )
+    .map_err(|e| format!("{e}\n{name}.x:\n{library}"))
+}
+
 /// Compare an explicit BX program with independently constructed concrete
 /// DSLX functions when the BX source uses a language extension.
 pub(crate) fn compare_bx_program(

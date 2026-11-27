@@ -180,6 +180,12 @@ Compares BX and DSLX array literal acceptance and element values, including a tr
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_array_literals`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_imported_array_literals.rs
+
+Compares BX and pinned DSLX when an imported function takes an array of signed or unsigned bits. The caller repeats a single let-bound literal and passes the array inline, through lets and aliases, or after tuple destructuring. Decimal, binary, hexadecimal, explicitly typed, and independently written elements distinguish valid signed bit patterns from out-of-range integers. Accepted calls compare every lane against native IR and DSLX constant evaluation.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_imported_array_literals -- -max_len=14 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_array_ranges.rs
 
 Compares exclusive and inclusive array-valued ranges in BX with pinned DSLX. Endpoints vary from zero to 129 bits and include signed crossings through zero, both extrema and carries across bit 63. Direct returns also exercise contextually typed bounds. Signed calls compare shared and distinct hexadecimal bounds. Programs return, pass, index and nest the arrays, construct them from constants or constexpr calls, and instantiate the same function with different bounds. The target compares complete results against DSLX constexpr execution and compiled IR. Empty ranges use the pinned bytecode interpreter because the converter cannot emit an empty array literal. Rejected cases exercise descending ranges, runtime bounds, and incompatible endpoint or result types.

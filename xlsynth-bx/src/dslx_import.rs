@@ -378,6 +378,10 @@ impl ImportResolver {
         self.structs.has_public_type(subject, member)
     }
 
+    pub(crate) fn function_has_parametrics(&self, subject: &str, member: &str) -> bool {
+        self.structs.function_has_parametrics(subject, member)
+    }
+
     pub(crate) fn is_struct_type(&self, subject: &str, member: &str) -> bool {
         self.structs.is_struct_type(subject, member)
     }

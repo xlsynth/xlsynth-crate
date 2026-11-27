@@ -7,6 +7,7 @@ use super::{ImportResolver, ImportedStructs, ProbeImports, Type, TypeWitness};
 use crate::import_structs::probe_function;
 use crate::parser::parse_value_type;
 use crate::typed::BoundParametricValue;
+use std::collections::BTreeSet;
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
 /// A data argument's type evidence for DSLX contextual literal inference.
@@ -15,6 +16,11 @@ pub(crate) enum NativeDataArg {
     Typed(Type),
     Inferred(String),
     BoundLiteral(String),
+    /// References with the same per-call ID name one native let binding.
+    SharedLiteral {
+        id: usize,
+        literal: String,
+    },
     Tuple(Vec<Self>),
     Array {
         members: Vec<Self>,
@@ -34,7 +40,9 @@ impl NativeDataArg {
     pub(crate) fn storage_work(&self) -> usize {
         match self {
             Self::Typed(ty) => crate::check::source_type_nodes(ty),
-            Self::Inferred(literal) | Self::BoundLiteral(literal) => literal.len().max(1),
+            Self::Inferred(literal)
+            | Self::BoundLiteral(literal)
+            | Self::SharedLiteral { literal, .. } => literal.len().max(1),
             Self::Repeated { element, size } => element
                 .storage_work()
                 .saturating_add((usize::BITS - size.leading_zeros()) as usize),
@@ -45,6 +53,14 @@ impl NativeDataArg {
             }
         }
     }
+}
+
+/// Parameters and lexical bindings for one generated native type probe.
+#[derive(Default)]
+struct ProbeArguments {
+    params: Vec<String>,
+    lets: Vec<String>,
+    shared: BTreeSet<usize>,
 }
 
 /// The contextual evidence used to infer each operand of one specialized native
@@ -173,24 +189,25 @@ impl ProbeImports {
         &mut self,
         arg: &NativeDataArg,
         structs: &ImportedStructs,
-        params: &mut Vec<String>,
-        lets: &mut Vec<String>,
+        arguments: &mut ProbeArguments,
         in_aggregate: bool,
     ) -> Result<String, String> {
         match arg {
             NativeDataArg::Typed(ty) => {
-                let name = format!("arg_{}", params.len());
+                let name = format!("arg_{}", arguments.params.len());
                 if in_aggregate
                     && structs.aggregate_spelling(ty).is_none()
                     && let Some((alias, suffix)) = structs.aggregate_projection(ty)
                 {
                     let (subject, member) = alias.split_once("::").expect("qualified public alias");
-                    params.push(format!("{name}: {}", self.qualify(subject, member)));
+                    arguments
+                        .params
+                        .push(format!("{name}: {}", self.qualify(subject, member)));
                     return Ok(format!("{name}{suffix}"));
                 }
                 // A private field can arrive from a public record before the
                 // aggregate alias in the callee's formal has been reflected.
-                params.push(format!(
+                arguments.params.push(format!(
                     "{name}: {}",
                     self.render_probe_type(ty, structs, in_aggregate)?
                 ));
@@ -200,20 +217,35 @@ impl ProbeImports {
             NativeDataArg::BoundLiteral(literal) => {
                 // DSLX infers a let initializer before applying the concrete
                 // callee's constraints at a use of its name.
-                let name = format!("bound_{}", lets.len());
-                lets.push(format!("let {name} = {literal};"));
+                let name = format!("bound_{}", arguments.lets.len());
+                arguments.lets.push(format!("let {name} = {literal};"));
+                Ok(name)
+            }
+            NativeDataArg::SharedLiteral { id, literal } => {
+                let name = format!("shared_{id}");
+                if arguments.shared.insert(*id) {
+                    arguments.lets.push(format!("let {name} = {literal};"));
+                }
                 Ok(name)
             }
             NativeDataArg::Repeated { element, size } => {
-                let member = self.render_argument(element, structs, params, lets, true)?;
+                let member = self.render_argument(element, structs, arguments, true)?;
+                if *size == 0 {
+                    // Equal bounds retain an empty range's element constraint.
+                    let name = format!("bound_{}", arguments.lets.len());
+                    arguments
+                        .lets
+                        .push(format!("let {name} = {member}..{member};"));
+                    return Ok(name);
+                }
                 // Double the same bound array so the probe preserves its shared
                 // element constraint with logarithmic source size.
                 let mut power = format!("[{member}]");
                 let mut parts = Vec::new();
                 let mut remaining = *size;
                 while remaining != 0 {
-                    let name = format!("bound_{}", lets.len());
-                    lets.push(format!("let {name} = {power};"));
+                    let name = format!("bound_{}", arguments.lets.len());
+                    arguments.lets.push(format!("let {name} = {power};"));
                     if remaining & 1 == 1 {
                         parts.push(name.clone());
                     }
@@ -228,7 +260,7 @@ impl ProbeImports {
                 let in_aggregate = in_aggregate || !matches!(arg, NativeDataArg::Branches(_));
                 let mut values = items
                     .iter()
-                    .map(|a| self.render_argument(a, structs, params, lets, in_aggregate))
+                    .map(|a| self.render_argument(a, structs, arguments, in_aggregate))
                     .collect::<Result<Vec<_>, _>>()?;
                 if matches!(
                     arg,
@@ -305,19 +337,18 @@ impl ImportResolver {
         self.reserve_explicit_probe(self.context_types.len(), parametrics, work, 1)?;
         let mut imports = ProbeImports::default();
         let target = imports.specialized_name(subject, function, parametrics, &self.structs)?;
-        let mut params = Vec::new();
-        let mut lets = Vec::new();
+        let mut arguments = ProbeArguments::default();
         let values = args
             .iter()
-            .map(|arg| imports.render_argument(arg, &self.structs, &mut params, &mut lets, false))
+            .map(|arg| imports.render_argument(arg, &self.structs, &mut arguments, false))
             .collect::<Result<Vec<_>, _>>()?;
         let target_name = imports.qualify(subject, function);
         let specialization = target
             .strip_prefix(&target_name)
             .expect("specialized name starts with its callee");
         let declarations = imports.declarations();
-        let params = params.join(", ");
-        let lets = lets.join("\n");
+        let params = arguments.params.join(", ");
+        let lets = arguments.lets.join("\n");
         let values = values.join(", ");
         let source =
             format!("{declarations}fn probe({params}) {{ {lets} let _ = {target}({values}); }}");
@@ -414,9 +445,9 @@ fn contextual_shape<'d>(
                 .iter()
                 .find_map(|arm| contextual_shape(arm, display, aggregates));
         }
-        NativeDataArg::Inferred(_) | NativeDataArg::BoundLiteral(_) => {
-            parse_value_type(display).ok()
-        }
+        NativeDataArg::Inferred(_)
+        | NativeDataArg::BoundLiteral(_)
+        | NativeDataArg::SharedLiteral { .. } => parse_value_type(display).ok(),
         NativeDataArg::Tuple(fields) => {
             let text = display.strip_prefix('(')?.strip_suffix(')')?;
             let mut depth = 0;

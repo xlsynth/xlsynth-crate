@@ -59,23 +59,26 @@ impl BindingWidths {
 
     /// Whether a reference selects any leaf with a use-site width.
     pub(crate) fn infers_at_use(&self, expr: &Expr) -> bool {
-        self.infers_member(expr, |_| true)
+        self.infers_member(expr, |_, minimum| minimum.infer_at_use)
     }
 
-    /// Whether a reference carries any use-site constraint from an array
-    /// element, including an array nested in a tuple.
-    pub(crate) fn infers_array_member(&self, expr: &Expr) -> bool {
-        self.infers_member(expr, |member| member.contains(&Member::ArrayElement))
+    /// Whether an imported formal can supply a width or interpret a bound
+    /// array element's prefixed literal at its existing width.
+    pub(crate) fn infers_array_member(&self, expr: &Expr, include_radix: bool) -> bool {
+        self.infers_member(expr, |member, minimum| {
+            member.contains(&Member::ArrayElement)
+                && (minimum.infer_at_use || include_radix && minimum.has_prefix)
+        })
     }
 
-    fn infers_member(&self, expr: &Expr, matches: impl Fn(&[Member]) -> bool) -> bool {
+    fn infers_member(&self, expr: &Expr, matches: impl Fn(&[Member], &Minimum) -> bool) -> bool {
         let Some((_, path)) = reference_path(expr) else {
             return false;
         };
         self.members
             .range(path.clone()..)
             .take_while(|(member, _)| member.starts_with(&path))
-            .any(|(member, minimum)| minimum.infer_at_use && matches(member))
+            .any(|(member, minimum)| matches(member, minimum))
     }
 
     /// Tuple match literals constrain the same field as a binder in another
@@ -630,14 +633,46 @@ pub(crate) fn supplies_selected_minimum(source: &Expr) -> Result<bool, String> {
 pub(crate) fn import_literal_witness(
     expr: &Expr,
     lookup: Option<WidthLookup<'_>>,
-) -> Result<Option<String>, String> {
+    contextual: bool,
+    origins: &mut ImportLiteralOrigins,
+) -> Result<Option<NativeDataArg>, String> {
+    let inline = Some(WidthLookup::DslxLiterals(None));
+    let mut minimum = expression_minimum(expr, lookup.or(inline))?;
+    if let Some(m) = &minimum
+        && let Some(origin) = &m.origin
+    {
+        // Expressions such as `h ^ h` retain the same bit-pattern
+        // constraint as another occurrence of `h` in the call.
+        let literal = literal_witness(m.signed, m.width, m.has_prefix)?;
+        return Ok(Some(origins.bound(literal, Some(origin))));
+    }
     // A projection from an inline aggregate can have a minimum without a
     // lexical binding, such as the indexed element of a range.
-    let Some(minimum) = expression_minimum(expr, lookup.or(Some(WidthLookup::DslxLiterals(None))))?
-    else {
-        return Ok(None);
-    };
-    literal_witness(minimum.signed, minimum.width, minimum.has_prefix).map(Some)
+    if !contextual && lookup.is_some() {
+        minimum = expression_minimum(expr, inline)?;
+    }
+    minimum
+        .map(|m| literal_witness(m.signed, m.width, m.has_prefix).map(NativeDataArg::Inferred))
+        .transpose()
+}
+
+/// Number shared prefixed-literal constraints by first use in a native call.
+/// Retaining each origin keeps its address valid throughout probe construction.
+#[derive(Default)]
+pub(crate) struct ImportLiteralOrigins(BTreeMap<*const (), (Rc<()>, usize)>);
+
+impl ImportLiteralOrigins {
+    fn bound(&mut self, literal: String, origin: Option<&Rc<()>>) -> NativeDataArg {
+        let Some(origin) = origin else {
+            return NativeDataArg::BoundLiteral(literal);
+        };
+        let next = self.0.len();
+        let (_, id) = self
+            .0
+            .entry(Rc::as_ptr(origin))
+            .or_insert_with(|| (Rc::clone(origin), next));
+        NativeDataArg::SharedLiteral { id: *id, literal }
+    }
 }
 
 /// Preserve the checked array length and its unified element constraint in
@@ -648,16 +683,24 @@ pub(crate) fn import_array_witness(
     scope: usize,
     size: usize,
     scoped_element: Option<&Type>,
+    origins: &mut ImportLiteralOrigins,
 ) -> Result<Option<NativeDataArg>, String> {
     let mut minimum = None;
-    let (signed, width, has_prefix) =
+    let (signed, width, has_prefix, origin) =
         if collect_projected(expr, &[Member::ArrayElement], lookup, &mut minimum)?
             && let Some(minimum) = minimum
         {
-            if !minimum.can_widen_in(scope) {
+            // Captures keep their hardware width, but their radix can still
+            // supply signedness at that width during final argument checking.
+            if !minimum.can_widen_in(scope) && !minimum.has_prefix {
                 return Ok(None);
             }
-            (minimum.signed, minimum.width, minimum.has_prefix)
+            (
+                minimum.signed,
+                minimum.width,
+                minimum.has_prefix,
+                minimum.origin,
+            )
         } else {
             // A scoped endpoint's trailing name is no longer visible here. The
             // bound checker retained its minimum while the lexical alias
@@ -665,17 +708,12 @@ pub(crate) fn import_array_witness(
             let Some((signed, width)) = scoped_element.and_then(bits) else {
                 return Ok(None);
             };
-            (signed, width, false)
+            (signed, width, false, None)
         };
     let literal = literal_witness(signed, width, has_prefix)?;
-    Ok(Some(if size == 0 {
-        // Equal bounds supply the element constraint even for an empty array.
-        NativeDataArg::BoundLiteral(format!("{{ let bound = {literal}; bound..bound }}"))
-    } else {
-        NativeDataArg::Repeated {
-            element: Box::new(NativeDataArg::BoundLiteral(literal)),
-            size,
-        }
+    Ok(Some(NativeDataArg::Repeated {
+        element: Box::new(origins.bound(literal, origin.as_ref())),
+        size,
     }))
 }
 
@@ -686,17 +724,18 @@ pub(crate) fn import_bound_literal_witness(
     ty: &Type,
     lookup: WidthLookup<'_>,
     scope: usize,
-) -> Result<Option<String>, String> {
-    if !lookup.can_widen_reference(expr, scope)? {
-        return Ok(None);
-    }
+    origins: &mut ImportLiteralOrigins,
+) -> Result<Option<NativeDataArg>, String> {
     let Some(minimum) = expression_minimum(expr, Some(lookup))? else {
         return Ok(None);
     };
-    if bits(ty) != Some((minimum.signed, minimum.width)) {
+    if bits(ty) != Some((minimum.signed, minimum.width))
+        || (!minimum.can_widen_in(scope) && !minimum.has_prefix)
+    {
         return Ok(None);
     }
-    literal_witness(minimum.signed, minimum.width, minimum.has_prefix).map(Some)
+    let literal = literal_witness(minimum.signed, minimum.width, minimum.has_prefix)?;
+    Ok(Some(origins.bound(literal, minimum.origin.as_ref())))
 }
 
 fn literal_witness(signed: bool, width: usize, has_prefix: bool) -> Result<String, String> {
