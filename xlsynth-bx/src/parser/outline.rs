@@ -105,6 +105,17 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
 pub(crate) struct ImportedTypeDeclarations {
     pub(crate) sums: BTreeSet<String>,
     pub(crate) struct_arities: BTreeMap<String, usize>,
+    /// Structs whose derive list names ToBits and whose impl permits the
+    /// method.
+    pub(crate) derives_to_bits: BTreeMap<String, ToBitsDerive>,
+}
+
+/// Whether the builtin alone supplies a struct's conversion or DSLX must
+/// resolve the trait list for the concrete receiver.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToBitsDerive {
+    Builtin,
+    CheckNative,
 }
 
 pub(crate) fn outline_import(
@@ -215,12 +226,14 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
         depth: 0,
         dslx_type_display: false,
         value_context: ValueContext::Block,
+        forward_callables: false,
         in_function_body: false,
         expression_grammar: ExpressionGrammar::Block,
         type_params: BTreeSet::new(),
         dependent_types: false,
         callable_templates: Default::default(),
         type_structs: Default::default(),
+        map_to_bits_heads: Default::default(),
         literal_type_heads: Default::default(),
         overwritten_literal_types: Default::default(),
         hidden_templates: Vec::new(),
@@ -230,6 +243,7 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
         literal_type_context: super::LiteralTypeContext::Live,
         block_map_shadowed: false,
         forward_map_import: false,
+        native_map_import: false,
     })
 }
 
@@ -242,9 +256,12 @@ fn parse_outline_with_functions<'s>(
     let mut module = DslxOutline::default();
     let mut uses = Vec::new();
     let mut pending_domain = None;
+    let mut pending_to_bits = None;
+    let mut local_to_bits_trait = false;
     while !parser.peek(0).is_empty() {
         if parser.eat("#") {
             let inner = parser.eat("!");
+            let start = parser.pos;
             if !inner
                 && parser.peek(1) == "fuzz_domain"
                 && parser.peek(2) == "("
@@ -254,9 +271,27 @@ fn parse_outline_with_functions<'s>(
                 pending_domain = fuzz_domain_name(parser.peek(3));
             }
             parser.outline_group("[")?;
+            if !inner
+                && let [_, kind, open, args @ .., close, _] = &parser.tokens[start..parser.pos]
+                && kind.text == "derive"
+                && open.text == "("
+                && close.text == ")"
+            {
+                // DSLX validates every trait in a derive list when the method
+                // is used. Other traits may be valid module-local markers.
+                if args.iter().any(|t| t.text == "ToBits") {
+                    pending_to_bits =
+                        Some(if args.iter().all(|t| matches!(t.text, "," | "ToBits")) {
+                            ToBitsDerive::Builtin
+                        } else {
+                            ToBitsDerive::CheckNative
+                        });
+                }
+            }
             continue;
         }
         let domain = pending_domain.take();
+        let derives_to_bits = pending_to_bits.take();
         let public = parser.eat("pub");
         match parser.peek(0) {
             "import" => {
@@ -295,6 +330,9 @@ fn parse_outline_with_functions<'s>(
                         OutlineKind::Alias(ty)
                     }
                     "struct" => {
+                        if let (Some(derive), Some(imported)) = (derives_to_bits, &mut imported) {
+                            imported.derives_to_bits.insert(name.clone(), derive);
+                        }
                         parser.expect("{")?;
                         let fields = parser.list("}", |p| {
                             let field = p.outline_identifier()?;
@@ -371,7 +409,27 @@ fn parse_outline_with_functions<'s>(
                 }
                 module.declarations.insert(name, declaration);
             }
-            "impl" | "trait" => parser.skip_outline_item(true)?,
+            "impl" => {
+                parser.pos += 1;
+                let owner = parser.outline_identifier()?;
+                if parser.peek(0) == "<" {
+                    parser.outline_group("<")?;
+                }
+                let start = parser.pos;
+                parser.skip_outline_item(true)?;
+                // Only direct impl members can conflict with the generated
+                // method. A nested function-local type or constant is harmless.
+                if let Some(imported) = &mut imported
+                    && imported.derives_to_bits.contains_key(&owner)
+                    && impl_declares_to_bits(&parser.tokens[start..parser.pos])
+                {
+                    imported.derives_to_bits.remove(&owner);
+                }
+            }
+            "trait" => {
+                local_to_bits_trait |= parser.peek(1) == "ToBits";
+                parser.skip_outline_item(true)?;
+            }
             "const" => {
                 parser.pos += 1;
                 let name = parser.outline_identifier()?;
@@ -384,8 +442,31 @@ fn parse_outline_with_functions<'s>(
             _ => return Err(parser.error("expected a DSLX module declaration")),
         }
     }
+    // Native trait lookup checks named traits of the declaring module before
+    // builtin stubs, independent of source order. A use or import alias does
+    // not declare a trait.
+    if local_to_bits_trait && let Some(imported) = imported {
+        imported
+            .derives_to_bits
+            .values_mut()
+            .for_each(|derive| *derive = ToBitsDerive::CheckNative);
+    }
     module.uses = uses.into_iter().map(|path| path.components).collect();
     Ok(module)
+}
+
+/// An impl's value and type members share the generated method's name.
+fn impl_declares_to_bits(tokens: &[Token<'_>]) -> bool {
+    let mut braces = 0;
+    tokens.windows(2).any(|pair| {
+        match pair[0].text {
+            "{" => braces += 1,
+            "}" => braces -= 1,
+            "fn" | "type" | "const" if braces == 1 => return pair[1].text == "to_bits",
+            _ => { /* Other tokens do not open a scope or declare a member. */ }
+        }
+        false
+    })
 }
 
 /// DSLX accepts arbitrary strings for derived fuzz-domain names. Keep the

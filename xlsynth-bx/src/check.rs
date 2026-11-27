@@ -44,6 +44,7 @@ mod scope;
 pub(crate) use scope::TuplePatternLayout;
 mod source_patterns;
 mod struct_parametrics;
+mod to_bits;
 use struct_parametrics::{BoundStructArgument, StructApplication, StructArguments};
 mod test_program;
 mod timing;
@@ -2161,6 +2162,7 @@ pub(crate) fn check_sources_with_tests(
         structs.definitions.push(StructDef {
             name: def.name.clone(),
             public: def.public,
+            derives_to_bits: def.derives_to_bits,
             // Reserve local indices before reflection appends imported layouts.
             fields: Vec::new(),
             value_parametrics: Vec::new(),

@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 mod native_files;
 
 use super::runfiles::XlsRunfiles;
-use crate::ast::UsePath;
+use crate::ast::{StructParametricKind, UsePath};
 use crate::check::{MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE};
 use crate::parser::dslx_tokens;
-use crate::parser::outline::{ImportedTypeDeclarations, outline_import};
+use crate::parser::outline::{ImportedTypeDeclarations, ToBitsDerive, outline_import};
 use crate::parser::source_bytes::decode_dslx_source;
 use crate::{DslxOutline, OutlineKind, OutlineShape, OutlineType};
 pub(super) use native_files::NativeSourceFiles;
@@ -273,12 +273,13 @@ impl<'a> DslxSourceLoader<'a> {
         self.locator.search.file(subject, "bx").map(|p| p.physical)
     }
 
-    /// Identify angle lists belonging to public DSLX functions. Missing imports
-    /// receive their ordinary diagnostic when all uses are checked.
-    pub(crate) fn template_names(
+    /// Disambiguate public DSLX function templates and directly imported
+    /// types in BX expressions. Missing imports are diagnosed during checking.
+    pub(crate) fn parser_bindings(
         &mut self,
         path: &UsePath,
         names: &mut BTreeSet<String>,
+        type_structs: &mut BTreeMap<String, Vec<StructParametricKind>>,
     ) -> Result<(), String> {
         let Ok(binding) = self.locator.use_binding(&path.components) else {
             return Ok(());
@@ -286,16 +287,26 @@ impl<'a> DslxSourceLoader<'a> {
         let subject = binding.subject();
         self.graph
             .capture(vec![subject.to_owned()], &mut self.locator)?;
-        let templates = &self.graph.modules[subject].outline.function_parametrics;
+        let outline = &self.graph.modules[subject].outline;
+        let templates = &outline.function_parametrics;
         match binding {
             Binding::Module(_) => {
                 let head = path.binding().expect("validated use");
                 names.extend(templates.keys().map(|name| format!("{head}::{name}")));
             }
-            Binding::Member(id) if templates.contains_key(&id.name) => {
-                names.insert(id.name);
+            Binding::Member(id) => {
+                if templates.contains_key(&id.name) {
+                    names.insert(id.name);
+                } else if outline
+                    .declarations
+                    .get(&id.name)
+                    .is_some_and(|decl| decl.has_public_spelling(&id.name))
+                {
+                    // Imported native struct applications use value argument
+                    // grammar.
+                    type_structs.insert(id.name, Vec::new());
+                }
             }
-            Binding::Member(_) => { /* Non-template members keep their expression grammar. */ }
         }
         Ok(())
     }
@@ -734,6 +745,15 @@ impl OutlineGraph {
     pub(super) fn return_type(&self, subject: &str, function: &str) -> Option<ResolvedShape> {
         let ty = self.modules.get(subject)?.outline.functions.get(function)?;
         Some(self.resolve_type(subject, ty))
+    }
+
+    pub(super) fn to_bits_derive(&self, subject: &str, name: &str) -> Option<ToBitsDerive> {
+        self.modules
+            .get(subject)?
+            .type_declarations
+            .derives_to_bits
+            .get(name)
+            .copied()
     }
 
     pub(super) fn fields(&self, id: &DeclId) -> Option<&[(String, OutlineType)]> {

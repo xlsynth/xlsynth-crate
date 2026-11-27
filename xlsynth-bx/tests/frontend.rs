@@ -16,6 +16,8 @@ mod bits_array_casts;
 mod builtins;
 #[path = "frontend/counted_for.rs"]
 mod counted_for;
+#[path = "frontend/derive_to_bits.rs"]
+mod derive_to_bits;
 #[path = "support/directed_expr_eval.rs"]
 mod directed_expr_eval;
 #[path = "support/expr_eval.rs"]

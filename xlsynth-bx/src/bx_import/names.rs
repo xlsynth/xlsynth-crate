@@ -87,6 +87,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         out.structs.push(StructDef {
             name: names.declared(&def.name),
             public: def.public,
+            derives_to_bits: def.derives_to_bits,
             type_params: def.type_params.clone(),
             value_parametrics,
             fields: scope.fields(&def.fields)?,

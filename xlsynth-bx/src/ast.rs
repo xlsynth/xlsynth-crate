@@ -232,6 +232,9 @@ pub struct Param {
 pub struct StructDef {
     pub name: String,
     pub public: bool,
+    /// The declaration requests a derived DSLX `to_bits` method. Its concrete
+    /// receiver and nested field types are validated on use.
+    pub derives_to_bits: bool,
     /// Type parameters in declaration order.
     pub type_params: Vec<String>,
     /// Compile-time values in declaration order.
@@ -624,7 +627,7 @@ pub enum Expr {
     },
     /// An all-zero value of the specified type, including aggregate types.
     Zero(Type),
-    /// A DSLX builtin invocation with explicit type arguments.
+    /// A DSLX builtin invocation or a derived `to_bits` method call.
     TypeBuiltin {
         name: String,
         types: Vec<Type>,

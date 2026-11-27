@@ -482,6 +482,15 @@ impl ImportResolver {
         self.structs.definitions()
     }
 
+    /// Validate nontrivial trait resolution only when BX uses the concrete
+    /// layout. An unrelated import can legally contain a failing lazy derive.
+    pub(crate) fn check_to_bits_derive(&mut self, name: &str, width: usize) -> Result<(), String> {
+        if !self.structs.needs_to_bits_probe(name) {
+            return Ok(());
+        }
+        self.with_imports(|structs, data| structs.check_to_bits_derive(name, width, data))
+    }
+
     /// Read the bindings of a concrete instance through its source use name.
     pub(crate) fn struct_parametric_values(
         &self,
@@ -885,6 +894,7 @@ fn probe_call(
 }
 
 /// A DSLX expression whose resolved type is being reflected into BX.
+#[derive(Clone)]
 pub(crate) struct TypeWitness {
     pub(crate) imports: String,
     pub(crate) params: String,

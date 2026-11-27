@@ -758,7 +758,7 @@ impl<'a> Graph<'a> {
     ) -> Result<Module, String> {
         let mut names = BTreeSet::new();
         let mut type_structs = BTreeMap::new();
-        if source.contains('<') {
+        if source.contains('<') || source.contains("to_bits") && source.contains("::") {
             for path in uses {
                 let head = path.binding().expect("validated use");
                 match &bindings[head] {
@@ -766,7 +766,7 @@ impl<'a> Graph<'a> {
                         if !e.parametrics.is_empty() {
                             names.insert(head.to_owned());
                         }
-                        if !e.struct_params.is_empty() {
+                        if e.is_struct || e.can_qualify_member {
                             type_structs.insert(head.to_owned(), e.struct_params.clone());
                         }
                     }
@@ -783,11 +783,16 @@ impl<'a> Graph<'a> {
                             }
                         }
                     }
-                    Binding::Dslx(_) => self.lookup.native.template_names(path, &mut names)?,
+                    Binding::Dslx(_) => {
+                        self.lookup
+                            .native
+                            .parser_bindings(path, &mut names, &mut type_structs)?
+                    }
                 }
             }
         }
-        parser::parse_with_imports(source, &names, &type_structs)
+        let native_map_import = matches!(bindings.get("map"), Some(Binding::Dslx(_)));
+        parser::parse_with_imports(source, &names, &type_structs, native_map_import)
     }
 
     /// Collect source references before BX imports lose their local spellings.

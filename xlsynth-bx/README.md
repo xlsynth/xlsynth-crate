@@ -464,6 +464,36 @@ parameter's type or default can use earlier bindings, as in
 `struct Stamp<N: u32, T, Init: T> { data: T[N] }`. Every binding
 participates in type identity, even when it does not appear in a field.
 
+### Packing a struct with ToBits
+
+Put `#[derive(ToBits)]` on a struct to give its values a `.to_bits()` method.
+It concatenates fields in declaration order, with the first field at the
+most-significant end and no padding.
+
+```text
+#[derive(ToBits)]
+struct Header { kind: u3, urgent: bool, tag: u4 }
+
+const H = Header { kind: u3:5, urgent: true, tag: u4:2 };
+const_assert!(H.to_bits() == u8:0xb2);
+```
+
+Tuples and arrays pack in ascending index order. Signed bits and enums keep
+their bit patterns. Nested structs can derive `ToBits` too. Empty fields
+contribute zero bits, and an entirely empty layout yields `uN[0]`. The
+result width follows the concrete field types of each struct specialization.
+A field named `to_bits` remains accessible as `value.to_bits`, and conflicts
+with a call to the derived method.
+
+Use `map(headers, Header::to_bits)` to pack an array of headers. BX accepts
+this callback immediately after the struct declaration. For compatibility
+with the pinned DSLX compiler, call `.to_bits()` on a concrete receiver
+before using the named callback so the compiler has created the method.
+
+BX recognizes the derive on structs from both `.bx` and `.x` modules. To
+use a handwritten DSLX `to_bits` implementation, call an exported DSLX
+function that invokes the method.
+
 ### Struct updates
 
 Use `..base` at the end of a struct literal to copy fields that the literal
@@ -1031,7 +1061,7 @@ selected bit says whether all bounds checks associated with that value hold.
 
 ## Compile and link
 
-Use `parse_module` to inspect BX syntax without reading imports. For a source file with library imports, `parse_module_with_options` uses the exported signatures to distinguish multi-callback template calls from comma-separated comparisons. Pass the parsed module and the same search paths to `check_module_with_options` to inspect its checked declarations. The checker resolves BX and DSLX module imports and accepts signatures for prelinked externs. Pass the checked result to `lower_module`, or use `compile` for all three stages. Supply a PIR package containing your externs, or `empty_package("design")` when all calls use local definitions or imports.
+Use `parse_module` to inspect BX syntax without reading imports. For a source file with library imports, `parse_module_with_options` uses the exported declarations to distinguish multi-callback template calls from comma-separated comparisons. It also resolves whether the qualifier in `map(xs, head::to_bits)` denotes a directly imported type or a module exporting a function. Pass the parsed module and the same search paths to `check_module_with_options` to inspect its checked declarations. The checker resolves BX and DSLX module imports and accepts signatures for prelinked externs. Pass the checked result to `lower_module`, or use `compile` for all three stages. Supply a PIR package containing your externs, or `empty_package("design")` when all calls use local definitions or imports.
 
 ```rust
 use xlsynth_bx::{compile, ResetBehavior};

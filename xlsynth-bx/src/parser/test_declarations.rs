@@ -14,6 +14,8 @@ impl Parser<'_> {
             self.value_context = ValueContext::DslxItem;
             TestKind::Function
         } else if self.eat("block") {
+            // A clocked test checks its input types and actions in block scope.
+            self.forward_callables = true;
             TestKind::Block
         } else if quickcheck {
             return Err(self.error("expected private block after #[quickcheck]"));
@@ -56,6 +58,7 @@ impl Parser<'_> {
         self.expect("{")?;
         let statements = self.test_body(kind, quickcheck)?;
         self.value_context = ValueContext::Block;
+        self.forward_callables = false;
         Ok(TestDecl {
             kind,
             name,
