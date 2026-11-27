@@ -15,6 +15,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use xlsynth_pir::IrValue;
 
+/// Select the independently typed operands to retain while preparing lexical
+/// scopes.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PrepareOperands {
+    ScopesOnly,
+    AggregateAnchors,
+    CallArgument,
+}
+
 /// An elaborated let initializer and the unsized literals retained at its
 /// leaves.
 pub(super) struct BindingInitializer {
@@ -623,14 +632,16 @@ impl BodyChecker<'_, '_> {
     /// checking its literal constraints. The aliases keep the initializer's
     /// value and width available through both inference and elaboration.
     pub(super) fn dslx_argument(&mut self, expr: &Expr, ty: &Type) -> Result<TypedExpr, String> {
-        self.with_prepared_value(expr, |checker, arg| {
+        self.with_scope_aliases(|checker| {
+            let arg =
+                checker.prepare_scopes(expr, PrepareOperands::CallArgument, &mut |_| Ok(()))?;
             super::check_argument_widths(
-                arg,
+                &arg,
                 ty,
                 Some(&checker.inferred_bindings),
                 Some(&|| checker.zero_calls_function()),
             )?;
-            checker.expr(arg, Some(ty))
+            checker.expr(&arg, Some(ty))
         })
     }
 
@@ -689,7 +700,7 @@ impl BodyChecker<'_, '_> {
     /// its trailing expression. Other edges (such as an index or a nested
     /// call's arguments) have independent contexts and are checked normally.
     pub(super) fn prepare_value<'e>(&mut self, expr: &'e Expr) -> Result<Cow<'e, Expr>, String> {
-        self.prepare_scopes(expr, false, &mut |_| Ok(()))
+        self.prepare_scopes(expr, PrepareOperands::ScopesOnly, &mut |_| Ok(()))
     }
 
     /// Keep an implicit selected value available as a parametric witness.
@@ -782,7 +793,9 @@ impl BodyChecker<'_, '_> {
         self.with_scope_aliases(|checker| {
             let prepared = items
                 .iter()
-                .map(|expr| checker.prepare_scopes(expr, true, &mut |_| Ok(())))
+                .map(|expr| {
+                    checker.prepare_scopes(expr, PrepareOperands::AggregateAnchors, &mut |_| Ok(()))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let expressions = prepared.iter().map(|e| e.as_ref()).collect::<Vec<_>>();
             check(checker, &expressions)
@@ -794,7 +807,20 @@ impl BodyChecker<'_, '_> {
     fn prepare_scopes<'e>(
         &mut self,
         expr: &'e Expr,
-        capture_anchors: bool,
+        mode: PrepareOperands,
+        before_scope: &mut dyn FnMut(&mut Self) -> Result<(), String>,
+    ) -> Result<Cow<'e, Expr>, String> {
+        // Nested aggregates can reach the expression depth limit even when
+        // the caller started the check on a small stack.
+        stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
+            self.prepare_scope_operands(expr, mode, before_scope)
+        })
+    }
+
+    fn prepare_scope_operands<'e>(
+        &mut self,
+        expr: &'e Expr,
+        mode: PrepareOperands,
         before_scope: &mut dyn FnMut(&mut Self) -> Result<(), String>,
     ) -> Result<Cow<'e, Expr>, String> {
         if let Expr::ConstIf {
@@ -807,8 +833,7 @@ impl BodyChecker<'_, '_> {
             let arm = self.const_if_arm(condition, then_value, else_value)?;
             // Parents use Cow::Owned to detect that their child was replaced.
             return Ok(Cow::Owned(
-                self.prepare_scopes(arm, capture_anchors, before_scope)?
-                    .into_owned(),
+                self.prepare_scopes(arm, mode, before_scope)?.into_owned(),
             ));
         }
         if let Expr::UnrollMap(map) = expr {
@@ -827,7 +852,11 @@ impl BodyChecker<'_, '_> {
         // type now and use the same checked value during final elaboration.
         // A constructor with missing nominal arguments may need a sibling's
         // type first.
-        if capture_anchors
+        // A range computes its length at its own bound width before a call
+        // formal or another aggregate operand can widen its elements.
+        let capture_range =
+            mode != PrepareOperands::ScopesOnly && matches!(expr, Expr::Range { .. });
+        let capture_anchor = mode == PrepareOperands::AggregateAnchors
             && !matches!(
                 expr,
                 Expr::Bool(_)
@@ -842,8 +871,8 @@ impl BodyChecker<'_, '_> {
             && self.contextual_struct_constructor(expr).is_none()
             && self.reference_type(expr).is_none()
             && !crate::infer_literal::has_const_if_result(expr)
-            && self.has_concrete_element_type(expr)?
-        {
+            && self.has_concrete_element_type(expr)?;
+        if capture_range || capture_anchor {
             before_scope(self)?;
             let mut init = self.binding_initializer(expr, None, |checker, expr| {
                 let value = checker.expr(expr, None)?;
@@ -859,7 +888,7 @@ impl BodyChecker<'_, '_> {
             // A projection can supply a tuple shape while its literal members
             // still take their final width and signedness from another operand.
             if let Some(widths) = &mut init.widths {
-                widths.infer_at_use = true;
+                widths.enable_use_site_inference();
             }
             let value = self.share_scoped_value(init.value);
             let alias = self.capture_value_alias(None, value, init.widths);
@@ -869,7 +898,7 @@ impl BodyChecker<'_, '_> {
         match expr {
             Expr::For(fold) if fold.annotation.is_none() => {
                 let operands = self.with_dslx_value_context(|checker| {
-                    checker.prepare_loop_seed(&fold.seed, before_scope, |checker| {
+                    checker.prepare_loop_seed(&fold.seed, mode, before_scope, |checker| {
                         checker.validate_loop_binders(&fold.element, &fold.accumulator)?;
                         checker.counted_iteration(&fold.iterable, None)
                     })
@@ -883,10 +912,11 @@ impl BodyChecker<'_, '_> {
                 }
             }
             Expr::UnrollFor(fold) if fold.annotation.is_none() => {
-                let operands = self.prepare_loop_seed(&fold.seed, before_scope, |checker| {
-                    checker.validate_loop_binders(&fold.element, &fold.accumulator)?;
-                    checker.unroll_iteration(&fold.iterable, None, "unroll_for!")
-                })?;
+                let operands =
+                    self.prepare_loop_seed(&fold.seed, mode, before_scope, |checker| {
+                        checker.validate_loop_binders(&fold.element, &fold.accumulator)?;
+                        checker.unroll_iteration(&fold.iterable, None, "unroll_for!")
+                    })?;
                 if let Some((iterable, seed)) = operands {
                     let Expr::UnrollFor(fold) = prepared.to_mut() else {
                         unreachable!()
@@ -896,9 +926,7 @@ impl BodyChecker<'_, '_> {
                 }
             }
             Expr::Scope { statements, result } if !expr.needs_scope_preparation() => {
-                if let Cow::Owned(result) =
-                    self.prepare_scopes(result, capture_anchors, before_scope)?
-                {
+                if let Cow::Owned(result) = self.prepare_scopes(result, mode, before_scope)? {
                     prepared = Cow::Owned(Expr::Scope {
                         statements: statements.clone(),
                         result: Box::new(result),
@@ -912,9 +940,7 @@ impl BodyChecker<'_, '_> {
                     .pop()
                     .expect("one scope")
                     .into_owned();
-                if let Cow::Owned(nested) =
-                    self.prepare_scopes(&result, capture_anchors, before_scope)?
-                {
+                if let Cow::Owned(nested) = self.prepare_scopes(&result, mode, before_scope)? {
                     result = nested;
                 }
                 prepared = Cow::Owned(result);
@@ -923,13 +949,13 @@ impl BodyChecker<'_, '_> {
                 // The lexical initializers in a match arm use DSLX inference
                 // even if its enclosing block argument uses BX inference.
                 return self.with_dslx_value_context(|checker| {
-                    checker.prepare_scopes(expr, capture_anchors, before_scope)
+                    checker.prepare_scopes(expr, mode, before_scope)
                 });
             }
             Expr::Match { arms, .. } => {
                 for (index, arm) in arms.iter().enumerate() {
                     if let Cow::Owned(value) = self.with_match_bytecode(|checker| {
-                        checker.prepare_scopes(&arm.value, capture_anchors, before_scope)
+                        checker.prepare_scopes(&arm.value, mode, before_scope)
                     })? {
                         let Expr::Match { arms, .. } = prepared.to_mut() else {
                             unreachable!()
@@ -946,9 +972,7 @@ impl BodyChecker<'_, '_> {
                 ..
             } => {
                 for (i, item) in items.iter().enumerate() {
-                    if let Cow::Owned(item) =
-                        self.prepare_scopes(item, capture_anchors, before_scope)?
-                    {
+                    if let Cow::Owned(item) = self.prepare_scopes(item, mode, before_scope)? {
                         let (Expr::Tuple(items)
                         | Expr::Array(items)
                         | Expr::ArrayLiteral { members: items, .. }) = prepared.to_mut()
@@ -974,7 +998,9 @@ impl BodyChecker<'_, '_> {
                     .enumerate()
                     .map(|(i, (_, value))| (Some(i), value));
                 for (index, value) in base.chain(fields) {
-                    let Cow::Owned(value) = self.prepare_scopes(value, false, before_scope)? else {
+                    let Cow::Owned(value) =
+                        self.prepare_scopes(value, PrepareOperands::ScopesOnly, before_scope)?
+                    else {
                         continue;
                     };
                     let (Expr::Struct { fields, base, .. }
@@ -994,7 +1020,9 @@ impl BodyChecker<'_, '_> {
             Expr::Field { value, .. } | Expr::Index { value, .. } | Expr::Unary { value, .. } => {
                 // Only a member's complete expression supplies an anchor.
                 // Its internal operands still need their lexical scopes.
-                if let Cow::Owned(value) = self.prepare_scopes(value, false, before_scope)? {
+                if let Cow::Owned(value) =
+                    self.prepare_scopes(value, PrepareOperands::ScopesOnly, before_scope)?
+                {
                     let (Expr::Field { value: subject, .. }
                     | Expr::Index { value: subject, .. }
                     | Expr::Unary { value: subject, .. }) = prepared.to_mut()
@@ -1004,12 +1032,27 @@ impl BodyChecker<'_, '_> {
                     **subject = value;
                 }
             }
+            Expr::Range {
+                start,
+                limit,
+                inclusive,
+            } => {
+                let lo = self.prepare_scopes(start, PrepareOperands::ScopesOnly, before_scope)?;
+                let hi = self.prepare_scopes(limit, PrepareOperands::ScopesOnly, before_scope)?;
+                if matches!(lo, Cow::Owned(_)) || matches!(hi, Cow::Owned(_)) {
+                    prepared = Cow::Owned(Expr::Range {
+                        start: Box::new(lo.into_owned()),
+                        limit: Box::new(hi.into_owned()),
+                        inclusive: *inclusive,
+                    });
+                }
+            }
             Expr::Binary { op, left, right }
                 if has_common_bit_type(*op) || matches!(op, BinaryOp::Shl | BinaryOp::Shr) =>
             {
-                let lhs = self.prepare_scopes(left, false, before_scope)?;
+                let lhs = self.prepare_scopes(left, PrepareOperands::ScopesOnly, before_scope)?;
                 let rhs = if has_common_bit_type(*op) {
-                    self.prepare_scopes(right, false, before_scope)?
+                    self.prepare_scopes(right, PrepareOperands::ScopesOnly, before_scope)?
                 } else {
                     Cow::Borrowed(right.as_ref())
                 };
@@ -1026,8 +1069,8 @@ impl BodyChecker<'_, '_> {
                 then_value,
                 else_value,
             } => {
-                let lhs = self.prepare_scopes(then_value, capture_anchors, before_scope)?;
-                let rhs = self.prepare_scopes(else_value, capture_anchors, before_scope)?;
+                let lhs = self.prepare_scopes(then_value, mode, before_scope)?;
+                let rhs = self.prepare_scopes(else_value, mode, before_scope)?;
                 if matches!(lhs, Cow::Owned(_)) || matches!(rhs, Cow::Owned(_)) {
                     prepared = Cow::Owned(Expr::If {
                         condition: condition.clone(),
@@ -1103,11 +1146,19 @@ impl BodyChecker<'_, '_> {
     fn prepare_loop_seed(
         &mut self,
         seed: &Expr,
+        mode: PrepareOperands,
         before_scope: &mut dyn FnMut(&mut Self) -> Result<(), String>,
         check_iteration: impl Fn(&mut Self) -> Result<super::counted_for::Iteration, String>,
     ) -> Result<Option<(ForIterable, Expr)>, String> {
         let mut iteration = None;
-        let prepared = self.prepare_scopes(seed, false, &mut |checker| {
+        // An unannotated accumulator takes its type from the seed. A call
+        // formal can widen its elements once the range length is known.
+        let seed_mode = if mode == PrepareOperands::CallArgument {
+            mode
+        } else {
+            PrepareOperands::ScopesOnly
+        };
+        let prepared = self.prepare_scopes(seed, seed_mode, &mut |checker| {
             if iteration.is_none() {
                 before_scope(checker)?;
                 iteration = Some(check_iteration(checker)?);
@@ -1416,6 +1467,9 @@ impl BodyChecker<'_, '_> {
                     .map(|(i, (s, t))| field(i, s, t))
                     .collect::<Result<_, _>>()?,
             ),
+            (Type::Array { size: 0, .. }, Type::Array { .. }) => {
+                self.array_literal(&[], Some(target), false)?.1
+            }
             (
                 Type::Array {
                     element: source,
@@ -1865,6 +1919,11 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         Expr::Index {
             value: left,
             index: right,
+        }
+        | Expr::Range {
+            start: left,
+            limit: right,
+            ..
         }
         | Expr::Binary { left, right, .. } => {
             capture_names(left, aliases);

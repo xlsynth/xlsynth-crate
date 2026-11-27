@@ -759,14 +759,13 @@ struct MatchPatternSpellings {
     bindings: BTreeSet<String>,
 }
 
-/// An iterable being parsed, retaining expression heights through parentheses.
-enum ParsedIterable {
-    Array(ParsedExpr),
-    Range {
-        start: ParsedExpr,
-        limit: ParsedExpr,
-        inclusive: bool,
-    },
+/// A forward import can require both ordinary and builtin interpretations
+/// of a map call, including when both accept a range argument.
+#[derive(Clone, Copy, PartialEq)]
+enum MapOperandSyntax {
+    SpecializeRange,
+    OrdinaryArguments,
+    BuiltinOnly,
 }
 
 /// Map admits these callback spellings outside the ordinary expression grammar.
@@ -781,26 +780,6 @@ enum MapCallbackSyntax {
 struct ToBitsHead {
     is_type: bool,
     has_qualified_extern: bool,
-}
-
-impl ParsedIterable {
-    fn into_ast(self) -> (ForIterable, usize) {
-        match self {
-            Self::Array(value) => (ForIterable::Array(value.value), value.height),
-            Self::Range {
-                start,
-                limit,
-                inclusive,
-            } => (
-                ForIterable::Range {
-                    start: start.value,
-                    limit: limit.value,
-                    inclusive,
-                },
-                start.height.max(limit.height),
-            ),
-        }
-    }
 }
 
 /// Source distinctions needed for DSLX postfix and comparison precedence.
@@ -836,6 +815,26 @@ impl ParsedExpr {
             value,
             height: 1,
             spelling: ExprSpelling::Ordinary,
+        }
+    }
+
+    /// Preserve direct range bounds for consumers that iterate without first
+    /// constructing the array.
+    fn into_iterable(self) -> (ForIterable, usize) {
+        match self.value {
+            Expr::Range {
+                start,
+                limit,
+                inclusive,
+            } => (
+                ForIterable::Range {
+                    start: *start,
+                    limit: *limit,
+                    inclusive,
+                },
+                self.height - 1,
+            ),
+            expr => (ForIterable::Array(expr), self.height),
         }
     }
 }
@@ -3050,9 +3049,13 @@ impl<'s> Parser<'s> {
         self.full_expr(Braces::Struct)
     }
 
+    fn full_expr(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
+        self.full_expr_at(0, braces)
+    }
+
     /// DSLX ends a full expression at the closing brace of a standalone scope
     /// or the closing parenthesis of a fold that begins that expression.
-    fn full_expr(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
+    fn full_expr_at(&mut self, min: u8, braces: Braces) -> Result<ParsedExpr, String> {
         if self.peek(0) == "{" && (self.in_value_body() || self.peek(1) == "let") {
             self.pos += 1;
             return self.nested(Self::expression_scope);
@@ -3066,7 +3069,7 @@ impl<'s> Parser<'s> {
             self.pos += 1;
             return self.nested(Self::counted_for);
         }
-        self.expr_at(0, braces)
+        self.expr_at(min, braces)
     }
 
     /// Parse the condition and the opening brace. An unparenthesized name here
@@ -3335,7 +3338,7 @@ impl<'s> Parser<'s> {
                     return true;
                 }
                 if first == "}" {
-                    return matches!(next, "." | "[" | "as" | "{")
+                    return matches!(next, "." | "[" | "as" | "{" | ".." | "..=")
                         || BinaryOp::from_spelling(next).is_some();
                 }
                 let field = is_function_identifier(first)
@@ -3385,7 +3388,7 @@ impl<'s> Parser<'s> {
                     depth -= 1;
                     if depth == 0 && brace_offset.is_some() {
                         let after = self.peek(offset + 2);
-                        if !matches!(after, "{" | "." | "[" | "as")
+                        if !matches!(after, "{" | "." | "[" | "as" | ".." | "..=")
                             && BinaryOp::from_spelling(after).is_none()
                         {
                             return false;
@@ -3451,7 +3454,7 @@ impl<'s> Parser<'s> {
 
     fn counted_for_contents(&mut self) -> Result<ParsedExpr, String> {
         let head = self.loop_head(PatternSite::Binding)?;
-        let (iterable, height) = self.for_iterable(Braces::Body)?.into_ast();
+        let (iterable, height) = self.for_iterable(Braces::Body)?.into_iterable();
         self.expect("{")?;
         let body = self.with_name_scope(|p| {
             for name in head.names {
@@ -3490,60 +3493,55 @@ impl<'s> Parser<'s> {
         result
     }
 
-    /// Parse the range operator below all binary operators. Parentheses can
-    /// enclose an entire range, one endpoint, or an array-producing expression.
-    fn for_iterable(&mut self, braces: Braces) -> Result<ParsedIterable, String> {
+    /// Iterables also admit braced value scopes in BX block bodies. Keep that
+    /// grammar through grouping and restore ordinary precedence for
+    /// projections.
+    fn for_iterable(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
         let start = if self.peek(0) == "(" && !self.starts_array_literal_type() && self.eat("(") {
-            let grouped = self.nested(|p| {
+            let mut grouped = self.nested(|p| {
                 p.parenthesized(
                     |p| p.for_iterable(Braces::Struct),
-                    |p, fields| {
-                        let items = fields
-                            .into_iter()
-                            .map(|field| match field {
-                                ParsedIterable::Array(expr) => Ok(expr),
-                                ParsedIterable::Range { .. } => {
-                                    Err(p.error("expected a tuple member expression"))
-                                }
-                            })
-                            .collect::<Result<_, _>>()?;
-                        p.aggregate(items, Expr::Tuple).map(ParsedIterable::Array)
-                    },
+                    |p, fields| p.aggregate(fields, Expr::Tuple),
                 )
             })?;
-            let ParsedIterable::Array(mut value) = grouped else {
-                return Ok(grouped);
-            };
-            value.spelling = ExprSpelling::Parenthesized;
-            self.expr_tail(value, 0, braces)?
+            grouped.spelling = ExprSpelling::Parenthesized;
+            self.expr_tail(grouped, 1, braces)?
         } else if self.eat("{") {
             // A braced iterable introduces its own lexical expression scope.
             self.nested(Self::expression_scope)?
         } else if braces == Braces::UnrollIterable {
             // A fold at the start of an unrolled range is an operand, so its
             // postfix or binary operators still belong to that endpoint.
-            self.expr_at(0, braces)?
+            self.expr_at(1, braces)?
         } else {
-            self.full_expr(braces)?
+            self.full_expr_at(1, braces)?
         };
-        if !matches!(self.peek(0), ".." | "..=") {
-            return Ok(ParsedIterable::Array(start));
+        self.range_tail(start, braces)
+    }
+
+    /// A range binds below logical OR. Parsing its limit above range
+    /// precedence leaves a second unparenthesized range operator unconsumed.
+    fn range_tail(&mut self, start: ParsedExpr, braces: Braces) -> Result<ParsedExpr, String> {
+        let inclusive = self.eat("..=");
+        if !inclusive && !self.eat("..") {
+            return Ok(start);
         }
-        let inclusive = self.peek(0) == "..=";
-        self.pos += 1;
         let limit = self.expr_at(
-            0,
+            1,
             if braces == Braces::UnrollIterable {
                 Braces::Body
             } else {
                 braces
             },
         )?;
-        Ok(ParsedIterable::Range {
-            start,
-            limit,
-            inclusive,
-        })
+        self.compose(
+            start.height.max(limit.height),
+            Expr::Range {
+                start: Box::new(start.value),
+                limit: Box::new(limit.value),
+                inclusive,
+            },
+        )
     }
 
     /// In blocks, `for` is also a legal legacy name. A parenthesized binder
@@ -3575,7 +3573,7 @@ impl<'s> Parser<'s> {
     /// a DSLX-style unrolled fold.
     fn unroll_for(&mut self) -> Result<ParsedExpr, String> {
         let head = self.loop_head(PatternSite::UnrolledLoop)?;
-        let (iterable, height) = self.for_iterable(Braces::UnrollIterable)?.into_ast();
+        let (iterable, height) = self.for_iterable(Braces::UnrollIterable)?.into_iterable();
         let body = self.unrolled_body(head.names)?;
         self.expect("(")?;
         let seed = self.expr()?;
@@ -3614,7 +3612,7 @@ impl<'s> Parser<'s> {
             PatternSite::UnrolledLoop,
         )?;
         self.expect("in")?;
-        let (iterable, height) = self.for_iterable(Braces::Body)?.into_ast();
+        let (iterable, height) = self.for_iterable(Braces::Body)?.into_iterable();
         let body = self.unrolled_body(names)?;
         self.compose(
             height.max(body.height),
@@ -3799,7 +3797,11 @@ impl<'s> Parser<'s> {
                 let Some(op) =
                     BinaryOp::from_spelling(self.peek(0)).filter(|op| op.precedence() >= min)
                 else {
-                    return Ok(left);
+                    return if min == 0 {
+                        self.range_tail(left, braces)
+                    } else {
+                        Ok(left)
+                    };
                 };
                 if op.is_comparison()
                     && left.spelling != ExprSpelling::Parenthesized
@@ -3975,13 +3977,18 @@ impl<'s> Parser<'s> {
             if name == "map" && self.peek(0) != ")" {
                 let lambda = self.has_lambda_argument();
                 if lambda || self.dslx_value_grammar() {
-                    return self.map_call(name, lambda, false);
+                    let syntax = if self.map_shadowed() {
+                        MapOperandSyntax::OrdinaryArguments
+                    } else {
+                        MapOperandSyntax::SpecializeRange
+                    };
+                    return self.map_call(name, lambda, syntax);
                 }
                 if !self.map_shadowed() {
                     if self.forward_map_import {
                         return self.map_before_use(name);
                     }
-                    return self.map_call(name, false, false);
+                    return self.map_call(name, false, MapOperandSyntax::SpecializeRange);
                 }
             }
             let args = self.list(")", Self::expr)?;
@@ -4054,16 +4061,49 @@ impl<'s> Parser<'s> {
         Ok(ParsedExpr::leaf(self.named_value(name)?))
     }
 
+    /// A range following a bare conditional belongs inside its unary operand
+    /// in DSLX. Other binary tails retain BX's existing unary precedence.
+    fn unary_conditional_has_range_tail(&self, braces: Braces) -> bool {
+        if matches!(self.peek(0), ".." | "..=") {
+            return true;
+        }
+        if BinaryOp::from_spelling(self.peek(0)).is_none() && self.peek(0) != "as" {
+            return false;
+        }
+        let mut depth = 0;
+        for (_, token) in self.expression_lookahead(self.pos) {
+            match token.text {
+                ".." | "..=" if depth == 0 => return true,
+                ";" | "," | ")" | "]" | "}" | "=>" if depth == 0 => return false,
+                "{" if depth == 0 && braces != Braces::Struct => return false,
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth -= 1,
+                _ => { /* Ordinary operands and operators can precede the range. */ }
+            }
+        }
+        false
+    }
+
     /// DSLX parses a bare conditional under a unary operator as a full
     /// expression. An immediate field or index instead ends that expression
     /// and attaches to the conditional before applying the unary operator.
     fn unary_operand(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
-        if !self.starts_const_if() {
+        let kind = if self.starts_const_if() {
+            self.pos += 2;
+            ConditionalKind::Const
+        } else if (self.dslx_value_grammar()
+            || self.expression_grammar == ExpressionGrammar::DslxOperand)
+            && self.eat("if")
+        {
+            ConditionalKind::Runtime
+        } else {
             return self.expr_at(11, braces);
-        }
-        self.pos += 2;
+        };
         self.nested(|p| {
-            let mut conditional = p.if_expr(ConditionalKind::Const)?;
+            let mut conditional = p.if_expr(kind)?;
+            if kind == ConditionalKind::Runtime && !p.unary_conditional_has_range_tail(braces) {
+                return p.expr_tail(conditional, 11, braces);
+            }
             if matches!(p.peek(0), "." | "[") {
                 conditional.spelling = ExprSpelling::ConditionalUnaryOperand;
                 p.expr_tail(conditional, 11, braces)
@@ -4501,7 +4541,12 @@ impl<'s> Parser<'s> {
         self.pos = start;
         self.position_cursor = position_start;
         self.forward_map_import = false;
-        let builtin = self.map_call(target.clone(), false, ordinary.is_err());
+        let syntax = if ordinary.is_err() {
+            MapOperandSyntax::BuiltinOnly
+        } else {
+            MapOperandSyntax::OrdinaryArguments
+        };
+        let builtin = self.map_call(target.clone(), false, syntax);
         self.forward_map_import = true;
         match ordinary {
             Ok(args) => {
@@ -4543,8 +4588,8 @@ impl<'s> Parser<'s> {
                             self.compose(height, Expr::Call { name: target, args })
                         };
                     }
-                    // A range operand cannot also parse as an ordinary
-                    // argument.
+                    // A specialized callback cannot be passed as an ordinary
+                    // value argument.
                     Ok(_) => return Err(self.error("expected ordinary map arguments")),
                     Err(_) => (None, 0),
                 };
@@ -4561,26 +4606,39 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// Accept a range in the first operand and an inline lambda in the second.
-    /// Calls with ordinary arguments retain their usual grammar and resolution.
+    /// Preserve direct range bounds and accept inline or specialized callbacks
+    /// when the call resolves to the builtin.
     fn map_call(
         &mut self,
         target: String,
         lambda: bool,
-        builtin_only: bool,
+        syntax: MapOperandSyntax,
     ) -> Result<ParsedExpr, String> {
         let iterable = self.with_value_grammar(|p| p.for_iterable(Braces::Struct))?;
         let callback = self.map_callback_syntax();
         if !lambda
-            && !builtin_only
+            && syntax != MapOperandSyntax::BuiltinOnly
             && matches!(callback, MapCallbackSyntax::Ordinary)
-            && let ParsedIterable::Array(first) = iterable
         {
-            let mut args = vec![first];
-            if !self.eat(")") {
+            let rest = if self.eat(")") {
+                Vec::new()
+            } else {
                 self.expect(",")?;
-                args.extend(self.list(")", Self::expr)?);
+                self.list(")", Self::expr)?
+            };
+            if syntax == MapOperandSyntax::SpecializeRange
+                && matches!(iterable.value, Expr::Range { .. })
+                && let [
+                    ParsedExpr {
+                        value: Expr::Name(callback),
+                        ..
+                    },
+                ] = rest.as_slice()
+            {
+                return self.named_map(target, iterable, callback.clone());
             }
+            let mut args = vec![iterable];
+            args.extend(rest);
             return self.aggregate(args, |args| Expr::Call { name: target, args });
         }
         self.expect(",")?;
@@ -4598,16 +4656,7 @@ impl<'s> Parser<'s> {
                     "expected a named map function",
                 ));
             };
-            let (iterable, height) = iterable.into_ast();
-            self.compose(
-                height,
-                Expr::NamedMap {
-                    target,
-                    iterable: Box::new(iterable),
-                    callback,
-                    parametrics: Vec::new(),
-                },
-            )?
+            self.named_map(target, iterable, callback)?
         } else if self.value_context == ValueContext::Block {
             self.block_map_lambda(iterable)?
         } else {
@@ -4616,6 +4665,26 @@ impl<'s> Parser<'s> {
         self.eat(",");
         self.expect(")")?;
         Ok(mapped)
+    }
+
+    /// Build a map whose iterable syntax requires builtin resolution and
+    /// whose callback names a function without explicit parametrics.
+    fn named_map(
+        &self,
+        target: String,
+        iterable: ParsedExpr,
+        callback: String,
+    ) -> Result<ParsedExpr, String> {
+        let (iterable, height) = iterable.into_iterable();
+        self.compose(
+            height,
+            Expr::NamedMap {
+                target,
+                iterable: Box::new(iterable),
+                callback,
+                parametrics: Vec::new(),
+            },
+        )
     }
 
     /// Parse lookahead for grouped or bare named callbacks. A two-component
@@ -4686,7 +4755,7 @@ impl<'s> Parser<'s> {
     fn map_to_bits(
         &mut self,
         target: String,
-        iterable: ParsedIterable,
+        iterable: ParsedExpr,
         separator: usize,
     ) -> Result<ParsedExpr, String> {
         if self.eat("(") {
@@ -4704,7 +4773,7 @@ impl<'s> Parser<'s> {
         };
         self.expect("::")?;
         self.expect("to_bits")?;
-        let (iterable, height) = iterable.into_ast();
+        let (iterable, height) = iterable.into_iterable();
         // Only the generated body sees this binder. The receiver type and
         // iterable still resolve in the surrounding scope.
         let parameter = "receiver".to_owned();
@@ -4729,7 +4798,7 @@ impl<'s> Parser<'s> {
     fn specialized_named_map(
         &mut self,
         target: String,
-        iterable: ParsedIterable,
+        iterable: ParsedExpr,
     ) -> Result<ParsedExpr, String> {
         if self.eat("(") {
             let map = self.nested(|p| p.specialized_named_map(target, iterable))?;
@@ -4739,7 +4808,7 @@ impl<'s> Parser<'s> {
         let callback = self.name_or_qualified_member()?;
         self.eat_turbofish();
         self.expect("<")?;
-        let (iterable, mut height) = iterable.into_ast();
+        let (iterable, mut height) = iterable.into_iterable();
         let parametrics = self.parametric_arguments(&mut height)?;
         self.compose(
             height,
@@ -4755,7 +4824,7 @@ impl<'s> Parser<'s> {
     /// The module lexer used BX rules here. Re-lex the callback once using
     /// function rules, including any nested map lambdas, then resume the BX
     /// token stream at the call's closing parenthesis or trailing comma.
-    fn block_map_lambda(&mut self, iterable: ParsedIterable) -> Result<ParsedExpr, String> {
+    fn block_map_lambda(&mut self, iterable: ParsedExpr) -> Result<ParsedExpr, String> {
         let mut depth = 0usize;
         let end = self.tokens[self.pos..]
             .iter()
@@ -4822,7 +4891,7 @@ impl<'s> Parser<'s> {
 
     /// Parse a unary map lambda in DSLX's pure expression grammar. An
     /// explicit return annotation requires a braced body.
-    fn map_lambda(&mut self, iterable: ParsedIterable) -> Result<ParsedExpr, String> {
+    fn map_lambda(&mut self, iterable: ParsedExpr) -> Result<ParsedExpr, String> {
         if self.eat("(") {
             let mapped = self.nested(|parser| parser.map_lambda(iterable))?;
             self.expect(")")?;
@@ -4846,7 +4915,7 @@ impl<'s> Parser<'s> {
             };
             Ok((parameter_type, result_type, body))
         })?;
-        let (iterable, height) = iterable.into_ast();
+        let (iterable, height) = iterable.into_iterable();
         self.compose(
             height.max(body.height),
             Expr::Map(Box::new(MapExpr {
@@ -5333,6 +5402,8 @@ pub(crate) fn uses_only_const_assert_operands(expr: &str, constant_names: &[Stri
                         | "uN"
                         | "sN"
                         | "!"
+                        | ".."
+                        | "..="
                         | ":"
                         | "("
                         | ")"
@@ -7285,7 +7356,7 @@ fn test(x: S) -> u8 {
 
     #[test]
     fn struct_splat_must_end_the_constructor() {
-        for tail in ["..x,", "..x, a: u8:0", "..x, ..x", "a: u8:0 ..x"] {
+        for tail in ["..x,", "..x, a: u8:0", "..x, ..x"] {
             let source = format!("struct S {{ a: u8 }} fn test(x: S) -> S {{ S {{ {tail} }} }}");
             assert!(parse_module(&source).is_err(), "{source}");
         }
@@ -8379,6 +8450,7 @@ block wrapper(clk, x: u8, y: u8) -> u8 { map(x, (x | y)) }
             "{ let y = x; { y } }",
             "if true { if true { () }; x } else { x }",
             "map([x], |v| (if true { () }, v).1)[u32:0]",
+            "u8:1..=u8:2",
         ] {
             let source = format!(
                 "block m(clk, x: u8) -> u8 {{ map({operand}, x) }}\n\
@@ -8454,10 +8526,50 @@ fn by_array(xs: u8[3]) -> u8[3] { map(map(xs, twice), helpers::twice) }
             if name == "map" && callback == "helpers::twice"
             && matches!(&args[..], [Expr::Name(xs), Expr::Name(f)] if xs == "xs" && f == "twice"))
         );
-        for value in ["other(u8:0..u8:3, f)", "u8:0..u8:3", "map(u8:0..u8:3, f())"] {
+        Ok(())
+    }
+
+    #[test]
+    fn range_values_have_lower_precedence_than_binary_and_postfix_operators() -> Result<(), String>
+    {
+        let module = parse_module(
+            r#"
+fn bounds(a: bool, b: bool) -> bool[1] { a || b ..= a && b }
+fn nested(xs: u8[3]) -> u8 { f((u8:0..xs[u32:0])[u32:1], [u8:2..u8:3]) }
+fn endpoint() -> u8[2] { (u8:1..u8:2)[u32:0]..u8:3 }
+fn map(xs: u8[2], x: u8) -> u8 { x }
+fn shadowed() -> u8 { map(u8:1..u8:3, u8:4 + u8:5) }
+fn unary() -> s8[2] { -if true { s8:-1 } else { s8:0 } .. s8:3 }
+"#,
+        )?;
+        assert!(
+            matches!(&module.functions[0].body, Expr::Range { start, limit, inclusive: true }
+            if matches!(start.as_ref(), Expr::Binary { op: BinaryOp::LogicalOr, .. })
+            && matches!(limit.as_ref(), Expr::Binary { op: BinaryOp::LogicalAnd, .. }))
+        );
+        let Expr::Call { args, .. } = &module.functions[1].body else {
+            panic!("expected a call with an indexed range and an array of ranges");
+        };
+        assert!(
+            matches!(&args[..], [Expr::Index { value, .. }, Expr::Array(items)]
+            if matches!(value.as_ref(), Expr::Range { limit, inclusive: false, .. }
+                if matches!(limit.as_ref(), Expr::Index { .. }))
+            && matches!(&items[..], [Expr::Range { inclusive: false, .. }]))
+        );
+        assert!(
+            matches!(&module.functions[2].body, Expr::Range { start, .. }
+            if matches!(start.as_ref(), Expr::Index { value, .. } if matches!(value.as_ref(), Expr::Range { .. })))
+        );
+        assert!(matches!(&module.functions[4].body, Expr::Call { args, .. }
+            if matches!(&args[..], [Expr::Range { .. }, Expr::Binary { op: BinaryOp::Add, .. }])));
+        assert!(
+            matches!(&module.functions[5].body, Expr::Unary { value, .. }
+            if matches!(value.as_ref(), Expr::Range { start, .. } if matches!(start.as_ref(), Expr::If { .. })))
+        );
+        for malformed in ["0..1..2", "0..=1..2", "0..1..=2", "0..", "..1", "0...1"] {
             assert!(
-                parse_module(&format!("fn g() -> u8[3] {{ {value} }}")).is_err(),
-                "{value}"
+                parse_module(&format!("fn f() -> () {{ {malformed} }}")).is_err(),
+                "{malformed}"
             );
         }
         Ok(())
@@ -8787,7 +8899,6 @@ block wrapper(clk, xs: u8[2]) -> u8 {
             ),
         );
         for expr in [
-            "0..2",
             "unroll_for! (i) in 0..2 { i }(0)",
             "unroll_for! (i', a) in 0..2 { i' + a }(0)",
             "unroll_for! (i, a!) in 0..2 { i + a! }(0)",

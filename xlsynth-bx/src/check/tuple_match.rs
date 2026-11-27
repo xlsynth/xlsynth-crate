@@ -265,7 +265,7 @@ impl BodyChecker<'_, '_> {
         })?;
         if let Some(widths) = &mut init.widths {
             widths.constrain_match_fields(arms, &init.value.ty)?;
-            widths.infer_at_use = true;
+            widths.enable_use_site_inference();
         }
         Ok(init)
     }

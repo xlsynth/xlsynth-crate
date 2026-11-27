@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint};
 
 use crate::ast::{BinaryOp, Expr, MatchArm, MatchPattern, Type};
 use crate::check::TuplePatternLayout;
@@ -20,6 +20,9 @@ struct Minimum {
     /// Outermost scope in which a contributing value was materialized. A
     /// callback can reuse captured bits' signedness but cannot widen them.
     bound_scope: Option<usize>,
+    /// Range elements and destructured bindings can acquire their final
+    /// width at a reference in the same callback scope.
+    infer_at_use: bool,
     /// A single hex or binary literal can spell a signed bit pattern directly.
     has_prefix: bool,
     /// Aliases of one bound prefixed literal share its minimum annotation.
@@ -43,12 +46,37 @@ pub(crate) enum Member {
 #[derive(Clone, Default)]
 pub(crate) struct BindingWidths {
     members: BTreeMap<Vec<Member>, Minimum>,
-    /// Destructured fields and captured aggregate operands can acquire their
-    /// concrete member types at each use in a block expression.
-    pub(crate) infer_at_use: bool,
 }
 
 impl BindingWidths {
+    /// Mark the inferred leaves of a destructured or captured operand.
+    pub(crate) fn enable_use_site_inference(&mut self) {
+        for minimum in self.members.values_mut() {
+            minimum.infer_at_use = true;
+        }
+    }
+
+    /// Whether a reference selects any leaf with a use-site width.
+    pub(crate) fn infers_at_use(&self, expr: &Expr) -> bool {
+        self.infers_member(expr, |_| true)
+    }
+
+    /// Whether a reference carries any use-site constraint from an array
+    /// element, including an array nested in a tuple.
+    pub(crate) fn infers_array_member(&self, expr: &Expr) -> bool {
+        self.infers_member(expr, |member| member.contains(&Member::ArrayElement))
+    }
+
+    fn infers_member(&self, expr: &Expr, matches: impl Fn(&[Member]) -> bool) -> bool {
+        let Some((_, path)) = reference_path(expr) else {
+            return false;
+        };
+        self.members
+            .range(path.clone()..)
+            .take_while(|(member, _)| member.starts_with(&path))
+            .any(|(member, minimum)| minimum.infer_at_use && matches(member))
+    }
+
     /// Tuple match literals constrain the same field as a binder in another
     /// arm. A typed pattern fixes that field; unsized endpoints add minima.
     pub(crate) fn constrain_match_fields(
@@ -102,10 +130,10 @@ impl BindingWidths {
     /// Distribute the inferred widths of a destructured tuple to its members.
     pub(crate) fn tuple_fields(self, count: usize) -> Vec<Option<Self>> {
         let mut fields = (0..count).map(|_| None).collect::<Vec<_>>();
-        for (path, ty) in self.members {
+        for (path, mut ty) in self.members {
             if let Some((Member::TupleField(i), rest)) = path.split_first() {
                 let field = fields[*i].get_or_insert_with(Self::default);
-                field.infer_at_use = true;
+                ty.infer_at_use = true;
                 field.members.insert(rest.to_vec(), ty);
             }
         }
@@ -124,10 +152,7 @@ impl BindingWidths {
                 Some((rest.to_vec(), ty))
             })
             .collect::<BTreeMap<_, _>>();
-        (!widths.is_empty()).then_some(Self {
-            members: widths,
-            infer_at_use: self.infer_at_use,
-        })
+        (!widths.is_empty()).then_some(Self { members: widths })
     }
 
     /// The inferred scalar type of a range element before use-site constraints.
@@ -136,6 +161,7 @@ impl BindingWidths {
             signed,
             width,
             bound_scope: None,
+            infer_at_use: false,
             has_prefix: false,
             origin: None,
             has_inline_literal: false,
@@ -143,7 +169,6 @@ impl BindingWidths {
         };
         Self {
             members: BTreeMap::from([(Vec::new(), minimum)]),
-            infer_at_use: false,
         }
     }
 
@@ -157,6 +182,28 @@ impl BindingWidths {
 }
 
 pub(crate) type InferredBindings = BTreeMap<String, BindingWidths>;
+
+/// Identify the type member selected by a chain of projections.
+fn reference_path(mut expr: &Expr) -> Option<(&str, Vec<Member>)> {
+    let mut path = Vec::new();
+    loop {
+        match expr {
+            Expr::Field { value, name } => {
+                path.push(Member::TupleField(name.parse().ok()?));
+                expr = value;
+            }
+            Expr::Index { value, .. } => {
+                path.push(Member::ArrayElement);
+                expr = value;
+            }
+            Expr::Name(name) => {
+                path.reverse();
+                return Some((name, path));
+            }
+            _ => return None,
+        }
+    }
+}
 
 /// Minimum annotations visible to a type-inference operation. Block expressions
 /// can retype unrolled locals and destructured inferred values at their use
@@ -190,32 +237,27 @@ impl<'a> WidthLookup<'a> {
         }
     }
 
-    fn get(&self, name: &str) -> Option<&'a BindingWidths> {
+    fn member(&self, name: &str, path: &[Member]) -> Option<&'a Minimum> {
         match self {
             Self::Bindings { widths, locals } => {
-                let width = widths.get(name)?;
+                let width = widths.get(name)?.members.get(path)?;
                 if locals.is_some_and(|loops| !loops.contains_key(name)) && !width.infer_at_use {
                     return None;
                 }
                 Some(width)
             }
-            Self::DslxLiterals(widths) => widths.and_then(|w| w.get(name)),
+            Self::DslxLiterals(widths) => widths.and_then(|w| w.get(name))?.members.get(path),
         }
     }
 
     /// Retain the DSLX literal radix for an inferred member when a block
     /// expression determines the common type of several operands.
-    fn dslx_reference(self, mut expr: &Expr) -> Option<Self> {
+    fn dslx_reference(self, expr: &Expr) -> Option<Self> {
         let Self::Bindings { widths, .. } = self else {
             return Some(self);
         };
-        while let Expr::Field { value, .. } | Expr::Index { value, .. } = expr {
-            expr = value;
-        }
-        let Expr::Name(name) = expr else {
-            return None;
-        };
-        self.get(name)?
+        let (name, path) = reference_path(expr)?;
+        self.member(name, &path)?
             .infer_at_use
             .then_some(Self::DslxLiterals(Some(widths)))
     }
@@ -278,6 +320,7 @@ impl Minimum {
             width: usize::try_from(width).map_err(|_| "integer literal is too wide")?,
             signed,
             bound_scope: None,
+            infer_at_use: false,
             has_prefix: radix != 10,
             origin: None,
             has_inline_literal: true,
@@ -287,6 +330,7 @@ impl Minimum {
 
     /// Unify two minimum annotations as DSLX does for same-type operands.
     fn merge(mut self, other: Self) -> Self {
+        let infer_at_use = self.infer_at_use || other.infer_at_use;
         // Map scopes are numbered on entry, so an outer capture has a lower
         // number than every local constraint with which it can be combined.
         let bound_scope = match (self.bound_scope, other.bound_scope) {
@@ -299,6 +343,7 @@ impl Minimum {
             // The same unsized type constraint can reach both operands
             // through aliases. Applying it twice still denotes one literal.
             self.bound_scope = bound_scope;
+            self.infer_at_use = infer_at_use;
             return self;
         }
         let signed = self.signed || other.signed;
@@ -310,6 +355,7 @@ impl Minimum {
             width: width + usize::from(signed && (needs_sign_bit(&self) || needs_sign_bit(&other))),
             signed,
             bound_scope,
+            infer_at_use,
             // A group of distinct minimum annotations loses its radix prefix.
             has_prefix: false,
             origin: None,
@@ -337,20 +383,32 @@ pub(crate) fn has_common_bit_type(op: BinaryOp) -> bool {
 /// Whether a compile-time branch contributes to an operand's result type.
 /// Calls, casts, indices and branch selectors determine their own operands.
 pub(crate) fn has_const_if_result(expr: &Expr) -> bool {
+    has_contextual_result(expr, &|value| {
+        matches!(value, Expr::ConstIf { .. }).then_some(true)
+    })
+}
+
+/// Visit the result edges of a value that share constraints with its caller.
+pub(crate) fn has_contextual_result<'e>(
+    expr: &'e Expr,
+    matches: &impl Fn(&'e Expr) -> Option<bool>,
+) -> bool {
+    if let Some(result) = matches(expr) {
+        return result;
+    }
     if let Some(seed) = expr.unannotated_loop_seed() {
-        return has_const_if_result(seed);
+        return has_contextual_result(seed, matches);
     }
     match expr {
-        Expr::ConstIf { .. } => true,
         Expr::Scope { result, .. }
         | Expr::Unary { value: result, .. }
         | Expr::Binary {
             op: BinaryOp::Shl | BinaryOp::Shr,
             left: result,
             ..
-        } => has_const_if_result(result),
+        } => has_contextual_result(result, matches),
         Expr::Binary { op, left, right } if has_common_bit_type(*op) => {
-            has_const_if_result(left) || has_const_if_result(right)
+            has_contextual_result(left, matches) || has_contextual_result(right, matches)
         }
         Expr::Array(items)
         | Expr::Tuple(items)
@@ -358,13 +416,19 @@ pub(crate) fn has_const_if_result(expr: &Expr) -> bool {
             annotation: None,
             members: items,
             ..
-        } => items.iter().any(has_const_if_result),
+        } => items
+            .iter()
+            .any(|item| has_contextual_result(item, matches)),
         Expr::If {
             then_value,
             else_value,
             ..
-        } => has_const_if_result(then_value) || has_const_if_result(else_value),
-        Expr::Match { arms, .. } => arms.iter().any(|arm| has_const_if_result(&arm.value)),
+        } => {
+            has_contextual_result(then_value, matches) || has_contextual_result(else_value, matches)
+        }
+        Expr::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| has_contextual_result(&arm.value, matches)),
         _ => false,
     }
 }
@@ -467,19 +531,21 @@ fn collect_minimum_with_calls(
             return collect_fold_seed(&fold.seed, "for", minimum, calls);
         }
         Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. } => {
-            let Some(bindings) = bindings else {
-                return Ok(false);
-            };
-            if let Some(dslx) = bindings.dslx_reference(expr) {
+            if let Some(dslx) = bindings.and_then(|lookup| lookup.dslx_reference(expr)) {
                 return collect_projected(expr, &[], Some(dslx), minimum);
             }
             let mut projected = None;
-            if !collect_projected(expr, &[], Some(bindings), &mut projected)? {
+            if !collect_projected(expr, &[], bindings, &mut projected)? {
                 return Ok(false);
             }
             let Some(mut projected) = projected else {
                 return Ok(false);
             };
+            // Inline ranges carry their own width evidence even in a block
+            // without inferred bindings. Other block projections stay concrete.
+            if bindings.is_none() && !projected.infer_at_use {
+                return Ok(false);
+            }
             // Projections and names retain the width of their stored value.
             projected.has_prefix = false;
             projected.has_inline_literal = false;
@@ -560,11 +626,92 @@ pub(crate) fn supplies_selected_minimum(source: &Expr) -> Result<bool, String> {
 /// Supply the literal constraints of a BX data operand to a native DSLX
 /// type probe. Its runtime value is elaborated separately at the selected
 /// width. Signedness and decimal versus bit-pattern spelling affect inference.
-pub(crate) fn import_literal_witness(expr: &Expr) -> Result<Option<String>, String> {
-    let Some(minimum) = expression_minimum(expr, None)? else {
+pub(crate) fn import_literal_witness(
+    expr: &Expr,
+    lookup: Option<WidthLookup<'_>>,
+) -> Result<Option<String>, String> {
+    // A projection from an inline aggregate can have a minimum without a
+    // lexical binding, such as the indexed element of a range.
+    let Some(minimum) = expression_minimum(expr, lookup.or(Some(WidthLookup::DslxLiterals(None))))?
+    else {
         return Ok(None);
     };
     literal_witness(minimum).map(Some)
+}
+
+/// Construct a compact range of the checked length that carries the lane's
+/// minimum width and radix into native call inference.
+pub(crate) fn import_array_range_witness(
+    expr: &Expr,
+    lookup: Option<WidthLookup<'_>>,
+    scope: usize,
+    size: usize,
+    scoped_element: Option<&Type>,
+) -> Result<Option<String>, String> {
+    let mut minimum = None;
+    let (signed, width, has_prefix) =
+        if collect_projected(expr, &[Member::ArrayElement], lookup, &mut minimum)?
+            && let Some(minimum) = minimum
+        {
+            if !minimum.can_widen_in(scope) {
+                return Ok(None);
+            }
+            (minimum.signed, minimum.width, minimum.has_prefix)
+        } else {
+            // A scoped endpoint's trailing name is no longer visible here. The
+            // bound checker retained its minimum while the lexical alias
+            // existed.
+            let Some((signed, width)) = scoped_element.and_then(bits) else {
+                return Ok(None);
+            };
+            (signed, width, false)
+        };
+    let span = size.saturating_sub(1);
+    if span > 0 && span.ilog2() as usize >= width {
+        // A destructured array can repeat elements and outgrow their domain.
+        // Use its actual type when no range of that width can have this length.
+        return Ok(None);
+    }
+    let magnitude = if width == 0 {
+        BigInt::from(0)
+    } else {
+        BigInt::from(1) << (width - 1)
+    };
+    let distance = BigInt::from(span);
+    // At least one endpoint must witness the original minimum. Choose the
+    // negative minimum of a signed lane or a high-bit-set unsigned limit.
+    let (start, limit) = if signed {
+        let start = -magnitude;
+        let limit = &start + distance;
+        (start, limit)
+    } else {
+        let limit = magnitude.max(distance.clone());
+        let start = &limit - distance;
+        (start, limit)
+    };
+    let render = |value: BigInt| {
+        if signed && width == 0 {
+            "-0".to_owned()
+        } else if has_prefix {
+            format!("{value:#x}")
+        } else {
+            value.to_string()
+        }
+    };
+    let operator = if size == 0 { ".." } else { "..=" };
+    if has_prefix && start == limit {
+        // Aliases of one hex literal keep its radix when the bounds unify.
+        // Two occurrences of its spelling would require an extra signed bit.
+        return Ok(Some(format!(
+            "{{ let bound = {}; bound{operator}bound }}",
+            render(start)
+        )));
+    }
+    Ok(Some(format!(
+        "({}{operator}{})",
+        render(start),
+        render(limit)
+    )))
 }
 
 /// A named literal supplies independent evidence if no parametric fixed its
@@ -656,10 +803,7 @@ fn collect_projected_with_calls(
 ) -> Result<bool, String> {
     match (expr, path.split_first()) {
         (Expr::Name(name), _) => {
-            let Some(bound) = bindings
-                .and_then(|widths| widths.get(name))
-                .and_then(|binding| binding.members.get(path))
-            else {
+            let Some(bound) = bindings.and_then(|widths| widths.member(name, path)) else {
                 return Ok(false);
             };
             let dslx = matches!(bindings, Some(WidthLookup::DslxLiterals(_)));
@@ -667,6 +811,7 @@ fn collect_projected_with_calls(
                 signed: bound.signed,
                 width: bound.width,
                 bound_scope: bound.bound_scope,
+                infer_at_use: bound.infer_at_use,
                 has_prefix: bound.has_prefix && dslx,
                 origin: if dslx { bound.origin.clone() } else { None },
                 has_inline_literal: false,
@@ -695,6 +840,14 @@ fn collect_projected_with_calls(
             Some(field) => collect_projected_with_calls(field, rest, bindings, minimum, calls),
             None => Ok(false),
         },
+        (Expr::Range { start, limit, .. }, Some((Member::ArrayElement, rest))) => {
+            let inferred = collect_projected_with_calls(start, rest, bindings, minimum, calls)?
+                && collect_projected_with_calls(limit, rest, bindings, minimum, calls)?;
+            if inferred && let Some(minimum) = minimum {
+                minimum.infer_at_use = true;
+            }
+            Ok(inferred)
+        }
         (_, Some((Member::ArrayElement, rest)))
             if let Some((items, _)) = expr.unannotated_array() =>
         {
@@ -774,6 +927,25 @@ fn visit_bit_members(
         }
     }
     Ok(())
+}
+
+/// An inline projection can obtain its final width from a range in its subject.
+pub(crate) fn inline_projection_infers_at_use(
+    expr: &Expr,
+    ty: &Type,
+    bindings: &InferredBindings,
+) -> Result<bool, String> {
+    let lookup = Some(WidthLookup::DslxLiterals(Some(bindings)));
+    let mut inferred = false;
+    visit_bit_members(ty, &mut Vec::new(), &mut |path, _| {
+        if !inferred {
+            let mut minimum = None;
+            inferred = collect_projected(expr, path, lookup, &mut minimum)?
+                && minimum.is_some_and(|m| m.infer_at_use);
+        }
+        Ok(())
+    })?;
+    Ok(inferred)
 }
 
 /// Apply the scalar literal unification rules to corresponding inferred leaves
@@ -1186,7 +1358,8 @@ pub(crate) fn projected_type_compatible(
                 Ok(inferred
                     && minimum.is_some_and(|m| {
                         if a_width < b_width {
-                            widen_in_scope.is_some_and(|scope| m.can_widen_in(scope))
+                            m.infer_at_use
+                                && widen_in_scope.is_some_and(|scope| m.can_widen_in(scope))
                         } else {
                             !m.signed && m.has_prefix && m.width == a_width
                         }

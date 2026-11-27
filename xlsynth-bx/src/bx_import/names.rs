@@ -1126,6 +1126,15 @@ impl<'a> Scope<'a> {
             },
             Expr::Tuple(fields) => Expr::Tuple(self.expressions(fields)?),
             Expr::Array(items) => Expr::Array(self.expressions(items)?),
+            Expr::Range {
+                start,
+                limit,
+                inclusive,
+            } => Expr::Range {
+                start: Box::new(self.expr(start)?),
+                limit: Box::new(self.expr(limit)?),
+                inclusive: *inclusive,
+            },
             Expr::ArrayLiteral {
                 annotation,
                 members,

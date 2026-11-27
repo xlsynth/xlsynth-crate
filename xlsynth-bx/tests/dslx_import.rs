@@ -820,6 +820,198 @@ pub fn width<K:u32,N:u32>(x:uN[N])->u32 { N + K }
 }
 
 #[test]
+fn native_signed_range_arguments_preserve_a_shared_literal_bound() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "lanes.x",
+        "pub fn pick(a: s1[1]) -> s1 { a[u32:0] }",
+    )?;
+    let options = search_paths(&[root.path()]);
+    let body = "let h = 0x1; lanes::pick(h..=h)";
+    let source = format!(
+        "use lanes; #[allow(combinational_block)] block run(clk, x: u8) -> s1 {{ {body} }}"
+    );
+    let package = compile_with_options(
+        &source,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(run_block(&package, 0)?, IrValue::make_sbits(1, -1)?);
+    Ok(())
+}
+
+#[test]
+fn native_array_arguments_can_be_longer_than_the_element_domain() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "lanes.x",
+        "pub fn pick(a: u1[4]) -> u1 { a[u32:2] }",
+    )?;
+    let options = search_paths(&[root.path()]);
+    let body = "let (xs, _) = ([1, 1, 0, 1], true); lanes::pick(xs)";
+    let source = format!(
+        "use lanes; #[allow(combinational_block)] block run(clk, x: u8) -> u1 {{ {body} }}"
+    );
+    let package = compile_with_options(
+        &source,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(run_block(&package, 0)?, IrValue::make_ubits(1, 0)?);
+    Ok(())
+}
+
+#[test]
+fn native_formals_reach_ranges_through_scopes_branches_and_aggregates() -> Result<(), Box<dyn Error>>
+{
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "lanes.x",
+        r#"
+pub fn head(xs: u8[2]) -> u8 { xs[u32:0] }
+pub fn pair(xs: (u8[2], bool)) -> u8 { xs.0[u32:1] }
+pub fn matrix(xs: u8[2][3]) -> u8 { xs[u32:2][u32:0] }
+pub fn byte(x: u8) -> u8 { x }
+"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    let body = r#"
+        let r = 1..3;
+        let s = 4..6;
+        let t = (r, true);
+        let m = [r, r, s];
+        (lanes::head(if x == u8:1 { r } else { s }), lanes::head(match x { u8:1 => s, _ => r }),
+         lanes::head({ let q = 6..8; let alias = q; alias }), lanes::pair(t),
+         lanes::matrix(m), lanes::byte(r[u32:1] + 1))
+    "#;
+    let ty = "(u8, u8, u8, u8, u8, u8)";
+    let native = format!("import lanes; fn run(x: u8) -> {ty} {{ {body} }}");
+    parse_and_typecheck(
+        &native,
+        "sample.x",
+        "sample",
+        &mut ImportData::new(None, &options.additional_search_paths),
+    )?;
+    let source = format!(
+        "use lanes; #[allow(combinational_block)] block run(clk, x: u8) -> {ty} {{ {body} }}"
+    );
+    let package = compile_with_options(
+        &source,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    for (x, expected) in [
+        (
+            1,
+            "(bits[8]:1, bits[8]:4, bits[8]:6, bits[8]:2, bits[8]:4, bits[8]:3)",
+        ),
+        (
+            2,
+            "(bits[8]:4, bits[8]:1, bits[8]:6, bits[8]:2, bits[8]:4, bits[8]:3)",
+        ),
+    ] {
+        assert_eq!(run_block(&package, x)?, IrValue::parse_typed(expected)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn native_array_formals_supply_range_element_widths() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "words.x",
+        r#"
+pub fn fixed(xs: u8[2]) -> u8 { xs[u32:1] }
+pub fn byte(x: u8) -> u8 { x }
+pub fn from_width<N: u32>(xs: sN[N][3]) -> sN[N] { xs[u32:0] }
+pub fn from_lane<N: u32>(x: uN[N], xs: uN[N][2]) -> uN[N] { x + xs[u32:1] }
+pub fn from_array<N: u32>(xs: uN[N][2], x: uN[N]) -> uN[N] { x + xs[u32:1] }
+pub fn length<M: u32>(xs: u8[M]) -> u32 { M }
+pub fn pair(xs: (u8[2], u8)) -> u8 { xs.0[u32:1] + xs.1 }
+"#,
+    )?;
+    let body = r#"
+        let xs = 2..4;
+        let grouped = (6..8, u8:1);
+        let alias = grouped.0;
+        (words::fixed(1..=2), words::fixed(xs), words::from_width<8>(-2..1),
+         words::from_lane(x, 3..5), words::length(5..5), words::pair((1..3, x)),
+         words::fixed(alias), words::fixed(({ let lo = 2; lo })..=3), words::byte((6..8)[u32:0]))
+    "#;
+    let ty = "(u8, u8, s8, u8, u32, u8, u8, u8, u8)";
+    let options = search_paths(&[root.path()]);
+    // The pinned native frontend recurses on a range node directly inside
+    // a tuple argument. Use its equivalent let-bound operand for comparison.
+    let native_body = body.replace(
+        "words::pair((1..3, x))",
+        "words::pair(({ let r = 1..3; r }, x))",
+    );
+    let native = format!("import words; fn run(x: u8) -> {ty} {{ {native_body} }}");
+    parse_and_typecheck(
+        &native,
+        "sample.x",
+        "sample",
+        &mut ImportData::new(None, &options.additional_search_paths),
+    )?;
+    let bx = format!(
+        "use words; #[allow(combinational_block)] block run(clk, x: u8) -> {ty} {{ {body} }}"
+    );
+    let package = compile_with_options(
+        &bx,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    let actual = run_block(&package, 9)?;
+    assert_eq!(
+        actual,
+        IrValue::parse_typed(
+            "(bits[8]:2, bits[8]:3, bits[8]:254, bits[8]:13, bits[32]:0, bits[8]:11, bits[8]:7, bits[8]:3, bits[8]:6)"
+        )?
+    );
+    // Native IR conversion needs the inferred widths spelled out and cannot
+    // emit the empty array value. Its length is nevertheless known to be zero.
+    let executable = format!(
+        r#"import words;
+fn sample(x: u8) -> {ty} {{
+    let pair_range = u8:1..u8:3;
+    (words::fixed(u8:1..=u8:2), words::fixed(u8:2..u8:4), words::from_width<8>(s8:-2..s8:1),
+     words::from_lane(x, u8:3..u8:5), u32:0, words::pair((pair_range, x)),
+     words::fixed(u8:6..u8:8), words::fixed(u8:2..=u8:3), words::byte((u8:6..u8:8)[u32:0]))
+}}"#
+    );
+    let reference = xlsynth::convert_dslx_to_ir(
+        &executable,
+        Path::new("sample.x"),
+        &xlsynth::DslxConvertOptions {
+            additional_search_paths: vec![root.path()],
+            ..Default::default()
+        },
+    )?
+    .ir
+    .get_function("__sample__sample")?;
+    assert_eq!(
+        xlsynth_pir::libxls_bridge::value_to_libxls(&actual)?,
+        reference.interpret(&[xlsynth::XlsIrValue::make_ubits(8, 9)?])?,
+    );
+    for call in [
+        "words::fixed(1..4)",
+        "words::fixed(u2:1..u2:3)",
+        "words::from_array(1..3, x)",
+    ] {
+        assert_import_rejected("words", call, "u8", &options);
+    }
+    Ok(())
+}
+
+#[test]
 fn ordered_roots_select_the_body_and_qualified_and_direct_calls_share_one_specialization()
 -> Result<(), Box<dyn Error>> {
     let first = tempdir()?;

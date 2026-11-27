@@ -48,6 +48,8 @@ mod native_aggregate_aliases;
 mod native_structs;
 #[path = "frontend/numeric_enums.rs"]
 mod numeric_enums;
+#[path = "frontend/range_values.rs"]
+mod range_values;
 #[path = "frontend/scalar_match.rs"]
 mod scalar_match;
 #[path = "frontend/tuple_match.rs"]

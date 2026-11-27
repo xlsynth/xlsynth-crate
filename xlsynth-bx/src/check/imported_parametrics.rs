@@ -4,10 +4,14 @@
 //! DSLX typechecker to select the concrete imported function.
 
 use super::{BodyChecker, K, MAX_ELABORATION_DEPTH, TypedExpr, has_aggregate_literal};
-use crate::ast::Expr;
+use crate::ast::{Expr, ScopeStatement, Type};
 use crate::dslx_import::NativeDataArg;
-use crate::infer_literal::{import_bound_literal_witness, import_literal_witness};
+use crate::infer_literal::{
+    has_contextual_result, import_array_range_witness, import_bound_literal_witness,
+    import_literal_witness,
+};
 use crate::typed::BoundParametricValue;
+use std::collections::BTreeMap;
 
 /// An independently typed operand can be used directly in IR. A literal
 /// needing context is elaborated after DSLX selects the callee's input types.
@@ -26,6 +30,64 @@ impl ImportOperand {
 }
 
 impl BodyChecker<'_, '_> {
+    /// Native formals can determine the element width of a range, including
+    /// one retained through a let or a tuple projection.
+    pub(super) fn needs_contextual_import(&self, arg: &Expr) -> bool {
+        self.contextual_import_in_scope(arg, &BTreeMap::new())
+    }
+
+    /// Track scoped aliases until preparation replaces them with checked
+    /// bindings. Only a binding used by the result can constrain the formal.
+    fn contextual_import_in_scope<'e>(
+        &self,
+        arg: &'e Expr,
+        names: &BTreeMap<&'e str, bool>,
+    ) -> bool {
+        has_contextual_result(arg, &|expr| match expr {
+            Expr::ConstIf { .. } | Expr::Range { .. } => Some(true),
+            Expr::Scope { statements, result } => {
+                let mut names = names.clone();
+                for stmt in statements {
+                    match stmt {
+                        ScopeStatement::Let(binding) => {
+                            let contextual = binding.ty.is_none()
+                                && self.contextual_import_in_scope(&binding.value, &names);
+                            binding.pattern.visit_names(&mut |name| {
+                                names.insert(name, contextual);
+                            });
+                        }
+                        ScopeStatement::Const(def) => {
+                            let contextual = def.ty.is_none()
+                                && self.contextual_import_in_scope(&def.value, &names);
+                            names.insert(&def.name, contextual);
+                        }
+                        ScopeStatement::TypeAlias(_)
+                        | ScopeStatement::ConstAssert(_)
+                        | ScopeStatement::Expression(_) => { /* No new value binding. */ }
+                    }
+                }
+                Some(self.contextual_import_in_scope(result, &names))
+            }
+            Expr::Name(name) => Some(names.get(name.as_str()).copied().unwrap_or_else(|| {
+                self.inferred_bindings
+                    .get(name)
+                    .is_some_and(|widths| widths.infers_array_member(expr))
+            })),
+            Expr::Index { value, .. } | Expr::Field { value, .. } => {
+                Some(self.contextual_import_in_scope(value, names))
+            }
+            _ => None,
+        })
+    }
+
+    fn inferred_reference<'e>(&'e self, expr: &'e Expr) -> Option<&'e Type> {
+        let (binding, ty) = self.reference_type(expr)?;
+        self.inferred_bindings
+            .get(binding)?
+            .infers_at_use(expr)
+            .then_some(ty)
+    }
+
     /// Evaluate the explicit prefix in caller scope using the native
     /// declarations' types. DSLX binds defaults and infers the suffix.
     pub(super) fn imported_value_parametrics(
@@ -155,6 +217,11 @@ impl BodyChecker<'_, '_> {
         let child = depth
             .checked_sub(1)
             .ok_or("import data argument nesting exceeds limit")?;
+        if let Some(ty @ (Type::Array { .. } | Type::Tuple(_))) = self.inferred_reference(expr) {
+            return self
+                .bound_aggregate_evidence(expr, ty, child)
+                .map(ImportOperand::Contextual);
+        }
         if let Some((_, ty)) = self.reference_type(expr)
             && let Some(lookup) = self.dslx_widths()
             && let Some(witness) =
@@ -175,6 +242,30 @@ impl BodyChecker<'_, '_> {
                 .collect::<Result<Vec<_>, String>>()
         };
         let evidence = match expr {
+            Expr::Range {
+                start,
+                limit,
+                inclusive,
+            } => {
+                let range = self.array_range_bounds(start, limit, *inclusive, None)?;
+                self.structs
+                    .validate_type(&Type::array(range.ty.clone(), range.count))?;
+                if let Some(witness) = import_array_range_witness(
+                    expr,
+                    self.dslx_widths(),
+                    self.width_scope(),
+                    range.count,
+                    range.widths.as_ref().map(|_| &range.ty),
+                )? {
+                    // Native inference recurses on a range node nested in a
+                    // tuple argument. A probe let preserves its constraints.
+                    NativeDataArg::BoundLiteral(witness)
+                } else {
+                    return self
+                        .materialize_range(range, "array range")
+                        .map(ImportOperand::Checked);
+                }
+            }
             Expr::Tuple(items) => NativeDataArg::Tuple(group(self, items)?),
             Expr::Array(items) => NativeDataArg::Array {
                 members: group(self, items)?,
@@ -189,7 +280,7 @@ impl BodyChecker<'_, '_> {
                 has_ellipsis: *has_ellipsis,
             },
             _ if let Some(seed) = expr.unannotated_loop_seed()
-                && has_aggregate_literal(seed) =>
+                && (has_aggregate_literal(seed) || self.needs_contextual_import(seed)) =>
             {
                 // The caller's expected accumulator type reaches the seed as
                 // well as the loop body during final elaboration.
@@ -199,23 +290,100 @@ impl BodyChecker<'_, '_> {
                 then_value,
                 else_value,
                 ..
-            } if has_aggregate_literal(expr) => NativeDataArg::Branches(vec![
-                self.import_operand(then_value, child)?.into_evidence(),
-                self.import_operand(else_value, child)?.into_evidence(),
-            ]),
-            Expr::Match { arms, .. } if has_aggregate_literal(expr) => NativeDataArg::Branches(
-                arms.iter()
-                    .map(|arm| {
-                        self.import_operand(&arm.value, child)
-                            .map(ImportOperand::into_evidence)
-                    })
-                    .collect::<Result<_, _>>()?,
-            ),
-            _ => match import_literal_witness(expr)? {
-                Some(witness) => NativeDataArg::Inferred(witness),
-                None => return self.expr(expr, None).map(ImportOperand::Checked),
-            },
+            } if has_aggregate_literal(expr) || self.needs_contextual_import(expr) => {
+                NativeDataArg::Branches(vec![
+                    self.import_operand(then_value, child)?.into_evidence(),
+                    self.import_operand(else_value, child)?.into_evidence(),
+                ])
+            }
+            Expr::Match { arms, .. }
+                if has_aggregate_literal(expr) || self.needs_contextual_import(expr) =>
+            {
+                NativeDataArg::Branches(
+                    arms.iter()
+                        .map(|arm| {
+                            self.import_operand(&arm.value, child)
+                                .map(ImportOperand::into_evidence)
+                        })
+                        .collect::<Result<_, _>>()?,
+                )
+            }
+            Expr::Scope { result, .. } if self.needs_contextual_import(result) => {
+                self.import_operand(result, child)?.into_evidence()
+            }
+            _ => {
+                let widths = self
+                    .dslx_widths()
+                    .filter(|_| self.needs_contextual_import(expr));
+                let Some(witness) = import_literal_witness(expr, widths)? else {
+                    return self.expr(expr, None).map(ImportOperand::Checked);
+                };
+                NativeDataArg::Inferred(witness)
+            }
         };
         Ok(ImportOperand::Contextual(evidence))
+    }
+
+    /// Reconstruct the inferred leaves of an aggregate binding for native
+    /// inference. All positions of an array select the same width constraint.
+    fn bound_aggregate_evidence(
+        &self,
+        expr: &Expr,
+        ty: &Type,
+        depth: usize,
+    ) -> Result<NativeDataArg, String> {
+        let child = depth
+            .checked_sub(1)
+            .ok_or("import data argument nesting exceeds limit")?;
+        if self.inferred_reference(expr).is_none() {
+            return Ok(NativeDataArg::Typed(ty.clone()));
+        }
+        Ok(match ty {
+            Type::Tuple(fields) => NativeDataArg::Tuple(
+                fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| {
+                        let field = Expr::Field {
+                            value: Box::new(expr.clone()),
+                            name: i.to_string(),
+                        };
+                        self.bound_aggregate_evidence(&field, ty, child)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Type::Array { element, size } => {
+                if let Some(range) = import_array_range_witness(
+                    expr,
+                    self.dslx_widths(),
+                    self.width_scope(),
+                    *size,
+                    None,
+                )? {
+                    NativeDataArg::BoundLiteral(range)
+                } else if *size != 0 {
+                    let lane = Expr::Index {
+                        value: Box::new(expr.clone()),
+                        index: Box::new(Expr::Bool(false)),
+                    };
+                    NativeDataArg::Repeated {
+                        element: Box::new(self.bound_aggregate_evidence(&lane, element, child)?),
+                        size: *size,
+                    }
+                } else {
+                    NativeDataArg::Typed(ty.clone())
+                }
+            }
+            _ => {
+                if let Some(lookup) = self.dslx_widths()
+                    && let Some(witness) =
+                        import_bound_literal_witness(expr, ty, lookup, self.width_scope())?
+                {
+                    NativeDataArg::BoundLiteral(witness)
+                } else {
+                    NativeDataArg::Typed(ty.clone())
+                }
+            }
+        })
     }
 }

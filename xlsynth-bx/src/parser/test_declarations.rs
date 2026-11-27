@@ -218,7 +218,7 @@ impl Parser<'_> {
                 PatternSite::Binding,
             )?;
             self.expect("in")?;
-            let iterable = self.for_iterable(Braces::Body)?.into_ast().0;
+            let iterable = self.for_iterable(Braces::Body)?.into_iterable().0;
             self.expect("{")?;
             let body = self.nested(|p| {
                 p.with_name_scope(|p| {

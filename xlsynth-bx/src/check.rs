@@ -210,6 +210,7 @@ fn has_aggregate_literal(expr: &Expr) -> bool {
     match expr {
         Expr::Scope { result, .. } => has_aggregate_literal(result),
         Expr::Array(_)
+        | Expr::Range { .. }
         | Expr::UnrollMap(_)
         | Expr::Tuple(_)
         | Expr::ArrayLiteral {
@@ -766,9 +767,9 @@ struct Declarations<'a> {
     /// iterables erased during unrolling.
     evaluate_pure_test_discards: bool,
     has_test_discards: Cell<bool>,
-    /// A local declaration or assertion may need the constexpr operands of
-    /// any visible pure helper.
-    has_constexpr_declaration: bool,
+    /// A declaration, assertion or range bound may need the constexpr
+    /// operands of any visible pure helper.
+    needs_constexpr_operands: bool,
     /// A compile-time declaration, register reset, or unrolled iterable
     /// instantiated a callee whose body may have no hardware users.
     constexpr_instantiated_callee: Cell<bool>,
@@ -2170,7 +2171,7 @@ pub(crate) fn check_sources_with_tests(
         });
     }
     let mut declarations = Declarations {
-        has_constexpr_declaration: source_patterns::has_constexpr_declaration(
+        needs_constexpr_operands: source_patterns::needs_constexpr_operands(
             module,
             tests.is_some(),
         ),
@@ -3266,7 +3267,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             template_callbacks: None,
             template_name_depth: None,
             dslx_value_context: false,
-            preserve_assert_inputs: decls.has_constexpr_declaration,
+            preserve_assert_inputs: decls.needs_constexpr_operands,
             dslx_constant_use: ConstantUse::Dslx,
             assertion_cache: None,
             assert_operands: None,
@@ -4155,6 +4156,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Zero(ty) => self.zero_value(ty),
             Expr::Literal { ty, text } => self.bit_literal(ty.as_ref(), text, expected),
             Expr::Tuple(items) => self.tuple_literal(items, expected),
+            Expr::Range {
+                start,
+                limit,
+                inclusive,
+            } => {
+                let array = match expected {
+                    Some(Type::Array { element, size }) => {
+                        self.range_value(start, limit, *inclusive, Some(element), Some(*size))?
+                    }
+                    None => self.range_value(start, limit, *inclusive, None, None)?,
+                    Some(other) => return Err(format!("expected {other}, got an array")),
+                };
+                Ok((array.ty, array.kind))
+            }
             Expr::Array(items) => self.array_literal(items, expected, false),
             Expr::ArrayLiteral {
                 annotation,
@@ -4907,11 +4922,22 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         // A capture keeps its materialized width across a map boundary. Its
         // literal radix can still determine signedness at that width.
-        let scoped_projection = self.reference_type(expr).is_some_and(|(name, _)| {
-            self.inferred_bindings
+        let scoped_projection = match self.reference_type(expr) {
+            Some((name, _)) => self
+                .inferred_bindings
                 .get(name)
-                .is_some_and(|widths| widths.infer_at_use)
-        });
+                .is_some_and(|widths| widths.infers_at_use(expr)),
+            None if matches!(expr, Expr::Index { .. } | Expr::Field { .. })
+                && expected.is_some_and(|target| !compatible(&ty, target)) =>
+            {
+                crate::infer_literal::inline_projection_infers_at_use(
+                    expr,
+                    &ty,
+                    &self.inferred_bindings,
+                )?
+            }
+            None => false,
+        };
         let dslx_projection =
             (self.kind == BodyKind::Function || self.dslx_value_context || scoped_projection)
                 && matches!(
@@ -5046,7 +5072,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         match expr {
             // The surrounding array type can supply the element type of an
             // empty map or of a body such as `zero!()`.
-            Expr::UnrollMap(_) => true,
+            Expr::UnrollMap(_) | Expr::Range { .. } => true,
             Expr::For(fold) if fold.annotation.is_none() => {
                 self.contains_inferred_aggregate(&fold.seed)
             }
@@ -5080,7 +5106,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     && self.inferred_bindings.get(name).is_some_and(|widths| {
                         self.dslx_widths().is_some()
                             || self.function_values.contains_key(name)
-                            || widths.infer_at_use
+                            || widths.infers_at_use(expr)
                     })
             }),
         }
@@ -5123,6 +5149,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         match expr {
             Expr::UnrollMap(map) => self.map_element_type_witness(map),
+            Expr::Range { start, limit, .. } => Ok(self.concrete_element_type(start, widths)?
+                || self.concrete_element_type(limit, widths)?),
             Expr::SelectedOperand(value) => self.concrete_element_type(value, widths),
             Expr::Scope { result, .. } => self.concrete_element_type(
                 result,
@@ -5205,7 +5233,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
             }
             for (i, item) in items.iter().enumerate() {
-                if matches!(item, Expr::UnrollMap(_)) && self.has_concrete_element_type(item)? {
+                if matches!(item, Expr::UnrollMap(_) | Expr::Range { .. })
+                    && self.has_concrete_element_type(item)?
+                {
                     return Ok(CommonTypeHint::FromExpr(i));
                 }
             }
@@ -5337,8 +5367,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if items.iter().any(|e| e.needs_scope_preparation()) {
             return self.with_scoped_results(items, Self::unify_values);
         }
-        if items.iter().any(|e| self.contains_inferred_aggregate(e))
-            && items.iter().any(|e| has_aggregate_literal(e))
+        if (items.len() > 1 && items.iter().any(|e| matches!(e, Expr::Range { .. })))
+            || (items.iter().any(|e| self.contains_inferred_aggregate(e))
+                && items.iter().any(|e| has_aggregate_literal(e)))
         {
             return self.with_aggregate_operands(items, Self::unify_prepared_values);
         }
@@ -5868,7 +5899,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     "{kind} '{spelling}' cannot be called as a function"
                 ));
             }
-            if args.iter().any(crate::infer_literal::has_const_if_result) {
+            if args.iter().any(|arg| self.needs_contextual_import(arg)) {
                 let value = self.contextual_import_call(&subject, &function, &[], args)?;
                 return Ok((value.ty, value.kind));
             }

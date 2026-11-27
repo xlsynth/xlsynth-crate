@@ -700,6 +700,22 @@ helpers from imported BX modules. Callable parameters cannot be assigned to a
 `let`, returned, or forwarded to another template. Inline lambdas remain
 available in `map` expressions. Callable parameters are a BX extension.
 
+### Range expressions
+
+An integer range evaluates to an array in ascending order. Both bounds must
+be compile-time values of the same bit type. `lo..hi` excludes `hi`, and
+`lo..=hi` includes it. Equal bounds produce an empty array with `..` and a
+one-element array with `..=`. A limit below the start is an error.
+
+```text
+fn lane_ids<N: u32>() -> u32[N] { u32:0..N }
+
+const OFFSETS = s8:-1..=s8:1;  // [s8:-1, s8:0, s8:1]
+```
+
+You can bind a range with `let`, pass it to a function, or index it with a
+runtime value just like another array.
+
 ### Map expressions
 
 Use `map(array, function_name)` or `map(array, |element| expression)` in a function or block to transform each element of a nonempty array in order. The callback takes one element, and its return type supplies the output element type. The output has the same length as the input.

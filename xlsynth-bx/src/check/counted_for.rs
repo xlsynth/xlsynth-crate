@@ -184,7 +184,14 @@ impl BodyChecker<'_, '_> {
         hint: Option<&Type>,
     ) -> Result<Iteration, String> {
         self.with_scoped_results(&[start, limit], |checker, bounds| {
-            let range = checker.static_range(bounds[0], bounds[1], hint, inclusive, "for")?;
+            let range = checker.static_range(
+                bounds[0],
+                bounds[1],
+                hint,
+                inclusive,
+                "for",
+                super::ConstantUse::Bx,
+            )?;
             if i64::try_from(range.count).is_err() {
                 return Err("for range trip count exceeds XLS IR limits".into());
             }
