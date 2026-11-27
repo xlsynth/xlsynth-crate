@@ -161,7 +161,7 @@ fn compare_signed_results(
 /// independent acceptance expectation.
 pub fn check_scalar_match(data: &[u8]) -> Result<(), String> {
     let mut bytes = data.iter().copied().chain(std::iter::repeat(0));
-    let mode = bytes.next().unwrap() % 9;
+    let mode = bytes.next().unwrap() % 11;
     let selector = bytes.next().unwrap();
     let flags = bytes.next().unwrap();
     if mode == 8 {
@@ -257,6 +257,21 @@ pub fn check_scalar_match(data: &[u8]) -> Result<(), String> {
             });
             patterns.push("_".into());
         }
+        9 => {
+            if flags & 8 != 0 && width != 0 {
+                patterns.push(typed(&pivot));
+            }
+            patterns.push("whole".into());
+        }
+        10 => {
+            valid = Some(false);
+            let pattern = match flags % 3 {
+                0 => "(..)".into(),
+                1 => format!("{} | whole", typed(&pivot)),
+                _ => "..".into(),
+            };
+            patterns.extend([pattern, "_".into()]);
+        }
         _ => {
             if width == 0 {
                 patterns.push(typed(&zero));
@@ -285,7 +300,9 @@ pub fn check_scalar_match(data: &[u8]) -> Result<(), String> {
     let result = ["u8", "u8[2]", "(u8, u8[2])"][usize::from(shape)].to_owned();
     let mut arms = Vec::new();
     for (i, pattern) in patterns.iter().enumerate() {
-        let tag = if mode == 6 && i == 0 {
+        let tag = if mode == 9 && pattern == "whole" {
+            "whole as u8".into()
+        } else if mode == 6 && i == 0 {
             format!("[u8:{}][x as u32]", i + 1)
         } else if flags & 32 != 0 && i + 1 < patterns.len() {
             (i + 1).to_string()
@@ -301,7 +318,7 @@ pub fn check_scalar_match(data: &[u8]) -> Result<(), String> {
     }
     let params = format!("x: {}", domain.ty);
     let mut functions = format!("fn key({params}) -> {} {{ x }}", domain.ty);
-    let subject = if flags & 128 != 0 && mode != 6 {
+    let subject = if flags & 128 != 0 && mode != 6 && mode < 9 {
         // Patterns can supply the width of an unsized subject literal.
         domain.literal(&pivot, 2)
     } else if flags & 64 != 0 {
@@ -358,4 +375,24 @@ pub fn check_scalar_match(data: &[u8]) -> Result<(), String> {
         DslxExecution::BytecodeTests,
         inputs,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_scalar_match;
+
+    #[test]
+    fn compare_whole_scalar_patterns() -> Result<(), String> {
+        for (mode, domain, flags) in [
+            (9, 0, 0),
+            (9, 63, 8),
+            (9, 31, 103),
+            (10, 3, 27),
+            (10, 5, 1),
+            (10, 33, 2),
+        ] {
+            check_scalar_match(&[mode, domain, flags, 0x83])?;
+        }
+        Ok(())
+    }
 }

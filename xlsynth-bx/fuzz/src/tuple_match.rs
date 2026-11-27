@@ -4,6 +4,8 @@
 
 use crate::function_oracle::{DslxExecution, FunctionProgram, compare_program};
 use Shape::{Leaf, Tuple};
+use xlsynth::dslx::{ImportData, parse_and_typecheck};
+use xlsynth_bx::parse_module;
 use xlsynth_pir::{IrBits, IrFormatPreference, IrValue};
 
 /// Positions of the independently generated leaves in a tuple subject.
@@ -45,7 +47,7 @@ impl Shape {
     }
 
     /// Construct a concrete IR value using the same field positions.
-    fn value(&self, leaves: &[IrValue]) -> IrValue {
+    fn value(&self, leaves: &[&IrValue]) -> IrValue {
         match self {
             Self::Leaf(index) => leaves[*index].clone(),
             Self::Tuple(members) => IrValue::make_tuple(
@@ -133,11 +135,121 @@ fn binding_arms(
     arms.join(", ")
 }
 
+/// A generated tuple subject, its match arms and the expected typecheck
+/// outcome.
+struct TupleCase {
+    shape: Shape,
+    arms: String,
+    result: String,
+    valid: bool,
+}
+
+/// Generate rest patterns, whole-subject binders and patterns that compare
+/// two independent numeric fields with the same constant.
+fn rest_and_binding_case(mode: u8, layout: u8, flags: u8, numeric_ty: &str) -> TupleCase {
+    let gap = |first: Shape, last: Shape| {
+        let mut members = vec![first];
+        members.extend((0..(layout / 8) % 4).map(|i| Leaf(usize::from(i % 2))));
+        members.push(last);
+        Tuple(members)
+    };
+    let mut result = numeric_ty.to_owned();
+    let (shape, arms) = match mode {
+        15 => match layout % 5 {
+            0 => (
+                gap(Leaf(0), Leaf(2)),
+                "(false, .., tail) => tail, (.., tail) => !tail".into(),
+            ),
+            1 => (
+                gap(Leaf(2), Leaf(1)),
+                "(head, .., true) => head, (head, ..) => !head".into(),
+            ),
+            2 => (
+                gap(gap(Leaf(2), Leaf(3)), Leaf(1)),
+                "((.., tail), .., false) => tail, ((head, ..), ..) => head".into(),
+            ),
+            3 => {
+                let shape = if flags & 4 == 0 {
+                    Tuple(vec![])
+                } else {
+                    Shape::product(layout)
+                };
+                let pattern = if flags & 8 == 0 { "(..)" } else { "(..,)" };
+                (shape, format!("{pattern} => {numeric_ty}:1"))
+            }
+            _ => (
+                gap(Tuple(vec![]), Leaf(2)),
+                "((..), .., last) => last".into(),
+            ),
+        },
+        16 => {
+            let shape = Shape::product(layout);
+            result = shape.render(&["bool", "bool", numeric_ty]);
+            let special = shape.render(&["false", "_", "_"]);
+            let value = shape.render(&["true", "true", &format!("{numeric_ty}:0")]);
+            let arms = if flags & 4 == 0 {
+                format!("{special} => {value}, whole => whole")
+            } else {
+                "whole => whole".into()
+            };
+            (shape, arms)
+        }
+        17 => {
+            let (shape, pattern) = match layout % 4 {
+                0 => (Tuple(vec![Leaf(2), Leaf(3)]), "(PIVOT, PIVOT)"),
+                1 => (
+                    Tuple(vec![Leaf(2), gap(Leaf(1), Leaf(3))]),
+                    "(PIVOT, (.., PIVOT))",
+                ),
+                2 => (
+                    Tuple(vec![Tuple(vec![Leaf(0), Leaf(2)]), Leaf(3)]),
+                    "((_, PIVOT), PIVOT)",
+                ),
+                _ => (gap(Leaf(2), Leaf(3)), "(PIVOT, .., PIVOT)"),
+            };
+            result = "bool".into();
+            (shape, format!("{pattern} => true, _ => false"))
+        }
+        _ => {
+            let (shape, pattern) = match layout % 6 {
+                0 => (Shape::product(layout), "(.., ..)"),
+                1 => (Tuple(vec![Leaf(2)]), "(_, .., _)"),
+                2 => (Tuple(vec![Leaf(0), Leaf(2)]), "((..), _)"),
+                3 => (Tuple(vec![]), "(.., _)"),
+                4 => (gap(Leaf(2), Leaf(3)), "(item, ..) | (.., item)"),
+                _ => (Shape::product(layout), ".."),
+            };
+            let arms = format!("{pattern} => {numeric_ty}:0, _ => {numeric_ty}:1");
+            (shape, arms)
+        }
+    };
+    TupleCase {
+        shape,
+        arms,
+        result,
+        valid: mode != 18,
+    }
+}
+
+/// A fresh name in both constant positions is a binding error in BX. The
+/// pinned DSLX frontend accepts the same source as an equality test.
+fn check_repeated_binder(ty: &str, constant_arms: &str) -> Result<(), String> {
+    let arms = constant_arms.replace("PIVOT", "item");
+    let source = format!("fn compare(x: {ty}) -> bool {{ match x {{ {arms} }} }}");
+    parse_and_typecheck(&source, "oracle.x", "oracle", &mut ImportData::default())
+        .map_err(|error| format!("DSLX rejected repeated name: {error}\n{source}"))?;
+    match parse_module(&source) {
+        Err(error) if error.contains("duplicate match binding 'item'") => Ok(()),
+        Err(error) => Err(format!("unexpected BX diagnostic: {error}\n{source}")),
+        Ok(_) => Err(format!("BX accepted a duplicate match binding\n{source}")),
+    }
+}
+
 /// Generate tuple patterns and sample the cross product of the Boolean
 /// leaves and the numeric range boundaries, including overlapping arms.
 pub fn check_tuple_match(data: &[u8]) -> Result<(), String> {
     let mut bytes = data.iter().copied().chain(std::iter::repeat(0));
-    let mode = bytes.next().unwrap() % 15;
+    let mode = bytes.next().unwrap() % 19;
     let layout = bytes.next().unwrap();
     let width_selector = bytes.next().unwrap();
     let flags = bytes.next().unwrap();
@@ -176,34 +288,43 @@ pub fn check_tuple_match(data: &[u8]) -> Result<(), String> {
     let pivot_text = literal(&pivot);
     let max_text = literal(&max);
     let mut functions = String::new();
-    let pivot_pattern: &str = if flags & 2 == 0 {
+    let pivot_pattern: &str = if flags & 2 == 0 && mode != 17 {
         &pivot_text
     } else {
         functions.push_str(&format!("const PIVOT = {pivot_text};\n"));
         "PIVOT"
     };
-    let shape = match mode {
-        7 | 9 => Shape::Tuple(vec![Shape::Leaf(2)]),
-        8 if layout & 1 == 0 => Shape::Tuple(vec![]),
-        8 => Shape::Tuple(vec![Shape::Tuple(vec![])]),
-        10 => Shape::Tuple(vec![Shape::Leaf(0), Shape::Leaf(1)]),
-        12 => {
-            let pair = Tuple(vec![Leaf(1), Leaf(2)]);
-            if layout & 1 == 0 {
-                Tuple(vec![Leaf(0), pair])
-            } else {
-                Tuple(vec![pair, Leaf(0)])
+    let mut valid = Some(true);
+    let (shape, binding_case) = if mode >= 15 {
+        let case = rest_and_binding_case(mode, layout, flags, &numeric_ty);
+        valid = Some(case.valid);
+        (case.shape, Some((case.result, case.arms)))
+    } else {
+        let shape = match mode {
+            7 | 9 => Shape::Tuple(vec![Shape::Leaf(2)]),
+            8 if layout & 1 == 0 => Shape::Tuple(vec![]),
+            8 => Shape::Tuple(vec![Shape::Tuple(vec![])]),
+            10 => Shape::Tuple(vec![Shape::Leaf(0), Shape::Leaf(1)]),
+            12 => {
+                let pair = Tuple(vec![Leaf(1), Leaf(2)]);
+                if layout & 1 == 0 {
+                    Tuple(vec![Leaf(0), pair])
+                } else {
+                    Tuple(vec![pair, Leaf(0)])
+                }
             }
-        }
-        _ => Shape::product(layout),
+            _ => Shape::product(layout),
+        };
+        (shape, None)
     };
     let pattern = |first, second, numeric| shape.render(&[first, second, numeric]);
     let low = format!("{min_text}..{pivot_text}");
     let through_pivot = format!("{min_text}..={pivot_text}");
     let high = format!("{pivot_text}..={max_text}");
-    let mut valid = Some(true);
     let aggregate = flags & 16 != 0;
-    let (result, arms) = if mode >= 11 {
+    let (result, arms) = if let Some(arms) = binding_case {
+        arms
+    } else if mode >= 11 {
         valid = Some(matches!(mode, 11 | 12));
         let result = if aggregate {
             format!("({numeric_ty}, bool)")
@@ -330,7 +451,10 @@ pub fn check_tuple_match(data: &[u8]) -> Result<(), String> {
             .join(", ");
         (result.to_owned(), arms)
     };
-    let ty = shape.render(&["bool", "bool", &numeric_ty]);
+    let ty = shape.render(&["bool", "bool", &numeric_ty, &numeric_ty]);
+    if mode == 17 {
+        check_repeated_binder(&ty, &arms)?;
+    }
     let params = format!("x: {ty}");
     let subject = if flags & 32 == 0 {
         "x"
@@ -339,30 +463,49 @@ pub fn check_tuple_match(data: &[u8]) -> Result<(), String> {
         "key(x)"
     };
     let mut body = format!("match {subject} {{ {arms} }}");
-    let check_constant = flags & 128 != 0 && matches!(mode, 11 | 12);
+    if mode == 15 && flags & 32 != 0 {
+        // Pinned DSLX can infer a zero-field tuple for a direct call whose
+        // match arms all use rest markers. Preserve the call's concrete type.
+        body = format!("let key_value: {ty} = {subject}; match key_value {{ {arms} }}");
+    }
+    let check_constant = flags & 128 != 0 && matches!(mode, 11 | 12 | 15..=17);
     if flags & 64 != 0 || check_constant {
         functions.push_str(&format!("fn classify({params}) -> {result} {{ {body} }}\n"));
         body = "classify(x)".into();
         if check_constant {
             let first = if layout & 1 == 0 { "false" } else { "true" };
             let second = if flags & 4 == 0 { "false" } else { "true" };
-            let value = shape.render(&[first, second, &pivot_text]);
+            let numeric = if flags & 8 == 0 {
+                &pivot_text
+            } else {
+                &min_text
+            };
+            let value = shape.render(&[first, second, &pivot_text, numeric]);
             functions.push_str(&format!("const SELECTED = classify({value});\n"));
         }
     }
 
     let mut inputs = Vec::new();
     for numeric in [min, pivot.sub(&one), pivot.add(&one), pivot, max] {
+        let neighbor = IrValue::from_bits(&numeric.add(&one));
+        let word = IrValue::from_bits(&numeric);
+        // At PIVOT and PIVOT-1 this exercises a match and a mismatch in
+        // either of the two positions tested against the constant.
+        let peers: &[&IrValue] = if mode == 17 {
+            &[&word, &neighbor]
+        } else {
+            &[&neighbor]
+        };
         for first in [false, true] {
+            let first = IrValue::make_ubits(1, u64::from(first)).map_err(|e| e.to_string())?;
             for second in [false, true] {
-                let leaves = [
-                    IrValue::make_ubits(1, u64::from(first)).map_err(|e| e.to_string())?,
-                    IrValue::make_ubits(1, u64::from(second)).map_err(|e| e.to_string())?,
-                    IrValue::from_bits(&numeric),
-                ];
-                let args = vec![shape.value(&leaves)];
-                if !inputs.contains(&args) {
-                    inputs.push(args);
+                let second =
+                    IrValue::make_ubits(1, u64::from(second)).map_err(|e| e.to_string())?;
+                for peer in peers {
+                    let args = vec![shape.value(&[&first, &second, &word, peer])];
+                    if !inputs.contains(&args) {
+                        inputs.push(args);
+                    }
                 }
             }
         }
@@ -418,6 +561,26 @@ mod tests {
             (13, 2, 2, 116, 3),
             (13, 4, 5, 8, 9),
             (14, 3, 4, 16, 0),
+            (15, 0, 3, 128, 0x45),
+            (15, 16, 8, 65, 0x81),
+            (15, 27, 6, 41, 0x55),
+            (15, 3, 1, 8, 5),
+            (15, 3, 1, 4, 5),
+            (15, 4, 10, 0, 0x40),
+            (16, 3, 9, 128, 0x9a),
+            (16, 5, 1, 4, 5),
+            (17, 0, 8, 145, 0x85),
+            (17, 1, 6, 56, 0xff),
+            (17, 2, 10, 192, 0x66),
+            (17, 3, 2, 1, 0x81),
+            (17, 4, 8, 144, 0x55),
+            (17, 5, 10, 185, 0x80),
+            (18, 0, 2, 0, 0),
+            (18, 1, 2, 0, 0),
+            (18, 2, 2, 0, 0),
+            (18, 3, 2, 0, 0),
+            (18, 4, 2, 0, 0),
+            (18, 5, 2, 0, 0),
         ] {
             check_tuple_match(&[mode, layout, width, flags, entropy])?;
         }

@@ -8,6 +8,7 @@ use std::rc::Rc;
 use num_bigint::BigUint;
 
 use crate::ast::{BinaryOp, Expr, MatchArm, MatchPattern, Type};
+use crate::check::TuplePatternLayout;
 use crate::parser::radix_digits;
 use crate::typed::bits;
 
@@ -50,16 +51,30 @@ pub(crate) struct BindingWidths {
 impl BindingWidths {
     /// Tuple match literals constrain the same field as a binder in another
     /// arm. A typed pattern fixes that field; unsized endpoints add minima.
-    pub(crate) fn constrain_match_fields(&mut self, arms: &[MatchArm]) -> Result<(), String> {
+    pub(crate) fn constrain_match_fields(
+        &mut self,
+        arms: &[MatchArm],
+        ty: &Type,
+    ) -> Result<(), String> {
         fn visit(
             widths: &mut BindingWidths,
             pattern: &MatchPattern,
+            ty: &Type,
             path: &mut Vec<Member>,
         ) -> Result<(), String> {
             if let MatchPattern::Tuple(fields) = pattern {
-                for (i, field) in fields.iter().enumerate() {
-                    path.push(Member::TupleField(i));
-                    visit(widths, field, path)?;
+                let Type::Tuple(types) = ty else {
+                    return Err(format!("tuple pattern requires a tuple subject, got {ty}"));
+                };
+                let layout = TuplePatternLayout::for_match(fields, types.len())?;
+                for (position, field) in fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| !matches!(field, MatchPattern::Rest))
+                {
+                    let index = layout.field_index(position);
+                    path.push(Member::TupleField(index));
+                    visit(widths, field, &types[index], path)?;
                     path.pop();
                 }
             } else if let MatchPattern::Literal(_) | MatchPattern::Range { .. } = pattern
@@ -79,7 +94,7 @@ impl BindingWidths {
         }
         let mut path = Vec::new();
         for pattern in arms.iter().flat_map(|arm| &arm.patterns) {
-            visit(self, pattern, &mut path)?;
+            visit(self, pattern, ty, &mut path)?;
         }
         Ok(())
     }

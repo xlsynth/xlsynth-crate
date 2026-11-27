@@ -106,8 +106,9 @@ In imported DSLX, cast both enum operands to their backing type before an ordere
 ### Match expressions
 
 Use `match` on a tuple, boolean, numeric enum, or signed or unsigned bit value
-in a function or block. The first matching arm supplies the result. All arms share a result
-type, which can also be an array, tuple, or struct.
+in a function or block. Array and struct subjects support a whole-subject
+binding or `_`. The first matching arm supplies the result. All arms share a
+result type, which can also be an array, tuple, or struct.
 
 ```text
 fn classify(op: u4) -> (u8, bool) {
@@ -144,20 +145,26 @@ fn round_to_even(guard: bool, sticky: bool, odd: bool) -> bool {
 
 A fresh name in a tuple pattern binds that field for the arm's result.
 Each arm has its own scope, so the same name can select different fields.
+Use `..` once per tuple pattern to skip zero or more fields. A fresh name
+on its own binds the entire subject. BX reserves names declared elsewhere
+in the module, including declarations that follow the match.
 
 ```text
 fn pick(input: (bool, u8, u8)) -> u8 {
     match input {
-        (true, value, _) => value,
-        (false, _, value) => value,
+        (true, .., last) => last,
+        whole => whole.1,
     }
 }
 ```
 
-Bindings can select nested tuple fields or whole aggregate values. Use
-distinct fresh names within a pattern. Arms joined with `|` can use
-wildcards and constant patterns. A visible constant in a tuple pattern
-continues to match its value. In BX, a field bound from a compile-time tuple
+Each fresh name must be unique within its pattern. BX rejects `(v, v)`,
+which DSLX interprets as an equality check. To compare two runtime fields
+in BX, bind them separately and write `left == right`. A named scalar
+constant can appear more than once in a pattern, as in `(TAG, .., TAG)`.
+Arms joined with `|` can use wildcards and constant patterns. A visible
+constant in a tuple pattern continues to match its value.
+In BX, a field bound from a compile-time tuple
 can also be used in an arm's `const_assert!` or `const if`, just like a
 destructured `let`. Pinned DSLX v0.65.2 rejects that direct use.
 

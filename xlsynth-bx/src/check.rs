@@ -41,6 +41,7 @@ mod map;
 mod match_patterns;
 mod module_constants;
 mod scope;
+pub(crate) use scope::TuplePatternLayout;
 mod source_patterns;
 mod struct_parametrics;
 use struct_parametrics::{BoundStructArgument, StructApplication, StructArguments};
@@ -5685,11 +5686,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 {
                     return checker.tuple_match_selector(subject, arms);
                 }
-                let mut values = checker.check_results(&operands, None)?.into_iter();
+                let mut values = checker.check_match_values(&operands)?;
                 let subject = values.next().expect("subject is the first operand");
-                check_match_operand_width(&operands, &subject.ty, checker.dslx_widths(), &|| {
-                    checker.zero_calls_function()
-                })?;
                 let patterns = match &subject.ty {
                     Type::Enum { name, .. } => {
                         let def = checker
@@ -5699,12 +5697,27 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                             .ok_or_else(|| format!("unknown enum '{name}'"))?;
                         match_patterns::check_enum_patterns(def, &subject.ty, arms, values)?
                     }
-                    Type::Tuple(_) => return checker.finish_tuple_match(subject, arms),
+                    Type::Tuple(_) | Type::Array { .. } | Type::Named(_) => {
+                        return checker.finish_aggregate_match(subject, arms);
+                    }
                     _ => match_patterns::check_patterns(&subject.ty, arms, values)?,
                 };
                 Ok(MatchSelector { subject, patterns })
             })
         })
+    }
+
+    /// A scalar subject and its literal patterns share a type group, including
+    /// the signed width constraints preceding a deferred call.
+    fn check_match_values(
+        &mut self,
+        operands: &[&Expr],
+    ) -> Result<std::vec::IntoIter<TypedExpr>, String> {
+        let values = self.check_results(operands, None)?;
+        check_match_operand_width(operands, &values[0].ty, self.dslx_widths(), &|| {
+            self.zero_calls_function()
+        })?;
+        Ok(values.into_iter())
     }
 
     /// Check the alternatives of a value-producing expression as one result

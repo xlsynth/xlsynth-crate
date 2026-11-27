@@ -17,7 +17,6 @@ use crate::typed::{CheckedEnum, TypedExpr, TypedExprKind, TypedMatchPattern, bit
 struct Coverage {
     remaining: BTreeMap<BigUint, BigUint>,
     seen: HashSet<(IrBits, IrBits)>,
-    saw_wildcard: bool,
 }
 
 impl Coverage {
@@ -25,7 +24,6 @@ impl Coverage {
         Self {
             remaining: BTreeMap::from([(BigUint::from(0u8), BigUint::from(1u8) << width)]),
             seen: HashSet::new(),
-            saw_wildcard: false,
         }
     }
 
@@ -137,9 +135,6 @@ pub(super) fn check_enum_patterns(
         for pattern in &arm.patterns {
             match pattern {
                 MatchPattern::Wildcard => {
-                    if saw_wildcard {
-                        return Err("exact-duplicate wildcard match pattern".into());
-                    }
                     saw_wildcard = true;
                     unconditional = true;
                 }
@@ -158,6 +153,7 @@ pub(super) fn check_enum_patterns(
                 MatchPattern::Literal(_)
                 | MatchPattern::Range { .. }
                 | MatchPattern::Tuple(_)
+                | MatchPattern::Rest
                 | MatchPattern::Binding(_) => {
                     return Err(format!(
                         "enum match pattern must name a value of {subject_ty}"
@@ -195,10 +191,6 @@ pub(super) fn check_patterns(
         for pattern in &arm.patterns {
             patterns.push(match pattern {
                 MatchPattern::Wildcard => {
-                    if coverage.saw_wildcard {
-                        return Err("exact-duplicate wildcard match pattern".into());
-                    }
-                    coverage.saw_wildcard = true;
                     coverage.remaining.clear();
                     TypedMatchPattern::Wildcard
                 }
@@ -232,8 +224,8 @@ pub(super) fn check_patterns(
                 MatchPattern::Tuple(_) => {
                     return Err("tuple pattern requires a tuple subject".into());
                 }
-                MatchPattern::Binding(_) => {
-                    return Err("match bindings require a tuple pattern".into());
+                MatchPattern::Binding(_) | MatchPattern::Rest => {
+                    return Err("invalid scalar match pattern".into());
                 }
             });
         }

@@ -40,9 +40,9 @@ struct EnteredScope {
 }
 
 /// Maps tuple-pattern positions to fields, accounting for a rest marker.
-struct TuplePatternLayout {
+pub(crate) struct TuplePatternLayout {
     rest: Option<usize>,
-    rest_fields: usize,
+    pub(super) rest_fields: usize,
 }
 
 impl TuplePatternLayout {
@@ -50,7 +50,22 @@ impl TuplePatternLayout {
         let rest = patterns
             .iter()
             .position(|p| matches!(p, BindingPattern::Rest));
-        let required = patterns.len() - usize::from(rest.is_some());
+        Self::from_positions(patterns.len(), rest, field_count)
+    }
+
+    pub(crate) fn for_match(patterns: &[MatchPattern], field_count: usize) -> Result<Self, String> {
+        let rest = patterns
+            .iter()
+            .position(|p| matches!(p, MatchPattern::Rest));
+        Self::from_positions(patterns.len(), rest, field_count)
+    }
+
+    fn from_positions(
+        count: usize,
+        rest: Option<usize>,
+        field_count: usize,
+    ) -> Result<Self, String> {
+        let required = count - usize::from(rest.is_some());
         if required > field_count || rest.is_none() && required != field_count {
             return Err(format!(
                 "tuple pattern with {required} fields cannot bind a {field_count}-element tuple"
@@ -62,12 +77,30 @@ impl TuplePatternLayout {
         })
     }
 
-    fn field_index(&self, position: usize) -> usize {
+    pub(crate) fn field_index(&self, position: usize) -> usize {
         if self.rest.is_some_and(|rest| position > rest) {
             position - 1 + self.rest_fields
         } else {
             position
         }
+    }
+
+    /// Look up the written predicate for a field, including implicit wildcards
+    /// skipped by a rest marker.
+    pub(crate) fn match_field<'p>(
+        &self,
+        patterns: &'p [MatchPattern],
+        index: usize,
+    ) -> &'p MatchPattern {
+        if let Some(rest) = self.rest
+            && index >= rest
+        {
+            if index < rest + self.rest_fields {
+                return &MatchPattern::Wildcard;
+            }
+            return &patterns[index - self.rest_fields + 1];
+        }
+        &patterns[index]
     }
 }
 
@@ -82,15 +115,16 @@ fn take_match_bindings(pattern: &mut MatchPattern) -> BindingPattern {
         }
         MatchPattern::Tuple(fields) => {
             let bindings: Vec<_> = fields.iter_mut().map(take_match_bindings).collect();
-            if bindings
-                .iter()
-                .any(|p| !matches!(p, BindingPattern::Name(n) if n == "_"))
-            {
+            if bindings.iter().any(|p| {
+                matches!(p, BindingPattern::Tuple(_))
+                    || matches!(p, BindingPattern::Name(n) if n != "_")
+            }) {
                 BindingPattern::Tuple(bindings)
             } else {
                 BindingPattern::Name("_".into())
             }
         }
+        MatchPattern::Rest => BindingPattern::Rest,
         MatchPattern::Wildcard | MatchPattern::Literal(_) | MatchPattern::Range { .. } => {
             BindingPattern::Name("_".into())
         }

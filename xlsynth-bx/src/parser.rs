@@ -553,7 +553,7 @@ struct Parser<'s> {
     /// Names in source scope, including imports. An overwritten literal type
     /// needs lexical resolution while its syntax is still available.
     visible_names: HashMap<String, NameKind>,
-    /// Module declarations that a tuple pattern can reference before their
+    /// Module declarations that a match pattern can reference before their
     /// definition.
     match_module_names: BTreeSet<&'s str>,
     /// Previous bindings hidden by currently active lexical declarations.
@@ -731,11 +731,10 @@ struct ParsedExpr {
     spelling: ExprSpelling,
 }
 
-/// Canonical spellings of tuple and range patterns in one match expression.
+/// Canonical spellings of patterns checked for duplicates in one match.
 #[derive(Default)]
 struct MatchPatternSpellings {
     current: String,
-    contains_range: bool,
     seen: BTreeSet<String>,
     bindings: BTreeSet<String>,
 }
@@ -1120,7 +1119,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// Find imports and module names visible to map calls and tuple patterns.
+    /// Find imports and module names visible to map calls and match patterns.
     fn scan_module_bindings(
         &mut self,
         mut visit: impl FnMut(UsePath, usize),
@@ -3059,17 +3058,17 @@ impl<'s> Parser<'s> {
     ) -> Result<MatchPattern, String> {
         let first = self.pos;
         spellings.current.clear();
-        spellings.contains_range = false;
         spellings.bindings.clear();
-        let pattern = self.match_pattern(spellings, false)?;
-        let tuple = matches!(pattern, MatchPattern::Tuple(_));
-        if (tuple || spellings.contains_range) && !spellings.seen.insert(spellings.current.clone())
-        {
-            let message = if tuple {
-                "exact-duplicate match pattern"
-            } else {
-                "duplicate range pattern"
-            };
+        let pattern = self.match_pattern(spellings)?;
+        let message = match &pattern {
+            MatchPattern::Wildcard => "exact-duplicate wildcard match pattern",
+            MatchPattern::Tuple(_) | MatchPattern::Binding(_) => "exact-duplicate match pattern",
+            MatchPattern::Range { .. } => "duplicate range pattern",
+            // Scalar literal equality is checked at the subject's concrete
+            // type. A rest marker occurs only inside a tuple.
+            MatchPattern::Literal(_) | MatchPattern::Rest => return Ok(pattern),
+        };
+        if !spellings.seen.insert(spellings.current.clone()) {
             return Err(diagnostic(self.source, self.tokens[first].start, message));
         }
         Ok(pattern)
@@ -3079,7 +3078,6 @@ impl<'s> Parser<'s> {
     fn match_pattern(
         &mut self,
         spellings: &mut MatchPatternSpellings,
-        tuple_field: bool,
     ) -> Result<MatchPattern, String> {
         if self.eat("_") {
             spellings.current.push('_');
@@ -3088,14 +3086,27 @@ impl<'s> Parser<'s> {
         if self.eat("(") {
             spellings.current.push('(');
             return self.nested(|parser| {
+                let mut seen_rest = false;
                 let fields = parser.list(")", |parser| {
-                    let field = parser.match_pattern(spellings, true)?;
+                    let field = if parser.eat("..") {
+                        if seen_rest {
+                            return Err(parser.error("duplicate rest marker in tuple pattern"));
+                        }
+                        seen_rest = true;
+                        spellings.current.push_str("..");
+                        MatchPattern::Rest
+                    } else {
+                        parser.match_pattern(spellings)?
+                    };
                     spellings.current.push(',');
                     Ok(field)
                 })?;
                 spellings.current.push(')');
                 Ok(MatchPattern::Tuple(fields))
             });
+        }
+        if self.peek(0) == ".." {
+            return Err(self.error("rest marker requires a tuple pattern"));
         }
         let first = self.pos;
         let mut end = 1;
@@ -3104,14 +3115,11 @@ impl<'s> Parser<'s> {
         }
         if is_function_identifier(self.peek(0)) && matches!(self.peek(end), "=>" | "|" | "," | ")")
         {
-            // The checker resolves a scalar constant, value parametric, or enum
-            // member. DSLX requires numeric literals on both sides of a range.
             let token = self.peek(0);
-            if tuple_field && end == 1 && spellings.bindings.contains(token) {
-                return Err(self.error(&format!("repeated match binding '{token}' is unsupported")));
+            if end == 1 && spellings.bindings.contains(token) {
+                return Err(self.error(&format!("duplicate match binding '{token}'")));
             }
-            if tuple_field
-                && end == 1
+            if end == 1
                 && !self.visible_names.contains_key(token)
                 && !self.has_type_parameter(token)
                 && !self.match_module_names.contains(token)
@@ -3132,6 +3140,8 @@ impl<'s> Parser<'s> {
                 // An unbound bare pattern introduces a name for this arm.
                 self.bind_local_name(self.peek(0));
             }
+            // The checker resolves a scalar constant, value parametric, or enum
+            // member. DSLX requires numeric literals on both sides of a range.
             let name = self.name_or_qualified_member()?;
             let value = self.named_value(name)?;
             spellings
@@ -3148,7 +3158,6 @@ impl<'s> Parser<'s> {
         let inclusive = self.eat("..=");
         if inclusive || self.eat("..") {
             let end = self.pattern_literal()?;
-            spellings.contains_range = true;
             spellings.current.push_str(self.tokens[separator].text);
             append_literal_pattern_spelling(
                 &mut spellings.current,
@@ -7100,7 +7109,9 @@ block second(clk, x: S) -> S { S { ..x } }
             "0 .. x => x",
             "- 1 => x",
             "(0 | 1,) => x",
-            "(_, ..) => x",
+            ".. => x",
+            "(_, .., ..) => x",
+            "(..u8:1) => x",
             "[0] => x",
             "NAME .. u8:1 => x",
             "u8[1]:0 => x",
@@ -7156,6 +7167,85 @@ fn f(x: ((bool,), (), u8)) -> bool {
             [Expr::Bool(false), literal("1"), literal("2")]
         );
         Ok(())
+    }
+
+    #[test]
+    fn match_patterns_preserve_rest_bindings_and_repeated_constants() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+            const TAG = u8:7;
+            fn f(p: ((u8, u8, u8), u8, u8, u8)) -> u8 {
+                match p {
+                    ((.., x), TAG, .., TAG) => x,
+                    ((x, ..), u8:0, .., _) => x,
+                    whole => whole.1,
+                }
+            }
+        "#,
+        )?;
+        let Expr::Match { arms, .. } = &module.functions[0].body else {
+            panic!("expected match");
+        };
+        assert_eq!(
+            arms[0].patterns,
+            [MatchPattern::Tuple(vec![
+                MatchPattern::Tuple(vec![MatchPattern::Rest, MatchPattern::Binding("x".into())]),
+                MatchPattern::Literal(Expr::Name("TAG".into())),
+                MatchPattern::Rest,
+                MatchPattern::Literal(Expr::Name("TAG".into())),
+            ])]
+        );
+        assert_eq!(arms[0].binding_names().collect::<Vec<_>>(), ["x"]);
+        assert_eq!(arms[1].binding_names().collect::<Vec<_>>(), ["x"]);
+        assert_eq!(arms[2].patterns, [MatchPattern::Binding("whole".into())]);
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_fresh_match_binders_are_rejected_across_tuple_levels() {
+        for (ty, pattern) in [
+            ("(u8, u8)", "(v, v)"),
+            ("(u8, bool, u8)", "(v, .., v)"),
+            ("((u8, bool), bool)", "((.., v), v)"),
+            ("(bool, (u8, bool))", "(v, (.., v))"),
+        ] {
+            let source =
+                format!("fn f(p: {ty}) -> bool {{ match p {{ {pattern} => true, _ => false }} }}");
+            let error = parse_module(&source).unwrap_err();
+            assert!(
+                error.contains("duplicate match binding 'v'"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn match_alternatives_cannot_introduce_names() {
+        for patterns in ["v | _", "_ | v", "(v, ..) | (..)", "(..) | (.., v)"] {
+            let source = format!("fn f(p: (u8, u8)) -> u8 {{ match p {{ {patterns} => u8:0 }} }}");
+            let error = parse_module(&source).unwrap_err();
+            assert!(
+                error.contains("cannot bind 'v' in a match arm with multiple patterns"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_catch_all_spellings_are_rejected_in_skipped_matches() {
+        for (arms, diagnostic) in [
+            (
+                "_ => true, _ => false",
+                "exact-duplicate wildcard match pattern",
+            ),
+            ("v => v, v => v", "exact-duplicate match pattern"),
+        ] {
+            let source = format!(
+                "fn f(x: bool) -> bool {{ const if true {{ x }} else {{ match x {{ {arms} }} }} }}"
+            );
+            let error = parse_module(&source).unwrap_err();
+            assert!(error.contains(diagnostic), "{source}: {error}");
+        }
     }
 
     #[test]

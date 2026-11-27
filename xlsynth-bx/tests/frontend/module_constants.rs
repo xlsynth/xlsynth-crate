@@ -167,8 +167,12 @@ fn named_scalar_patterns_match_their_evaluated_bit_values() -> Result<(), Box<dy
             IrValue::bool(expected)
         );
     }
+    // A fresh bare identifier binds the subject, even in uppercase. NEG is
+    // already declared and continues to match its constant value.
+    let source =
+        format!("{declarations} fn f(x: s8) -> s8 {{ match x {{ NEG => s8:0, OTHER => OTHER }} }}");
+    check_module(&parse_module(&source)?)?;
     for (prefix, patterns) in [
-        ("", "UNKNOWN"),
         ("let NEG = x;", "NEG"),
         ("", "NEG | s8:-4"),
         ("", "WRONG_SIGN"),
