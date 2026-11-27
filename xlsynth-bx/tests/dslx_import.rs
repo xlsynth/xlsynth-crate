@@ -849,37 +849,86 @@ fn native_signed_array_arguments_preserve_repeated_literal_bindings() -> Result<
     write_module(
         root.path(),
         "lanes.x",
-        "pub fn take(xs: s8[2]) -> s8[2] { xs }",
+        r#"pub fn take(xs: s8[2]) -> s8[2] { xs }
+           pub fn diagonal(xs: s8[2][2]) -> s8[2] { [xs[u32:0][u32:0], xs[u32:1][u32:1]] }"#,
     )?;
     let options = search_paths(&[root.path()]);
-    let body = "let h = 0xff; let (xs, _) = ([h, h], true); lanes::take(xs)";
-    let native = format!(
-        "import lanes; fn sample() -> s8[2] {{ {body} }} const_assert!(sample() == [s8:-1, s8:-1]);"
-    );
-    parse_and_typecheck(
-        &native,
-        "sample.x",
-        "sample",
-        &mut ImportData::new(None, &options.additional_search_paths),
-    )?;
-    let source =
-        format!("use lanes; #[allow(combinational_block)] block b(x: u8) -> s8[2] {{ {body} }}");
-    let package = compile_with_options(
-        &source,
-        empty_package("test"),
-        ResetBehavior::default(),
-        &options,
-    )?;
-    assert_eq!(
-        run_block(&package, 0)?,
-        IrValue::parse_typed("[bits[8]:255, bits[8]:255]")?
-    );
-    assert_import_rejected(
-        "lanes",
+    let expected = IrValue::parse_typed("[bits[8]:255, bits[8]:255]")?;
+    let block = "#[allow(combinational_block)] block b(x: u8) -> s8[2]";
+    for call in [
+        "lanes::take([h, h])",
+        "lanes::take([h | h, h])",
+        "let xs = [h, h]; lanes::take(xs)",
+        "let xs = [h, h]; let alias = xs; lanes::take(alias)",
+        "let (xs, _) = ([h, h], true); lanes::take(xs)",
+        "lanes::take(if x == u8:0 { [h, h] } else { [h, h] })",
+        "lanes::take(if x == u8:0 { [h, ...] } else { [s8:-1, s8:-1] })",
+        "let a = [h, h]; lanes::diagonal([a, a])",
+        "map([x], |_v| lanes::take([h, h]))[u32:0]",
+    ] {
+        let body = format!("let h = 0xff; {call}");
+        let native = format!(
+            "import lanes; fn sample(x: u8) -> s8[2] {{ {body} }}
+             const_assert!(sample(u8:0) == [s8:-1, s8:-1]);
+             const_assert!(sample(u8:1) == [s8:-1, s8:-1]);"
+        );
+        parse_and_typecheck(
+            &native,
+            "sample.x",
+            "sample",
+            &mut ImportData::new(None, &options.additional_search_paths),
+        )
+        .map_err(|e| format!("{native}\n{e}"))?;
+        for source in [
+            format!("use lanes; {block} {{ {body} }}"),
+            format!("use lanes; fn sample(x: u8) -> s8[2] {{ {body} }} {block} {{ sample(x) }}"),
+        ] {
+            let package = compile_with_options(
+                &source,
+                empty_package("test"),
+                ResetBehavior::default(),
+                &options,
+            )
+            .map_err(|e| format!("{source}\n{e}"))?;
+            for x in [0, 1] {
+                assert_eq!(run_block(&package, x)?, expected, "{source}, x={x}");
+            }
+        }
+    }
+    for body in [
+        "let h: u8 = 0xff; let xs = [h, h]; lanes::take(xs)",
+        "let h = 0xff; let xs = [h, u8:0xff]; lanes::take(xs)",
+        "let h = 255; let xs = [h, h]; lanes::take(xs)",
         "let h = 0xff; let (xs, _) = ([h, 255], true); lanes::take(xs)",
-        "s8[2]",
-        &options,
-    );
+    ] {
+        assert_import_rejected("lanes", body, "s8[2]", &options);
+    }
+    Ok(())
+}
+
+#[test]
+fn imported_and_local_arrays_keep_bound_literals_at_their_original_width()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let options = search_paths(&[root.path()]);
+    for (ty, accepts) in [
+        ("u8[2]", true),
+        ("s8[2]", true),
+        ("u16[2]", false),
+        ("s16[2]", false),
+    ] {
+        let declaration = format!("pub fn take(xs: {ty}) -> {ty} {{ xs }}");
+        write_module(root.path(), "lanes.x", &declaration)?;
+        let block = format!("#[allow(combinational_block)] block b(x: u8) -> {ty}");
+        for (module, callee) in [
+            (declaration.as_str(), "take"),
+            ("use lanes;", "lanes::take"),
+        ] {
+            let source = format!("{module} {block} {{ let h = 0xff; {callee}([h, h]) }}");
+            let checked = check_source_with_options(&source, &options);
+            assert_eq!(checked.is_ok(), accepts, "{source}\n{:?}", checked.err());
+        }
+    }
     Ok(())
 }
 

@@ -679,7 +679,17 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         &mut self,
         check: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
-        let saved = std::mem::replace(&mut self.parametric_argument_context, true);
+        self.with_argument_context(true, check)
+    }
+
+    /// A fixed formal can supply signedness at an existing width. Parametric
+    /// inference can also widen eligible bindings to a specialized width.
+    pub(super) fn with_argument_context<T>(
+        &mut self,
+        parametric: bool,
+        check: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let saved = std::mem::replace(&mut self.parametric_argument_context, parametric);
         let result = self.with_dslx_value_context(check);
         self.parametric_argument_context = saved;
         result

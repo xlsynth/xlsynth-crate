@@ -31,6 +31,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_imported_array_literals"
+path = "fuzz_targets/fuzz_bx_dslx_imported_array_literals.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_array_ranges"
 path = "fuzz_targets/fuzz_bx_dslx_array_ranges.rs"
 test = false

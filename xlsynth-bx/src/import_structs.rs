@@ -350,6 +350,12 @@ impl ImportedStructs {
         self.graph.has_public_function(subject, member)
     }
 
+    pub(crate) fn function_has_parametrics(&self, subject: &str, member: &str) -> bool {
+        self.graph
+            .module_reference(subject, &[])
+            .is_some_and(|module| module.outline.function_parametrics.contains_key(member))
+    }
+
     pub(crate) fn has_public_type(&self, subject: &str, member: &str) -> bool {
         self.graph.has_public_type(subject, member)
     }

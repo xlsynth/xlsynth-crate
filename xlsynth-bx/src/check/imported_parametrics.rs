@@ -7,8 +7,8 @@ use super::{BodyChecker, K, MAX_ELABORATION_DEPTH, TypedExpr, has_aggregate_lite
 use crate::ast::{Expr, ScopeStatement, Type};
 use crate::dslx_import::NativeDataArg;
 use crate::infer_literal::{
-    has_contextual_result, import_array_witness, import_bound_literal_witness,
-    import_literal_witness,
+    ImportLiteralOrigins, has_contextual_result, import_array_witness,
+    import_bound_literal_witness, import_literal_witness,
 };
 use crate::typed::BoundParametricValue;
 use std::collections::BTreeMap;
@@ -18,6 +18,15 @@ use std::collections::BTreeMap;
 enum ImportOperand {
     Checked(TypedExpr),
     Contextual(NativeDataArg),
+}
+
+/// Which contextual constraints are being sought along an operand's result
+/// edges.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportContext {
+    Width,
+    Value,
+    ArrayElement,
 }
 
 impl ImportOperand {
@@ -30,10 +39,10 @@ impl ImportOperand {
 }
 
 impl BodyChecker<'_, '_> {
-    /// Native formals can determine the element width of a range, including
-    /// one retained through a let or a tuple projection.
+    /// Native formals can constrain range bounds and unannotated array
+    /// elements, including those retained through a let or tuple projection.
     pub(super) fn needs_contextual_import(&self, arg: &Expr) -> bool {
-        self.contextual_import_in_scope(arg, &BTreeMap::new())
+        self.contextual_import_in_scope(arg, &BTreeMap::new(), ImportContext::Value)
     }
 
     /// Track scoped aliases until preparation replaces them with checked
@@ -42,23 +51,32 @@ impl BodyChecker<'_, '_> {
         &self,
         arg: &'e Expr,
         names: &BTreeMap<&'e str, bool>,
+        context: ImportContext,
     ) -> bool {
         has_contextual_result(arg, &|expr| match expr {
             Expr::ConstIf { .. } | Expr::Range { .. } => Some(true),
+            _ if context != ImportContext::Width
+                && let Some((items, _)) = expr.unannotated_array() =>
+            {
+                Some(items.iter().any(|item| {
+                    self.contextual_import_in_scope(item, names, ImportContext::ArrayElement)
+                }))
+            }
+            Expr::Literal { ty: None, .. } => Some(context == ImportContext::ArrayElement),
             Expr::Scope { statements, result } => {
                 let mut names = names.clone();
                 for stmt in statements {
                     match stmt {
                         ScopeStatement::Let(binding) => {
                             let contextual = binding.ty.is_none()
-                                && self.contextual_import_in_scope(&binding.value, &names);
+                                && self.contextual_import_in_scope(&binding.value, &names, context);
                             binding.pattern.visit_names(&mut |name| {
                                 names.insert(name, contextual);
                             });
                         }
                         ScopeStatement::Const(def) => {
                             let contextual = def.ty.is_none()
-                                && self.contextual_import_in_scope(&def.value, &names);
+                                && self.contextual_import_in_scope(&def.value, &names, context);
                             names.insert(&def.name, contextual);
                         }
                         ScopeStatement::TypeAlias(_)
@@ -66,15 +84,21 @@ impl BodyChecker<'_, '_> {
                         | ScopeStatement::Expression(_) => { /* No new value binding. */ }
                     }
                 }
-                Some(self.contextual_import_in_scope(result, &names))
+                Some(self.contextual_import_in_scope(result, &names, context))
             }
-            Expr::Name(name) => Some(names.get(name.as_str()).copied().unwrap_or_else(|| {
-                self.inferred_bindings
-                    .get(name)
-                    .is_some_and(|widths| widths.infers_array_member(expr))
-            })),
+            Expr::Name(name) => Some(names.get(name.as_str()).map_or_else(
+                || {
+                    self.inferred_bindings.get(name).is_some_and(|widths| {
+                        context == ImportContext::ArrayElement
+                            || widths.infers_array_member(expr, context != ImportContext::Width)
+                    })
+                },
+                // Preparation will resolve the scoped initializer before the
+                // probe decides which array elements supply literal evidence.
+                |contextual| *contextual || context == ImportContext::ArrayElement,
+            )),
             Expr::Index { value, .. } | Expr::Field { value, .. } => {
-                Some(self.contextual_import_in_scope(value, names))
+                Some(self.contextual_import_in_scope(value, names, context))
             }
             _ => None,
         })
@@ -82,10 +106,8 @@ impl BodyChecker<'_, '_> {
 
     fn inferred_reference<'e>(&'e self, expr: &'e Expr) -> Option<&'e Type> {
         let (binding, ty) = self.reference_type(expr)?;
-        self.inferred_bindings
-            .get(binding)?
-            .infers_at_use(expr)
-            .then_some(ty)
+        let widths = self.inferred_bindings.get(binding)?;
+        (widths.infers_at_use(expr) || widths.infers_array_member(expr, true)).then_some(ty)
     }
 
     /// Evaluate the explicit prefix in caller scope using the native
@@ -152,12 +174,20 @@ impl BodyChecker<'_, '_> {
     ) -> Result<TypedExpr, String> {
         let values = self.imported_value_parametrics(module, function, actuals)?;
         let source_args = args.iter().collect::<Vec<_>>();
-        self.with_parametric_context(|checker| {
+        // Parametric formals, ranges and compile-time selections can supply
+        // a width. Other fixed formals keep an ordinary binding's hardware
+        // width, as they do when calling a BX-defined function.
+        let infer_width = self.resolver.function_has_parametrics(module, function)
+            || args.iter().any(|arg| {
+                self.contextual_import_in_scope(arg, &BTreeMap::new(), ImportContext::Width)
+            });
+        self.with_argument_context(infer_width, |checker| {
             checker.with_aggregate_operands(&source_args, |checker, args| {
                 let mut evidence = Vec::with_capacity(args.len());
                 let mut checked = Vec::with_capacity(args.len());
+                let mut origins = ImportLiteralOrigins::default();
                 for (arg, source) in args.iter().zip(&source_args) {
-                    match checker.import_operand(arg, MAX_ELABORATION_DEPTH)? {
+                    match checker.import_operand(arg, MAX_ELABORATION_DEPTH, &mut origins)? {
                         ImportOperand::Checked(value) => {
                             evidence.push(NativeDataArg::Typed(value.ty.clone()));
                             checked.push(Some(value));
@@ -213,30 +243,33 @@ impl BodyChecker<'_, '_> {
     /// Represent the source edges that constrain a data operand's type.
     /// Concrete leaves become typed probe parameters. Literal leaves keep
     /// their minimum width until native inference has run.
-    fn import_operand(&mut self, expr: &Expr, depth: usize) -> Result<ImportOperand, String> {
+    fn import_operand(
+        &mut self,
+        expr: &Expr,
+        depth: usize,
+        origins: &mut ImportLiteralOrigins,
+    ) -> Result<ImportOperand, String> {
         let child = depth
             .checked_sub(1)
             .ok_or("import data argument nesting exceeds limit")?;
         if let Some(ty @ (Type::Array { .. } | Type::Tuple(_))) = self.inferred_reference(expr) {
             return self
-                .bound_aggregate_evidence(expr, ty, child)
+                .bound_aggregate_evidence(expr, ty, child, origins)
                 .map(ImportOperand::Contextual);
         }
         if let Some((_, ty)) = self.reference_type(expr)
             && let Some(lookup) = self.dslx_widths()
             && let Some(witness) =
-                import_bound_literal_witness(expr, ty, lookup, self.width_scope())?
+                import_bound_literal_witness(expr, ty, lookup, self.width_scope(), origins)?
         {
-            return Ok(ImportOperand::Contextual(NativeDataArg::BoundLiteral(
-                witness,
-            )));
+            return Ok(ImportOperand::Contextual(witness));
         }
-        let group = |checker: &mut Self, items: &[Expr]| {
+        let mut group = |checker: &mut Self, items: &[Expr]| {
             items
                 .iter()
                 .map(|item| {
                     checker
-                        .import_operand(item, child)
+                        .import_operand(item, child, origins)
                         .map(ImportOperand::into_evidence)
                 })
                 .collect::<Result<Vec<_>, String>>()
@@ -256,6 +289,7 @@ impl BodyChecker<'_, '_> {
                     self.width_scope(),
                     range.count,
                     range.widths.as_ref().map(|_| &range.ty),
+                    origins,
                 )? {
                     witness
                 } else {
@@ -282,7 +316,7 @@ impl BodyChecker<'_, '_> {
             {
                 // The caller's expected accumulator type reaches the seed as
                 // well as the loop body during final elaboration.
-                self.import_operand(seed, child)?.into_evidence()
+                self.import_operand(seed, child, origins)?.into_evidence()
             }
             Expr::If {
                 then_value,
@@ -290,8 +324,10 @@ impl BodyChecker<'_, '_> {
                 ..
             } if has_aggregate_literal(expr) || self.needs_contextual_import(expr) => {
                 NativeDataArg::Branches(vec![
-                    self.import_operand(then_value, child)?.into_evidence(),
-                    self.import_operand(else_value, child)?.into_evidence(),
+                    self.import_operand(then_value, child, origins)?
+                        .into_evidence(),
+                    self.import_operand(else_value, child, origins)?
+                        .into_evidence(),
                 ])
             }
             Expr::Match { arms, .. }
@@ -300,23 +336,26 @@ impl BodyChecker<'_, '_> {
                 NativeDataArg::Branches(
                     arms.iter()
                         .map(|arm| {
-                            self.import_operand(&arm.value, child)
+                            self.import_operand(&arm.value, child, origins)
                                 .map(ImportOperand::into_evidence)
                         })
                         .collect::<Result<_, _>>()?,
                 )
             }
             Expr::Scope { result, .. } if self.needs_contextual_import(result) => {
-                self.import_operand(result, child)?.into_evidence()
+                self.import_operand(result, child, origins)?.into_evidence()
             }
             _ => {
-                let widths = self
-                    .dslx_widths()
-                    .filter(|_| self.needs_contextual_import(expr));
-                let Some(witness) = import_literal_witness(expr, widths)? else {
+                let Some(witness) = import_literal_witness(
+                    expr,
+                    self.dslx_widths(),
+                    self.needs_contextual_import(expr),
+                    origins,
+                )?
+                else {
                     return self.expr(expr, None).map(ImportOperand::Checked);
                 };
-                NativeDataArg::Inferred(witness)
+                witness
             }
         };
         Ok(ImportOperand::Contextual(evidence))
@@ -329,6 +368,7 @@ impl BodyChecker<'_, '_> {
         expr: &Expr,
         ty: &Type,
         depth: usize,
+        origins: &mut ImportLiteralOrigins,
     ) -> Result<NativeDataArg, String> {
         let child = depth
             .checked_sub(1)
@@ -346,14 +386,19 @@ impl BodyChecker<'_, '_> {
                             value: Box::new(expr.clone()),
                             name: i.to_string(),
                         };
-                        self.bound_aggregate_evidence(&field, ty, child)
+                        self.bound_aggregate_evidence(&field, ty, child, origins)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Type::Array { element, size } => {
-                if let Some(witness) =
-                    import_array_witness(expr, self.dslx_widths(), self.width_scope(), *size, None)?
-                {
+                if let Some(witness) = import_array_witness(
+                    expr,
+                    self.dslx_widths(),
+                    self.width_scope(),
+                    *size,
+                    None,
+                    origins,
+                )? {
                     witness
                 } else if *size != 0 {
                     let lane = Expr::Index {
@@ -361,7 +406,9 @@ impl BodyChecker<'_, '_> {
                         index: Box::new(Expr::Bool(false)),
                     };
                     NativeDataArg::Repeated {
-                        element: Box::new(self.bound_aggregate_evidence(&lane, element, child)?),
+                        element: Box::new(
+                            self.bound_aggregate_evidence(&lane, element, child, origins)?,
+                        ),
                         size: *size,
                     }
                 } else {
@@ -371,9 +418,9 @@ impl BodyChecker<'_, '_> {
             _ => {
                 if let Some(lookup) = self.dslx_widths()
                     && let Some(witness) =
-                        import_bound_literal_witness(expr, ty, lookup, self.width_scope())?
+                        import_bound_literal_witness(expr, ty, lookup, self.width_scope(), origins)?
                 {
-                    NativeDataArg::BoundLiteral(witness)
+                    witness
                 } else {
                     NativeDataArg::Typed(ty.clone())
                 }

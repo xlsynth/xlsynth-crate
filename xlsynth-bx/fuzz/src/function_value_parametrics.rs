@@ -3,9 +3,10 @@
 //! Compare BX value-parametric functions with the same declarations in DSLX.
 
 use crate::eval::expr_eval::bx_source;
-use crate::function_oracle::{DslxExecution, FunctionProgram, compare_bx_program, compare_program};
+use crate::function_oracle::{
+    DslxExecution, FunctionProgram, compare_imported_program, compare_program,
+};
 use crate::input_seed;
-use std::fs;
 use xlsynth_pir::{IrBits, IrFormatPreference};
 
 /// Dimensions and choices shared by the generated function and its callers.
@@ -663,28 +664,6 @@ fn observe<N:u32, P:u8{default}, L:u32={{increment(u32:{length})}}>(x:uN[N], tag
             dynamic_index: None,
         }
     }
-}
-
-/// Run both frontends and their evaluation oracles against the same native
-/// import.
-fn compare_imported_program(
-    name: &str,
-    library: &str,
-    bx: &str,
-    program: FunctionProgram,
-    seed: u64,
-) -> Result<(), String> {
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    fs::write(dir.path().join(format!("{name}.x")), library).map_err(|e| e.to_string())?;
-    compare_bx_program(
-        bx,
-        program,
-        seed,
-        DslxExecution::ConcreteConstants,
-        Vec::new(),
-        &[dir.path()],
-    )
-    .map_err(|e| format!("{e}\n{name}.x:\n{library}"))
 }
 
 /// Generate shared parametric declarations and compare source acceptance,
