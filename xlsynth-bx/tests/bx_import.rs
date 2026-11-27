@@ -756,6 +756,11 @@ fn library_define_before_use_checks_alias_references_and_their_dimensions()
             "Word",
             "WIDTH",
         ),
+        (
+            "type Word = uN[array_size(u32:0..WIDTH)]; const WIDTH = u32:8;",
+            "Word",
+            "WIDTH",
+        ),
     ] {
         fs::write(
             &path,
@@ -1084,6 +1089,41 @@ pub block circuit(clk, x: u8) -> (u10, u12, u14, u5) {
     let defaulted = "use math; const N = u32:9; fn f() -> u32 { math::own() }";
     assert!(check_source_with_options(defaulted, &options).is_err());
     check_source_with_options(&defaulted.replace("own()", "own<4>()"), &options)?;
+    Ok(())
+}
+
+#[test]
+fn range_bounds_resolve_in_imported_modules_and_captured_scopes() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "bounds.bx",
+        r#"
+const OFFSET = u32:5;
+pub type Word = uN[array_size(OFFSET..=u32:12)];
+pub fn sequence<N: u32>() -> u32[N] { OFFSET..(OFFSET + N) }
+pub fn captured() -> u32[2] {
+    array_rev({ let OFFSET = u32:1; OFFSET..=u32:2 })
+}
+#[allow(combinational_block)]
+pub block word<N: u32>(clk, x: uN[array_size(u32:0..N)]) -> uN[N] { x }
+"#,
+    )?;
+    let source = r#"
+use bounds;
+const OFFSET = u32:9;
+pub block circuit(clk, x: bounds::Word) -> (u8, u32[3], u32[2]) {
+    let y = bounds::word<8>(x);
+    (y, bounds::sequence<3>(), bounds::captured())
+}
+"#;
+    let options = search_paths(&[dir.path()]);
+    assert_eq!(
+        run(compile_design(source, &options)?, 47)?,
+        IrValue::parse_typed(
+            "(bits[8]:47, [bits[32]:5, bits[32]:6, bits[32]:7], [bits[32]:2, bits[32]:1])"
+        )?
+    );
     Ok(())
 }
 

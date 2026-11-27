@@ -582,6 +582,37 @@ block sample(clk, xs:u8[2], index:u1)->u8 { map(before(xs), index) }
 }
 
 #[test]
+fn a_user_defined_map_receives_a_range_as_an_ordinary_array() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    let definition = "pub fn map(xs: u8[2], index: u1) -> u8 { xs[index] }";
+    fs::write(dir.path().join("ops.x"), definition)?;
+    let block = "#[allow(combinational_block)] block sample(clk, index: u1) -> u8 { map(u8:4..=u8:5, !index) }";
+    for program in [
+        format!("{definition}\n{block}"),
+        format!("use ops::map;\n{block}"),
+        format!("{block}\nuse ops::map;"),
+    ] {
+        let package = compile_with_options(
+            &program,
+            empty_package("test"),
+            ResetBehavior::default(),
+            &options,
+        )?;
+        let sample =
+            combinational_block_to_fn(package.get_block("sample").ok_or("missing sample")?)?;
+        for (index, expected) in [(false, 5), (true, 4)] {
+            assert_eq!(
+                eval_fn_in_package_value(&package, &sample, &[IrValue::bool(index)]),
+                IrValue::make_ubits(8, expected)?,
+                "{program}",
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn ordinary_block_calls_named_map_reject_builtin_operand_syntax() -> Result<(), Box<dyn Error>> {
     for (input_ty, operand) in [("u8", "{ u8:0 }"), ("()", "if true { () }")] {
         let source = format!(
@@ -663,7 +694,7 @@ block sample(clk, xs:u8[2], inc:u8)->u8[2] {{
 #[test]
 fn named_map_arity_is_checked_when_an_unrolled_iteration_is_elaborated()
 -> Result<(), Box<dyn Error>> {
-    for call in ["map(a)", "map(a, inc, u8:0)"] {
+    for call in ["map(a)", "map(a, inc, u8:0)", "map(u8:0..u8:2)"] {
         let functions = format!(
             r#"
 fn inc(x:u8)->u8 {{ x+u8:1 }}

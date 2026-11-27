@@ -20,6 +20,12 @@ pub(crate) enum NativeDataArg {
         members: Vec<Self>,
         has_ellipsis: bool,
     },
+    /// A checked array binding has one shared element constraint and a known
+    /// length.
+    Repeated {
+        element: Box<Self>,
+        size: usize,
+    },
     Branches(Vec<Self>),
 }
 
@@ -29,6 +35,9 @@ impl NativeDataArg {
         match self {
             Self::Typed(ty) => crate::check::source_type_nodes(ty),
             Self::Inferred(literal) | Self::BoundLiteral(literal) => literal.len().max(1),
+            Self::Repeated { element, size } => element
+                .storage_work()
+                .saturating_add((usize::BITS - size.leading_zeros()) as usize),
             Self::Array { members: items, .. } | Self::Tuple(items) | Self::Branches(items) => {
                 items
                     .iter()
@@ -194,6 +203,24 @@ impl ProbeImports {
                 let name = format!("bound_{}", lets.len());
                 lets.push(format!("let {name} = {literal};"));
                 Ok(name)
+            }
+            NativeDataArg::Repeated { element, size } => {
+                let member = self.render_argument(element, structs, params, lets, true)?;
+                // Double the same bound array so the probe preserves its shared
+                // element constraint with logarithmic source size.
+                let mut power = format!("[{member}]");
+                let mut parts = Vec::new();
+                let mut remaining = *size;
+                while remaining != 0 {
+                    let name = format!("bound_{}", lets.len());
+                    lets.push(format!("let {name} = {power};"));
+                    if remaining & 1 == 1 {
+                        parts.push(name.clone());
+                    }
+                    power = format!("{name} ++ {name}");
+                    remaining >>= 1;
+                }
+                Ok(format!("({})", parts.join(" ++ ")))
             }
             NativeDataArg::Tuple(items)
             | NativeDataArg::Array { members: items, .. }
@@ -421,6 +448,16 @@ fn contextual_shape<'d>(
                 .find_map(|a| contextual_shape(a, element, aggregates))
                 .or_else(|| parse_value_type(element).ok())?;
             Some(Type::array(element, size))
+        }
+        NativeDataArg::Repeated { element, size } => {
+            let (member, length) = display.strip_suffix(']')?.rsplit_once('[')?;
+            if length.parse::<usize>().ok()? != *size {
+                return None;
+            }
+            Some(Type::array(
+                contextual_shape(element, member, aggregates)?,
+                *size,
+            ))
         }
     }?;
     if matches!(ty, Type::Tuple(_) | Type::Array { .. }) {

@@ -635,6 +635,12 @@ pub enum Expr {
     },
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
+    /// The ascending array of integers between two compile-time endpoints.
+    Range {
+        start: Box<Expr>,
+        limit: Box<Expr>,
+        inclusive: bool,
+    },
     /// An array with an explicit type or a trailing ellipsis that repeats
     /// its final member up to the declared size.
     ArrayLiteral {

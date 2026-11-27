@@ -56,6 +56,7 @@ fn unselected_branches_resolve_names_and_skip_typechecking() -> Result<(), Strin
         for expression in [
             "const if true { x } else { let v = x; v + false }",
             "const if false { false } else { x }",
+            "const if true { x } else { x..=false }",
         ] {
             compile_design(&format!("{header} {{ {expression} }}"))?;
         }
@@ -71,6 +72,14 @@ fn unselected_branches_resolve_names_and_skip_typechecking() -> Result<(), Strin
             (
                 "const if true { let y = x; y } else { y }",
                 "unknown value 'y'",
+            ),
+            (
+                "const if true { x } else { missing..x }",
+                "unknown value 'missing'",
+            ),
+            (
+                "const if true { x } else { x..=missing }",
+                "unknown value 'missing'",
             ),
             (
                 "const if x == u8:0 { x } else { x }",

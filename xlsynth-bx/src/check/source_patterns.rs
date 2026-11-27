@@ -78,15 +78,18 @@ pub(super) fn validate_tuple_pattern_bindings(arms: &[MatchArm]) -> Result<(), S
     Ok(())
 }
 
-/// Local declarations and assertions can evaluate a helper transitively, so
+/// Local declarations, assertions, and range bounds can evaluate helpers, so
 /// retain the lexical operands used to determine constexpr values.
-pub(super) fn has_constexpr_declaration(module: &Module, include_tests: bool) -> bool {
+pub(super) fn needs_constexpr_operands(module: &Module, include_tests: bool) -> bool {
     if !module.const_asserts.is_empty() {
         return true;
     }
     let mut pending = module_nodes(module, include_tests);
     while let Some(node) = pending.pop() {
-        if matches!(node, Statement(Stmt::ConstAssert(_))) {
+        if matches!(
+            node,
+            Statement(Stmt::ConstAssert(_)) | Expression(Expr::Range { .. })
+        ) {
             return true;
         }
         if let Expression(Expr::Scope { statements, .. }) = node

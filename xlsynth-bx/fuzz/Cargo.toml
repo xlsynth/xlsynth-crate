@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+num-bigint = "0.4.6"
 tempfile = "3.20"
 xlsynth = { path = "../../xlsynth", version = "0.88.0" }
 xlsynth-bx = { path = "..", version = "0.88.0" }
@@ -26,6 +27,12 @@ doc = false
 [[bin]]
 name = "fuzz_bx_dslx_array_literals"
 path = "fuzz_targets/fuzz_bx_dslx_array_literals.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_bx_dslx_array_ranges"
+path = "fuzz_targets/fuzz_bx_dslx_array_ranges.rs"
 test = false
 doc = false
 

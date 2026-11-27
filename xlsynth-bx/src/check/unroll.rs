@@ -424,10 +424,23 @@ impl BodyChecker<'_, '_> {
         hint: Option<&Type>,
         inclusive: bool,
         keyword: &str,
+        usage: ConstantUse,
     ) -> Result<StaticRange, String> {
         let (lo, hi, inferred) =
             self.with_prepared_pair(start, limit, |checker, start, limit| {
                 let (lo, hi) = checker.pair(start, limit, hint)?;
+                if usage == ConstantUse::Declaration
+                    && bits(&lo.ty).is_some_and(|(signed, _)| signed)
+                {
+                    for bound in [start, limit] {
+                        check_argument_widths(
+                            bound,
+                            &lo.ty,
+                            Some(&checker.inferred_bindings),
+                            None,
+                        )?;
+                    }
+                }
                 let inferred = hint.is_none()
                     && binding_widths(start, &lo.ty, &checker.inferred_bindings)?.is_some()
                     && binding_widths(limit, &hi.ty, &checker.inferred_bindings)?.is_some();
@@ -437,7 +450,7 @@ impl BodyChecker<'_, '_> {
             bits(&lo.ty).ok_or_else(|| format!("{keyword} range requires integer bounds"))?;
         let mut constant = |bound: &TypedExpr| {
             if bound.has_constant_inputs(&self.constexpr_names)
-                && let Some(value) = self.checked_constant(bound)?
+                && let Some(value) = self.checked_constant_for(bound, usage)?
                 && let Ok(bits) = value.to_bits()
             {
                 return Ok(bits);
@@ -476,6 +489,82 @@ impl BodyChecker<'_, '_> {
         })
     }
 
+    /// Bound evaluation may instantiate a helper whose call disappears from IR.
+    /// Keep helper execution scoped to the range expression.
+    pub(super) fn array_range_bounds(
+        &mut self,
+        start: &Expr,
+        limit: &Expr,
+        inclusive: bool,
+        element: Option<&Type>,
+    ) -> Result<StaticRange, String> {
+        let prior_callees = self.callee_specialization_count();
+        let had_functions = self.constant_functions.is_some();
+        self.enable_constant_functions();
+        let range = self.static_range(
+            start,
+            limit,
+            element,
+            inclusive,
+            "array",
+            ConstantUse::Declaration,
+        );
+        if !had_functions {
+            self.constant_functions = None;
+        }
+        if self.callee_specialization_count() > prior_callees {
+            self.decls.constexpr_instantiated_callee.set(true);
+        }
+        range
+    }
+
+    /// Check an array-valued range against its contextual element type and
+    /// length.
+    pub(super) fn range_value(
+        &mut self,
+        start: &Expr,
+        limit: &Expr,
+        inclusive: bool,
+        element: Option<&Type>,
+        length: Option<usize>,
+    ) -> Result<TypedExpr, String> {
+        let range = self.array_range_bounds(start, limit, inclusive, element)?;
+        if let Some(length) = length {
+            self.check_array_length(range.count, length, false, 0)?;
+        }
+        self.materialize_range(range, "array range")
+    }
+
+    /// Materialize a checked constant range, preserving the element type for
+    /// an empty result and charging the expanded layout before allocation.
+    pub(super) fn materialize_range(
+        &mut self,
+        range: StaticRange,
+        budget: &str,
+    ) -> Result<TypedExpr, String> {
+        let ty = Type::array(range.ty, range.count);
+        let shape = self.structs.type_shape(&ty, MAX_ELABORATION_DEPTH)?;
+        self.charge_expansion(budget, range.count.saturating_add(shape.size.div_ceil(64)))?;
+        let mut index = range.first;
+        let width = index.get_bit_count();
+        let one = IrBits::from_lsb_fn(width, |i| i == 0);
+        let mut elements = Vec::with_capacity(range.count);
+        for _ in 0..range.count {
+            let next = index.add(&one);
+            elements.push(IrValue::Bits(index));
+            index = next;
+        }
+        let value =
+            IrValue::make_array_typed(IrType::Bits(width), &elements).map_err(|e| e.to_string())?;
+        Ok(super::scope::sequence(
+            range.operands,
+            TypedExpr {
+                ty,
+                kind: K::Literal(value),
+            },
+        ))
+    }
+
     /// Resolve an unrolled iterable outside the scope of its element and carry.
     pub(super) fn unroll_iteration(
         &mut self,
@@ -489,7 +578,7 @@ impl BodyChecker<'_, '_> {
                 limit,
                 inclusive,
             } => Ok(self
-                .static_range(start, limit, hint, *inclusive, keyword)?
+                .static_range(start, limit, hint, *inclusive, keyword, ConstantUse::Bx)?
                 .into()),
             ForIterable::Array(Expr::Name(name))
                 if let Some(iteration) = self.prepared_loop_iterables.remove(name) =>
@@ -1944,6 +2033,11 @@ impl BodyChecker<'_, '_> {
             Expr::Index {
                 value: left,
                 index: right,
+            }
+            | Expr::Range {
+                start: left,
+                limit: right,
+                ..
             }
             | Expr::Binary { left, right, .. } => {
                 self.check_expr_names(left, locals)?;

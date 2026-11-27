@@ -8,7 +8,6 @@ use super::{
     TypedExpr, TypedMap, compatible,
 };
 use crate::ast::{Expr, ForIterable, MapExpr};
-use xlsynth_pir::{IrBits, IrValue};
 
 /// The callback spelling determines how to construct the map's pure body.
 enum MapCallback<'e> {
@@ -69,8 +68,15 @@ impl BodyChecker<'_, '_> {
                 limit,
                 inclusive,
             } => self.with_scoped_results(&[start, limit], |checker, bounds| {
-                let range = checker.static_range(bounds[0], bounds[1], None, *inclusive, "map")?;
-                checker.map_range_array(range)
+                let range = checker.static_range(
+                    bounds[0],
+                    bounds[1],
+                    None,
+                    *inclusive,
+                    "map",
+                    super::ConstantUse::Bx,
+                )?;
+                checker.materialize_range(range, "map range")
             }),
         }
     }
@@ -174,35 +180,5 @@ impl BodyChecker<'_, '_> {
         let bindings = self.take_pure_bindings(start);
         let output = output.map_err(|e| format!("map lambda body: {e}"))?;
         Ok((bindings, output))
-    }
-
-    /// DSLX ranges used as map operands are constant arrays. Check the
-    /// expanded layout before allocating their elements.
-    fn map_range_array(&mut self, range: super::unroll::StaticRange) -> Result<TypedExpr, String> {
-        if range.count == 0 {
-            return Err("map requires a nonempty array".into());
-        }
-        let ty = Type::array(range.ty, range.count);
-        let shape = self.structs.type_shape(&ty, MAX_ELABORATION_DEPTH)?;
-        self.charge_expansion(
-            "map range",
-            range.count.saturating_add(shape.size.div_ceil(64)),
-        )?;
-        let mut index = range.first;
-        let one = IrBits::from_lsb_fn(index.get_bit_count(), |i| i == 0);
-        let mut elements = Vec::with_capacity(range.count);
-        for _ in 0..range.count {
-            let next = index.add(&one);
-            elements.push(IrValue::Bits(index));
-            index = next;
-        }
-        let value = IrValue::make_array(&elements).map_err(|e| e.to_string())?;
-        Ok(super::scope::sequence(
-            range.operands,
-            TypedExpr {
-                ty,
-                kind: K::Literal(value),
-            },
-        ))
     }
 }

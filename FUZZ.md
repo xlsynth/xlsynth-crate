@@ -180,6 +180,12 @@ Compares BX and DSLX array literal acceptance and element values, including a tr
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_array_literals`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_array_ranges.rs
+
+Compares exclusive and inclusive array-valued ranges in BX with pinned DSLX. Endpoints vary from zero to 129 bits and include signed crossings through zero, both extrema and carries across bit 63. Direct returns also exercise contextually typed bounds. Signed calls compare shared and distinct hexadecimal bounds. Programs return, pass, index and nest the arrays, construct them from constants or constexpr calls, and instantiate the same function with different bounds. The target compares complete results against DSLX constexpr execution and compiled IR. Empty ranges use the pinned bytecode interpreter because the converter cannot emit an empty array literal. Rejected cases exercise descending ranges, runtime bounds, and incompatible endpoint or result types.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_array_ranges -- -max_len=14 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_bits_array_casts.rs
 
 The target compares BX bits-to-array and array-to-bits casts with pinned DSLX. It varies signed, unsigned and Boolean types, zero-width and wide elements, empty arrays, and asymmetric bit patterns to expose reversed elements or slices. It checks module constants and runtime values against DSLX IR and also checks unsigned casts against DSLX constexpr evaluation. Signed cases use compiled DSLX because the pinned bytecode interpreter cannot flatten signed elements and assigns unsigned tags to cast results. Unequal packed widths and casts involving nested arrays, tuples, structs or enums must fail typechecking.

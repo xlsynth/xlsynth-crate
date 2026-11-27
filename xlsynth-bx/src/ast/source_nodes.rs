@@ -119,6 +119,9 @@ impl<'a> SourceNode<'a> {
                 | Type::Applied { .. } => { /* These types contain no value expressions. */ }
             },
             Expression(expr) => match expr {
+                Expr::Range { start, limit, .. } => {
+                    pending.extend([limit.as_ref(), start.as_ref()].map(Expression));
+                }
                 Expr::Array(args) | Expr::Tuple(args) | Expr::Call { args, .. } => {
                     pending.extend(args.iter().map(Expression));
                 }
