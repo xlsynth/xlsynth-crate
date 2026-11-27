@@ -8,6 +8,8 @@ mod alias_expressions;
 mod array_concat;
 #[path = "frontend/array_update.rs"]
 mod array_update;
+#[path = "frontend/bit_type_attributes.rs"]
+mod bit_type_attributes;
 #[path = "frontend/bits_array_casts.rs"]
 mod bits_array_casts;
 #[path = "frontend/builtins.rs"]

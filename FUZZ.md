@@ -418,6 +418,12 @@ Compares concrete module type aliases in BX and pinned DSLX. Generated chains re
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_type_aliases -- -max_len=13 -len_control=0`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_bit_type_attributes.rs
+
+Compares `MIN`, `MAX`, and `ZERO` on fixed-width bit types and aliases with pinned DSLX. It varies width (including zero, one, and above 64), signedness, local and imported aliases, match patterns, and repeated calls at different parametric types. The oracle checks inferred constant types and values, native execution, and lowered BX and DSLX results. It also checks enum members sharing attribute names and rejection of unknown attributes, shadowed types, non-bit receivers, and unsupported receiver spellings.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_bit_type_attributes -- -max_len=12 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
 
 Generates small DSLX module graphs with two distinct, same-shaped structs,

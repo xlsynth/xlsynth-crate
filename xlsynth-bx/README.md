@@ -28,6 +28,19 @@ pub block transform_pipe(clk, valid_in: bool, x: u8) -> ResultPorts {
 
 BX supports concrete bit types, booleans, numeric enums, tuples, named structs, and fixed-size arrays. Bit types of width 1 through 64 have shorthand names `u1` through `u64` and `s1` through `s64`. For width zero or widths above 64, use `uN[width]` or `sN[width]`, as in `uN[0]` or `sN[84]`.
 
+Bit types provide three constants of their own type. `MIN` and `MAX` are
+the smallest and largest representable values, and `ZERO` is zero. For
+example, `s8::MIN` is −128, `s8::MAX` is 127, and `u8::MAX` is 255.
+Use a type alias to access these attributes on `bool` or a bracketed bit
+type such as `sN[N]`. For a zero-width alias, all three attributes are zero.
+
+```text
+fn at_max<N: u32>(x: sN[N]) -> bool {
+    type Word = sN[N];
+    x == Word::MAX
+}
+```
+
 The expression subset includes arithmetic, comparisons, bitwise and logical operations, shifts, concatenation, bit casts, field selection, array indexing, value-producing `if` and `const if` expressions, and width slices such as `word[offset+:u8]`. See the manual’s [width slice examples](https://google.github.io/xls/dslx_reference/#width-slice).
 
 Use `++` to concatenate arrays with the same element type. The result length is the sum of the operand lengths, and the left operand's elements come first. Each operand is typed independently. For example, `[u8:1, u8:2] ++ [u8:3]` produces a `u8[3]`.

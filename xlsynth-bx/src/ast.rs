@@ -82,6 +82,32 @@ impl BinaryOp {
     }
 }
 
+/// DSLX constants provided by a signed or unsigned bit type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BitTypeAttribute {
+    Min,
+    Max,
+    Zero,
+}
+
+impl BitTypeAttribute {
+    /// Split a qualified attribute without losing the module part of its type
+    /// name.
+    pub(crate) fn qualified(name: &str) -> Option<(&str, Self)> {
+        let (subject, member) = name.rsplit_once("::")?;
+        Some((subject, Self::parse(member)?))
+    }
+
+    pub(crate) fn parse(member: &str) -> Option<Self> {
+        match member {
+            "MIN" => Some(Self::Min),
+            "MAX" => Some(Self::Max),
+            "ZERO" => Some(Self::Zero),
+            _ => None,
+        }
+    }
+}
+
 /// Value types shared by block ports, registers, and function calls.
 /// A named type can refer to a declaration or an enclosing function or block
 /// type parameter.

@@ -1661,7 +1661,7 @@ impl BodyChecker<'_, '_> {
                 self.function_position.or(self.block_position),
             );
         }
-        if self.is_enum_member_name(name)? {
+        if self.is_type_member_name(name)? {
             if locals.contains(head) {
                 return Err(format!("'{head}' names a local value here"));
             }
