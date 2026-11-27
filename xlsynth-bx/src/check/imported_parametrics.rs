@@ -7,7 +7,7 @@ use super::{BodyChecker, K, MAX_ELABORATION_DEPTH, TypedExpr, has_aggregate_lite
 use crate::ast::{Expr, ScopeStatement, Type};
 use crate::dslx_import::NativeDataArg;
 use crate::infer_literal::{
-    has_contextual_result, import_array_range_witness, import_bound_literal_witness,
+    has_contextual_result, import_array_witness, import_bound_literal_witness,
     import_literal_witness,
 };
 use crate::typed::BoundParametricValue;
@@ -250,16 +250,14 @@ impl BodyChecker<'_, '_> {
                 let range = self.array_range_bounds(start, limit, *inclusive, None)?;
                 self.structs
                     .validate_type(&Type::array(range.ty.clone(), range.count))?;
-                if let Some(witness) = import_array_range_witness(
+                if let Some(witness) = import_array_witness(
                     expr,
                     self.dslx_widths(),
                     self.width_scope(),
                     range.count,
                     range.widths.as_ref().map(|_| &range.ty),
                 )? {
-                    // Native inference recurses on a range node nested in a
-                    // tuple argument. A probe let preserves its constraints.
-                    NativeDataArg::BoundLiteral(witness)
+                    witness
                 } else {
                     return self
                         .materialize_range(range, "array range")
@@ -353,14 +351,10 @@ impl BodyChecker<'_, '_> {
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Type::Array { element, size } => {
-                if let Some(range) = import_array_range_witness(
-                    expr,
-                    self.dslx_widths(),
-                    self.width_scope(),
-                    *size,
-                    None,
-                )? {
-                    NativeDataArg::BoundLiteral(range)
+                if let Some(witness) =
+                    import_array_witness(expr, self.dslx_widths(), self.width_scope(), *size, None)?
+                {
+                    witness
                 } else if *size != 0 {
                     let lane = Expr::Index {
                         value: Box::new(expr.clone()),

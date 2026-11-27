@@ -5,10 +5,11 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use num_bigint::{BigInt, BigUint};
+use num_bigint::BigUint;
 
 use crate::ast::{BinaryOp, Expr, MatchArm, MatchPattern, Type};
 use crate::check::TuplePatternLayout;
+use crate::dslx_import::NativeDataArg;
 use crate::parser::radix_digits;
 use crate::typed::bits;
 
@@ -636,18 +637,18 @@ pub(crate) fn import_literal_witness(
     else {
         return Ok(None);
     };
-    literal_witness(minimum).map(Some)
+    literal_witness(minimum.signed, minimum.width, minimum.has_prefix).map(Some)
 }
 
-/// Construct a compact range of the checked length that carries the lane's
-/// minimum width and radix into native call inference.
-pub(crate) fn import_array_range_witness(
+/// Preserve the checked array length and its unified element constraint in
+/// the native type probe. The probe only needs one representative element.
+pub(crate) fn import_array_witness(
     expr: &Expr,
     lookup: Option<WidthLookup<'_>>,
     scope: usize,
     size: usize,
     scoped_element: Option<&Type>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<NativeDataArg>, String> {
     let mut minimum = None;
     let (signed, width, has_prefix) =
         if collect_projected(expr, &[Member::ArrayElement], lookup, &mut minimum)?
@@ -666,52 +667,16 @@ pub(crate) fn import_array_range_witness(
             };
             (signed, width, false)
         };
-    let span = size.saturating_sub(1);
-    if span > 0 && span.ilog2() as usize >= width {
-        // A destructured array can repeat elements and outgrow their domain.
-        // Use its actual type when no range of that width can have this length.
-        return Ok(None);
-    }
-    let magnitude = if width == 0 {
-        BigInt::from(0)
+    let literal = literal_witness(signed, width, has_prefix)?;
+    Ok(Some(if size == 0 {
+        // Equal bounds supply the element constraint even for an empty array.
+        NativeDataArg::BoundLiteral(format!("{{ let bound = {literal}; bound..bound }}"))
     } else {
-        BigInt::from(1) << (width - 1)
-    };
-    let distance = BigInt::from(span);
-    // At least one endpoint must witness the original minimum. Choose the
-    // negative minimum of a signed lane or a high-bit-set unsigned limit.
-    let (start, limit) = if signed {
-        let start = -magnitude;
-        let limit = &start + distance;
-        (start, limit)
-    } else {
-        let limit = magnitude.max(distance.clone());
-        let start = &limit - distance;
-        (start, limit)
-    };
-    let render = |value: BigInt| {
-        if signed && width == 0 {
-            "-0".to_owned()
-        } else if has_prefix {
-            format!("{value:#x}")
-        } else {
-            value.to_string()
+        NativeDataArg::Repeated {
+            element: Box::new(NativeDataArg::BoundLiteral(literal)),
+            size,
         }
-    };
-    let operator = if size == 0 { ".." } else { "..=" };
-    if has_prefix && start == limit {
-        // Aliases of one hex literal keep its radix when the bounds unify.
-        // Two occurrences of its spelling would require an extra signed bit.
-        return Ok(Some(format!(
-            "{{ let bound = {}; bound{operator}bound }}",
-            render(start)
-        )));
-    }
-    Ok(Some(format!(
-        "({}{operator}{})",
-        render(start),
-        render(limit)
-    )))
+    }))
 }
 
 /// A named literal supplies independent evidence if no parametric fixed its
@@ -731,20 +696,20 @@ pub(crate) fn import_bound_literal_witness(
     if bits(ty) != Some((minimum.signed, minimum.width)) {
         return Ok(None);
     }
-    literal_witness(minimum).map(Some)
+    literal_witness(minimum.signed, minimum.width, minimum.has_prefix).map(Some)
 }
 
-fn literal_witness(minimum: Minimum) -> Result<String, String> {
-    if minimum.width > crate::check::MAX_TYPE_SIZE {
+fn literal_witness(signed: bool, width: usize, has_prefix: bool) -> Result<String, String> {
+    if width > crate::check::MAX_TYPE_SIZE {
         return Err("integer literal exceeds maximum concrete type size".into());
     }
-    let magnitude = if minimum.width == 0 {
+    let magnitude = if width == 0 {
         BigUint::from(0u8)
     } else {
-        BigUint::from(1u8) << (minimum.width - 1)
+        BigUint::from(1u8) << (width - 1)
     };
-    let sign = if minimum.signed { "-" } else { "" };
-    Ok(if minimum.has_prefix {
+    let sign = if signed { "-" } else { "" };
+    Ok(if has_prefix {
         format!("{sign}{magnitude:#x}")
     } else {
         format!("{sign}{magnitude}")

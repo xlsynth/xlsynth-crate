@@ -843,6 +843,47 @@ fn native_signed_range_arguments_preserve_a_shared_literal_bound() -> Result<(),
 }
 
 #[test]
+fn native_signed_array_arguments_preserve_repeated_literal_bindings() -> Result<(), Box<dyn Error>>
+{
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "lanes.x",
+        "pub fn take(xs: s8[2]) -> s8[2] { xs }",
+    )?;
+    let options = search_paths(&[root.path()]);
+    let body = "let h = 0xff; let (xs, _) = ([h, h], true); lanes::take(xs)";
+    let native = format!(
+        "import lanes; fn sample() -> s8[2] {{ {body} }} const_assert!(sample() == [s8:-1, s8:-1]);"
+    );
+    parse_and_typecheck(
+        &native,
+        "sample.x",
+        "sample",
+        &mut ImportData::new(None, &options.additional_search_paths),
+    )?;
+    let source =
+        format!("use lanes; #[allow(combinational_block)] block b(x: u8) -> s8[2] {{ {body} }}");
+    let package = compile_with_options(
+        &source,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(
+        run_block(&package, 0)?,
+        IrValue::parse_typed("[bits[8]:255, bits[8]:255]")?
+    );
+    assert_import_rejected(
+        "lanes",
+        "let h = 0xff; let (xs, _) = ([h, 255], true); lanes::take(xs)",
+        "s8[2]",
+        &options,
+    );
+    Ok(())
+}
+
+#[test]
 fn native_array_arguments_can_be_longer_than_the_element_domain() -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;
     write_module(
