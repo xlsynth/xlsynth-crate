@@ -55,7 +55,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
                     None,
                     Some(owner),
                     ReferenceKind::Name,
-                    /* in_const_if_arm= */ false,
+                    /* in_const_arm= */ false,
                 )?);
             }
         }
@@ -341,7 +341,7 @@ struct Scope<'a> {
     region: DeclarationRegion,
     /// Branches retain type-qualified source names until the checker selects an
     /// arm.
-    in_const_if_arm: bool,
+    in_const_arm: bool,
     expression_depth: usize,
     guard_depth: usize,
 }
@@ -357,7 +357,7 @@ impl<'a> Scope<'a> {
             formals: BTreeSet::new(),
             hardware_callees: None,
             region: DeclarationRegion::Other,
-            in_const_if_arm: false,
+            in_const_arm: false,
             introduced: Vec::new(),
             expression_depth: 0,
             guard_depth: 0,
@@ -417,8 +417,7 @@ impl<'a> Scope<'a> {
         }
         if let Some((head, member)) = name.split_once("::") {
             if let Some(binding) = self.locals.get(head) {
-                if *binding == Local::TypeAlias || self.in_const_if_arm && *binding == Local::Formal
-                {
+                if *binding == Local::TypeAlias || self.in_const_arm && *binding == Local::Formal {
                     // The checker determines which formals can qualify a
                     // member.
                     return Ok(name.to_owned());
@@ -428,7 +427,7 @@ impl<'a> Scope<'a> {
                     .unresolved(name, format!("'{head}' names a local value here"));
             }
             if crate::parser::fixed_width(head).is_some()
-                && (self.in_const_if_arm
+                && (self.in_const_arm
                     || matches!(kind, ReferenceKind::Value)
                         && BitTypeAttribute::parse(member).is_some())
             {
@@ -439,7 +438,7 @@ impl<'a> Scope<'a> {
             Ok(name.to_owned())
         } else {
             self.names
-                .resolve(name, at, self.source_owner, kind, self.in_const_if_arm)
+                .resolve(name, at, self.source_owner, kind, self.in_const_arm)
         }
     }
 
@@ -466,7 +465,7 @@ impl<'a> Scope<'a> {
                 self.at,
                 self.source_owner,
                 ReferenceKind::Name,
-                self.in_const_if_arm,
+                self.in_const_arm,
             );
         }
         match self.locals.get(name) {
@@ -481,7 +480,7 @@ impl<'a> Scope<'a> {
                     self.at,
                     self.source_owner,
                     ReferenceKind::Name,
-                    self.in_const_if_arm,
+                    self.in_const_arm,
                 )
             }
             Some(Local::Lexical | Local::Hardware | Local::TypeAlias)
@@ -535,7 +534,7 @@ impl<'a> Scope<'a> {
             at,
             owner,
             ReferenceKind::Builtin(fallback),
-            self.in_const_if_arm,
+            self.in_const_arm,
         )
     }
 
@@ -815,7 +814,7 @@ impl<'a> Scope<'a> {
                         self.value_at,
                         self.source_owner,
                         ReferenceKind::Value,
-                        self.in_const_if_arm,
+                        self.in_const_arm,
                     )
                     .map(StageAnnotation::Constant)
             },
@@ -1375,25 +1374,27 @@ impl<'a> Scope<'a> {
                 else_value: Box::new(self.expr(else_value)?),
             },
             Expr::SelectedOperand(value) => Expr::SelectedOperand(Box::new(self.expr(value)?)),
+            Expr::SelectedMatchArm(value) => Expr::SelectedMatchArm(Box::new(self.expr(value)?)),
             Expr::ConstIf {
                 condition,
                 then_value,
                 else_value,
             } => {
                 let condition = Box::new(self.expr(condition)?);
-                let enclosing = std::mem::replace(&mut self.in_const_if_arm, true);
+                let enclosing = std::mem::replace(&mut self.in_const_arm, true);
                 let then_value = Box::new(self.expr(then_value)?);
                 let else_value = Box::new(self.expr(else_value)?);
-                self.in_const_if_arm = enclosing;
+                self.in_const_arm = enclosing;
                 Expr::ConstIf {
                     condition,
                     then_value,
                     else_value,
                 }
             }
-            Expr::Match { subject, arms } => Expr::Match {
-                subject: Box::new(self.expr(subject)?),
-                arms: arms
+            Expr::Match { subject, arms } | Expr::ConstMatch { subject, arms } => {
+                let subject = Box::new(self.expr(subject)?);
+                let is_const = matches!(expr, Expr::ConstMatch { .. });
+                let arms = arms
                     .iter()
                     .map(|arm| {
                         let patterns = arm
@@ -1405,12 +1406,21 @@ impl<'a> Scope<'a> {
                             for name in arm.binding_names() {
                                 scope.bind(name);
                             }
-                            scope.expr(&arm.value)
+                            let enclosing = scope.in_const_arm;
+                            scope.in_const_arm |= is_const;
+                            let value = scope.expr(&arm.value);
+                            scope.in_const_arm = enclosing;
+                            value
                         })?;
                         Ok(MatchArm { patterns, value })
                     })
-                    .collect::<Result<_, String>>()?,
-            },
+                    .collect::<Result<_, String>>()?;
+                if is_const {
+                    Expr::ConstMatch { subject, arms }
+                } else {
+                    Expr::Match { subject, arms }
+                }
+            }
             Expr::For(fold) => Expr::For(Box::new(self.fold(fold)?)),
             Expr::UnrollFor(fold) => Expr::UnrollFor(Box::new(self.unrolled_fold(fold)?)),
             Expr::UnrollMap(map) => {

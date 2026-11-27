@@ -8,6 +8,7 @@ use num_bigint::BigUint;
 use xlsynth_pir::range_analysis::IntervalSet;
 use xlsynth_pir::{IrBits, IrValue};
 
+use super::MatchKind;
 use crate::ast::{Expr, MatchArm, MatchPattern, Type};
 use crate::infer_literal::check_inferred_signed_width;
 use crate::typed::{CheckedEnum, TypedExpr, TypedExprKind, TypedMatchPattern, bits};
@@ -125,16 +126,17 @@ pub(super) fn check_enum_patterns(
     subject_ty: &Type,
     arms: &[MatchArm],
     mut literals: impl Iterator<Item = TypedExpr>,
+    kind: MatchKind,
 ) -> Result<Vec<Vec<TypedMatchPattern>>, String> {
     let mut seen = HashSet::new();
     let mut saw_wildcard = false;
     let mut checked = Vec::with_capacity(arms.len());
     for (index, arm) in arms.iter().enumerate() {
         let mut patterns = Vec::with_capacity(arm.patterns.len());
-        let mut unconditional = index + 1 == arms.len();
+        let mut unconditional = kind == MatchKind::Runtime && index + 1 == arms.len();
         for pattern in &arm.patterns {
             match pattern {
-                MatchPattern::Wildcard => {
+                MatchPattern::Wildcard | MatchPattern::Binding(_) => {
                     saw_wildcard = true;
                     unconditional = true;
                 }
@@ -153,8 +155,7 @@ pub(super) fn check_enum_patterns(
                 MatchPattern::Literal(_)
                 | MatchPattern::Range { .. }
                 | MatchPattern::Tuple(_)
-                | MatchPattern::Rest
-                | MatchPattern::Binding(_) => {
+                | MatchPattern::Rest => {
                     return Err(format!(
                         "enum match pattern must name a value of {subject_ty}"
                     ));
@@ -167,7 +168,7 @@ pub(super) fn check_enum_patterns(
             patterns
         });
     }
-    if !saw_wildcard && seen.len() != def.value_count() {
+    if kind == MatchKind::Runtime && !saw_wildcard && seen.len() != def.value_count() {
         return Err("match patterns are not exhaustive".into());
     }
     Ok(checked)
@@ -180,6 +181,7 @@ pub(super) fn check_patterns(
     subject_ty: &Type,
     arms: &[MatchArm],
     mut literals: impl Iterator<Item = TypedExpr>,
+    kind: MatchKind,
 ) -> Result<Vec<Vec<TypedMatchPattern>>, String> {
     let (signed, width) = bits(subject_ty)
         .ok_or_else(|| format!("scalar match requires a bits or bool subject, got {subject_ty}"))?;
@@ -190,7 +192,7 @@ pub(super) fn check_patterns(
         let mut patterns = Vec::with_capacity(arm.patterns.len());
         for pattern in &arm.patterns {
             patterns.push(match pattern {
-                MatchPattern::Wildcard => {
+                MatchPattern::Wildcard | MatchPattern::Binding(_) => {
                     coverage.remaining.clear();
                     TypedMatchPattern::Wildcard
                 }
@@ -224,17 +226,17 @@ pub(super) fn check_patterns(
                 MatchPattern::Tuple(_) => {
                     return Err("tuple pattern requires a tuple subject".into());
                 }
-                MatchPattern::Binding(_) | MatchPattern::Rest => {
+                MatchPattern::Rest => {
                     return Err("invalid scalar match pattern".into());
                 }
             });
         }
-        if !was_exhaustive && coverage.remaining.is_empty() {
+        if kind == MatchKind::Runtime && !was_exhaustive && coverage.remaining.is_empty() {
             patterns = vec![TypedMatchPattern::Wildcard];
         }
         checked.push(patterns);
     }
-    if !coverage.remaining.is_empty() {
+    if kind == MatchKind::Runtime && !coverage.remaining.is_empty() {
         return Err("match patterns are not exhaustive".into());
     }
     Ok(checked)

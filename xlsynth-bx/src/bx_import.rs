@@ -60,11 +60,11 @@ enum ParametricKind {
 
 impl Export {
     /// Qualify members of enums and aliases, and defer struct member lookup in
-    /// const-if arms.
-    fn reference(&self, member: Option<&str>, in_const_if_arm: bool) -> Option<String> {
+    /// compile-time branches.
+    fn reference(&self, member: Option<&str>, in_const_arm: bool) -> Option<String> {
         match member {
             None => Some(self.name.clone()),
-            Some(member) if self.can_qualify_member || in_const_if_arm && self.is_struct => {
+            Some(member) if self.can_qualify_member || in_const_arm && self.is_struct => {
                 Some(format!("{}::{member}", self.name))
             }
             Some(_) => None,
@@ -289,7 +289,7 @@ impl Names {
         at: Option<usize>,
         owner: Option<&str>,
         kind: ReferenceKind<'_>,
-        in_const_if_arm: bool,
+        in_const_arm: bool,
     ) -> Result<String, String> {
         if name.contains('$') {
             return self.unresolved(name, format!("invalid source reference '{name}'"));
@@ -325,7 +325,7 @@ impl Names {
                         .map_or((m, None), |(name, member)| (name, Some(member)));
                     lib.exports
                         .get(name)
-                        .and_then(|e| e.reference(member, in_const_if_arm))
+                        .and_then(|e| e.reference(member, in_const_arm))
                         .ok_or_else(|| {
                             format!("unknown or private BX member '{}::{m}'", lib.subject)
                         })
@@ -334,7 +334,7 @@ impl Names {
                     "use binding '{head}' names a BX module and requires a member"
                 )),
                 (Binding::Member(e), member) => {
-                    e.reference(member, in_const_if_arm).ok_or_else(|| {
+                    e.reference(member, in_const_arm).ok_or_else(|| {
                         format!("use binding '{head}' is a BX member and cannot qualify '{name}'")
                     })
                 }
@@ -357,8 +357,7 @@ impl Names {
             return Ok(self.declared(name));
         }
         if let Some(member) = member
-            && (self.enums_or_aliases.contains(head)
-                || in_const_if_arm && self.structs.contains(head))
+            && (self.enums_or_aliases.contains(head) || in_const_arm && self.structs.contains(head))
         {
             self.record_reference(owner, head, name, None);
             return Ok(format!("{}::{member}", self.declared(head)));

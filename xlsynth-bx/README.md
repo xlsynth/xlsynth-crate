@@ -238,6 +238,33 @@ dependency. For `stage<true>(data)`, the output comes directly from the input,
 so that feedback would form a combinational cycle. An ordinary `if` emits a
 runtime select whose dependencies include both arms.
 
+`const match` selects among several expressions using a compile-time
+subject. For example, each call to `extend` below picks an arm based on
+its result width, while `x` is still a runtime input.
+
+```text
+fn extend<N: u32>(x: u8) -> uN[N] {
+    const match N {
+        8 => x,
+        16 => x ++ x,
+        24 => x ++ x ++ x,
+    }
+}
+```
+
+The subject must be computable using only compile-time inputs. For example,
+`const match { let _ = x; true } { ... }` reads `x` and requires it to be
+known at compile time, even though the subject returns `true`.
+
+The patterns use the same syntax and name-binding rules as an ordinary BX
+`match`. BX checks each pattern against the subject type and selects the first
+matching arm in source order. A wildcard is optional. Here `extend<16>(x)`
+returns a `u16`, and `extend<32>(x)` fails because no arm matches.
+Only the selected arm supplies the result type and emits IR. Names in every
+arm must resolve. Tuple patterns can bind compile-time values for use in that
+arm, including as type dimensions. Blocks can use `const match` in value
+expressions such as register initializers and outputs.
+
 ### Compile-time assertions
 
 Use `const_assert!(predicate);` at module scope, inside a pure function, or

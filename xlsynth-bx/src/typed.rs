@@ -609,16 +609,27 @@ pub(super) enum ConstantUse {
     /// A lexical const, type alias or const_assert! requires its declaration's
     /// constexpr operands, including prerequisites of projected bindings.
     Declaration,
+    /// Evaluate the entire subject with the captures required by DSLX match
+    /// bytecode. Referenced outer lets still replay as ordinary declarations.
+    MatchSubject,
 }
 
 impl ConstantUse {
+    /// Use declaration rules for references to lets enclosing a match subject.
+    pub(super) fn binding_use(self) -> Self {
+        match self {
+            Self::MatchSubject => Self::Declaration,
+            usage => usage,
+        }
+    }
+
     pub(super) fn is_bx(self) -> bool {
         matches!(self, Self::Bx | Self::RegisterReset)
     }
 
     fn requires_capture(self, capture: CaptureUse) -> bool {
         match self {
-            Self::Declaration => capture.constexpr(),
+            Self::Declaration | Self::MatchSubject => capture.constexpr(),
             Self::Dslx => capture.runtime(false),
             Self::Bx | Self::RegisterReset => false,
         }
@@ -851,7 +862,8 @@ struct CountedWork<'a> {
     enums: &'a BTreeMap<String, CheckedEnum>,
     remaining: &'a mut usize,
     inside_loop: bool,
-    /// A DSLX constexpr match executes its selected arm as bytecode.
+    /// A DSLX constexpr match evaluates its subject and selected arm as
+    /// bytecode.
     inside_match: bool,
     needs_dslx_replay: bool,
     usage: ConstantUse,
@@ -1649,9 +1661,9 @@ impl TypedExpr {
             enums,
             remaining,
             inside_loop: replaying,
-            inside_match: false,
+            inside_match: usage == ConstantUse::MatchSubject,
             needs_dslx_replay: false,
-            usage,
+            usage: usage.binding_use(),
             failure: None,
             missing_local: None,
             functions: callees.local,
@@ -1660,7 +1672,13 @@ impl TypedExpr {
         if replaying && work.charge(1).is_none() {
             return Err(ConstantFailure::WorkLimit);
         }
-        let mut evaluate = || self.constant_with_budget(&ConstantScope::Outer(names), &mut work);
+        let mut evaluate = || {
+            self.evaluate_with_captures(
+                &ConstantScope::Outer(names),
+                &mut work,
+                usage == ConstantUse::MatchSubject,
+            )
+        };
         let value = if may_call {
             on_constant_stack(evaluate)
         } else {
@@ -1681,12 +1699,23 @@ impl TypedExpr {
         names: &ConstantScope<'_>,
         remaining: &mut CountedWork<'_>,
     ) -> Option<IrValue> {
+        self.evaluate_with_captures(names, remaining, false)
+    }
+
+    /// Match subjects and bytecode-emitting expressions need all their free
+    /// names to be available before executing the selected path.
+    fn evaluate_with_captures(
+        &self,
+        names: &ConstantScope<'_>,
+        remaining: &mut CountedWork<'_>,
+        match_subject: bool,
+    ) -> Option<IrValue> {
         // DSLX emits bytecode for a constexpr match or loop with bindings for
         // all its free names, including unselected arms. A helper's parameters
         // and iteration locals already have concrete values when executed.
         if !remaining.usage.is_bx()
             && names.depth() == 0
-            && matches!(self.kind, K::Match { .. } | K::For(_) | K::Map(_))
+            && (match_subject || matches!(self.kind, K::Match { .. } | K::For(_) | K::Map(_)))
         {
             let mut deferred = None;
             let ready = self.all_inputs(true, &mut |name, usage| {

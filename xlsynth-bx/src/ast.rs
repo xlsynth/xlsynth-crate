@@ -756,7 +756,17 @@ pub enum Expr {
     /// when neither an enclosing annotation nor an earlier argument binds it.
     #[doc(hidden)]
     SelectedOperand(Box<Expr>),
+    /// The selected value of a prepared const match in a BX block. Its
+    /// operands retain DSLX value semantics when the enclosing expression
+    /// supplies their concrete type.
+    #[doc(hidden)]
+    SelectedMatchArm(Box<Expr>),
     Match {
+        subject: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+    /// A match whose subject selects an arm during elaboration.
+    ConstMatch {
         subject: Box<Expr>,
         arms: Vec<MatchArm>,
     },
@@ -822,7 +832,7 @@ impl Expr {
     /// pattern bindings have yet to be replaced with lexical aliases.
     pub(crate) fn needs_scope_preparation(&self) -> bool {
         match self {
-            Self::ConstIf { .. } => true,
+            Self::ConstIf { .. } | Self::ConstMatch { .. } => true,
             Self::Match { arms, .. } => arms.iter().any(MatchArm::has_bindings),
             Self::Scope { statements, .. } => {
                 statements.is_empty() || !statements.iter().all(|s| {

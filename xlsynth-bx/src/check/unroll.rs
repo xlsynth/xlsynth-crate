@@ -965,9 +965,9 @@ impl BodyChecker<'_, '_> {
                 }
                 Ok(false)
             }
-            Expr::Scope { result, .. } | Expr::SelectedOperand(result) => {
-                self.map_result_witness(result)
-            }
+            Expr::Scope { result, .. }
+            | Expr::SelectedOperand(result)
+            | Expr::SelectedMatchArm(result) => self.map_result_witness(result),
             _ => match self.type_struct_witness(result)? {
                 StructWitness::Other => self.has_concrete_element_type(result),
                 StructWitness::Deferred => Ok(false),
@@ -1060,9 +1060,9 @@ struct LexicalScope<'a> {
     in_lambda: bool,
     /// A zero-trip map inside a value expression still requires a pure body.
     allow_children: bool,
-    /// A const conditional resolves the qualifying type in either arm.
+    /// A compile-time branch resolves the qualifying type in every arm.
     /// Member lookup on that type waits until the arm is selected.
-    in_const_if_arm: bool,
+    in_const_arm: bool,
     /// Shared across nested scopes in this one lexical walk, including
     /// zero-trip bodies that will never produce a typed expression.
     visited: &'a Cell<usize>,
@@ -1077,7 +1077,7 @@ impl<'a> LexicalScope<'a> {
             parent: None,
             in_lambda: false,
             allow_children: true,
-            in_const_if_arm: false,
+            in_const_arm: false,
             visited,
         }
     }
@@ -1090,7 +1090,7 @@ impl<'a> LexicalScope<'a> {
             parent: Some(self),
             in_lambda: self.in_lambda,
             allow_children: self.allow_children,
-            in_const_if_arm: self.in_const_if_arm,
+            in_const_arm: self.in_const_arm,
             visited: self.visited,
         }
     }
@@ -1433,17 +1433,26 @@ impl BodyChecker<'_, '_> {
     }
 
     /// Keep skipped arms lexically well formed without resolving their types.
-    pub(super) fn check_const_if_arm_names(&mut self, arm: &Expr) -> Result<(), String> {
+    pub(super) fn check_const_arm_names<'n>(
+        &mut self,
+        keyword: &str,
+        binders: impl IntoIterator<Item = &'n str>,
+        arm: &Expr,
+    ) -> Result<(), String> {
         let visited = Cell::new(0);
-        let mut scope = LexicalScope::root(&self.names, &visited);
-        scope.in_const_if_arm = true;
+        let locals = LexicalScope::root(&self.names, &visited);
+        let mut scope = locals.nested();
+        scope.in_const_arm = true;
+        for name in binders {
+            scope.bind(name, LexicalKind::Constant);
+        }
         let hardware = self.has_block_only_behavior.get();
         let result = self.check_expr_names(arm, &scope);
         // An inactive reference does not instantiate hardware.
         self.has_block_only_behavior.set(hardware);
         result?;
         if self.replaying_body() {
-            self.charge_expansion("const if", visited.get())?;
+            self.charge_expansion(keyword, visited.get())?;
         }
         Ok(())
     }
@@ -1681,7 +1690,7 @@ impl BodyChecker<'_, '_> {
                     "a member of type alias '{head}' cannot be a qualifier"
                 ));
             }
-            if locals.in_const_if_arm && qualifier.is_some() {
+            if locals.in_const_arm && qualifier.is_some() {
                 crate::parser::validate_dslx_value_path(name)?;
             }
             return Ok(());
@@ -1697,7 +1706,7 @@ impl BodyChecker<'_, '_> {
                 "callable parameter '{head}' may only be used as a callee"
             ));
         }
-        if locals.in_const_if_arm
+        if locals.in_const_arm
             && qualifier == Some(head)
             && !locals.contains(head)
             && (self
@@ -1730,7 +1739,7 @@ impl BodyChecker<'_, '_> {
         {
             return Ok(());
         }
-        if locals.in_const_if_arm
+        if locals.in_const_arm
             && let Some(qualifier) = qualifier
             && !locals.contains(head)
             && (self.decls.type_aliases.contains_key(qualifier)
@@ -1785,7 +1794,7 @@ impl BodyChecker<'_, '_> {
         if !locals.allow_children {
             return Err(self.block_in_value_error(name));
         }
-        if locals.in_const_if_arm && self.kind == BodyKind::Block && !locals.in_lambda && !hidden {
+        if locals.in_const_arm && self.kind == BodyKind::Block && !locals.in_lambda && !hidden {
             self.reject_type_parameter_value(name)?;
         } else {
             self.check_block_call_signature(name, parametric_count, hidden)?;
@@ -1978,7 +1987,7 @@ impl BodyChecker<'_, '_> {
                     .into_iter()
                     .flat_map(|t| t.block.parametric_bindings())
                     .chain(template.into_iter().flat_map(|f| f.parametric_bindings()));
-                let skipped_child = block && locals.in_const_if_arm;
+                let skipped_child = block && locals.in_const_arm;
                 for actual in parametrics {
                     if skipped_child
                         && let Expr::Name(name) = actual
@@ -2013,7 +2022,7 @@ impl BodyChecker<'_, '_> {
                 };
                 self.check_nominal_name(literal.name, usage, locals)?;
                 self.check_struct_argument_names(literal.args, locals, NominalUse::Annotation)?;
-                if locals.in_const_if_arm {
+                if locals.in_const_arm {
                     self.check_constructor_field_names(&literal, locals)?;
                 }
                 for (_, value) in literal.fields {
@@ -2074,11 +2083,13 @@ impl BodyChecker<'_, '_> {
             } => {
                 self.check_expr_names(condition, locals)?;
                 let mut arm = locals.nested();
-                arm.in_const_if_arm = true;
+                arm.in_const_arm = true;
                 self.check_expr_names(then_value, &arm)?;
                 self.check_expr_names(else_value, &arm)?;
             }
-            Expr::Match { subject, arms } => {
+            Expr::Match { subject, arms } | Expr::ConstMatch { subject, arms } => {
+                let is_const = matches!(expr, Expr::ConstMatch { .. });
+                let hardware = self.has_block_only_behavior.get();
                 for operand in super::match_operands(subject, arms, |name| {
                     let head = name.split_once("::").map_or(name, |(head, _)| head);
                     if let Some(kind) = self.lexical_kind(locals, head) {
@@ -2090,7 +2101,7 @@ impl BodyChecker<'_, '_> {
                     }
                     // The lexical walk below resolves the qualifier. Checking
                     // which enum member it denotes requires the active arm.
-                    if locals.in_const_if_arm && head != name {
+                    if locals.in_const_arm && head != name {
                         return Ok(true);
                     }
                     Ok(self.callback_index(head).is_none() && self.is_constant_pattern(name)?)
@@ -2106,13 +2117,27 @@ impl BodyChecker<'_, '_> {
                         .visited
                         .set(locals.visited.get().saturating_add(pattern_nodes));
                     let mut scope = locals.nested();
+                    scope.in_const_arm |= is_const;
+                    // An unevaluated const-match arm can name a child in a BX
+                    // block. Elaboration checks any selected call as a value.
+                    scope.allow_children |= is_const;
                     for name in arm.binding_names() {
-                        scope.bind_pattern_name(name);
+                        if is_const {
+                            scope.bind(name, LexicalKind::Constant);
+                        } else {
+                            scope.bind_pattern_name(name);
+                        }
                     }
                     self.check_expr_names(&arm.value, &scope)?;
                 }
+                if is_const {
+                    // No const-match arm can supply a structural child.
+                    self.has_block_only_behavior.set(hardware);
+                }
             }
-            Expr::SelectedOperand(value) => self.check_expr_names(value, locals)?,
+            Expr::SelectedOperand(value) | Expr::SelectedMatchArm(value) => {
+                self.check_expr_names(value, locals)?;
+            }
             Expr::UnrollFor(fold) => {
                 self.check_iterable_names(&fold.iterable, locals)?;
                 self.check_expr_names(&fold.seed, locals)?;
@@ -2300,9 +2325,33 @@ fn check_supplied_fields<'a>(
 
 #[cfg(test)]
 mod tests {
-    use crate::{ImportOptions, check_module, check_module_with_options, parse_module};
+    use crate::{
+        BxWarningKind, ImportOptions, check_module, check_module_with_options, parse_module,
+    };
     use std::fs;
     use xlsynth::dslx::{ImportData, parse_and_typecheck};
+
+    #[test]
+    fn zero_trip_const_match_resolves_child_names_without_instantiating_hardware()
+    -> Result<(), String> {
+        let fold = "unroll_for! (_, carry) in u32:0..u32:0 { const match true { true => carry, false => child(carry) } }(x)";
+        for body in [fold.to_owned(), format!("let result = {fold}; result")] {
+            let source = format!(
+                r#"block child(clk, x: u8) -> u8 {{ reg q: u8; q := x; q }}
+                   block top(clk, x: u8) -> u8 {{ {body} }}"#
+            );
+            let checked = check_module(&parse_module(&source)?)?;
+            let [warning] = checked.warnings() else {
+                panic!(
+                    "expected one warning for the combinational block: {:?}",
+                    checked.warnings()
+                );
+            };
+            assert_eq!(warning.kind, BxWarningKind::CombinationalBlock);
+            assert_eq!(warning.declaration, "top");
+        }
+        Ok(())
+    }
 
     #[test]
     fn inactive_const_if_checks_declared_struct_fields() {

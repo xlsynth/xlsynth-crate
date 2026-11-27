@@ -475,6 +475,23 @@ block wrapper(clk, x: u12) -> (u12, (u8, u12), s3) {
 }
 
 #[test]
+fn const_match_arguments_infer_a_shared_type_from_nested_match_results()
+-> Result<(), Box<dyn Error>> {
+    let source = r#"
+block same<T>(clk, a: T, b: T) -> T { a }
+block wrapper(clk, x: u8, y: u12) -> ((u8, u12), (s3, u12)) {
+    let pair = same(const match true { _ => match true { _ => (x, 0) } },
+                    const match true { _ => match true { _ => (0, y) } });
+    let signed = same(const match true { _ => match true { _ => (s3:-5, 0) } }, (0, y));
+    (pair, signed)
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
+    Ok(())
+}
+
+#[test]
 fn complementary_arrays_at_the_expression_depth_limit_compile_on_a_small_stack()
 -> Result<(), String> {
     // The call, tuple and leaf occupy three of BX's 64 expression levels.

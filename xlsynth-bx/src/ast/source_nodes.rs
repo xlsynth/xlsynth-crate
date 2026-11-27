@@ -147,7 +147,9 @@ impl<'a> SourceNode<'a> {
                 } => {
                     pending.extend(args.iter().chain(parametrics).map(Expression));
                 }
-                Expr::SelectedOperand(value) => pending.push(Expression(value)),
+                Expr::SelectedOperand(value) | Expr::SelectedMatchArm(value) => {
+                    pending.push(Expression(value));
+                }
                 Expr::UnrollFor(fold) => {
                     pending.leave_scope();
                     pending.push(Expression(&fold.result));
@@ -228,7 +230,7 @@ impl<'a> SourceNode<'a> {
                 } => {
                     pending.extend([condition.as_ref(), then_value, else_value].map(Expression));
                 }
-                Expr::Match { subject, arms } => {
+                Expr::Match { subject, arms } | Expr::ConstMatch { subject, arms } => {
                     for arm in arms.iter().rev() {
                         pending.leave_scope();
                         pending.push(Expression(&arm.value));
