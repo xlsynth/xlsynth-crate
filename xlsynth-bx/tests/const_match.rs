@@ -334,16 +334,294 @@ fn selected_tuple_alias_infers_signed_members_in_either_order() -> Result<(), St
 }
 
 #[test]
-fn selected_block_arm_requires_a_value_expression() -> Result<(), String> {
+fn structural_match_wires_the_first_matching_child_or_bypasses_it() -> Result<(), String> {
     let source = r#"
         block delay(clk, x:u8) -> u8 { reg q:u8; q := x; q }
-        #[allow(combinational_block)] block parent(clk, x:u8) -> u8 {
-            let result = const match true { true => x, false => delay(x) };
+        block invert_delay(clk, x:u8) -> u8 { reg q:u8; q := !x; q }
+        #[allow(combinational_block)] block stage<MODE:u32>(clk, x:u8) -> u8 {
+            let result:u8 = const match (MODE, MODE < u32:2) {
+                (0, _) => delay(x),
+                (_, true) => invert_delay(x),
+                _ => x,
+            };
+            result
+        }
+        pub block lanes(clk, x:u8) -> (u8, u8, u8) {
+            let plain = stage<0>(x);
+            let inverted = stage<1>(x);
+            let bypassed = stage<2>(x);
+            (plain, inverted, bypassed)
+        }
+    "#;
+    let package = compile_design(source)?;
+    let lanes = package.get_block("lanes").ok_or("missing lanes")?;
+    assert_eq!(lanes.instantiations.len(), 3);
+    for (lane, expected) in
+        lanes
+            .instantiations
+            .iter()
+            .zip([Some("delay"), Some("invert_delay"), None])
+    {
+        let stage = package
+            .get_block(&lane.block)
+            .ok_or("missing stage specialization")?;
+        let input = stage.get_input_port("x").ok_or("missing input")?;
+        let output = stage.output_value(stage.get_output_port("out").ok_or("missing output")?);
+        assert!(stage.nodes.iter().all(|node| !matches!(
+            node.payload,
+            NodePayload::Sel { .. } | NodePayload::PrioritySel { .. }
+        )));
+        let Some(expected) = expected else {
+            assert!(stage.instantiations.is_empty());
+            assert_eq!(output, input);
+            continue;
+        };
+        let [child] = stage.instantiations.as_slice() else {
+            return Err(format!("expected one child in {}", lane.name));
+        };
+        assert_eq!(
+            (child.name.as_str(), child.block.as_str()),
+            ("result", expected)
+        );
+        assert!(stage.nodes.iter().any(|node| matches!(
+            &node.payload, NodePayload::InstantiationInput { instantiation, port_name, arg }
+            if instantiation == "result" && port_name == "x" && *arg == input
+        )));
+        assert!(matches!(
+            &stage.get_node(output).payload, NodePayload::InstantiationOutput { instantiation, port_name }
+            if instantiation == "result" && port_name == "out"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn selected_child_ports_keep_match_arm_literal_inference() -> Result<(), String> {
+    let source = r#"
+        #[allow(combinational_block)] block child(x:s3, y:s8) -> (s3, s8) { (x, y) }
+        #[allow(combinational_block)] block sized<N:u32>(x:sN[N], y:s8) -> (sN[N], s8) { (x, y) }
+        block parent(clk) -> ((s3, s8), (s3, s8)) {
+            let mask = 0xff;
+            let a = const match true { _ => child(s3:-5, mask) };
+            let b = const match (true, 0xff) {
+                (true, m) => sized<3>(s3:-5, m),
+                _ => (s3:0, s8:0),
+            };
+            (a, b)
+        }
+        #[test] block values() {
+            let both = parent();
+            assert_eq(both, ((s3:3, s8:-1), (s3:3, s8:-1)));
+        }
+    "#;
+    check_block_test(source)
+}
+
+#[test]
+fn selected_child_ports_check_the_signed_width_of_literal_groups() -> Result<(), String> {
+    for (params, element, args) in [("", "s8", ""), ("<N:u32>", "sN[N]", "<8>")] {
+        for (shape, too_wide, fits) in [
+            ("", "0xff + 0xfe", "0x7f + 0x7e"),
+            ("[2]", "[0xff, 0xfe]", "[0x7f, 0x7e]"),
+        ] {
+            let source = format!(
+                r#"
+                #[allow(combinational_block)]
+                block child{params}(x:{element}{shape}) -> {element}{shape} {{ x }}
+                block parent(clk) -> s8{shape} {{
+                    let y = const match true {{ _ => child{args}({too_wide}) }};
+                    y
+                }}
+                "#
+            );
+            let error = compile_design(&source).unwrap_err();
+            assert!(
+                error.contains("require 9 signed bits, got s8"),
+                "child{args}({too_wide}): {error}"
+            );
+            compile_design(&source.replace(too_wide, fits))?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn selected_child_ports_infer_range_bounds_before_applying_the_port_type() -> Result<(), String> {
+    for (params, len, args) in [("", "3", ""), ("<N:u32>", "N", "<3>")] {
+        let row = format!("u8[{len}]");
+        for (port, argument, output) in [
+            (row.clone(), "2..(2 + 3)", "x"),
+            (format!("(bool, {row})"), "(true, 2..(2 + 3))", "x.1"),
+        ] {
+            let source = format!(
+                r#"
+                #[allow(combinational_block)]
+                block child{params}(x:{port}) -> {row} {{ {output} }}
+                block parent(clk) -> u8[3] {{
+                    let y = const match true {{ _ => child{args}({argument}) }};
+                    y
+                }}
+                #[test] block values() {{
+                    let row = parent();
+                    assert_eq(row, [u8:2, u8:3, u8:4]);
+                }}
+                "#
+            );
+            let error = compile_design(&source).unwrap_err();
+            assert!(
+                error.contains("array range limit precedes its start"),
+                "child{args}({argument}): {error}"
+            );
+            check_block_test(&source.replace("2 + 3", "2 + u8:3"))?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn nested_selectors_supply_pattern_constants_to_a_destructured_child() -> Result<(), String> {
+    let source = r#"
+        block stage<BIAS:u32>(clk, x:u8) -> (u8, u8) {
+            reg held:u8 = 42;
+            held := x + (BIAS as u8);
+            (held, x)
+        }
+        block parent(clk, x:u8) -> (u8, u8) {
+            let (previous, live): (u8, u8) = const match (true, u32:5) {
+                (enabled, bias) => const if enabled {
+                    const match (bias, u8:3) {
+                        (5, offset) => stage<bias>(x + offset),
+                        _ => (x, x),
+                    }
+                } else { (x, x) },
+            };
+            (previous, live)
+        }
+        #[test] block outputs() {
+            reg x:u8;
+            let pair = parent(x);
+            tick!(rst: true);
+            x := u8:10;
+            assert_eq(pair, (u8:42, u8:13));
+            tick!();
+            x := u8:20;
+            assert_eq(pair, (u8:18, u8:23));
+        }
+    "#;
+    let package = compile_design(source)?;
+    assert_eq!(
+        package
+            .get_block("parent")
+            .ok_or("missing parent")?
+            .instantiations
+            .len(),
+        1
+    );
+    check_block_test(source)
+}
+
+#[test]
+fn structural_unrolls_instantiate_only_matching_iterations() -> Result<(), String> {
+    let source = r#"
+        block delay(clk, x:u8) -> u8 { reg q:u8; q := x; q }
+        block split(clk, x:u8) -> (u8, u8) { reg q:u8; q := x; (q, x) }
+        pub block lanes(clk, x:u8) -> (u8, u8[3]) {
+            let held = unroll_for! (i, acc) in u32:0..u32:3 {
+                let lane = const match i { 1 => delay(acc), _ => acc };
+                let (first, _) = const match i { 2 => split(lane), _ => (lane, lane) };
+                first
+            }(x);
+            let mapped = unroll_map! i in u32:0..u32:3 {
+                const match i { 0 | 2 => delay(x), _ => x }
+            };
+            (held, mapped)
+        }
+    "#;
+    let package = compile_design(source)?;
+    let children = &package
+        .get_block("lanes")
+        .ok_or("missing lanes")?
+        .instantiations;
+    assert_eq!(
+        children
+            .iter()
+            .map(|c| c.block.as_str())
+            .collect::<Vec<_>>(),
+        ["delay", "split", "delay", "delay"]
+    );
+    assert_eq!(children[0].name, "lane_1");
+    Ok(())
+}
+
+#[test]
+fn skipped_child_calls_resolve_names_and_defer_signature_checks() -> Result<(), String> {
+    let source = r#"
+        block delay<INIT:u32>(clk, x:u8) -> u8 { reg q:u8 = INIT as u8; q := x; q }
+        #[allow(combinational_block)] block parent(x:u8) -> u8 {
+            let result = const match false { true => delay<9>(x), false => x };
             result
         }
     "#;
     compile_design(source)?;
-    let err = compile_design(&source.replace("const match true", "const match false")).unwrap_err();
-    assert!(err.contains("call to block 'delay'"), "{err}");
+    let selected = source.replace("const match false", "const match true");
+    let error = compile_design(&selected).unwrap_err();
+    assert!(
+        error.contains("clockless block cannot call clocked block"),
+        "{error}"
+    );
+    compile_design(&source.replace("delay<9>(x)", "delay<9>(x, false)"))?;
+    for child in ["missing(x)", "delay<missing>(x)", "delay<9>(missing)"] {
+        let error = compile_design(&source.replace("delay<9>(x)", child)).unwrap_err();
+        assert!(error.contains("missing"), "{child}: {error}");
+    }
     Ok(())
+}
+
+#[test]
+fn map_result_preserves_match_arm_literal_inference() -> Result<(), String> {
+    let source = r#"
+        #[allow(combinational_block)] block sample() -> s8[2][1] {
+            let y = unroll_map! _ in u32:0..u32:1 {
+                const match true { _ => [{ let m = 0xff; m }, s8:0] }
+            };
+            y
+        }
+        #[test] block values() {
+            let y = sample();
+            assert_eq(y, [[s8:-1, s8:0]]);
+        }
+    "#;
+    check_block_test(source)?;
+    let overflow = source.replace("{ let m = 0xff; m }", "0xff + 0xfe");
+    let error = compile_design(&overflow).unwrap_err();
+    assert!(error.contains("require 9 signed bits"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn selected_child_calls_require_a_structural_site() {
+    let delay = "block delay(clk, x:u8) -> u8 { reg q:u8; q := x; q }";
+    for body in [
+        "const match true { _ => delay(x) }",
+        "if en { let y = const match true { _ => delay(x) }; } x",
+        "let y = if en { const match true { _ => delay(x) } } else { x }; y",
+        "let y = match en { true => delay(x), _ => x }; y",
+        "let y = const match true { _ => delay(x) + x }; y",
+        "let y = const match true { _ => delay(delay(x)) }; y",
+        "let y = { let a = x; const match true { _ => delay(a) } }; y",
+        "let y = const match true { _ => { let a = x; delay(a) } }; y",
+        "let y = const match true { _ => unroll_map! a in [x] { delay(a) } }; y[0]",
+        "unroll_for! (_, a) in u32:0..u32:1 { const match true { _ => delay(a) } }(x)",
+    ] {
+        let source = format!("{delay} pub block parent(clk, x:u8, en:bool) -> u8 {{ {body} }}");
+        let error = compile_design(&source).unwrap_err();
+        assert!(error.contains("call to block 'delay'"), "{body}: {error}");
+    }
+    let source =
+        format!("{delay} fn f(x:u8) -> u8 {{ let y = const match true {{ _ => delay(x) }}; y }}");
+    let error = compile_design(&source).unwrap_err();
+    assert!(
+        error.contains("pure function cannot call block 'delay'"),
+        "{error}"
+    );
 }

@@ -429,6 +429,12 @@ The target compares lowered BX outputs with DSLX IR and concrete DSLX calls. For
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_const_match -- -max_len=12 -len_control=0`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_structural_const_match.rs
+
+Compares BX structural `const match` with an equivalent `const if` chain in a block let, an indexed fold, and structural maps. Overlapping ranges, alternatives, and tuple-bound indices select a capture register, an inverting register, or a combinational bypass. The target checks the number, names, and targets of the lowered child instances. A register model checks every output lane across two synchronous resets and changing inputs, exposing incorrect arm priority, stale pattern bindings, and shared or miswired state.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_structural_const_match -- -max_len=12 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_local_declarations.rs
 
 Generates function-local constants and type aliases in nested blocks and conditional branches. Cases vary lexical shadowing, constexpr lets, alias chains, signed and unsigned widths, aggregate types, and successive value and type parameter bindings. For each accepted case the BX block returns results from both the local function and a concrete function with its declarations hoisted to module scope under fresh names. Compiled DSLX IR and concrete DSLX calls evaluate the local function on the same inputs and supply the expected value for both BX results. Rejection cases check runtime-dependent initializers and dimensions, mismatched annotations, forward references, and references outside a declaration's scope.

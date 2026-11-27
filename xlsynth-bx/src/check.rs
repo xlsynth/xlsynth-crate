@@ -3686,9 +3686,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         for (arg, param) in args.iter().zip(&child.params) {
             let value = match &mut prepared {
                 Some(values) => values.next().expect("one checked value per generic input"),
-                None => self.expr(arg, Some(&param.ty)).map_err(|e| {
-                    format!("input '{}', call to block '{target}': {e}", param.name)
-                })?,
+                None => {
+                    let value = if self.dslx_value_context {
+                        self.dslx_argument(arg, &param.ty)
+                    } else {
+                        self.expr(arg, Some(&param.ty))
+                    };
+                    value.map_err(|e| {
+                        format!("input '{}', call to block '{target}': {e}", param.name)
+                    })?
+                }
             };
             self.statements.push(CheckedStmt::Connect {
                 instance: instance.clone(),
@@ -4080,31 +4087,61 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         initializer: &Expr,
         structural: bool,
     ) -> Result<scope::BindingInitializer, String> {
-        let (initializer, structural) = self.select_let_initializer(initializer, structural)?;
-        self.annotated_binding_initializer(initializer, annotation, |checker, expr, ty| {
-            checker.let_value(name, expr, ty, structural)
+        self.with_let_initializer(initializer, structural, |checker, expr, structural| {
+            checker.annotated_binding_initializer(expr, annotation, |checker, expr, ty| {
+                checker.let_value(name, expr, ty, structural)
+            })
         })
     }
 
-    /// A leading `const if` can supply a direct child call at a structural let.
-    /// Decide this before value preparation strips lexical scopes.
-    fn select_let_initializer<'e>(
+    /// Select direct child calls before value preparation removes lexical
+    /// scopes.
+    fn with_let_initializer<T>(
         &mut self,
-        initializer: &'e Expr,
+        initializer: &Expr,
         structural: bool,
-    ) -> Result<(&'e Expr, bool), String> {
+        check: impl FnOnce(&mut Self, &Expr, bool) -> Result<T, String>,
+    ) -> Result<T, String> {
         if !structural {
-            return Ok((initializer, false));
+            return check(self, initializer, false);
         }
         let value = self.selected_const_if_value(initializer)?;
+        if let Expr::ConstMatch { subject, arms } = value {
+            return self
+                .with_scope_aliases(|checker| checker.with_structural_match(subject, arms, check));
+        }
         let structural = match value {
-            Expr::Scope { .. } | Expr::ConstMatch { .. } => false,
+            Expr::Scope { .. } => false,
             // Child-producing loops must themselves occupy a structural site.
             Expr::UnrollFor(_) => matches!(initializer, Expr::UnrollFor(_)),
             Expr::UnrollMap(_) => matches!(initializer, Expr::UnrollMap(_)),
             _ => true,
         };
-        Ok((value, structural))
+        check(self, value, structural)
+    }
+
+    /// Keep pattern bindings alive through child specialization or value
+    /// checking.
+    fn with_structural_match<T>(
+        &mut self,
+        subject: &Expr,
+        arms: &[MatchArm],
+        check: impl FnOnce(&mut Self, &Expr, bool) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let arm = self.const_match_arm(subject, arms)?;
+        let value = self.selected_const_if_value(&arm)?;
+        if let Expr::ConstMatch { subject, arms } = value {
+            return stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
+                self.with_structural_match(subject, arms, check)
+            });
+        }
+        if self.direct_block_call(value).is_some() {
+            return self.with_dslx_value_context(|checker| check(checker, value, true));
+        }
+        // A value arm retains DSLX literal inference. It cannot introduce a
+        // child hidden by an ordinary scope, aggregate, or loop.
+        let value = Expr::SelectedMatchArm(Box::new(value.clone()));
+        check(self, &value, false)
     }
 
     /// Propagate expected types to literals, aggregate members, and pure call
@@ -5897,7 +5934,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             format!("pure function cannot call block '{name}'")
         } else {
             format!(
-                "call to block '{name}' must directly initialize an unconditional top-level let or unrolled let, optionally through const if"
+                "call to block '{name}' must directly initialize an unconditional top-level let or unrolled let, or supply a structural unroll_map! result, optionally through const if or const match"
             )
         }
     }

@@ -181,6 +181,30 @@ impl BodyChecker<'_, '_> {
         }
     }
 
+    /// Identify a direct child call using the same lookup as ordinary block
+    /// lets.
+    pub(super) fn direct_block_call<'e>(
+        &self,
+        expr: &'e Expr,
+    ) -> Option<(&'e str, &'e [Expr], &'e [Expr])> {
+        let (name, parametrics, args) = match expr {
+            Expr::Call { name, args } | Expr::MapBeforeUse { name, args, .. } => {
+                (name, &[][..], args)
+            }
+            Expr::ParametricCall {
+                name,
+                parametrics,
+                args,
+            } => (name, parametrics.as_slice(), args),
+            _ => return None,
+        };
+        (self.decls.is_block(name) && self.callback_index(name).is_none()).then_some((
+            name,
+            parametrics,
+            args,
+        ))
+    }
+
     /// Check an ordinary binding or elaborate its child instance.
     pub(super) fn let_value(
         &mut self,
@@ -189,21 +213,7 @@ impl BodyChecker<'_, '_> {
         expected: Option<&Type>,
         structural: bool,
     ) -> Result<TypedExpr, String> {
-        let call = match expr {
-            Expr::Call { name, args } | Expr::MapBeforeUse { name, args, .. } => {
-                Some((name, &[][..], args))
-            }
-            Expr::ParametricCall {
-                name,
-                parametrics,
-                args,
-            } => Some((name, parametrics.as_slice(), args)),
-            _ => None,
-        };
-        if let Some((target, parametrics, args)) = call
-            && self.decls.is_block(target)
-            && self.callback_index(target).is_none()
-        {
+        if let Some((target, parametrics, args)) = self.direct_block_call(expr) {
             if self.kind == BodyKind::Function || !structural {
                 return Err(self.block_in_value_error(target));
             }
@@ -731,7 +741,7 @@ impl BodyChecker<'_, '_> {
                 &[&fold.element, &fold.accumulator],
                 &fold.body,
                 &fold.result,
-                true,
+                structural,
             )?;
             return Ok(scope::sequence(input.operands, carry));
         }
@@ -844,10 +854,14 @@ impl BodyChecker<'_, '_> {
                         "unroll_map!",
                         saved,
                     )?;
-                    let (result, structural) =
-                        checker.select_let_initializer(&map.result, structural)?;
                     checker
-                        .let_value(None, result, hint, structural)
+                        .with_let_initializer(
+                            &map.result,
+                            structural,
+                            |checker, result, structural| {
+                                checker.let_value(None, result, hint, structural)
+                            },
+                        )
                         .map_err(|e| format!("unroll_map! iteration {ordinal}: {e}"))
                 })?
             };
@@ -1013,20 +1027,19 @@ impl BodyChecker<'_, '_> {
             };
             let ty = ty.as_ref().map(|t| self.source_type(t)).transpose()?;
             let binding_error = |e| format!("{keyword} iteration {ordinal}, let '{name}': {e}");
-            let (selected, structural) = self
-                .select_let_initializer(expr, structural)
-                .map_err(binding_error)?;
             // Capture the selected result's widths before its lexical
             // bindings leave scope, including widths of tuple members.
             let (value, widths) = self
-                .with_prepared_value(selected, |checker, expr| {
-                    let value = checker.let_value(Some(name), expr, ty.as_ref(), structural)?;
-                    let widths = if ty.is_none() {
-                        binding_widths(expr, &value.ty, &checker.inferred_bindings)?
-                    } else {
-                        None
-                    };
-                    Ok((value, widths))
+                .with_let_initializer(expr, structural, |checker, selected, structural| {
+                    checker.with_prepared_value(selected, |checker, expr| {
+                        let value = checker.let_value(Some(name), expr, ty.as_ref(), structural)?;
+                        let widths = if ty.is_none() {
+                            binding_widths(expr, &value.ty, &checker.inferred_bindings)?
+                        } else {
+                            None
+                        };
+                        Ok((value, widths))
+                    })
                 })
                 .map_err(binding_error)?;
             let value = self.share_loop_value(value, false);
@@ -1058,7 +1071,9 @@ struct LexicalScope<'a> {
     declarations: BTreeMap<String, LexicalKind>,
     parent: Option<&'a LexicalScope<'a>>,
     in_lambda: bool,
-    /// A zero-trip map inside a value expression still requires a pure body.
+    /// Permit resolving child names in this skipped body. An empty value
+    /// map requires a pure body, but its skipped const-match arms can name
+    /// children.
     allow_children: bool,
     /// A compile-time branch resolves the qualifying type in every arm.
     /// Member lookup on that type waits until the arm is selected.
@@ -1275,10 +1290,10 @@ impl BodyChecker<'_, '_> {
 
     /// Expressions and symbolic types can contain one another. Bound their
     /// combined nesting before a template signature is retained or evaluated.
-    fn with_template_name_depth(
+    fn with_template_name_depth<T>(
         &self,
-        check: impl FnOnce() -> Result<(), String>,
-    ) -> Result<(), String> {
+        check: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
         let Some(depth) = &self.template_name_depth else {
             return check();
         };
@@ -1404,8 +1419,10 @@ impl BodyChecker<'_, '_> {
         let visited = Cell::new(0);
         let locals = LexicalScope::root(&self.names, &visited);
         let mut scope = locals.nested();
-        scope.allow_children = structural;
-        self.check_body_names(keyword, patterns, body, result, &mut scope)?;
+        // An empty fold resolves child names even in a value operand. Only a
+        // structural loop can select a child in a const-match initializer.
+        scope.allow_children = keyword == "unroll_for!" || structural;
+        self.check_body_names(keyword, patterns, body, result, &mut scope, structural)?;
         if self.replaying_body() {
             self.charge_expansion(keyword, visited.get())?;
         }
@@ -1464,6 +1481,7 @@ impl BodyChecker<'_, '_> {
         body: &[Stmt],
         result: &Expr,
         locals: &mut LexicalScope<'_>,
+        structural: bool,
     ) -> Result<(), String> {
         for pattern in patterns {
             locals.bind_pattern(pattern);
@@ -1474,7 +1492,7 @@ impl BodyChecker<'_, '_> {
                 if let Some(ty) = &binding.ty {
                     self.check_type_names(ty, locals)?;
                 }
-                self.check_expr_names(&binding.value, locals)?;
+                self.check_unrolled_initializer_names(&binding.value, locals, structural)?;
                 locals.bind_pattern(&binding.pattern);
                 continue;
             }
@@ -1486,10 +1504,30 @@ impl BodyChecker<'_, '_> {
             if let Some(ty) = ty {
                 self.check_type_names(ty, locals)?;
             }
-            self.check_expr_names(value, locals)?;
+            self.check_unrolled_initializer_names(value, locals, structural)?;
             locals.bind_pattern_name(name);
         }
-        self.check_expr_names(result, locals)
+        if keyword == "unroll_map!" {
+            self.check_unrolled_initializer_names(result, locals, structural)
+        } else {
+            // A fold result can directly contain another structural loop.
+            // Only a binding or map result can select a direct child call.
+            self.check_initializer_names(result, locals, structural)
+                .map(|_| ())
+        }
+    }
+
+    /// A structural let or map result can name a child even in an empty unroll.
+    fn check_unrolled_initializer_names(
+        &self,
+        expr: &Expr,
+        locals: &LexicalScope<'_>,
+        structural: bool,
+    ) -> Result<(), String> {
+        if self.check_initializer_names(expr, locals, structural)? && structural {
+            self.has_block_only_behavior.set(true);
+        }
+        Ok(())
     }
 
     /// An enclosing block port shadows a module name inside a symbolic type
@@ -1804,15 +1842,33 @@ impl BodyChecker<'_, '_> {
     }
 
     fn check_expr_names(&self, expr: &Expr, locals: &LexicalScope<'_>) -> Result<(), String> {
-        self.with_template_name_depth(|| self.check_expr_names_at_depth(expr, locals))
+        self.check_initializer_names(expr, locals, false)
+            .map(|_| ())
+    }
+
+    /// Resolve names and report a direct child call through leading
+    /// compile-time selectors, using the same callee lookup as the rest of the
+    /// lexical walk. A loop can contain structural bindings only when the
+    /// loop itself occupies an unconditional binding or result.
+    fn check_initializer_names(
+        &self,
+        expr: &Expr,
+        locals: &LexicalScope<'_>,
+        structural_unroll: bool,
+    ) -> Result<bool, String> {
+        self.with_template_name_depth(|| {
+            self.check_expr_names_at_depth(expr, locals, structural_unroll)
+        })
     }
 
     fn check_expr_names_at_depth(
         &self,
         expr: &Expr,
         locals: &LexicalScope<'_>,
-    ) -> Result<(), String> {
+        structural_unroll: bool,
+    ) -> Result<bool, String> {
         locals.visited.set(locals.visited.get().saturating_add(1));
+        let mut child_initializer = false;
         match expr {
             Expr::Scope { statements, result } => {
                 let mut names = locals.nested();
@@ -1936,6 +1992,7 @@ impl BodyChecker<'_, '_> {
                                 return Err(format!("pure function cannot call block '{name}'"));
                             }
                             self.check_lexical_block_call(name, 0, false, locals)?;
+                            child_initializer = true;
                         } else if self.kind != BodyKind::Function
                             && !locals.in_lambda
                             && local.is_some_and(|scope| scope.parent.is_none())
@@ -1946,6 +2003,7 @@ impl BodyChecker<'_, '_> {
                             // child's name. A nearer lexical or iteration
                             // binder shadows it.
                             self.check_lexical_block_call(name, 0, false, locals)?;
+                            child_initializer = true;
                         }
                     }
                     if self.callback_index(name).is_none() || local.is_some() {
@@ -1973,6 +2031,7 @@ impl BodyChecker<'_, '_> {
                     if self.kind == BodyKind::Function || locals.in_lambda {
                         return Err(format!("pure function cannot call block '{name}'"));
                     }
+                    child_initializer = true;
                 } else if template.is_some_and(|f| !f.has_inferred_parametrics()) {
                     self.callable_template(
                         name,
@@ -2084,8 +2143,8 @@ impl BodyChecker<'_, '_> {
                 self.check_expr_names(condition, locals)?;
                 let mut arm = locals.nested();
                 arm.in_const_arm = true;
-                self.check_expr_names(then_value, &arm)?;
-                self.check_expr_names(else_value, &arm)?;
+                child_initializer = self.check_initializer_names(then_value, &arm, false)?;
+                child_initializer |= self.check_initializer_names(else_value, &arm, false)?;
             }
             Expr::Match { subject, arms } | Expr::ConstMatch { subject, arms } => {
                 let is_const = matches!(expr, Expr::ConstMatch { .. });
@@ -2118,8 +2177,8 @@ impl BodyChecker<'_, '_> {
                         .set(locals.visited.get().saturating_add(pattern_nodes));
                     let mut scope = locals.nested();
                     scope.in_const_arm |= is_const;
-                    // An unevaluated const-match arm can name a child in a BX
-                    // block. Elaboration checks any selected call as a value.
+                    // A skipped const arm can name a child independently of
+                    // whether its enclosing expression is a structural site.
                     scope.allow_children |= is_const;
                     for name in arm.binding_names() {
                         if is_const {
@@ -2128,10 +2187,13 @@ impl BodyChecker<'_, '_> {
                             scope.bind_pattern_name(name);
                         }
                     }
-                    self.check_expr_names(&arm.value, &scope)?;
+                    let arm_is_child = self.check_initializer_names(&arm.value, &scope, false)?;
+                    child_initializer |= is_const && arm_is_child;
                 }
                 if is_const {
-                    // No const-match arm can supply a structural child.
+                    // Only the caller knows whether this match occupies a
+                    // structural initializer. Discard hardware references in
+                    // value operands and return the direct child calls above.
                     self.has_block_only_behavior.set(hardware);
                 }
             }
@@ -2152,6 +2214,7 @@ impl BodyChecker<'_, '_> {
                     &fold.body,
                     &fold.result,
                     &mut locals.nested(),
+                    structural_unroll,
                 )?;
             }
             Expr::UnrollMap(map) => {
@@ -2163,6 +2226,7 @@ impl BodyChecker<'_, '_> {
                     &map.body,
                     &map.result,
                     &mut locals.nested(),
+                    structural_unroll,
                 )?;
             }
             Expr::Map(map) => {
@@ -2202,7 +2266,7 @@ impl BodyChecker<'_, '_> {
                 self.check_expr_names(&fold.body, &names)?;
             }
         }
-        Ok(())
+        Ok(child_initializer)
     }
 
     /// Capture the constructor's declaration identity before specializing a
@@ -2349,6 +2413,101 @@ mod tests {
             };
             assert_eq!(warning.kind, BxWarningKind::CombinationalBlock);
             assert_eq!(warning.declaration, "top");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn zero_trip_const_match_marks_only_direct_structural_children() -> Result<(), String> {
+        let source = r#"
+            block child<N:u32>(clk, x:u8) -> u8 { reg q:u8; q := x + (N as u8); q }
+            block split(clk, x:u8) -> (u8, u8) { reg q:u8; q := x; (q, x) }
+            block named(clk, x:u8) -> u8 {
+                unroll_for! (i, a) in u32:0..u32:0 {
+                    let q = const if true {
+                        const match i { 0 => child<i>(a), _ => a }
+                    } else { a };
+                    q
+                }(x)
+            }
+            block destructured(clk, x:u8) -> u8 {
+                unroll_for! (i, a) in u32:0..u32:0 {
+                    let (q, _) = const match i { 0 => split(a), _ => (a, a) };
+                    q
+                }(x)
+            }
+            block collected(clk, x:u8) -> u8[0] {
+                unroll_map! i in u32:0..u32:0 {
+                    const match i { 0 => const if true { child<i>(x) } else { x }, _ => x }
+                }
+            }
+            block arithmetic(clk, x:u8) -> u8 {
+                unroll_for! (i, a) in u32:0..u32:0 {
+                    let q = const match i { 0 => child<i>(a) + a, _ => a };
+                    q
+                }(x)
+            }
+            block bypass(clk, x:u8) -> u8 {
+                unroll_for! (i, a) in u32:0..u32:1 {
+                    let q = const match i { 0 => a, _ => child<i>(a) };
+                    q
+                }(x)
+            }
+            fn identity(x:u8) -> u8 { x }
+            block callback<split:fn(u8)->u8>(clk, x:u8) -> u8 {
+                unroll_for! (i, a) in u32:0..u32:0 {
+                    let q = const match i { 0 => split(a), _ => a };
+                    q
+                }(x)
+            }
+            pub block caller(clk, x:u8) -> u8 { let result = callback<identity>(x); result }
+        "#;
+        let checked = check_module(&parse_module(source)?)?;
+        let warned: Vec<_> = checked
+            .warnings()
+            .iter()
+            .map(|warning| (warning.kind, warning.declaration.as_str()))
+            .collect();
+        assert_eq!(
+            warned,
+            [
+                (BxWarningKind::CombinationalBlock, "arithmetic"),
+                (BxWarningKind::CombinationalBlock, "bypass"),
+                (BxWarningKind::CombinationalBlock, "callback"),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn zero_trip_const_match_children_follow_the_nested_unroll_site() -> Result<(), String> {
+        let fold = "unroll_for! (_, b) in u32:0..u32:1 { let y = const match true { _ => child(b) }; y }(a)";
+        let map = "unroll_map! _ in u32:0..u32:1 { const match true { _ => child(a) } }";
+        for (body, warns) in [
+            (format!("let t = a + {fold}; t"), true),
+            (format!("let t = {fold}; t"), false),
+            (fold.to_owned(), false),
+            (
+                format!("let t = const if true {{ {fold} }} else {{ a }}; t"),
+                true,
+            ),
+            (format!("let t = {map}[u32:0]; t"), true),
+            (format!("let t = {map}; t[u32:0]"), false),
+        ] {
+            let source = format!(
+                r#"block child(clk, x:u8) -> u8 {{ reg q:u8; q := x; q }}
+                   block top(clk, x:u8) -> u8 {{
+                       unroll_for! (_, a) in u32:0..u32:0 {{ {body} }}(x)
+                   }}"#
+            );
+            let checked = check_module(&parse_module(&source)?)?;
+            let warnings: Vec<_> = checked
+                .warnings()
+                .iter()
+                .map(|warning| (warning.kind, warning.declaration.as_str()))
+                .collect();
+            let expected = (BxWarningKind::CombinationalBlock, "top");
+            assert_eq!(warnings, warns.then_some(expected).as_slice(), "{body}");
         }
         Ok(())
     }

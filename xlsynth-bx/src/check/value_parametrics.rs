@@ -1486,12 +1486,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let mut checked = Vec::with_capacity(inputs.len());
         for (input, param) in inputs.into_iter().zip(params) {
             if let Some(expr) = input.source() {
-                super::check_argument_widths(
-                    expr,
-                    &param.ty,
-                    Some(&self.inferred_bindings),
-                    Some(&|| self.zero_calls_function()),
-                )?;
+                self.check_dslx_argument_widths(expr, &param.ty)?;
             }
             checked
                 .push(self.finish_input(input, &param.ty).map_err(|e| {
