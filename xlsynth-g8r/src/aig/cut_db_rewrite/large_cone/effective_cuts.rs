@@ -12,6 +12,7 @@ mod singleton;
 
 use self::compact_leaves::CompactLeaves;
 use super::cut_truth::{self, ConeCache, CutEvaluator};
+use crate::aig::cut_db_rewrite::CutFaninWalk;
 use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 
@@ -143,7 +144,7 @@ pub(in crate::aig::cut_db_rewrite) struct EffectiveCuts {
     deep_truth: ConeCache,
     mffc: batched_mffc::BatchedMffc,
     compact: CompactLeaves,
-    pending: Vec<(AigRef, bool)>,
+    walk: CutFaninWalk,
 }
 
 impl EffectiveCuts {
@@ -175,20 +176,9 @@ impl EffectiveCuts {
     /// Fill missing boundaries in fanin order. A shared gate's retained cuts
     /// can serve several parents until a graph edit invalidates them.
     fn fill(&mut self, g: &GateFn, root: AigRef, depths: &[usize]) {
-        self.pending.push((root, false));
-        while let Some((node, expanded)) = self.pending.pop() {
-            if self.by_node.contains_key(&node) {
-                continue;
-            }
+        self.walk.start(root);
+        while let Some(node) = self.walk.next_ready(g, |n| self.by_node.contains_key(&n)) {
             let gate = &g.gates[node.id];
-            if let AigNode::And2 { a, b, .. } = gate
-                && !expanded
-            {
-                self.pending.push((node, true));
-                self.pending.push((b.node, false));
-                self.pending.push((a.node, false));
-                continue;
-            }
             let mut unit = Boundary::unit(node, depths[node.id]);
             if matches!(gate, AigNode::Literal { .. }) {
                 unit.leaves.clear();
