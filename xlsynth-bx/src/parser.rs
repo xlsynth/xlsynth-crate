@@ -792,7 +792,7 @@ enum ExprSpelling {
     ConditionalUnaryOperand,
 }
 
-/// The evaluation mode inherited by every condition in an else-if chain.
+/// The evaluation mode of a match or an entire if/else-if chain.
 #[derive(Clone, Copy, PartialEq)]
 enum ConditionalKind {
     Runtime,
@@ -2010,7 +2010,10 @@ impl<'s> Parser<'s> {
                 height = height.max(initializer_height);
                 statements.push(ScopeStatement::Let(binding));
                 self.expect(";")?;
-            } else if self.in_function_body && !self.starts_const_if() && self.eat("const") {
+            } else if self.in_function_body
+                && !matches!(self.peek(1), "if" | "match")
+                && self.eat("const")
+            {
                 if self.peek(0) == "_" {
                     return Err(self.error("a local constant requires a name"));
                 }
@@ -3116,7 +3119,7 @@ impl<'s> Parser<'s> {
 
     /// Retain arms in source order without constructing a nested condition
     /// tree. The result height depends on the deepest arm, not their count.
-    fn match_expr(&mut self) -> Result<ParsedExpr, String> {
+    fn match_expr(&mut self, kind: ConditionalKind) -> Result<ParsedExpr, String> {
         let subject = self.match_value(Braces::MatchArms)?;
         self.expect("{")?;
         let mut height = subject.height;
@@ -3144,13 +3147,12 @@ impl<'s> Parser<'s> {
                 })
             })
         })?;
-        self.compose(
-            height,
-            Expr::Match {
-                subject: Box::new(subject.value),
-                arms,
-            },
-        )
+        let subject = Box::new(subject.value);
+        let value = match kind {
+            ConditionalKind::Runtime => Expr::Match { subject, arms },
+            ConditionalKind::Const => Expr::ConstMatch { subject, arms },
+        };
+        self.compose(height, value)
     }
 
     /// Detect repeated spellings even when the pattern has an empty domain.
@@ -3887,9 +3889,13 @@ impl<'s> Parser<'s> {
             self.pos += 2;
             return self.if_expr(ConditionalKind::Const);
         }
+        if text == "const" && self.peek(1) == "match" {
+            self.pos += 2;
+            return self.match_expr(ConditionalKind::Const);
+        }
         if text == "match" && (self.dslx_value_grammar() || self.block_match_ahead()) {
             self.pos += 1;
-            return self.match_expr();
+            return self.match_expr(ConditionalKind::Runtime);
         }
         if self.eat("unroll_for!") {
             return self.unroll_for();
@@ -7278,6 +7284,55 @@ block b(clk, x: s8) -> s8 { match (x) { _ => { let y = x; y } } }
         assert_eq!(arms[2].patterns, [MatchPattern::Wildcard]);
         assert!(matches!(arms[1].value, Expr::Scope { .. }));
         assert!(matches!(module.blocks[0].output, Expr::Match { .. }));
+    }
+
+    #[test]
+    fn const_match_shares_match_grammar_in_value_scopes_and_blocks() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+            fn f() -> u8 {
+                const K = (true, u8:7);
+                const match K { (true, value) => value, _ => u8:0 };
+                match K { (true, value) => value, _ => u8:0 }
+            }
+            block b(const: u8) -> u8 {
+                const match u8:0 { 0..2 | 4 => (const,), _ => (u8:0,) }.0
+            }
+            "#,
+        )?;
+        let Expr::Scope { statements, result } = &module.functions[0].body else {
+            panic!("expected a value scope");
+        };
+        let [
+            ScopeStatement::Const(def),
+            ScopeStatement::Expression(Expr::ConstMatch { subject, arms }),
+        ] = statements.as_slice()
+        else {
+            panic!("expected a constant declaration and a discarded const match");
+        };
+        assert_eq!(def.name, "K");
+        let Expr::Match {
+            subject: runtime_subject,
+            arms: runtime_arms,
+        } = result.as_ref()
+        else {
+            panic!("expected a runtime match");
+        };
+        assert_eq!(subject, runtime_subject);
+        assert_eq!(arms, runtime_arms);
+        let Expr::Field { value, name } = &module.blocks[0].output else {
+            panic!("expected a projection");
+        };
+        assert_eq!(name, "0");
+        assert!(
+            matches!(value.as_ref(), Expr::ConstMatch { arms, .. } if arms[0].patterns.len() == 2)
+        );
+        for body in ["reg q: u8; q", "q := u8:1; q", "let q: u8; q"] {
+            let source =
+                format!("block b(clk) -> u8 {{ const match true {{ _ => {{ {body} }} }} }}");
+            assert!(parse_module(&source).is_err(), "{body}");
+        }
+        Ok(())
     }
 
     #[test]

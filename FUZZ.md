@@ -421,6 +421,14 @@ Compares `const if` chains in parametric BX functions and blocks with pinned DSL
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_const_if -- -max_len=12 -len_control=0`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_const_match.rs
+
+Compares expression-form `const match` in BX functions and combinational blocks with pinned DSLX. Repeated specializations select among runtime scalars, arrays, and tuples. Cases vary signed ranges, named alternatives, enum members, constants differing above bit 63, and nested tuple bindings used as values or type widths. Selected arms also exercise signed literals and inferred bit patterns. Negative cases cover missing arms, invalid patterns, runtime inputs read by a destructured or discarded subject-local let, and name, assertion, and type errors in skipped arms.
+
+The target compares lowered BX outputs with DSLX IR and concrete DSLX calls. For tuple binders read as arm values, both frontends check the original source and the DSLX value reference uses an ordinary `match` on the same constant tuple. The pinned v0.65.2 bytecode emitter and IR converter cannot read these binders in a `const match` arm.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_const_match -- -max_len=12 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_local_declarations.rs
 
 Generates function-local constants and type aliases in nested blocks and conditional branches. Cases vary lexical shadowing, constexpr lets, alias chains, signed and unsigned widths, aggregate types, and successive value and type parameter bindings. For each accepted case the BX block returns results from both the local function and a concrete function with its declarations hoisted to module scope under fresh names. Compiled DSLX IR and concrete DSLX calls evaluate the local function on the same inputs and supply the expected value for both BX results. Rejection cases check runtime-dependent initializers and dimensions, mismatched annotations, forward references, and references outside a declaration's scope.

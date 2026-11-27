@@ -56,6 +56,12 @@ fn strict_modules_require_earlier_block_dependencies() -> Result<(), String> {
     let record = "struct Packet { data: u8 }";
     for (dependency, user, owner, name) in [
         (helper, call, "top", "step"),
+        (
+            helper,
+            "block top(clk, x: u8) -> u8 { const match true { true => x, false => step(x) } }",
+            "top",
+            "step",
+        ),
         (external, call, "top", "step"),
         (stage, child, "top", "step"),
         (external_stage, child, "top", "step"),
@@ -160,6 +166,12 @@ fn strict_functions_require_earlier_helpers_and_types() -> Result<(), String> {
         (
             "const FLAG = true;",
             "fn pick(p: (bool, u8)) -> u8 { match p { (FLAG, byte) => byte, _ => u8:0 } }",
+            "pick",
+            "FLAG",
+        ),
+        (
+            "const FLAG = true;",
+            "fn pick() -> u8 { const match (true, u8:2) { (FLAG, byte) => byte, _ => u8:0 } }",
             "pick",
             "FLAG",
         ),

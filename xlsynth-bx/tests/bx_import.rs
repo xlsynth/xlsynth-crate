@@ -251,6 +251,12 @@ fn imported_match_function_resolves_tuple_bindings_in_each_arm() -> Result<(), B
                 (_, (_, byte)) => byte,
             }
         }
+        pub fn select_const(x: u8) -> u8 {
+            const match (true, (u8:17, u8:42)) {
+                (SELECT, (byte, _)) => x + byte,
+                (_, (_, byte)) => x + byte,
+            }
+        }
         "#,
     )?;
     let source = r#"
@@ -260,6 +266,7 @@ fn imported_match_function_resolves_tuple_bindings_in_each_arm() -> Result<(), B
         fn sample(flag: bool) -> u8 {
             select::select((flag, (u8:17, u8:42)))
         }
+        fn sample_const(x: u8) -> u8 { select::select_const(x) }
     "#;
     let package = compile_design(source, &search_paths(&[dir.path()]))?;
     let sample = package.get_fn("sample").ok_or("missing sample")?;
@@ -269,6 +276,13 @@ fn imported_match_function_resolves_tuple_bindings_in_each_arm() -> Result<(), B
             IrValue::make_ubits(8, expected)?
         );
     }
+    let sample_const = package
+        .get_fn("sample_const")
+        .ok_or("missing sample_const")?;
+    assert_eq!(
+        eval_fn_in_package_value(&package, sample_const, &[IrValue::make_ubits(8, 2)?]),
+        IrValue::make_ubits(8, 19)?
+    );
     Ok(())
 }
 

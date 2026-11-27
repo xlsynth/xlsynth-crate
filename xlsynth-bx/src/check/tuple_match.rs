@@ -2,6 +2,7 @@
 
 //! Check the field types and Cartesian coverage of tuple match patterns.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
@@ -9,11 +10,15 @@ use num_bigint::BigUint;
 use xlsynth_pir::IrBits;
 
 use super::match_patterns::{nonempty_range, pattern_bits};
-use super::scope::BindingInitializer;
-use super::{BodyChecker, MAX_TYPE_SIZE, MatchSelector, StructTable, TuplePatternLayout};
+use super::scope::{BindingInitializer, take_match_bindings};
+use super::{
+    BodyChecker, MAX_TYPE_SIZE, MatchKind, MatchSelector, StructTable, TuplePatternLayout,
+};
 use crate::ast::{Expr, MatchArm, MatchPattern, Type};
-use crate::infer_literal::check_inferred_signed_width;
-use crate::typed::{TypedExpr, TypedMatchPattern, bits};
+use crate::infer_literal::{
+    BindingWidths, WidthLookup, binding_widths_using, check_inferred_signed_width,
+};
+use crate::typed::{ConstantUse, TypedExpr, TypedExprKind, TypedMatchPattern, bits};
 
 type Region = Vec<Range<BigUint>>;
 type EnumOrdinals = HashMap<String, Option<HashMap<IrBits, usize>>>;
@@ -226,7 +231,7 @@ fn region_for(
 
 impl BodyChecker<'_, '_> {
     /// Infer the subject from its value and the literals in the tuple patterns.
-    fn tuple_match_subject(
+    pub(super) fn tuple_match_subject(
         &mut self,
         subject: &Expr,
         arms: &[MatchArm],
@@ -245,38 +250,106 @@ impl BodyChecker<'_, '_> {
     ) -> Result<BindingInitializer, String> {
         super::source_patterns::validate_match_pattern_size(arms)?;
         super::source_patterns::validate_tuple_pattern_bindings(arms)?;
-        let mut init = self.binding_initializer(subject, None, |checker, subject| {
+        self.with_prepared_value(subject, |checker, subject| {
             let patterns = arms.iter().flat_map(|arm| &arm.patterns);
-            if patterns
+            let value = if patterns
                 .clone()
                 .any(|pattern| matches!(pattern, MatchPattern::Tuple(_)))
             {
-                return checker.tuple_match_subject(subject, arms);
-            }
-            // A whole-subject binder shares the original scalar subject's
-            // literal group. Check deferred call widths before capturing it.
-            let operands: Vec<_> = std::iter::once(subject)
-                .chain(patterns.flat_map(MatchPattern::literals))
-                .collect();
-            Ok(checker
-                .check_match_values(&operands)?
-                .next()
-                .expect("subject is the first operand"))
-        })?;
-        if let Some(widths) = &mut init.widths {
-            widths.constrain_match_fields(arms, &init.value.ty)?;
-            widths.enable_use_site_inference();
-        }
-        Ok(init)
+                checker.tuple_match_subject(subject, arms)?
+            } else {
+                // A whole-subject binder shares the original scalar subject's
+                // literal group. Check deferred call widths before capturing
+                // it.
+                let operands: Vec<_> = std::iter::once(subject)
+                    .chain(patterns.flat_map(MatchPattern::literals))
+                    .collect();
+                checker
+                    .check_match_values(&operands)?
+                    .next()
+                    .expect("subject is the first operand")
+            };
+            let widths = checker.match_binding_widths(subject, &value.ty, arms)?;
+            Ok(BindingInitializer { value, widths })
+        })
     }
 
-    pub(super) fn tuple_match_selector(
+    /// Retain implicit widths of the subject's bound fields, accounting for
+    /// type constraints from literals in every pattern.
+    fn match_binding_widths(
+        &self,
+        subject: &Expr,
+        ty: &Type,
+        arms: &[MatchArm],
+    ) -> Result<Option<BindingWidths>, String> {
+        let mut widths = binding_widths_using(
+            subject,
+            ty,
+            WidthLookup::DslxLiterals(Some(&self.inferred_bindings)),
+        )?;
+        if let Some(widths) = &mut widths {
+            widths.constrain_match_fields(arms, ty)?;
+            widths.enable_use_site_inference();
+        }
+        Ok(widths)
+    }
+
+    /// Select a compile-time match arm and capture its projected constants in
+    /// the caller's alias scope so its result can receive contextual types.
+    pub(super) fn const_match_arm<'e>(
         &mut self,
         subject: &Expr,
-        arms: &[MatchArm],
-    ) -> Result<MatchSelector, String> {
-        let subject = self.tuple_match_subject(subject, arms)?;
-        self.finish_aggregate_match(subject, arms)
+        arms: &'e [MatchArm],
+    ) -> Result<Cow<'e, Expr>, String> {
+        let (selected, init) = self
+            .with_erased_declaration(|checker| {
+                checker.with_match_bytecode(|checker| {
+                    checker.with_prepared_value(subject, |checker, subject| {
+                        let selector =
+                            checker.check_match_selector(subject, arms, MatchKind::Const)?;
+                        let value = checker
+                            .checked_constant_for(&selector.subject, ConstantUse::MatchSubject)?
+                            .ok_or("subject must evaluate to a compile-time constant")?;
+                        let index = selector.selected_arm(&value)?;
+                        let ty = selector.subject.ty;
+                        let widths = if arms[index].has_bindings() {
+                            checker.match_binding_widths(subject, &ty, arms)?
+                        } else {
+                            None
+                        };
+                        let value = TypedExpr {
+                            ty,
+                            kind: TypedExprKind::Literal(value),
+                        };
+                        Ok((index, BindingInitializer { value, widths }))
+                    })
+                })
+            })
+            .map_err(|err| format!("const match: {err}"))?;
+
+        for (index, arm) in arms.iter().enumerate() {
+            if index != selected {
+                self.check_const_arm_names("const match", arm.binding_names(), &arm.value)?;
+            }
+        }
+        let arm = &arms[selected];
+        if !arm.has_bindings() {
+            return Ok(Cow::Borrowed(&arm.value));
+        }
+        // Validation above requires a single alternative for an arm that
+        // introduces names. Bind from the evaluated subject, including tuple
+        // fields used as type dimensions in the selected expression.
+        let bindings = take_match_bindings(&mut arm.patterns[0].clone());
+        let mut saved = Vec::new();
+        let result = self
+            .bind_pattern(&bindings, init.value, init.widths, &mut saved)
+            .map(|()| {
+                self.constant_pattern_names
+                    .extend(arm.binding_names().map(str::to_owned));
+                Cow::Owned(self.capture_iteration_result(&saved, &arm.value))
+            });
+        self.leave_scope(saved);
+        result
     }
 
     /// Share each pattern's field hints across the subject's tuple constructors
@@ -371,6 +444,7 @@ impl BodyChecker<'_, '_> {
         &mut self,
         subject: TypedExpr,
         arms: &[MatchArm],
+        kind: MatchKind,
     ) -> Result<MatchSelector, String> {
         let mut enums = HashMap::new();
         let mut domain = Vec::new();
@@ -421,12 +495,12 @@ impl BodyChecker<'_, '_> {
             } else {
                 !was_exhaustive && coverage.remaining.is_empty()
             };
-            if is_default {
+            if kind == MatchKind::Runtime && is_default {
                 checked = vec![TypedMatchPattern::Wildcard];
             }
             patterns.push(checked);
         }
-        if !coverage.remaining.is_empty() {
+        if kind == MatchKind::Runtime && !coverage.remaining.is_empty() {
             return Err("match patterns are not exhaustive".into());
         }
         Ok(MatchSelector { subject, patterns })
@@ -441,8 +515,7 @@ impl BodyChecker<'_, '_> {
         budget: &mut usize,
     ) -> Result<Option<TypedMatchPattern>, String> {
         Ok(Some(match pattern {
-            MatchPattern::Wildcard => TypedMatchPattern::Wildcard,
-            MatchPattern::Binding(_) => return Err("unexpected uncaptured match binding".into()),
+            MatchPattern::Wildcard | MatchPattern::Binding(_) => TypedMatchPattern::Wildcard,
             MatchPattern::Rest => return Err("rest marker requires a tuple pattern".into()),
             MatchPattern::Tuple(fields) => {
                 let Type::Tuple(types) = ty else {

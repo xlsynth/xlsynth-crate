@@ -214,6 +214,9 @@ fn reference_path(mut expr: &Expr) -> Option<(&str, Vec<Member>)> {
 /// sites. Type dimensions also consult preceding outer let bindings.
 #[derive(Clone, Copy)]
 pub(crate) enum WidthLookup<'a> {
+    /// Enclosing BX operands have concrete types. Only a nested selected
+    /// match arm may consult the DSLX literal constraints of these bindings.
+    SelectedArmOnly(&'a InferredBindings),
     Bindings {
         widths: &'a InferredBindings,
         locals: Option<&'a BTreeMap<String, crate::typed::TypedExpr>>,
@@ -243,6 +246,7 @@ impl<'a> WidthLookup<'a> {
 
     fn member(&self, name: &str, path: &[Member]) -> Option<&'a Minimum> {
         match self {
+            Self::SelectedArmOnly(_) => None,
             Self::Bindings { widths, locals } => {
                 let width = widths.get(name)?.members.get(path)?;
                 if locals.is_some_and(|loops| !loops.contains_key(name)) && !width.infer_at_use {
@@ -257,6 +261,9 @@ impl<'a> WidthLookup<'a> {
     /// Retain the DSLX literal radix for an inferred member when a block
     /// expression determines the common type of several operands.
     fn dslx_reference(self, expr: &Expr) -> Option<Self> {
+        if matches!(self, Self::SelectedArmOnly(_)) {
+            return None;
+        }
         let Self::Bindings { widths, .. } = self else {
             return Some(self);
         };
@@ -270,7 +277,18 @@ impl<'a> WidthLookup<'a> {
     pub(crate) fn without_names(self) -> Option<Self> {
         match self {
             Self::DslxLiterals(_) => Some(Self::DslxLiterals(None)),
-            Self::Bindings { .. } => None,
+            Self::SelectedArmOnly(_) | Self::Bindings { .. } => None,
+        }
+    }
+
+    /// Restore the literal bindings of a prepared DSLX arm after returning to
+    /// the enclosing BX operand group.
+    fn selected_match_arm(self) -> Self {
+        match self {
+            Self::SelectedArmOnly(widths) | Self::Bindings { widths, .. } => {
+                Self::DslxLiterals(Some(widths))
+            }
+            Self::DslxLiterals(_) => self,
         }
     }
 
@@ -386,9 +404,9 @@ pub(crate) fn has_common_bit_type(op: BinaryOp) -> bool {
 
 /// Whether a compile-time branch contributes to an operand's result type.
 /// Calls, casts, indices and branch selectors determine their own operands.
-pub(crate) fn has_const_if_result(expr: &Expr) -> bool {
+pub(crate) fn has_compile_time_branch_result(expr: &Expr) -> bool {
     has_contextual_result(expr, &|value| {
-        matches!(value, Expr::ConstIf { .. }).then_some(true)
+        matches!(value, Expr::ConstIf { .. } | Expr::ConstMatch { .. }).then_some(true)
     })
 }
 
@@ -405,6 +423,7 @@ pub(crate) fn has_contextual_result<'e>(
     }
     match expr {
         Expr::Scope { result, .. }
+        | Expr::SelectedMatchArm(result)
         | Expr::Unary { value: result, .. }
         | Expr::Binary {
             op: BinaryOp::Shl | BinaryOp::Shr,
@@ -502,6 +521,14 @@ fn collect_minimum_with_calls(
     calls: MinimumContext<'_>,
 ) -> Result<bool, String> {
     let next = match expr {
+        Expr::SelectedMatchArm(value) => {
+            return collect_minimum_with_calls(
+                value,
+                bindings.map(WidthLookup::selected_match_arm),
+                minimum,
+                calls,
+            );
+        }
         Expr::Literal { ty: None, text } => Minimum::from_literal(text)?,
         Expr::Call { name, .. }
         | Expr::MapBeforeUse { name, .. }
@@ -547,7 +574,9 @@ fn collect_minimum_with_calls(
             };
             // Inline ranges carry their own width evidence even in a block
             // without inferred bindings. Other block projections stay concrete.
-            if bindings.is_none() && !projected.infer_at_use {
+            if matches!(bindings, None | Some(WidthLookup::SelectedArmOnly(_)))
+                && !projected.infer_at_use
+            {
                 return Ok(false);
             }
             // Projections and names retain the width of their stored value.
@@ -888,6 +917,13 @@ fn collect_projected_with_calls(
             }
             Ok(!arms.is_empty())
         }
+        (Expr::SelectedMatchArm(value), _) => collect_projected_with_calls(
+            value,
+            path,
+            bindings.map(WidthLookup::selected_match_arm),
+            minimum,
+            calls,
+        ),
         (Expr::Scope { result, .. }, _) => collect_projected_with_calls(
             result,
             path,
@@ -1223,7 +1259,7 @@ fn check_projected_argument(
     zero_is_call: Option<&dyn Fn() -> Result<bool, String>>,
 ) -> Result<(), String> {
     match (expr, path.split_first()) {
-        (Expr::SelectedOperand(value), _) => {
+        (Expr::SelectedOperand(value) | Expr::SelectedMatchArm(value), _) => {
             return check_projected_argument(value, path, ty, width, bindings, zero_is_call);
         }
         (Expr::Scope { result, .. }, _) => {

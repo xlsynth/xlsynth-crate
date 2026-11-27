@@ -208,7 +208,9 @@ fn has_aggregate_literal(expr: &Expr) -> bool {
         return has_aggregate_literal(seed);
     }
     match expr {
-        Expr::Scope { result, .. } => has_aggregate_literal(result),
+        Expr::Scope { result, .. } | Expr::SelectedMatchArm(result) => {
+            has_aggregate_literal(result)
+        }
         Expr::Array(_)
         | Expr::Range { .. }
         | Expr::UnrollMap(_)
@@ -241,6 +243,14 @@ struct MatchSelector {
     patterns: Vec<Vec<TypedMatchPattern>>,
 }
 
+/// Runtime matches must cover the domain and have an IR default arm. A const
+/// match only needs a predicate covering the selected compile-time value.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MatchKind {
+    Runtime,
+    Const,
+}
+
 impl MatchSelector {
     /// Select the first matching arm for a compile-time subject.
     fn selected_arm(&self, value: &IrValue) -> Result<usize, String> {
@@ -251,7 +261,7 @@ impl MatchSelector {
                 }
             }
         }
-        Err("constant value did not select an arm of an exhaustive match".into())
+        Err("no pattern matches the subject value".into())
     }
 
     fn with_values(self, values: &mut impl Iterator<Item = TypedExpr>) -> TypedExpr {
@@ -3096,9 +3106,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn fold_required_constant(
         mut ctx: ConstantContext<'_>,
         value: &TypedExpr,
-        usage: ConstantUse,
+        value_use: ConstantUse,
         requested: &mut Option<usize>,
     ) -> Result<Option<IrValue>, String> {
+        let usage = value_use.binding_use();
+        let first_local = ctx
+            .temporary_bindings
+            .as_ref()
+            .map_or(ctx.statements.len(), |scope| scope.first_local);
         let mut charge_values = ctx.charge_values;
         let mut pending: Vec<usize> = Vec::new();
         loop {
@@ -3120,11 +3135,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             } else {
                 (value, None)
             };
+            // Scope preparation lifts subject-local initializers, including
+            // tuple-pattern prerequisites, into checked lets. They still
+            // execute inside the subject's bytecode. Only a reference to an
+            // enclosing lexical definition crosses the bytecode boundary.
+            let expr_use = if definition.is_some_and(|index| index < first_local) {
+                usage
+            } else {
+                value_use
+            };
             match expr.fold(
                 ctx.names,
                 &mut ctx.budgets.required,
                 charge_values,
-                usage,
+                expr_use,
                 ConstantCallees {
                     local: ctx.functions.as_deref_mut(),
                     imports: Some(ctx.imports),
@@ -3138,7 +3162,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     if let Some(result) = result {
                         let definition = definition.expect("replayed let");
                         let binding = match usage {
-                            ConstantUse::Declaration => ConstantBinding::Known(result.value),
+                            ConstantUse::Declaration | ConstantUse::MatchSubject => {
+                                ConstantBinding::Known(result.value)
+                            }
                             ConstantUse::Dslx => ConstantBinding::folded(
                                 result.value,
                                 definition,
@@ -4072,7 +4098,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let value = self.selected_const_if_value(initializer)?;
         let structural = match value {
-            Expr::Scope { .. } => false,
+            Expr::Scope { .. } | Expr::ConstMatch { .. } => false,
             // Child-producing loops must themselves occupy a structural site.
             Expr::UnrollFor(_) => matches!(initializer, Expr::UnrollFor(_)),
             Expr::UnrollMap(_) => matches!(initializer, Expr::UnrollMap(_)),
@@ -4135,6 +4161,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
             Expr::UnrollMap(map) => return self.unroll_map(map, expected, false),
             Expr::SelectedOperand(value) => return self.scoped_result(value, expected, false),
+            Expr::SelectedMatchArm(value) => {
+                return self.with_dslx_value_context(|checker| {
+                    checker.scoped_result(value, expected, false)
+                });
+            }
             Expr::For(fold) => {
                 return self.with_dslx_value_context(|checker| {
                     checker.counted_for(fold, CarryContext::Expected(expected))
@@ -4255,6 +4286,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 Ok((value.ty, value.kind))
             }),
             Expr::Cast { value, ty } => self.cast(value, ty),
+            Expr::ConstMatch { subject, arms } => {
+                return self.with_dslx_value_context(|checker| {
+                    checker.with_scope_aliases(|checker| {
+                        let arm = checker.const_match_arm(subject, arms)?;
+                        checker.scoped_result(&arm, expected, false)
+                    })
+                });
+            }
             Expr::ConstIf {
                 condition,
                 then_value,
@@ -5069,43 +5108,42 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// An inferred aggregate can receive a leaf's type or missing struct
     /// arguments from another operand.
     fn contains_inferred_aggregate(&self, expr: &Expr) -> bool {
+        self.contains_inferred_aggregate_in_context(expr, self.dslx_widths().is_some())
+    }
+
+    /// A selected match arm can use a block binding's DSLX literal constraints
+    /// even when the other operands see its concrete BX type.
+    fn contains_inferred_aggregate_in_context(&self, expr: &Expr, dslx: bool) -> bool {
+        let contains = |value| self.contains_inferred_aggregate_in_context(value, dslx);
         match expr {
             // The surrounding array type can supply the element type of an
             // empty map or of a body such as `zero!()`.
             Expr::UnrollMap(_) | Expr::Range { .. } => true,
-            Expr::For(fold) if fold.annotation.is_none() => {
-                self.contains_inferred_aggregate(&fold.seed)
-            }
-            Expr::UnrollFor(fold) if fold.annotation.is_none() => {
-                self.contains_inferred_aggregate(&fold.seed)
-            }
+            Expr::For(fold) if fold.annotation.is_none() => contains(&fold.seed),
+            Expr::UnrollFor(fold) if fold.annotation.is_none() => contains(&fold.seed),
             Expr::Struct { .. }
             | Expr::AppliedStruct { .. }
             | Expr::ParametricStruct { .. }
             | Expr::MixedAppliedStruct { .. } => self.contextual_struct_constructor(expr).is_some(),
-            Expr::Tuple(items) | Expr::Array(items) => items
-                .iter()
-                .any(|item| self.contains_inferred_aggregate(item)),
+            Expr::Tuple(items) | Expr::Array(items) => items.iter().any(contains),
             Expr::ArrayLiteral {
                 annotation: None, ..
             } => true,
-            Expr::Scope { result, .. } => self.contains_inferred_aggregate(result),
+            Expr::Scope { result, .. } => contains(result),
+            Expr::SelectedMatchArm(result) => {
+                has_aggregate_literal(result)
+                    || self.contains_inferred_aggregate_in_context(result, true)
+            }
             Expr::If {
                 then_value,
                 else_value,
                 ..
-            } => {
-                self.contains_inferred_aggregate(then_value)
-                    || self.contains_inferred_aggregate(else_value)
-            }
-            Expr::Match { arms, .. } => arms
-                .iter()
-                .any(|arm| self.contains_inferred_aggregate(&arm.value)),
+            } => contains(then_value) || contains(else_value),
+            Expr::Match { arms, .. } => arms.iter().any(|arm| contains(&arm.value)),
             _ => self.reference_type(expr).is_some_and(|(name, ty)| {
                 matches!(ty, Type::Array { .. } | Type::Tuple(_))
                     && self.inferred_bindings.get(name).is_some_and(|widths| {
-                        self.dslx_widths().is_some()
-                            || self.function_values.contains_key(name)
+                        dslx || self.function_values.contains_key(name)
                             || widths.infers_at_use(expr)
                     })
             }),
@@ -5152,6 +5190,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Range { start, limit, .. } => Ok(self.concrete_element_type(start, widths)?
                 || self.concrete_element_type(limit, widths)?),
             Expr::SelectedOperand(value) => self.concrete_element_type(value, widths),
+            Expr::SelectedMatchArm(value) => {
+                self.with_dslx_value_context(|checker| checker.concrete_element_type(value, widths))
+            }
             Expr::Scope { result, .. } => self.concrete_element_type(
                 result,
                 match widths {
@@ -5240,7 +5281,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
             }
         }
-        common_type_hint(items, self.common_widths(), &|name, explicit| {
+        let widths = self
+            .common_widths()
+            .unwrap_or(WidthLookup::SelectedArmOnly(&self.inferred_bindings));
+        common_type_hint(items, Some(widths), &|name, explicit| {
             self.call_needs_result(name, explicit)
         })
     }
@@ -5279,6 +5323,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         fn operand(checker: &BodyChecker<'_, '_>, expr: &Expr) -> Result<Option<Type>, String> {
             match expr {
+                Expr::SelectedMatchArm(value) => operand(checker, value),
                 Expr::Tuple(fields) => {
                     let mut types = Vec::with_capacity(fields.len());
                     for field in fields {
@@ -5353,6 +5398,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// members of nested aggregate literals. Keep the resulting values in
     /// source order and reuse the expression that supplied a concrete type.
     fn unify_values(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
+        // Matches and aggregate loop seeds put the whole group in DSLX value
+        // context. Keep their result arms and seeds visible to sibling operands
+        // when a compile-time match selected them in a block.
+        if items.iter().any(|expr| {
+            matches!(expr, Expr::SelectedMatchArm(inner)
+            if matches!(inner.as_ref(), Expr::Match { .. })
+                || inner.unannotated_loop_seed().is_some_and(has_aggregate_literal))
+        }) {
+            let items: Vec<_> = items
+                .iter()
+                .map(|expr| match expr {
+                    Expr::SelectedMatchArm(inner) => inner.as_ref(),
+                    _ => *expr,
+                })
+                .collect();
+            return self.with_dslx_value_context(|checker| checker.unify_values(&items));
+        }
         if items.iter().any(|expr| {
             expr.unannotated_loop_seed()
                 .is_some_and(has_aggregate_literal)
@@ -5692,52 +5754,63 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Result<MatchSelector, String> {
         self.with_match_bytecode(|checker| {
             checker.with_prepared_value(subject, |checker, subject| {
-                let operands = match_operands(subject, arms, |name| {
-                    let head = name.split_once("::").map_or(name, |(head, _)| head);
-                    if checker.names.contains(head) {
-                        if let Some(TypedExpr {
-                            kind: K::Call { name: target, .. },
-                            ..
-                        }) = checker.lexical_value(name)
-                            && target == crate::typed::DEFERRED_CALLBACK_VALUE
-                        {
-                            checker.deferred_callback_declaration = true;
-                            return Err("match pattern requires a specialized callback".into());
-                        }
-                        return Ok(checker.constant_pattern_names.contains(name)
-                            || (head != name
-                                && checker.local_type_aliases.contains_key(head)
-                                && checker.is_type_member_name(name)?));
-                    }
-                    Ok(checker.callback_index(head).is_none()
-                        && checker.is_constant_pattern(name)?)
-                })?;
-                if arms
-                    .iter()
-                    .flat_map(|arm| &arm.patterns)
-                    .any(|p| matches!(p, MatchPattern::Tuple(_)))
-                {
-                    return checker.tuple_match_selector(subject, arms);
-                }
-                let mut values = checker.check_match_values(&operands)?;
-                let subject = values.next().expect("subject is the first operand");
-                let patterns = match &subject.ty {
-                    Type::Enum { name, .. } => {
-                        let def = checker
-                            .structs
-                            .enums
-                            .get(name)
-                            .ok_or_else(|| format!("unknown enum '{name}'"))?;
-                        match_patterns::check_enum_patterns(def, &subject.ty, arms, values)?
-                    }
-                    Type::Tuple(_) | Type::Array { .. } | Type::Named(_) => {
-                        return checker.finish_aggregate_match(subject, arms);
-                    }
-                    _ => match_patterns::check_patterns(&subject.ty, arms, values)?,
-                };
-                Ok(MatchSelector { subject, patterns })
+                checker.check_match_selector(subject, arms, MatchKind::Runtime)
             })
         })
+    }
+
+    /// Infer a prepared subject and check all of its patterns before checking
+    /// any arm results.
+    fn check_match_selector(
+        &mut self,
+        subject: &Expr,
+        arms: &[MatchArm],
+        kind: MatchKind,
+    ) -> Result<MatchSelector, String> {
+        let operands = match_operands(subject, arms, |name| {
+            let head = name.split_once("::").map_or(name, |(head, _)| head);
+            if self.names.contains(head) {
+                if let Some(TypedExpr {
+                    kind: K::Call { name: target, .. },
+                    ..
+                }) = self.lexical_value(name)
+                    && target == crate::typed::DEFERRED_CALLBACK_VALUE
+                {
+                    self.deferred_callback_declaration = true;
+                    return Err("match pattern requires a specialized callback".into());
+                }
+                return Ok(self.constant_pattern_names.contains(name)
+                    || (head != name
+                        && self.local_type_aliases.contains_key(head)
+                        && self.is_type_member_name(name)?));
+            }
+            Ok(self.callback_index(head).is_none() && self.is_constant_pattern(name)?)
+        })?;
+        if arms
+            .iter()
+            .flat_map(|arm| &arm.patterns)
+            .any(|p| matches!(p, MatchPattern::Tuple(_)))
+        {
+            let subject = self.tuple_match_subject(subject, arms)?;
+            return self.finish_aggregate_match(subject, arms, kind);
+        }
+        let mut values = self.check_match_values(&operands)?;
+        let subject = values.next().expect("subject is the first operand");
+        let patterns = match &subject.ty {
+            Type::Enum { name, .. } => {
+                let def = self
+                    .structs
+                    .enums
+                    .get(name)
+                    .ok_or_else(|| format!("unknown enum '{name}'"))?;
+                match_patterns::check_enum_patterns(def, &subject.ty, arms, values, kind)?
+            }
+            Type::Tuple(_) | Type::Array { .. } | Type::Named(_) => {
+                return self.finish_aggregate_match(subject, arms, kind);
+            }
+            _ => match_patterns::check_patterns(&subject.ty, arms, values, kind)?,
+        };
+        Ok(MatchSelector { subject, patterns })
     }
 
     /// A scalar subject and its literal patterns share a type group, including
@@ -5984,6 +6057,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// evaluation.
     fn dimension_expr(&mut self, expr: &Expr, context_width: usize) -> Result<TypedExpr, String> {
         match expr {
+            Expr::SelectedMatchArm(value) => {
+                self.with_dslx_value_context(|checker| checker.dimension_expr(value, context_width))
+            }
+            Expr::ConstMatch { subject, arms } => self.with_scope_aliases(|checker| {
+                let arm = checker.const_match_arm(subject, arms)?;
+                checker
+                    .with_dslx_value_context(|checker| checker.dimension_expr(&arm, context_width))
+            }),
             Expr::ConstIf {
                 condition,
                 then_value,

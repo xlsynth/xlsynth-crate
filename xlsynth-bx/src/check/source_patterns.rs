@@ -12,7 +12,7 @@ use std::collections::HashSet;
 pub(super) fn validate_source_match_patterns(module: &Module) -> Result<(), String> {
     let mut pending = module_nodes(module, false);
     while let Some(node) = pending.pop() {
-        if let Expression(Expr::Match { arms, .. }) = node {
+        if let Expression(Expr::Match { arms, .. } | Expr::ConstMatch { arms, .. }) = node {
             validate_match_pattern_size(arms)?;
             validate_tuple_pattern_bindings(arms)?;
         }
@@ -78,8 +78,8 @@ pub(super) fn validate_tuple_pattern_bindings(arms: &[MatchArm]) -> Result<(), S
     Ok(())
 }
 
-/// Local declarations, assertions, and range bounds can evaluate helpers, so
-/// retain the lexical operands used to determine constexpr values.
+/// Retain helper operands for declarations, assertions, ranges and
+/// compile-time match subjects.
 pub(super) fn needs_constexpr_operands(module: &Module, include_tests: bool) -> bool {
     if !module.const_asserts.is_empty() {
         return true;
@@ -88,7 +88,8 @@ pub(super) fn needs_constexpr_operands(module: &Module, include_tests: bool) -> 
     while let Some(node) = pending.pop() {
         if matches!(
             node,
-            Statement(Stmt::ConstAssert(_)) | Expression(Expr::Range { .. })
+            Statement(Stmt::ConstAssert(_))
+                | Expression(Expr::Range { .. } | Expr::ConstMatch { .. })
         ) {
             return true;
         }
@@ -253,7 +254,7 @@ mod tests {
         let Expr::Tuple(fields) = result.as_mut() else {
             return None;
         };
-        let Expr::Match { arms, .. } = fields.first_mut()? else {
+        let (Expr::Match { arms, .. } | Expr::ConstMatch { arms, .. }) = fields.first_mut()? else {
             return None;
         };
         arms.first_mut()?.patterns.first_mut()
@@ -261,33 +262,38 @@ mod tests {
 
     #[test]
     fn rejects_deep_programmatic_match_pattern_before_cloning_its_scope() {
-        let source = r#"
-            fn project(x: (bool,)) -> bool { x.0 }
-            fn f(x: bool) -> bool {
-                project({
+        for (keyword, subject) in [("match", "y"), ("const match", "true")] {
+            let source = format!(
+                r#"
+            fn project(x: (bool,)) -> bool {{ x.0 }}
+            fn f(x: bool) -> bool {{
+                project({{
                     let y = x;
-                    (match (y,) { (_,) => y },)
-                })
+                    ({keyword} ({subject},) {{ (_,) => y }},)
+                }})
+            }}
+        "#
+            );
+            let mut module = parse_module(&source).unwrap();
+            check_module(&module).unwrap();
+            let oversized = (0..16_384).fold(MatchPattern::Wildcard, |field, _| {
+                MatchPattern::Tuple(vec![field])
+            });
+            *scoped_tuple_pattern(&mut module.functions[1].body).unwrap() = oversized;
+            let result = check_module(&module);
+            // Dismantle the caller-owned malformed pattern without recursive
+            // drop.
+            let mut pattern = std::mem::replace(
+                scoped_tuple_pattern(&mut module.functions[1].body).unwrap(),
+                MatchPattern::Wildcard,
+            );
+            while let MatchPattern::Tuple(mut fields) = pattern {
+                pattern = fields.pop().unwrap();
             }
-        "#;
-        let mut module = parse_module(source).unwrap();
-        check_module(&module).unwrap();
-        let oversized = (0..16_384).fold(MatchPattern::Wildcard, |field, _| {
-            MatchPattern::Tuple(vec![field])
-        });
-        *scoped_tuple_pattern(&mut module.functions[1].body).unwrap() = oversized;
-        let result = check_module(&module);
-        // Dismantle the caller-owned malformed pattern without recursive drop.
-        let mut pattern = std::mem::replace(
-            scoped_tuple_pattern(&mut module.functions[1].body).unwrap(),
-            MatchPattern::Wildcard,
-        );
-        while let MatchPattern::Tuple(mut fields) = pattern {
-            pattern = fields.pop().unwrap();
+            assert_eq!(
+                result.unwrap_err(),
+                "match pattern exceeds the elaboration limit"
+            );
         }
-        assert_eq!(
-            result.unwrap_err(),
-            "match pattern exceeds the elaboration limit"
-        );
     }
 }

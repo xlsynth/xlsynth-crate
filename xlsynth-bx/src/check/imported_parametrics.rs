@@ -54,7 +54,7 @@ impl BodyChecker<'_, '_> {
         context: ImportContext,
     ) -> bool {
         has_contextual_result(arg, &|expr| match expr {
-            Expr::ConstIf { .. } | Expr::Range { .. } => Some(true),
+            Expr::ConstIf { .. } | Expr::ConstMatch { .. } | Expr::Range { .. } => Some(true),
             _ if context != ImportContext::Width
                 && let Some((items, _)) = expr.unannotated_array() =>
             {

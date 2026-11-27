@@ -24,6 +24,64 @@ enum PrepareOperands {
     CallArgument,
 }
 
+/// Expose a selected arm's tuple fields, array rows, and ellipses to
+/// its siblings while keeping each member in DSLX value context.
+fn selected_block_arm(mut value: Expr) -> Expr {
+    let mut pending = vec![&mut value];
+    while let Some(expr) = pending.pop() {
+        if matches!(expr, Expr::If { .. } | Expr::Match { .. })
+            && (super::has_aggregate_literal(expr)
+                || crate::infer_literal::has_contextual_result(expr, &|value| {
+                    value.struct_literal().is_some().then_some(true)
+                }))
+        {
+            match expr {
+                Expr::If {
+                    condition,
+                    then_value,
+                    else_value,
+                } => {
+                    pending.extend([condition.as_mut(), then_value.as_mut(), else_value.as_mut()]);
+                }
+                Expr::Match { arms, .. } => {
+                    // Port inference visits each result constructor. The
+                    // subject and patterns already use DSLX typing.
+                    pending.extend(arms.iter_mut().map(|arm| &mut arm.value));
+                }
+                _ => unreachable!("aggregate branch result"),
+            }
+            continue;
+        }
+        match expr {
+            Expr::Tuple(members)
+            | Expr::Array(members)
+            | Expr::ArrayLiteral {
+                annotation: None,
+                members,
+                ..
+            } => pending.extend(members),
+            Expr::Struct { fields, base, .. }
+            | Expr::AppliedStruct { fields, base, .. }
+            | Expr::ParametricStruct { fields, base, .. }
+            | Expr::TypeAppliedStruct { fields, base, .. }
+            | Expr::MixedAppliedStruct { fields, base, .. } => {
+                pending.extend(fields.iter_mut().map(|(_, field)| field));
+                if let Some(base) = base {
+                    pending.push(&mut base.value);
+                }
+            }
+            Expr::SelectedMatchArm(_) => {
+                // This operand already retains its DSLX value context.
+            }
+            _ => {
+                let member = std::mem::replace(expr, Expr::Bool(false));
+                *expr = Expr::SelectedMatchArm(Box::new(member));
+            }
+        }
+    }
+    value
+}
+
 /// An elaborated let initializer and the unsized literals retained at its
 /// leaves.
 pub(super) struct BindingInitializer {
@@ -115,7 +173,7 @@ impl TuplePatternLayout {
 
 /// Move the field names out of a match predicate into its destructuring
 /// pattern. Only subtrees that introduce names need tuple projections.
-fn take_match_bindings(pattern: &mut MatchPattern) -> BindingPattern {
+pub(super) fn take_match_bindings(pattern: &mut MatchPattern) -> BindingPattern {
     match pattern {
         MatchPattern::Binding(name) => {
             let binding = BindingPattern::Name(std::mem::take(name));
@@ -279,7 +337,7 @@ impl BodyChecker<'_, '_> {
 
     /// Evaluate a compile-time declaration in its lexical environment. Remove
     /// generated lets and restore caches before resuming runtime elaboration.
-    fn with_erased_declaration<T>(
+    pub(super) fn with_erased_declaration<T>(
         &mut self,
         check: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
@@ -355,7 +413,7 @@ impl BodyChecker<'_, '_> {
         } else {
             (else_value, then_value)
         };
-        self.check_const_if_arm_names(skipped)?;
+        self.check_const_arm_names("const if", [], skipped)?;
         Ok(selected)
     }
 
@@ -713,7 +771,7 @@ impl BodyChecker<'_, '_> {
             Cow::Owned(value)
                 if infer_type_parameters
                     && super::has_aggregate_literal(&value)
-                    && crate::infer_literal::has_const_if_result(source)
+                    && crate::infer_literal::has_compile_time_branch_result(source)
                     && !self.contains_type_struct_constructor(&value) =>
             {
                 self.selected_aggregate_operand(value).map(Cow::Owned)
@@ -836,6 +894,29 @@ impl BodyChecker<'_, '_> {
                 self.prepare_scopes(arm, mode, before_scope)?.into_owned(),
             ));
         }
+        if let Expr::ConstMatch { subject, arms } = expr {
+            before_scope(self)?;
+            let arm = self.const_match_arm(subject, arms)?;
+            let value = self.with_dslx_value_context(|checker| {
+                checker
+                    .prepare_scopes(&arm, mode, before_scope)
+                    .map(Cow::into_owned)
+            })?;
+            return Ok(Cow::Owned(if self.dslx_widths().is_none() {
+                selected_block_arm(value)
+            } else {
+                value
+            }));
+        }
+        if let Expr::SelectedMatchArm(value) = expr {
+            let prepared = self.with_dslx_value_context(|checker| {
+                checker.prepare_scopes(value, mode, before_scope)
+            })?;
+            return Ok(match prepared {
+                Cow::Borrowed(_) => Cow::Borrowed(expr),
+                Cow::Owned(value) => Cow::Owned(selected_block_arm(value)),
+            });
+        }
         if let Expr::UnrollMap(map) = expr {
             if self.prepared_map_count(expr).is_some() {
                 return Ok(Cow::Borrowed(expr));
@@ -870,7 +951,7 @@ impl BodyChecker<'_, '_> {
             && !super::has_aggregate_literal(expr)
             && self.contextual_struct_constructor(expr).is_none()
             && self.reference_type(expr).is_none()
-            && !crate::infer_literal::has_const_if_result(expr)
+            && !crate::infer_literal::has_compile_time_branch_result(expr)
             && self.has_concrete_element_type(expr)?;
         if capture_range || capture_anchor {
             before_scope(self)?;
@@ -1182,6 +1263,10 @@ impl BodyChecker<'_, '_> {
         let mut prepared = Vec::with_capacity(items.len());
         for &expr in items {
             let expr = self.selected_const_if_value(expr)?;
+            if matches!(expr, Expr::ConstMatch { .. }) {
+                prepared.push(self.prepare_value(expr)?);
+                continue;
+            }
             if let Expr::Match { subject, arms } = expr
                 && arms.iter().any(MatchArm::has_bindings)
             {
@@ -1948,7 +2033,7 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                 }
             }
         }
-        Expr::Match { subject, arms } => {
+        Expr::Match { subject, arms } | Expr::ConstMatch { subject, arms } => {
             capture_names(subject, aliases);
             for arm in arms {
                 for literal in arm.patterns.iter_mut().flat_map(|p| p.literals_mut()) {
@@ -2001,7 +2086,9 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             capture_names(result, aliases);
             aliases.extend(hidden);
         }
-        Expr::SelectedOperand(value) => capture_names(value, aliases),
+        Expr::SelectedOperand(value) | Expr::SelectedMatchArm(value) => {
+            capture_names(value, aliases)
+        }
         Expr::UnrollFor(fold) => {
             let hidden = capture_loop_inputs(
                 &mut fold.annotation,
