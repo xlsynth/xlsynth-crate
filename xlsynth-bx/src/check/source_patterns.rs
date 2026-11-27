@@ -21,39 +21,57 @@ pub(super) fn validate_source_match_patterns(module: &Module) -> Result<(), Stri
     Ok(())
 }
 
-/// Validate arm-local names and irrefutable tuple spellings before replacing
-/// name bindings with wildcards for coverage and lowering.
+/// Check rest markers, lexical references and duplicate tuple spellings before
+/// preparing the arm-local bindings.
 pub(super) fn validate_tuple_pattern_bindings(arms: &[MatchArm]) -> Result<(), String> {
     let mut seen = HashSet::new();
     for arm in arms {
-        let mut bindings = HashSet::new();
         for pattern in &arm.patterns {
-            let mut irrefutable = true;
+            let mut bindings = HashSet::new();
+            let mut contains_literal = false;
             for (depth, node) in pattern.nodes() {
                 match node {
                     MatchPattern::Binding(name) => {
-                        if depth == 1 {
-                            return Err("match bindings require a tuple pattern".into());
-                        }
                         if arm.patterns.len() != 1 {
                             return Err(format!(
                                 "cannot bind '{name}' in a match arm with multiple patterns"
                             ));
                         }
                         if !crate::parser::is_match_binding_name(name) {
-                            return Err(format!("invalid tuple match binding '{name}'"));
+                            return Err(format!("invalid match binding '{name}'"));
                         }
                         if !bindings.insert(name) {
-                            return Err(format!("repeated match binding '{name}' is unsupported"));
+                            return Err(format!("duplicate match binding '{name}'"));
                         }
                     }
-                    MatchPattern::Literal(_) | MatchPattern::Range { .. } => irrefutable = false,
-                    MatchPattern::Wildcard | MatchPattern::Tuple(_) => { /* No name or predicate at this node. */
+                    MatchPattern::Tuple(fields) => {
+                        if fields
+                            .iter()
+                            .filter(|f| matches!(f, MatchPattern::Rest))
+                            .nth(1)
+                            .is_some()
+                        {
+                            return Err("duplicate rest marker in tuple pattern".into());
+                        }
                     }
+                    MatchPattern::Rest if depth == 1 => {
+                        return Err("rest marker requires a tuple pattern".into());
+                    }
+                    MatchPattern::Literal(_) | MatchPattern::Range { .. } => {
+                        contains_literal = true
+                    }
+                    MatchPattern::Wildcard | MatchPattern::Rest => { /* No name at this node. */ }
                 }
             }
-            if irrefutable && matches!(pattern, MatchPattern::Tuple(_)) && !seen.insert(pattern) {
-                return Err("exact-duplicate match pattern".into());
+            // Source AST literals omit spelling distinctions such as u8 vs
+            // uN[8]. The parser checks exact spellings for tuples that contain
+            // literals.
+            if !contains_literal && !seen.insert(pattern) {
+                return Err(if matches!(pattern, MatchPattern::Wildcard) {
+                    "exact-duplicate wildcard match pattern".into()
+                } else {
+                    "exact-duplicate match pattern".into()
+                });
             }
         }
     }
@@ -190,8 +208,36 @@ pub(super) fn validate_match_pattern_size(arms: &[MatchArm]) -> Result<(), Strin
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::{Expr, MatchPattern};
+    use super::validate_tuple_pattern_bindings;
+    use crate::ast::{Expr, MatchArm, MatchPattern};
     use crate::{check_module, parse_module};
+
+    #[test]
+    fn rejects_malformed_programmatic_rest_and_match_bindings() {
+        for (pattern, diagnostic) in [
+            (MatchPattern::Rest, "rest marker requires a tuple pattern"),
+            (
+                MatchPattern::Tuple(vec![MatchPattern::Rest, MatchPattern::Rest]),
+                "duplicate rest marker in tuple pattern",
+            ),
+            (
+                MatchPattern::Tuple(vec![
+                    MatchPattern::Binding("v".into()),
+                    MatchPattern::Tuple(vec![MatchPattern::Binding("v".into())]),
+                ]),
+                "duplicate match binding 'v'",
+            ),
+        ] {
+            let arm = MatchArm {
+                patterns: vec![pattern],
+                value: Expr::Bool(false),
+            };
+            assert_eq!(
+                validate_tuple_pattern_bindings(&[arm]).unwrap_err(),
+                diagnostic
+            );
+        }
+    }
 
     /// Find the pattern inside a tuple that is cloned during scope capture.
     fn scoped_tuple_pattern(body: &mut Expr) -> Option<&mut MatchPattern> {

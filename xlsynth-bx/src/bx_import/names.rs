@@ -994,6 +994,7 @@ impl<'a> Scope<'a> {
         Ok(match pattern {
             MatchPattern::Wildcard => MatchPattern::Wildcard,
             MatchPattern::Binding(name) => MatchPattern::Binding(name.clone()),
+            MatchPattern::Rest => MatchPattern::Rest,
             MatchPattern::Literal(value) => MatchPattern::Literal(self.expr(value)?),
             MatchPattern::Range {
                 start,

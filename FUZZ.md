@@ -205,12 +205,14 @@ Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dsl
 Compares scalar `match` in BX blocks and local functions against pinned DSLX
 source checking, native bytecode execution and hardware IR. The generator
 varies signedness and widths up to 129 bits, literals, alternatives, wildcards,
-and exclusive and inclusive ranges. It generates exhaustive partitions,
-coverage gaps, partial overlaps, freely combined patterns and malformed
+whole-subject bindings, and exclusive and inclusive ranges. It generates
+exhaustive partitions, coverage gaps, partial overlaps, freely combined patterns and malformed
 arms. Match subjects include names, function calls and unsized literals, so
 both the subject and the patterns can supply the first concrete bit width.
 Signed patterns also vary the spelling of negative literals whose magnitude
-uses the full width. Result arms mix unsized literals with explicit signed
+uses the full width. Fresh whole-subject names supply scalar and aggregate
+results. Rejected cases cover a rest marker on a scalar and bindings in
+multi-pattern arms. Result arms mix unsized literals with explicit signed
 values and local calls, both directly and inside aggregate results.
 For runtime subjects, the target exercises every pattern endpoint and its
 immediate neighbors alongside random inputs. Distinct arm results expose priority inversions,
@@ -234,10 +236,17 @@ priority errors. Concrete inputs cross range endpoints with the Boolean
 combinations to exercise overlapping arms. Some arms compute their result
 from a bound scalar or tuple, including in the final catch-all pattern. Reusing
 names for different fields in successive arms checks that projections are scoped
-to the selected arm. Calls on constant tuples compare BX and DSLX compile-time
-results for the same bindings. Rejected programs exercise redundant patterns, incorrect
-tuple arity or leaf signedness, bindings in alternatives, and a binding used
-outside its arm.
+to the selected arm. A whole-subject binding can return the complete nested tuple.
+Rest markers appear before and after projected fields, inside nested patterns
+and on unit tuples. The number of skipped fields varies down to zero.
+Repeated references to a declared constant check that both fields must match,
+including cases where only the first or last field matches. Replacing those
+references with a repeated fresh name checks BX's duplicate-binding diagnostic
+and pinned DSLX's acceptance of the same tuple pattern. Calls on constant
+tuples compare BX and DSLX compile-time results for the same bindings.
+Rejected programs exercise redundant patterns, incorrect tuple arity or leaf
+signedness, multiple rest markers at one level, bindings in alternatives, and a
+binding used outside its arm.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_tuple_match`.
 

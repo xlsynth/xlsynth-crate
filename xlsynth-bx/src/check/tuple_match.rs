@@ -10,7 +10,7 @@ use xlsynth_pir::IrBits;
 
 use super::match_patterns::{nonempty_range, pattern_bits};
 use super::scope::BindingInitializer;
-use super::{BodyChecker, MAX_TYPE_SIZE, MatchSelector, StructTable};
+use super::{BodyChecker, MAX_TYPE_SIZE, MatchSelector, StructTable, TuplePatternLayout};
 use crate::ast::{Expr, MatchArm, MatchPattern, Type};
 use crate::infer_literal::check_inferred_signed_width;
 use crate::typed::{TypedExpr, TypedMatchPattern, bits};
@@ -246,10 +246,26 @@ impl BodyChecker<'_, '_> {
         super::source_patterns::validate_match_pattern_size(arms)?;
         super::source_patterns::validate_tuple_pattern_bindings(arms)?;
         let mut init = self.binding_initializer(subject, None, |checker, subject| {
-            checker.tuple_match_subject(subject, arms)
+            let patterns = arms.iter().flat_map(|arm| &arm.patterns);
+            if patterns
+                .clone()
+                .any(|pattern| matches!(pattern, MatchPattern::Tuple(_)))
+            {
+                return checker.tuple_match_subject(subject, arms);
+            }
+            // A whole-subject binder shares the original scalar subject's
+            // literal group. Check deferred call widths before capturing it.
+            let operands: Vec<_> = std::iter::once(subject)
+                .chain(patterns.flat_map(MatchPattern::literals))
+                .collect();
+            Ok(checker
+                .check_match_values(&operands)?
+                .next()
+                .expect("subject is the first operand"))
         })?;
         if let Some(widths) = &mut init.widths {
-            widths.constrain_match_fields(arms)?;
+            widths.constrain_match_fields(arms, &init.value.ty)?;
+            widths.infer_at_use = true;
         }
         Ok(init)
     }
@@ -260,7 +276,7 @@ impl BodyChecker<'_, '_> {
         arms: &[MatchArm],
     ) -> Result<MatchSelector, String> {
         let subject = self.tuple_match_subject(subject, arms)?;
-        self.finish_tuple_match(subject, arms)
+        self.finish_aggregate_match(subject, arms)
     }
 
     /// Share each pattern's field hints across the subject's tuple constructors
@@ -304,15 +320,31 @@ impl BodyChecker<'_, '_> {
                 .collect::<Option<Vec<_>>>()
             {
                 let arity = subjects[0].len();
-                for fields in &tuples {
-                    check_arity(arity, fields.len())?;
+                let mut constraints: HashMap<usize, Vec<&MatchPattern>> = HashMap::new();
+                for fields in tuples {
+                    let layout = TuplePatternLayout::for_match(fields, arity)?;
+                    for (pos, field) in fields.iter().enumerate() {
+                        if matches!(
+                            field,
+                            MatchPattern::Literal(_)
+                                | MatchPattern::Range { .. }
+                                | MatchPattern::Tuple(_)
+                        ) {
+                            constraints
+                                .entry(layout.field_index(pos))
+                                .or_default()
+                                .push(field);
+                        }
+                    }
                 }
                 for fields in &subjects[1..] {
                     check_arity(fields.len(), arity)?;
                 }
                 return self.check_tuple_results(&subjects, |checker, index, values| {
-                    let fields: Vec<_> = tuples.iter().map(|fields| &fields[index]).collect();
-                    checker.tuple_match_subjects(values, &fields)
+                    checker.tuple_match_subjects(
+                        values,
+                        constraints.get(&index).map_or(&[], Vec::as_slice),
+                    )
                 });
             }
             return self.check_results(items, None);
@@ -334,17 +366,12 @@ impl BodyChecker<'_, '_> {
         Ok(values)
     }
 
-    pub(super) fn finish_tuple_match(
+    /// Check the patterns and Cartesian coverage of an aggregate subject.
+    pub(super) fn finish_aggregate_match(
         &mut self,
         subject: TypedExpr,
         arms: &[MatchArm],
     ) -> Result<MatchSelector, String> {
-        if !matches!(subject.ty, Type::Tuple(_)) {
-            return Err(format!(
-                "tuple pattern requires a tuple subject, got {}",
-                subject.ty
-            ));
-        }
         let mut enums = HashMap::new();
         let mut domain = Vec::new();
         let mut budget = MAX_TYPE_SIZE;
@@ -358,22 +385,18 @@ impl BodyChecker<'_, '_> {
         )?;
         let mut coverage = Coverage::new(domain, budget);
         let empty_domain = coverage.remaining.is_empty();
-        let mut saw_wildcard = false;
         let mut patterns = Vec::with_capacity(arms.len());
         for (index, arm) in arms.iter().enumerate() {
             let was_exhaustive = coverage.remaining.is_empty();
             let mut checked = Vec::new();
             for source in &arm.patterns {
-                let Some(pattern) = self.check_tuple_pattern(source, &subject.ty)? else {
+                let Some(pattern) =
+                    self.check_tuple_pattern(source, &subject.ty, &mut coverage.budget)?
+                else {
                     // Empty patterns have no region to subtract.
                     continue;
                 };
                 if pattern.is_irrefutable() {
-                    if matches!(source, MatchPattern::Wildcard)
-                        && std::mem::replace(&mut saw_wildcard, true)
-                    {
-                        return Err("exact-duplicate match pattern".into());
-                    }
                     coverage.remaining.clear();
                 } else if !empty_domain {
                     // In an empty domain, duplicate checking uses source
@@ -409,24 +432,43 @@ impl BodyChecker<'_, '_> {
         Ok(MatchSelector { subject, patterns })
     }
 
+    /// Expand rest markers against the checked tuple type at each nesting
+    /// level.
     fn check_tuple_pattern(
         &mut self,
         pattern: &MatchPattern,
         ty: &Type,
+        budget: &mut usize,
     ) -> Result<Option<TypedMatchPattern>, String> {
         Ok(Some(match pattern {
-            MatchPattern::Wildcard | MatchPattern::Binding(_) => TypedMatchPattern::Wildcard,
+            MatchPattern::Wildcard => TypedMatchPattern::Wildcard,
+            MatchPattern::Binding(_) => return Err("unexpected uncaptured match binding".into()),
+            MatchPattern::Rest => return Err("rest marker requires a tuple pattern".into()),
             MatchPattern::Tuple(fields) => {
                 let Type::Tuple(types) = ty else {
                     return Err(format!("tuple pattern requires a tuple subject, got {ty}"));
                 };
-                check_arity(types.len(), fields.len())?;
-                let fields = fields
+                let layout = TuplePatternLayout::for_match(fields, types.len())?;
+                if fields
                     .iter()
-                    .zip(types)
-                    .map(|(field, ty)| self.check_tuple_pattern(field, ty))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let Some(fields) = fields.into_iter().collect() else {
+                    .all(|field| matches!(field, MatchPattern::Wildcard | MatchPattern::Rest))
+                {
+                    return Ok(Some(TypedMatchPattern::Wildcard));
+                }
+                // Written nodes are already bounded by the source pattern
+                // check. Charge for additional implicit wildcard fields.
+                *budget = budget
+                    .checked_sub(layout.rest_fields)
+                    .ok_or("tuple match coverage exceeds the elaboration limit")?;
+                let mut members = Vec::with_capacity(types.len());
+                for (index, ty) in types.iter().enumerate() {
+                    members.push(self.check_tuple_pattern(
+                        layout.match_field(fields, index),
+                        ty,
+                        budget,
+                    )?);
+                }
+                let Some(fields) = members.into_iter().collect() else {
                     // A tuple with an empty range in any member never matches.
                     return Ok(None);
                 };

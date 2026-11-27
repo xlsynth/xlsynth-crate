@@ -221,9 +221,77 @@ block route(x: u32, data: uN[match (u32:3, true) { (x, _) => x }]) -> u3 { data 
             "{name}"
         );
     }
-    assert!(
-        parse_module("fn f(p: (u8, u8)) -> u8 { match p { (x, x) => x, _ => u8:0 } }").is_err()
+    Ok(())
+}
+
+#[test]
+fn tuple_match_rest_and_whole_subject_agree_with_dslx() -> Result<(), Box<dyn Error>> {
+    let params = "x: u8, y: u8, z: u8";
+    let body = r#"
+        match (x, true, z, (y, z)) {
+            (u8:4, .., (u8:4, last)) => last,
+            whole => whole.0,
+        }
+    "#;
+    let eval = ExpressionEvaluator::compile(params, "u8", body, compile_dslx)?;
+    for (x, y, z, expected) in [(4, 4, 9, 9), (4, 5, 9, 4), (7, 7, 0, 7)] {
+        let args = [
+            IrValue::make_ubits(8, x)?,
+            IrValue::make_ubits(8, y)?,
+            IrValue::make_ubits(8, z)?,
+        ];
+        assert_eq!(eval.compare(&args)?, IrValue::make_ubits(8, expected)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn tuple_match_constant_references_and_whole_bindings_fold_and_lower() -> Result<(), Box<dyn Error>>
+{
+    let functions = r#"
+        const TAG = u8:3;
+        fn both_tag(left: u8, right: u8) -> bool {
+            match (left, right) { (TAG, .., TAG) => true, _ => false }
+        }
+        fn scalar(x: u8) -> u8 { match x { u8:0 => u8:9, remaining => remaining } }
+        fn first(xs: u8[2]) -> u8 { match xs { all => all[u32:0] } }
+        const_assert!(both_tag(u8:3, u8:3));
+        const_assert!(!both_tag(u8:3, u8:4));
+        const_assert!(scalar(u8:0) == u8:9 && scalar(u8:5) == u8:5);
+    "#;
+    let params = "a: u8, b: u8";
+    let body = "if both_tag(a, b) { u8:255 } else { scalar(first([a, b])) }";
+    let dslx = format!("{functions} fn sample({params}) -> u8 {{ {body} }}");
+    let bx = format!(
+        "{functions} #[allow(combinational_block)] block sample({params}) -> u8 {{ {body} }}"
     );
+    let eval = ExpressionEvaluator::compile_block(
+        &bx,
+        &ImportOptions::default(),
+        compile_dslx_module(&dslx, &[]),
+    )?;
+    for (a, b, expected) in [(0, 0, 9), (3, 3, 255), (2, 3, 2), (3, 4, 3)] {
+        assert_eq!(
+            eval.compare(&[IrValue::make_ubits(8, a)?, IrValue::make_ubits(8, b)?])?,
+            IrValue::make_ubits(8, expected)?,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn tuple_match_can_infer_a_rest_pattern_from_a_call_subject() -> Result<(), String> {
+    // Pinned DSLX v0.65.2 needs the call bound to a typed local for this rest
+    // pattern.
+    let source = r#"
+        fn key(x: (bool, u8)) -> (bool, u8) { x }
+        fn pick(x: (bool, u8)) -> u8 {
+            match key(x) { (false, .., tail) => tail, (.., tail) => !tail }
+        }
+        const_assert!(pick((false, u8:3)) == u8:3);
+        const_assert!(pick((true, u8:3)) == u8:252);
+    "#;
+    check_module(&parse_module(source)?)?;
     Ok(())
 }
 
@@ -269,6 +337,16 @@ fn tuple_match_coverage_agrees_with_dslx() {
         ("(true, _) => u8:1, (true, _) => u8:2, _ => u8:3", false),
         ("(true,) => u8:1, _ => u8:2", false),
         ("(true, u2:0) => u8:1, _ => u8:2", false),
+        ("(true, ..) => u8:1, (false, ..) => u8:2", true),
+        ("all => u8:1, all => u8:2", false),
+        ("all => u8:1, other => u8:2", true),
+        ("(a, a) => u8:1", false),
+        (
+            "(a, a) => u8:1, (true, false) => u8:2, (false, true) => u8:3",
+            false,
+        ),
+        ("(.., ..) => u8:1", false),
+        ("(a, a) | (false, true) => u8:1, _ => u8:0", false),
         (
             "(true, u1:1..u1:1) => u8:1, (true, u1:1..u1:1) => u8:2, _ => u8:3",
             false,
@@ -472,5 +550,73 @@ fn tuple_match_selects_a_constant_slice_width() -> Result<(), Box<dyn Error>> {
         eval.compare(&[IrValue::make_ubits(8, 0b10111010)?])?,
         IrValue::make_ubits(3, 2)?
     );
+    Ok(())
+}
+
+#[test]
+fn match_rest_and_whole_binders_retain_literal_widths() -> Result<(), Box<dyn Error>> {
+    for (subject, explicit, arms, expected) in [
+        ("1", "u8:1", "v => v", 1),
+        ("1", "u8:1", "v => !v", 254),
+        ("(1, b)", "(u8:1, b)", "v => v.0", 1),
+        ("[1, 2]", "[u8:1, u8:2]", "v => v[u32:0]", 1),
+        (
+            "(b, u4:7, 1)",
+            "(b, u4:7, u8:1)",
+            "(false, .., 128) => u8:0, (.., v) => v",
+            1,
+        ),
+        (
+            "(b, (2, 1))",
+            "(b, (u2:2, u8:1))",
+            "(false, (.., 128)) => u8:0, (_, (.., v)) => v",
+            1,
+        ),
+    ] {
+        let body = format!("match {subject} {{ {arms} }}");
+        let source = format!("fn sample(b: bool) -> u8 {{ {body} }}");
+        dslx::parse_and_typecheck(
+            &source,
+            "match_width.x",
+            "match_width",
+            &mut ImportData::default(),
+        )?;
+        check_module(&parse_module(&source)?)?;
+        // The pinned converter needs explicit subject widths to generate
+        // comparable IR after successfully inferring the source types.
+        let reference = format!("match {explicit} {{ {arms} }}");
+        let bx = super::expr_eval::bx_source("b: bool", "u8", &body);
+        let eval = ExpressionEvaluator::compile_block(
+            &bx,
+            &ImportOptions::default(),
+            compile_dslx("b: bool", "u8", &reference),
+        )?;
+        assert_eq!(
+            eval.compare(&[IrValue::bool(true)])?,
+            IrValue::make_ubits(8, expected)?,
+            "{body}"
+        );
+    }
+    for (result, body) in [
+        ("u8", "match 1 { u3:1 => u8:0, v => v }"),
+        (
+            "u8",
+            "match (true, u4:7, 1) { (false, .., 256) => u8:0, (.., v) => v }",
+        ),
+        ("s8", "match key() { 0 | 0xff => s8:0, v => v }"),
+    ] {
+        let source = format!("fn key() -> s8 {{ s8:-1 }} fn sample() -> {result} {{ {body} }}");
+        assert!(
+            dslx::parse_and_typecheck(
+                &source,
+                "match_width.x",
+                "match_width",
+                &mut ImportData::default()
+            )
+            .is_err(),
+            "{body}"
+        );
+        assert!(check_module(&parse_module(&source)?).is_err(), "{body}");
+    }
     Ok(())
 }

@@ -403,7 +403,7 @@ pub struct MatchArm {
 }
 
 impl MatchArm {
-    /// Names introduced by this arm, in tuple field order.
+    /// Names introduced by this arm, in source order.
     pub(crate) fn binding_names(&self) -> impl Iterator<Item = &str> {
         self.patterns
             .iter()
@@ -419,13 +419,14 @@ impl MatchArm {
     }
 }
 
-/// A tuple of patterns or a leaf matching a binding, wildcard, literal,
-/// value parametric, module constant, enum member, or literal range.
+/// A DSLX match pattern. Each alternative introduces its own lexical scope.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum MatchPattern {
     Wildcard,
-    /// Introduce the matched tuple field as a lexical value in this arm.
+    /// Introduce the matched value as a lexical value in this arm.
     Binding(String),
+    /// Skip zero or more fields of the immediately enclosing tuple.
+    Rest,
     Literal(Expr),
     Range {
         start: Expr,
@@ -461,7 +462,7 @@ impl MatchPattern {
     pub(crate) fn literals(&self) -> impl Iterator<Item = &Expr> {
         self.nodes()
             .flat_map(|(_, pattern)| match pattern {
-                Self::Wildcard | Self::Binding(_) | Self::Tuple(_) => [None, None],
+                Self::Wildcard | Self::Binding(_) | Self::Rest | Self::Tuple(_) => [None, None],
                 Self::Literal(value) => [Some(value), None],
                 Self::Range { start, end, .. } => [Some(start), Some(end)],
             })
@@ -476,7 +477,9 @@ impl MatchPattern {
             loop {
                 if let Some(pattern) = next.take() {
                     match pattern {
-                        Self::Wildcard | Self::Binding(_) => { /* No literal expressions to visit. */ }
+                        Self::Wildcard
+                        | Self::Binding(_)
+                        | Self::Rest => { /* No literal expressions to visit. */ }
                         Self::Literal(value) => return Some([Some(value), None]),
                         Self::Range { start, end, .. } => return Some([Some(start), Some(end)]),
                         Self::Tuple(fields) => pending.push(fields.iter_mut()),
