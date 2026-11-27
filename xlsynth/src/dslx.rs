@@ -1309,6 +1309,17 @@ impl Hash for StructDef {
 }
 
 impl StructDef {
+    /// Returns the DSLX module that declares this struct, including through
+    /// aliases.
+    pub fn get_owner_module(&self) -> Module {
+        let ptr = unsafe { sys::xls_dslx_struct_def_get_module(self.ptr) };
+        assert!(!ptr.is_null());
+        Module {
+            parent: self.parent.clone(),
+            ptr,
+        }
+    }
+
     pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_struct_def_to_string(self.ptr)) }
     }

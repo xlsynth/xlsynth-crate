@@ -388,12 +388,16 @@ enum Dialect {
     Dslx,
 }
 
-/// Declaration attributes select a test body or configure ordinary warning
-/// handling.
+/// Attributes for a test, an invariant, or an ordinary declaration.
 enum DeclarationAttributes {
-    Test { quickcheck: bool },
+    Test {
+        quickcheck: bool,
+    },
     Invariant,
-    Warnings(BTreeSet<BxWarningKind>),
+    Ordinary {
+        allowed_warnings: BTreeSet<BxWarningKind>,
+        derives_to_bits: bool,
+    },
 }
 
 /// Decode one DSLX byte character and return its value and token length.
@@ -469,7 +473,8 @@ fn decode_byte_string(text: &str) -> Result<Vec<u8>, &'static str> {
 /// `f<a,b>(x)` are parsed as calls. Use [`crate::parse_module_with_options`] to
 /// distinguish these calls from tuples of comparisons on imported constants,
 /// distinguish an imported `zero!<callback>()` from the intrinsic
-/// `zero!<Type>()`, or parse type arguments to imported BX structs.
+/// `zero!<Type>()`, parse type arguments to imported BX structs, or distinguish
+/// `map(xs, head::to_bits)` on a directly imported type from a module function.
 /// Syntax diagnostics carry one-based line and column.
 pub fn parse_module(source: &str) -> Result<Module, String> {
     Parser::new(source, false)?.module_with_imports(None)
@@ -480,9 +485,16 @@ pub(crate) fn parse_with_imports(
     source: &str,
     templates: &BTreeSet<String>,
     type_structs: &BTreeMap<String, Vec<StructParametricKind>>,
+    native_map_import: bool,
 ) -> Result<Module, String> {
     let mut parser = Parser::new(source, false)?;
+    parser.native_map_import = native_map_import;
     for (name, kinds) in type_structs {
+        parser
+            .map_to_bits_heads
+            .entry(name.clone())
+            .or_default()
+            .is_type = true;
         if let Some(grammar) = StructArgumentGrammar::from_kinds(kinds) {
             parser.type_structs.insert(name.clone(), grammar);
         }
@@ -523,6 +535,9 @@ struct Parser<'s> {
     depth: usize,
     dslx_type_display: bool,
     value_context: ValueContext,
+    /// A design block body or clocked test can call declarations later in
+    /// the module. Other declaration scopes use source order.
+    forward_callables: bool,
     /// A function body and its nested scopes accept compile-time declarations.
     in_function_body: bool,
     /// Pure operands such as counted-loop iterables and map inputs permit
@@ -532,6 +547,9 @@ struct Parser<'s> {
     block_map_shadowed: bool,
     /// Until its use is reached, an imported map may be a callable or an enum.
     forward_map_import: bool,
+    /// A native map function becomes visible in a declaration's types at its
+    /// use. A BX member can already be linked from its dependency module.
+    native_map_import: bool,
     /// Type parameters that can annotate literals in this function or block.
     type_params: BTreeSet<&'s str>,
     /// Function and struct templates allow full expressions in their type
@@ -543,6 +561,8 @@ struct Parser<'s> {
     callable_templates: BTreeMap<String, TemplateBinding>,
     /// Local and imported structs that accept at least one type argument.
     type_structs: BTreeMap<String, StructArgumentGrammar>,
+    /// Names that disambiguate a bare `Head::to_bits` map callback.
+    map_to_bits_heads: BTreeMap<String, ToBitsHead>,
     /// Module aliases and use bindings that can start a named literal
     /// annotation.
     literal_type_heads: BTreeSet<String>,
@@ -749,6 +769,20 @@ enum ParsedIterable {
     },
 }
 
+/// Map admits these callback spellings outside the ordinary expression grammar.
+enum MapCallbackSyntax {
+    Ordinary,
+    SpecializedFunction,
+    ToBits { separator: usize },
+}
+
+/// A type and a qualified extern can both supply a `Head::to_bits` spelling.
+#[derive(Clone, Copy, Default)]
+struct ToBitsHead {
+    is_type: bool,
+    has_qualified_extern: bool,
+}
+
 impl ParsedIterable {
     fn into_ast(self) -> (ForIterable, usize) {
         match self {
@@ -890,14 +924,17 @@ impl<'s> Parser<'s> {
             depth: 0,
             dslx_type_display,
             value_context: ValueContext::Block,
+            forward_callables: false,
             in_function_body: false,
             expression_grammar: ExpressionGrammar::Block,
             block_map_shadowed: false,
             forward_map_import: false,
+            native_map_import: false,
             type_params: BTreeSet::new(),
             dependent_types: false,
             callable_templates,
             type_structs,
+            map_to_bits_heads: BTreeMap::new(),
             literal_type_heads,
             overwritten_literal_types: BTreeSet::new(),
             hidden_templates: Vec::new(),
@@ -1007,6 +1044,15 @@ impl<'s> Parser<'s> {
 
     fn dslx_value_grammar(&self) -> bool {
         self.value_context != ValueContext::Block
+    }
+
+    /// Whether the current scope has a binding for the builtin map name.
+    fn map_shadowed(&self) -> bool {
+        if self.forward_callables {
+            self.block_map_shadowed
+        } else {
+            self.visible_names.contains_key("map") || self.has_type_parameter("map")
+        }
     }
 
     /// Restore callable names used to disambiguate syntax when leaving this
@@ -1149,9 +1195,25 @@ impl<'s> Parser<'s> {
                     if self.peek(1) != "::" {
                         self.match_module_names.insert(self.peek(0));
                     }
-                    if matches!(token.text, "fn" | "block" | "struct")
-                        && self.peek(0) == "map"
-                        && matches!(self.peek(1), "(" | "<" | "{")
+                    if matches!(token.text, "struct" | "type") {
+                        self.map_to_bits_heads
+                            .entry(self.peek(0).to_owned())
+                            .or_default()
+                            .is_type = true;
+                    } else if token.text == "fn"
+                        && self.peek(1) == "::"
+                        && self.peek(2) == "to_bits"
+                    {
+                        self.map_to_bits_heads
+                            .entry(self.peek(0).to_owned())
+                            .or_default()
+                            .has_qualified_extern = true;
+                    }
+                    if self.peek(0) == "map"
+                        && matches!(
+                            (token.text, self.peek(1)),
+                            ("fn" | "block", "(" | "<") | ("struct", "{")
+                        )
                     {
                         self.block_map_shadowed = true;
                     }
@@ -1217,7 +1279,7 @@ impl<'s> Parser<'s> {
         let mut use_bindings = BTreeSet::new();
         while !self.peek(0).is_empty() {
             let first_declaration = module.declaration_order.len();
-            let mut allowed_warnings = match self.attributes(&mut module)? {
+            let (mut allowed_warnings, derives_to_bits) = match self.attributes(&mut module)? {
                 DeclarationAttributes::Test { quickcheck } => {
                     let test = self.with_name_scope(|p| p.test_declaration(quickcheck))?;
                     module.declaration_order.push(test.name.clone());
@@ -1253,12 +1315,18 @@ impl<'s> Parser<'s> {
                     });
                     continue;
                 }
-                DeclarationAttributes::Warnings(warnings) => warnings,
+                DeclarationAttributes::Ordinary {
+                    allowed_warnings,
+                    derives_to_bits,
+                } => (allowed_warnings, derives_to_bits),
             };
-            if self.peek(0).is_empty() && allowed_warnings.is_empty() {
+            if self.peek(0).is_empty() && allowed_warnings.is_empty() && !derives_to_bits {
                 break;
             }
             let public = self.eat("pub");
+            if derives_to_bits && self.peek(0) != "struct" {
+                return Err(self.error("#[derive(ToBits)] requires a struct declaration"));
+            }
             let declares_type = matches!(self.peek(0), "enum" | "struct" | "type");
             let is_const_assert = self.peek(0) == "const_assert!";
             if self.eat("block") {
@@ -1299,7 +1367,10 @@ impl<'s> Parser<'s> {
                 module.declaration_order.push(def.name.clone());
                 module.type_aliases.push(def);
             } else if self.eat("struct") {
-                let def = self.with_name_scope(|p| p.struct_def(public))?;
+                let def = self.with_name_scope(|p| p.struct_def(public, derives_to_bits))?;
+                // A parametric struct shadows the map builtin from its
+                // declaration.
+                self.block_map_shadowed |= def.name == "map";
                 module.declaration_order.push(def.name.clone());
                 module.structs.push(def);
             } else if self.eat("enum") {
@@ -1423,6 +1494,7 @@ impl<'s> Parser<'s> {
     /// declaration.
     fn attributes(&mut self, module: &mut Module) -> Result<DeclarationAttributes, String> {
         let mut allowed = BTreeSet::new();
+        let mut derives_to_bits = false;
         while self.eat("#") {
             let module_attribute = self.eat("!");
             self.expect("[")?;
@@ -1463,7 +1535,24 @@ impl<'s> Parser<'s> {
             if matches!(name, "require_block_timing" | "require_define_before_use") {
                 return Err(self.error(&format!("use #![{name}] at module scope")));
             }
+            if self.eat("derive") {
+                if derives_to_bits {
+                    return Err(self.error("duplicate #[derive(...)] attribute"));
+                }
+                self.expect("(")?;
+                self.expect("ToBits")?;
+                while self.eat(",") {
+                    self.expect("ToBits")?;
+                }
+                self.expect(")")?;
+                self.expect("]")?;
+                derives_to_bits = true;
+                continue;
+            }
             if matches!(name, "test" | "quickcheck" | "invariant") {
+                if derives_to_bits {
+                    return Err(self.error("#[derive(ToBits)] requires a struct declaration"));
+                }
                 self.pos += 1;
                 if !allowed.is_empty() {
                     return Err(self.error("BX warning allowances apply to hardware declarations"));
@@ -1497,7 +1586,10 @@ impl<'s> Parser<'s> {
             self.expect(")")?;
             self.expect("]")?;
         }
-        Ok(DeclarationAttributes::Warnings(allowed))
+        Ok(DeclarationAttributes::Ordinary {
+            allowed_warnings: allowed,
+            derives_to_bits,
+        })
     }
 
     /// Flatten one DSLX use tree in source order. BX additionally bounds the
@@ -1628,7 +1720,7 @@ impl<'s> Parser<'s> {
 
     /// Parse an aggregate declaration and its interleaved type and value
     /// formals.
-    fn struct_def(&mut self, public: bool) -> Result<StructDef, String> {
+    fn struct_def(&mut self, public: bool, derives_to_bits: bool) -> Result<StructDef, String> {
         let name = self.ident()?;
         let mut type_params = Vec::new();
         let mut value_parametrics = Vec::new();
@@ -1638,6 +1730,9 @@ impl<'s> Parser<'s> {
                 return Err(self.error("expected a struct parameter"));
             }
             let mut names = BTreeSet::new();
+            // Struct formals use declaration order for BX member imports.
+            // Field types can see a callable already linked from a BX module.
+            let forward_map_import = std::mem::take(&mut self.forward_map_import);
             self.with_value_grammar(|p| {
                 p.list(">", |p| {
                     let token = p.tokens[p.pos];
@@ -1661,6 +1756,7 @@ impl<'s> Parser<'s> {
                     Ok(())
                 })
             })?;
+            self.forward_map_import = forward_map_import;
         }
         self.expect("{")?;
         let fields = if self.dependent_types {
@@ -1673,6 +1769,7 @@ impl<'s> Parser<'s> {
         Ok(StructDef {
             name,
             public,
+            derives_to_bits,
             type_params,
             value_parametrics,
             fields,
@@ -2249,9 +2346,11 @@ impl<'s> Parser<'s> {
             self.shadow_callable(&port.name);
         }
         self.dependent_types = !params.value_parametrics.is_empty();
+        self.forward_callables = true;
         let body = self.with_name_scope(|p| {
             p.block_body_contents(lemmas, /* guarded= */ false, &mut HashSet::new())
         })?;
+        self.forward_callables = false;
         self.dependent_types = false;
         self.type_params.clear();
         let (output, output_span) = body
@@ -3671,13 +3770,20 @@ impl<'s> Parser<'s> {
                 } else {
                     self.take_identifier(is_dslx_member_name)?
                 };
-                left = self.compose(
-                    left.height,
+                let projection = if name == "to_bits" && self.eat("(") {
+                    self.expect(")")?;
+                    Expr::TypeBuiltin {
+                        name,
+                        types: Vec::new(),
+                        args: vec![left.value],
+                    }
+                } else {
                     Expr::Field {
                         value: Box::new(left.value),
                         name,
-                    },
-                )?;
+                    }
+                };
+                left = self.compose(left.height, projection)?;
             } else if self.peek(0) == "[" {
                 left = self.subscript(left)?;
             } else if min <= 10 && self.eat("as") {
@@ -3871,7 +3977,7 @@ impl<'s> Parser<'s> {
                 if lambda || self.dslx_value_grammar() {
                     return self.map_call(name, lambda, false);
                 }
-                if !self.block_map_shadowed {
+                if !self.map_shadowed() {
                     if self.forward_map_import {
                         return self.map_before_use(name);
                     }
@@ -4382,10 +4488,11 @@ impl<'s> Parser<'s> {
                 _ => { /* Other tokens are immutable during parsing. */ }
             }
         }
-        self.block_map_shadowed = true;
         let position_start = self.position_cursor;
-        let ordinary = self.list(")", Self::expr);
-        self.block_map_shadowed = false;
+        let ordinary = self.with_name_scope(|p| {
+            p.shadow_callable("map");
+            p.list(")", Self::expr)
+        });
         let ordinary_end = self.pos;
         let ordinary_position = self.position_cursor;
         for &(index, token) in &split_candidates {
@@ -4416,6 +4523,26 @@ impl<'s> Parser<'s> {
                         }
                         (Some(pure), height - 1)
                     }
+                    Ok(
+                        mapped @ ParsedExpr {
+                            value: Expr::Map(_),
+                            ..
+                        },
+                    ) => {
+                        // An imported type or an out-of-scope native function
+                        // leaves the builtin visible. A visible function
+                        // receives ordinary values, including enum members.
+                        return if !self.forward_callables && self.native_map_import
+                            || self
+                                .map_to_bits_heads
+                                .get("map")
+                                .is_some_and(|head| head.is_type)
+                        {
+                            Ok(mapped)
+                        } else {
+                            self.compose(height, Expr::Call { name: target, args })
+                        };
+                    }
                     // A range operand cannot also parse as an ordinary
                     // argument.
                     Ok(_) => return Err(self.error("expected ordinary map arguments")),
@@ -4443,10 +4570,10 @@ impl<'s> Parser<'s> {
         builtin_only: bool,
     ) -> Result<ParsedExpr, String> {
         let iterable = self.with_value_grammar(|p| p.for_iterable(Braces::Struct))?;
-        let specialized = !lambda && self.specialized_map_callback_ahead();
+        let callback = self.map_callback_syntax();
         if !lambda
             && !builtin_only
-            && !specialized
+            && matches!(callback, MapCallbackSyntax::Ordinary)
             && let ParsedIterable::Array(first) = iterable
         {
             let mut args = vec![first];
@@ -4457,7 +4584,9 @@ impl<'s> Parser<'s> {
             return self.aggregate(args, |args| Expr::Call { name: target, args });
         }
         self.expect(",")?;
-        let mapped = if specialized {
+        let mapped = if let MapCallbackSyntax::ToBits { separator } = callback {
+            self.map_to_bits(target, iterable, separator)?
+        } else if matches!(callback, MapCallbackSyntax::SpecializedFunction) {
             self.specialized_named_map(target, iterable)?
         } else if !lambda {
             let offset = self.tokens[self.pos].start;
@@ -4489,25 +4618,111 @@ impl<'s> Parser<'s> {
         Ok(mapped)
     }
 
-    /// Only map's second operand permits a specialized function name without
-    /// a following call. An invocation here is still an ordinary value
-    /// argument.
-    fn specialized_map_callback_ahead(&self) -> bool {
+    /// Parse lookahead for grouped or bare named callbacks. A two-component
+    /// path can name either a module function or a derived method.
+    fn map_callback_syntax(&self) -> MapCallbackSyntax {
         if self.peek(0) != "," {
-            return false;
+            return MapCallbackSyntax::Ordinary;
         }
         let mut offset = 1;
         while self.peek(offset) == "(" {
             offset += 1;
         }
-        if self.peek(offset + 1) == "::" && self.peek(offset + 2) != "<" {
-            offset += 2;
+        let head = self.peek(offset);
+        if !is_value_identifier(head) {
+            return MapCallbackSyntax::Ordinary;
         }
-        let angle = offset + if self.peek(offset + 1) == "::" { 2 } else { 1 };
-        self.peek(angle) == "<"
-            && self
-                .parametric_arguments_end(self.pos + angle, &[",", ")"])
-                .is_some()
+        offset += 1;
+        let to_bits = |separator| {
+            self.peek(separator) == "::"
+                && self.peek(separator + 1) == "to_bits"
+                && matches!(self.peek(separator + 2), "," | ")")
+                // A user function can receive an enum member spelled Type::to_bits.
+                && !self.map_shadowed()
+        };
+        let bindings = self
+            .map_to_bits_heads
+            .get(head)
+            .copied()
+            .unwrap_or_default();
+        let visible_extern = bindings.has_qualified_extern
+            && (self.forward_callables
+                || self.visible_names.contains_key(&format!("{head}::to_bits")));
+        let associated = !visible_extern
+            && (bindings.is_type
+                || self.has_type_parameter(head)
+                || self.visible_names.get(head) == Some(&NameKind::LocalType));
+        if to_bits(offset) && associated {
+            return MapCallbackSyntax::ToBits {
+                separator: self.pos + offset,
+            };
+        }
+        if self.peek(offset) == "::" && self.peek(offset + 1) != "<" {
+            offset += 2;
+            if to_bits(offset) {
+                return MapCallbackSyntax::ToBits {
+                    separator: self.pos + offset,
+                };
+            }
+        }
+        if self.peek(offset) == "::" && self.peek(offset + 1) == "<" {
+            offset += 1;
+        }
+        if self.peek(offset) == "<" {
+            let angle = self.pos + offset;
+            if self.parametric_arguments_end(angle, &[",", ")"]).is_some() {
+                return MapCallbackSyntax::SpecializedFunction;
+            }
+            if let Some(end) = self.type_arguments_end(angle)
+                && to_bits(end + 1 - self.pos)
+            {
+                return MapCallbackSyntax::ToBits { separator: end + 1 };
+            }
+        }
+        MapCallbackSyntax::Ordinary
+    }
+
+    /// Elaborate an associated method reference as a typed unary map lambda.
+    fn map_to_bits(
+        &mut self,
+        target: String,
+        iterable: ParsedIterable,
+        separator: usize,
+    ) -> Result<ParsedExpr, String> {
+        if self.eat("(") {
+            let mapped = self.nested(|p| p.map_to_bits(target, iterable, separator))?;
+            self.expect(")")?;
+            return Ok(mapped);
+        }
+        let receiver = if self.pos + 1 == separator {
+            ParsedType {
+                value: Type::Named(self.take_identifier(is_value_identifier)?),
+                depth: 0,
+            }
+        } else {
+            self.type_atom(self.dslx_value_grammar())?
+        };
+        self.expect("::")?;
+        self.expect("to_bits")?;
+        let (iterable, height) = iterable.into_ast();
+        // Only the generated body sees this binder. The receiver type and
+        // iterable still resolve in the surrounding scope.
+        let parameter = "receiver".to_owned();
+        self.compose(
+            height.max(receiver.depth).max(2),
+            Expr::Map(Box::new(MapExpr {
+                target,
+                iterable,
+                parameter_type: Some(receiver.value),
+                result_type: None,
+                body: Expr::TypeBuiltin {
+                    name: "to_bits".to_owned(),
+                    types: Vec::new(),
+                    args: vec![Expr::Name(parameter.clone())],
+                },
+                parameter,
+            })),
+        )
     }
 
     /// Parse a grouped or bare specialization of a map callback.
@@ -6375,7 +6590,7 @@ fn make<W: u32>(data: uN[W]) -> (Local<W>, Packet<W>, packets::Packet<W>) {
     (Local<W> { data }, Packet<W> { data }, packets::Packet<W> { data })
 }
 "#;
-        let module = parse_with_imports(source, &BTreeSet::new(), &BTreeMap::new())?;
+        let module = parse_with_imports(source, &BTreeSet::new(), &BTreeMap::new(), false)?;
         assert!(matches!(&module.functions[0].body, Expr::Tuple(fields)
             if fields.len() == 3 && fields.iter().all(|field| matches!(field, Expr::ParametricStruct { .. }))));
         Ok(())
@@ -6532,6 +6747,7 @@ fn wrap<T>(x: T) -> (FlowOut<T>, library::FlowOut<(T, u8)>) {
                 ("FlowOut".into(), vec![StructParametricKind::Type]),
                 ("library::FlowOut".into(), vec![StructParametricKind::Type]),
             ]),
+            false,
         )?;
         let function = &module.functions[0];
         assert!(matches!(&function.result, Type::Tuple(types)
@@ -6601,6 +6817,7 @@ fn empty<T>(value: T) -> library::Row<T, 2> { library::Row::<> { value } }
                 "library::Row".into(),
                 vec![StructParametricKind::Type, StructParametricKind::Value],
             )]),
+            false,
         )?;
         assert!(
             matches!(&module.functions[0].body, Expr::MixedAppliedStruct { args, .. }
@@ -6634,6 +6851,7 @@ block sample(clk, xs: u8[2]) -> (u8[2], u8[2]) {
 "#,
             &BTreeSet::new(),
             &BTreeMap::new(),
+            false,
         )?;
         let Expr::Tuple(calls) = &module.functions[0].body else {
             panic!("expected two calls");
@@ -6859,7 +7077,7 @@ fn compare_member(a:u8, b:u8, x:u8) -> (bool,bool) { (K < a, b > (x)) }
 fn shadow(apply:u8, a:u8, b:u8, x:u8) -> (bool,bool) { (apply < a, b > (x)) }
 "#;
         let templates = BTreeSet::from(["lib::compose".to_string(), "apply".to_string()]);
-        let module = parse_with_imports(source, &templates, &BTreeMap::new())?;
+        let module = parse_with_imports(source, &templates, &BTreeMap::new(), false)?;
         assert_eq!(module_uses(source)?, module.uses);
         let Expr::ParametricCall { name, args, .. } = &module.functions[0].body else {
             panic!("expected qualified template call");
@@ -6910,7 +7128,7 @@ fn apply(x: u8) -> u8 { zero!<left>(x) }
         ));
         let ambiguous = "use wire::zero!; fn f() -> u8 { zero!<Tag>() }";
         let templates = BTreeSet::from(["zero!".to_string()]);
-        let hinted = parse_with_imports(ambiguous, &templates, &BTreeMap::new())?;
+        let hinted = parse_with_imports(ambiguous, &templates, &BTreeMap::new(), false)?;
         assert!(matches!(
             &hinted.functions[0].body,
             Expr::ParametricCall { parametrics, .. } if parametrics == &names(["Tag"])
@@ -8242,6 +8460,64 @@ fn by_array(xs: u8[3]) -> u8[3] { map(map(xs, twice), helpers::twice) }
                 "{value}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn derived_to_bits_preserves_field_access_and_function_names() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+#[allow(useless_struct_splat)]
+#[derive(ToBits, ToBits)]
+pub struct Sample { to_bits: u8 }
+struct Plain { x: u8 }
+fn to_bits(x: Sample) -> u8 { x.to_bits }
+fn pack(x: Sample) -> (u8, u8) { (x.to_bits(), to_bits(x)) }
+"#,
+        )?;
+        assert!(module.structs[0].public && module.structs[0].derives_to_bits);
+        assert!(!module.structs[1].derives_to_bits);
+        assert!(matches!(&module.functions[0].body, Expr::Field { name, .. } if name == "to_bits"));
+        let Expr::Tuple(values) = &module.functions[1].body else {
+            panic!("expected a pair");
+        };
+        assert!(matches!(&values[0], Expr::TypeBuiltin { name, types, args }
+            if name == "to_bits" && types.is_empty() && args == &[Expr::Name("x".into())]));
+        assert!(matches!(&values[1], Expr::Call { name, .. } if name == "to_bits"));
+        for source in [
+            "#[derive(ToBits)] fn f() {}",
+            "#[derive(ToBits)]",
+            "#[derive(ToBits,)] struct S {}",
+            "#[derive(ToBits)] #[derive(ToBits)] struct S {}",
+            "#[derive(Other)] struct S {}",
+            "fn f(x: Sample) -> u8 { x.to_bits(x) }",
+        ] {
+            assert!(parse_module(source).is_err(), "{source}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn associated_to_bits_map_callbacks_keep_the_receiver_type() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+struct Sample<N: u32> { v: uN[N] }
+fn map_width<N:u32>(xs: Sample<N>[2]) -> uN[N][2] { map(xs, ((Sample<N>::to_bits)),) }
+extern fn helpers::to_bits(x: u8) -> u8;
+block use_function(clk, xs: u8[2]) -> u8[2] { map(xs, helpers::to_bits) }
+"#,
+        )?;
+        let Expr::Map(map) = &module.functions[0].body else {
+            panic!("expected associated method");
+        };
+        assert!(
+            matches!(&map.parameter_type, Some(Type::ParametricStruct { name, args })
+            if name == "Sample" && args == &[Expr::Name("N".into())])
+        );
+        assert!(matches!(&map.body, Expr::TypeBuiltin { name, args, .. }
+            if name == "to_bits" && args == &[Expr::Name(map.parameter.clone())]));
+        assert!(matches!(&module.blocks[0].output, Expr::Call { name, args }
+            if name == "map" && matches!(&args[1], Expr::Name(name) if name == "helpers::to_bits")));
         Ok(())
     }
 

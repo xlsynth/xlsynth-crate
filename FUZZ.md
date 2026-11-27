@@ -192,6 +192,12 @@ Generates calls to pure DSLX builtins in BX module constants, local functions, a
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_builtins`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_derive_to_bits.rs
+
+Compares `#[derive(ToBits)]` on BX structs with pinned DSLX. Generated records vary field declaration order, signedness, widths up to 129 bits, tuples, arrays, enums, nested derived structs, empty fields and value parameters. Local functions, blocks, named map callbacks and imported records exercise the method on runtime values. A module constant checks its packed unsigned type and value. The target compares BX block IR with concrete DSLX calls and compiled DSLX IR. Empty array fields use concrete DSLX calls because the pinned converter cannot lower the empty value. Rejected calls check missing derives, conflicting field names, incorrect receiver types, extra arguments and incorrect result widths.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_derive_to_bits -- -max_len=12 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_enums.rs
 
 Generates numeric enums and compares BX with pinned DSLX source checking, concrete evaluation and compiled IR. Varying discriminants, backing types, aliases and module boundaries exposes nominal type, extension and exhaustiveness errors. Cast probes compare hardware results on arbitrary bits and separately check whether DSLX can evaluate each cast as a constant. Ordering probes exercise direct calls, map callbacks and counted-loop helpers. BX and DSLX must diagnose ordering of enum operands. The target also compares the hardware results of explicitly ordering their backing bits.

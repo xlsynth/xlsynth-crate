@@ -20,6 +20,7 @@ use xlsynth::dslx::{self, ImportData, MatchableModuleMember};
 use crate::ast::{Param, StructDef, Type, UsePath};
 use crate::check::MAX_ELABORATION_DEPTH;
 use crate::dslx_import::TypeWitness;
+use crate::parser::outline::ToBitsDerive;
 use crate::parser::parse_value_type;
 use crate::typed::CheckedEnum;
 pub(crate) use effect_source::{EffectFunctionSource, EffectSources, is_token_builtin};
@@ -71,6 +72,9 @@ pub(crate) struct ImportedStructs {
     /// spelling.
     aggregate_candidates: HashMap<String, Vec<DeclId>>,
     named_layouts: BTreeMap<String, usize>,
+    /// Concrete receivers whose trait lists require native validation on first
+    /// use.
+    pending_to_bits: BTreeMap<String, TypeWitness>,
     parametric_instances: BTreeMap<usize, ImportedStructInstance>,
     /// Reflected layouts that contain a concrete parametric struct, including
     /// through fields of another struct.
@@ -143,6 +147,7 @@ impl ImportedStructs {
             aggregate_projections: HashMap::new(),
             aggregate_candidates: HashMap::new(),
             named_layouts: BTreeMap::new(),
+            pending_to_bits: BTreeMap::new(),
             parametric_instances: BTreeMap::new(),
             instance_layouts: BTreeSet::new(),
             exports_bound: false,
@@ -426,6 +431,35 @@ impl ImportedStructs {
 
     pub(crate) fn definitions(&self) -> &[StructDef] {
         &self.definitions
+    }
+
+    /// Whether a concrete layout still needs its native trait resolution
+    /// checked.
+    pub(crate) fn needs_to_bits_probe(&self, name: &str) -> bool {
+        self.pending_to_bits.contains_key(name)
+    }
+
+    /// Typecheck the exact receiver and unsigned result width. A local ToBits
+    /// trait can give the generated conversion a specialization-dependent
+    /// signature.
+    pub(crate) fn check_to_bits_derive(
+        &mut self,
+        name: &str,
+        width: usize,
+        data: &mut ImportData,
+    ) -> Result<(), String> {
+        let witness = &self.pending_to_bits[name];
+        let source = format!(
+            r#"#![feature(generics)]
+{}
+fn probe(_bx_array_index: u32, {}) -> uN[{width}] {{ ({}).to_bits() }}"#,
+            witness.imports, witness.params, witness.expr,
+        );
+        let probe = format!("0bx_to_bits_{}", self.named_layouts[name]);
+        self.check_probe(&source, &probe, data)
+            .map_err(|e| format!("checking ToBits on DSLX struct '{name}': {e}"))?;
+        self.pending_to_bits.remove(name);
+        Ok(())
     }
 
     pub(crate) fn definition(&self, name: &str) -> Option<&StructDef> {
@@ -973,10 +1007,23 @@ impl ImportedStructs {
         {
             self.instance_layouts.insert(index);
         }
+        // The pinned struct API omits derive attributes from its display.
+        // Use the defining module's frozen outline for this exact declaration,
+        // including private structs returned through aliases or projections.
+        let owner = def.get_owner_module().get_name();
+        let derive = self
+            .files
+            .as_ref()
+            .and_then(|files| files.original_subject(&owner))
+            .and_then(|subject| self.graph.to_bits_derive(subject, &identifier));
+        if derive == Some(ToBitsDerive::CheckNative) {
+            self.pending_to_bits.insert(name.clone(), witness.clone());
+        }
         self.definitions.push(StructDef {
             type_params: Vec::new(),
             name: name.clone(),
             public,
+            derives_to_bits: derive.is_some(),
             value_parametrics: Vec::new(),
             fields,
         });

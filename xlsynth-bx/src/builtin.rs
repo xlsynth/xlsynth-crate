@@ -12,6 +12,11 @@ use xlsynth_pir::{IrBits, IrValue};
 #[derive(Clone, Copy, Debug)]
 pub enum BuiltinOp {
     Rev,
+    /// Pack a derived struct in declaration order. The checker counts the
+    /// projections so constexpr evaluation can charge the same expansion.
+    ToBits {
+        work: usize,
+    },
     Clz,
     Ctz,
     AndReduce,
@@ -61,6 +66,16 @@ impl BuiltinOp {
         args: &[BValue],
     ) -> Result<BValue, BuilderError> {
         match self {
+            Self::ToBits { .. } => {
+                let layout = builder.get_type(args[0])?.clone();
+                let mut leaves = Vec::new();
+                collect_bit_leaves(builder, args[0], &layout, &mut leaves)?;
+                match leaves.as_slice() {
+                    [] => builder.literal(IrValue::Bits(IrBits::zero(0))),
+                    [leaf] => Ok(*leaf),
+                    _ => builder.concat(&leaves),
+                }
+            }
             Self::Rev => builder.rev(args[0]),
             Self::Clz => builder.clz(args[0]),
             Self::Ctz => builder.ctz(args[0]),
@@ -146,6 +161,7 @@ impl BuiltinOp {
     /// Account for temporary IR used to evaluate builtins that expand arrays.
     pub(crate) fn evaluation_work(self, args: &[IrValue]) -> usize {
         let (array, nodes_per_element) = match self {
+            Self::ToBits { work } => return work,
             Self::ArrayRev => (&args[0], 2),
             Self::Zip => (&args[0], 4),
             Self::OneHotSel | Self::PrioritySel => (&args[1], 2),
@@ -193,6 +209,36 @@ impl BuiltinOp {
             FnEvalResult::Failure(_) => None,
         }
     }
+}
+
+/// Visit packed fields most-significant first, including array index zero.
+fn collect_bit_leaves<S: BuilderState>(
+    builder: &mut Builder<S>,
+    value: BValue,
+    ty: &Type,
+    leaves: &mut Vec<BValue>,
+) -> Result<(), BuilderError> {
+    match ty {
+        Type::Bits(_) => leaves.push(value),
+        Type::Tuple(fields) => {
+            for (i, field) in fields.iter().enumerate() {
+                if field.bit_count() != 0 {
+                    let member = builder.tuple_index(value, i)?;
+                    collect_bit_leaves(builder, member, field, leaves)?;
+                }
+            }
+        }
+        Type::Array(array) if array.element_type.bit_count() != 0 => {
+            for i in 0..array.element_count {
+                let index = builder.literal(IrValue::u32(i as u32))?;
+                let element = builder.array_index(value, index)?;
+                collect_bit_leaves(builder, element, &array.element_type, leaves)?;
+            }
+        }
+        Type::Array(_) => { /* Zero-width elements contribute no bits. */ }
+        Type::Token => return Err(BuilderError::InvalidOperation("cannot pack a token".into())),
+    }
+    Ok(())
 }
 
 /// Resize a bit pattern, choosing the extension independently of its BX type.

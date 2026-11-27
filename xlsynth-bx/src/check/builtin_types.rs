@@ -18,6 +18,8 @@ impl BodyChecker<'_, '_> {
         args: &[Expr],
     ) -> Result<(Type, K), String> {
         match (name, types, args) {
+            ("to_bits", [], [receiver]) => self.derived_to_bits(receiver),
+            ("to_bits", _, _) => Err("to_bits() takes no arguments after its receiver".into()),
             ("all_ones!" | "bit_count" | "element_count", [ty], []) => self.type_constant(name, ty),
             ("decode", [ty], [value]) => {
                 let ty = self.source_type(ty)?;

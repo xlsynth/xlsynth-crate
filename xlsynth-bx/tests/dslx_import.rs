@@ -73,6 +73,180 @@ fn assert_import_rejected(module: &str, body: &str, result: &str, options: &Impo
 }
 
 #[test]
+fn imported_to_bits_uses_native_trait_resolution() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let options = search_paths(&[root.path()]);
+    write_module(
+        root.path(),
+        "traits.x",
+        "#![feature(traits)]\npub trait ToBits {}",
+    )?;
+    for (declarations, traits, impl_or_trait, eligible) in [
+        ("", "Marker, ToBits", "trait Marker {}", true),
+        ("trait Marker {}", "ToBits, Marker", "", true),
+        ("", "ToBits", "trait ToBits {}", false),
+        (
+            "trait ToBits { fn to_bits(self) -> u8; }",
+            "ToBits",
+            "",
+            true,
+        ),
+        (
+            "trait ToBits { fn to_bits(self) -> u16; }",
+            "ToBits",
+            "",
+            false,
+        ),
+        (
+            "#![feature(use_syntax)]\nuse traits::ToBits;",
+            "ToBits",
+            "",
+            true,
+        ),
+        ("import traits as ToBits;", "ToBits", "", true),
+        ("", "Unknown, ToBits", "", false),
+        ("", "Spawn, ToBits", "", false),
+        ("", "ToBits", "impl S { const to_bits = u8:42; }", false),
+        ("", "ToBits", "impl S { type to_bits = u8; }", false),
+        (
+            "",
+            "ToBits",
+            "impl S { fn read(self) -> u8 { type to_bits = u8; self.a as to_bits } }",
+            true,
+        ),
+    ] {
+        let source = format!(
+            "#![feature(traits)]\n{declarations}\n#[derive({traits})] pub struct S {{ a: u8 }}\n{impl_or_trait}"
+        );
+        write_module(root.path(), "records.x", &source)?;
+        // DSLX resolves a derive on first use. Merely importing its layout
+        // must work even for a struct whose trait list cannot supply a method.
+        check_source_with_options("use records; fn get(s: records::S) -> u8 { s.a }", &options)?;
+        let native = parse_and_typecheck(
+            "import records; fn pack(s: records::S) -> u8 { s.to_bits() }",
+            "pack.x",
+            "pack",
+            &mut ImportData::new(None, &options.additional_search_paths),
+        );
+        assert_eq!(native.is_ok(), eligible, "{source}\n{:?}", native.err());
+        let bx = check_source_with_options(
+            "use records; fn pack(s: records::S) -> u8 { s.to_bits() }",
+            &options,
+        );
+        assert_eq!(bx.is_ok(), eligible, "{source}\n{:?}", bx.err());
+    }
+    Ok(())
+}
+
+#[test]
+fn imported_to_bits_checks_each_concrete_receiver() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "packed.x",
+        r#"
+#![feature(traits)]
+trait ToBits { fn to_bits(self) -> u8; }
+#[derive(ToBits)] pub struct Word<N: u32> { value: uN[N] }
+pub type Byte = Word<8>;
+pub type Nibble = Word<4>;
+"#,
+    )?;
+    write_module(
+        root.path(),
+        "records.x",
+        r#"
+#![feature(traits)]
+import packed;
+trait Marker {}
+#[derive(ToBits, Marker)] struct Private { a: u4, b: u4 }
+pub const VALUE = Private { a: u4:10, b: u4:3 };
+#[derive(ToBits)] pub struct Envelope { nibble: packed::Nibble }
+"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    let source = r#"
+use records;
+use packed::Byte;
+const_assert!(records::VALUE.to_bits() == u8:0xa3);
+const_assert!(map([Byte { value: u8:0xbf }], Byte::to_bits) == [u8:0xbf]);
+"#;
+    check_source_with_options(source, &options)?;
+    let nested = format!("{source} fn pack(x: records::Envelope) -> u4 {{ x.to_bits() }}");
+    assert!(check_source_with_options(&nested, &options).is_err());
+    Ok(())
+}
+
+#[test]
+fn imported_derived_to_bits_follows_declaration_identity() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "marked.x",
+        r#"
+#[derive(ToBits)]
+struct Private { a: u4, b: u4 }
+pub const HEADER = Private { a: 6, b: 9 };
+#[sv_type("pkg::word_t")]
+#[derive(ToBits)]
+pub struct Word<N:u32> { high: uN[N], low: u4 }
+impl Word<N> { fn high(self) -> uN[N] { self.high } }
+pub type Byte = Word<4>;
+"#,
+    )?;
+    write_module(
+        root.path(),
+        "ordinary.x",
+        r##"
+// #[derive(ToBits)]
+#[sv_type("#[derive(ToBits)]")]
+pub struct Word { high: u4, low: u4 }
+impl Word { fn to_bits(self) -> u8 { self.low ++ self.high } }
+#[derive(ToBits)]
+pub struct Envelope { word: Word }
+pub fn encode(x: Envelope) -> u8 { x.to_bits() }
+#[derive(ToBits)]
+pub struct Conflict { a: u8 }
+impl Conflict { fn to_bits(self) -> u8 { self.a } }
+"##,
+    )?;
+    let source = r#"
+use marked;
+use marked::Byte;
+use ordinary;
+#[allow(combinational_block)]
+block pack(clk, x: u8) -> (u8, u8, u8, u8[1], u8[1]) {
+    let high = (x >> u32:4) as u4;
+    let low = x as u4;
+    let direct = marked::Byte { high, low };
+    let word = ordinary::Word { high, low };
+    (direct.to_bits(), marked::HEADER.to_bits(), ordinary::encode(ordinary::Envelope { word }),
+     map([direct], Byte::to_bits), map([direct], marked::Word<4>::to_bits))
+}"#;
+    let options = search_paths(&[root.path()]);
+    let package = compile_with_options(
+        source,
+        empty_package("pack"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(
+        run_block(&package, 0xa3)?,
+        IrValue::parse_typed(
+            "(bits[8]:0xa3,bits[8]:0x69,bits[8]:0x3a,[bits[8]:0xa3],[bits[8]:0xa3])"
+        )?
+    );
+    for name in ["Word", "Envelope", "Conflict"] {
+        let source = format!("use ordinary; fn pack(x: ordinary::{name}) -> u8 {{ x.to_bits() }}");
+        assert!(
+            check_source_with_options(&source, &options).is_err(),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn nominal_specializations_share_native_names_with_explicit_value_calls()
 -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;

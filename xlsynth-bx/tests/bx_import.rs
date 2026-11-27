@@ -9,7 +9,8 @@ use tempfile::tempdir;
 use xlsynth_bx::ast::{Expr, Stmt};
 use xlsynth_bx::{
     ImportOptions, ResetBehavior, check_module_with_options, check_source_with_options,
-    compile_with_options, empty_package, lower_module, parse_module, run_tests,
+    compile_with_options, empty_package, lower_module, parse_module, parse_module_with_options,
+    run_tests,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
@@ -32,6 +33,206 @@ fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, 
         ResetBehavior::default(),
         options,
     )
+}
+
+#[test]
+fn ordinary_maps_receive_enum_members_named_to_bits() -> Result<(), Box<dyn Error>> {
+    let declarations = r#"
+pub enum E: u1 { to_bits = 0 }
+pub fn map(x: u8, y: E) -> E { y }
+"#;
+    let local = format!(
+        r#"{declarations}
+type A = E;
+fn from_function() -> E {{ map(u8:0, A::to_bits) }}
+fn from_scope() -> E {{ type Local = E; map(u8:0, Local::to_bits) }}
+block from_block(clk) -> E {{ map(u8:0, A::to_bits) }}"#
+    );
+    check_source_with_options(&local, &ImportOptions::default())?;
+    let qualified_extern = r#"
+struct S { x: u8 }
+extern fn S::to_bits(x: u8) -> u8;
+block apply(clk, words: u8[2]) -> u8[2] { map(words, S::to_bits) }
+"#;
+    check_source_with_options(qualified_extern, &ImportOptions::default())?;
+    let dir = tempdir()?;
+    let paths = [dir.path()];
+    let options = search_paths(&paths);
+    for (module, extension) in [("bxmap", "bx"), ("nativemap", "x")] {
+        write_module(dir.path(), &format!("{module}.{extension}"), declarations)?;
+        let head = format!("use {module}::E; type A = E;");
+        let import = format!("use {module}::map;");
+        let function = "fn f() -> E { map(u8:0, A::to_bits) }";
+        let block = "block b(clk) -> E { map(u8:0, A::to_bits) }";
+        check_source_with_options(&format!("{head}{import}{function}{block}"), &options)?;
+        check_source_with_options(&format!("{head}{block}{import}"), &options)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn qualified_to_bits_externs_follow_callback_visibility() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let paths = [dir.path()];
+    let options = search_paths(&paths);
+    let record = "#[derive(ToBits)] pub struct S { x: u8 }";
+    write_module(dir.path(), "records.bx", record)?;
+    write_module(dir.path(), "native.x", record)?;
+    let callers = r#"
+fn before(xs: S[1]) -> u8[1] { map(xs, S::to_bits) }
+block forward(clk, xs: u16[1]) -> u16[1] { map(xs, S::to_bits) }
+extern fn S::to_bits(x: u16) -> u16;
+fn after(xs: u16[1]) -> u16[1] { map(xs, S::to_bits) }
+"#;
+    for declaration in [
+        record,
+        "use records; type S = records::S;",
+        "use native; type S = native::S;",
+    ] {
+        check_source_with_options(&format!("{declaration}\n{callers}"), &options)?;
+    }
+    for subject in ["records", "native"] {
+        let source = format!("use {subject}::S;\n{callers}");
+        assert_eq!(
+            check_source_with_options(&source, &options).unwrap_err(),
+            "extern fn 'S::to_bits' conflicts with use binding 'S'"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn to_bits_map_in_declaration_types_and_defaults_uses_source_order() -> Result<(), String> {
+    let declarations = r#"
+#[derive(ToBits)] struct S { value: u32 }
+const XS = [S { value: u32:8 }];
+struct Field { x: uN[map(XS, S::to_bits)[u32:0]] }
+struct Defaulted<N:u32 = {map(XS, S::to_bits)[u32:0]}> { x: uN[N] }
+block port(clk, x: uN[map(XS, S::to_bits)[u32:0]]) -> u8 { x }
+block generic<N:u32 = {map(XS, S::to_bits)[u32:0]}>(clk, x: uN[N]) -> uN[N] { x }
+block caller(clk, x: Defaulted) -> u8 { let y = generic(x.x); y }
+extern fn external(x: uN[map(XS, S::to_bits)[u32:0]]) -> u8;
+extern block child(clk, x: uN[map(XS, S::to_bits)[u32:0]]) -> u8;
+"#;
+    for later in [
+        "extern fn S::to_bits(x: u16) -> u16;",
+        "extern fn S::to_bits(x: uN[map(XS, S::to_bits)[u32:0]]) -> u8;",
+        "fn map(x: u8, y: u16) -> u8 { x }",
+    ] {
+        check_source_with_options(&format!("{declarations}{later}"), &ImportOptions::default())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn to_bits_in_a_block_signature_respects_imported_map_bindings() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let paths = [dir.path()];
+    let options = search_paths(&paths);
+    let library = "pub enum E: u2 { to_bits = 1 } pub fn map(x: u8, e: E) -> u32 { u32:8 }";
+    write_module(dir.path(), "helpers.bx", library)?;
+    write_module(dir.path(), "native.x", library)?;
+    let linked = r#"
+use helpers::E;
+type A = E;
+#[derive(ToBits)] struct S { value: u32 }
+const XS = [S { value: u32:8 }];
+struct F<N:u32 = {map(XS, S::to_bits)[u32:0]}> { field: uN[map(u8:0, A::to_bits)], value: uN[N] }
+block main(clk, x: uN[map(u8:0, A::to_bits)]) -> u8 { x }
+block fields(clk, x: F) -> u8 { x.field + x.value }
+use helpers::map;
+"#;
+    check_source_with_options(linked, &options)?;
+    let native = r#"
+#[derive(ToBits)] struct S { value: u32 }
+const XS = [S { value: u32:8 }];
+block main(clk, x: uN[map(XS, S::to_bits)[u32:0]]) -> u8 { x }
+use native::map;
+"#;
+    check_source_with_options(native, &options)?;
+    Ok(())
+}
+
+#[test]
+fn block_body_type_annotations_can_see_forward_to_bits_externs() -> Result<(), String> {
+    for (statement, owner) in [
+        ("let y: uN[map(XS, S::to_bits)[u32:0]] = x;", "let 'y': "),
+        ("reg y: uN[map(XS, S::to_bits)[u32:0]]; y := x;", ""),
+    ] {
+        let source = format!(
+            r#"
+#[derive(ToBits)] struct S {{ value: u32 }}
+const XS = [S {{ value: u32:8 }}];
+block body(clk, x: u8) -> u8 {{ {statement} y }}
+extern fn S::to_bits(x: u16) -> u16;
+"#
+        );
+        assert_eq!(
+            check_source_with_options(&source, &ImportOptions::default()).unwrap_err(),
+            format!(
+                "block 'body': {owner}callback 'S::to_bits' has parameter types (u16), expected (S)"
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn to_bits_map_uses_the_builtin_before_later_type_names() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let paths = [dir.path()];
+    let options = search_paths(&paths);
+    write_module(dir.path(), "enums.bx", "pub enum map : u1 { A = 0 }")?;
+    write_module(dir.path(), "native.x", "pub enum map : u1 { A = 0 }")?;
+    let before = r#"
+#[derive(ToBits)] struct S { b: u8 }
+block apply(clk, xs: S[1]) -> u8[1] { map(xs, S::to_bits) }
+"#;
+    for later in [
+        "struct map<N:u32> { data: uN[N] }",
+        "use enums::map;",
+        "use native::map;",
+    ] {
+        check_source_with_options(&format!("{before}{later}"), &options)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn to_bits_map_callbacks_follow_bx_struct_identity_across_imports() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "records.bx",
+        r#"
+#[derive(ToBits)] pub struct Byte { hi: u4, lo: u4 }
+#[derive(ToBits)] pub struct Other { hi: u4, lo: u4 }
+pub fn to_bits(x: Byte) -> u8 { x.lo ++ x.hi }
+"#,
+    )?;
+    let declarations = r#"
+use records;
+use records::Byte;
+type Alias = Byte;
+const receiver = [Byte { hi: u4:10, lo: u4:3 }];
+"#;
+    let source = format!(
+        r#"{declarations}
+const_assert!(map(receiver, Alias::to_bits) == [u8:0xa3]);
+const_assert!(map(receiver, Byte::to_bits) == [u8:0xa3]);
+const_assert!(map(receiver, records::Byte::to_bits) == [u8:0xa3]);
+const_assert!(map(receiver, records::to_bits) == [u8:0x3a]);
+"#,
+    );
+    let paths = [dir.path()];
+    let options = search_paths(&paths);
+    check_module_with_options(&parse_module_with_options(&source, &options)?, &options)?;
+    let wrong = format!(
+        "{declarations} const_assert!(map(receiver, records::Other::to_bits) == [u8:0xa3]);"
+    );
+    let error = check_source_with_options(&wrong, &options).unwrap_err();
+    assert!(error.contains("map lambda parameter expects"), "{error}");
+    Ok(())
 }
 
 #[test]

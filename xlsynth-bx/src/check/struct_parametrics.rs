@@ -1379,6 +1379,7 @@ impl<'m> BodyChecker<'_, 'm> {
             let def = StructDef {
                 name: name.clone(),
                 public: template.public,
+                derives_to_bits: template.derives_to_bits,
                 fields,
                 value_parametrics: Vec::new(),
                 type_params: Vec::new(),

@@ -64,9 +64,8 @@ pub fn compile(source: &str, package: Package, reset: ResetBehavior) -> Result<P
     compile_with_options(source, package, reset, &ImportOptions::default())
 }
 
-/// Parse a BX source file with its imported template signatures available to
-/// distinguish calls with multiple parametrics from comma-separated
-/// comparisons.
+/// Parse BX source using imported declarations to distinguish parametric calls
+/// from comparisons and derived map callbacks from module functions.
 pub fn parse_module_with_options(
     source: &str,
     options: &ImportOptions<'_>,
