@@ -37,17 +37,17 @@ const POSITIONS: [Position; 7] = [
 ];
 
 /// Build a conditional width or signedness operand in the template's lexical
-/// scope. The module constant `x` collides with the runtime formal.
+/// scope. The module constant `x` has the same name as the data parameter.
 fn type_annotation(family: u8, sign_operand: bool, pivot: u32) -> Annotation {
-    let (good, runtime, local, wrong_type) = if sign_operand {
+    let (good, data_operand, local, wrong_type) = if sign_operand {
         ("S", "x != u32:0", "x == N", "u32:5")
     } else {
         ("N + u32:1", "x", "x + u32:2", "true")
     };
     let (taken, alternate) = match family {
-        0 => (good.into(), runtime),
+        0 => (good.into(), data_operand),
         1 => (good.into(), if sign_operand { "!S" } else { "N" }),
-        2 => (format!("let x = N; {local}"), runtime),
+        2 => (format!("let x = N; {local}"), data_operand),
         3 => (good.into(), "MISSING"),
         4 => (good.into(), "LATER"),
         5 => (good.into(), wrong_type),
@@ -208,7 +208,7 @@ mod tests {
     use super::{POSITIONS, compare_position, type_annotation};
 
     #[test]
-    fn unused_and_selected_runtime_formals() -> Result<(), String> {
+    fn unused_and_selected_data_parameters() -> Result<(), String> {
         for position in POSITIONS {
             for sign_operand in [false, true] {
                 let ty = type_annotation(0, sign_operand, 4);

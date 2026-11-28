@@ -687,15 +687,15 @@ For example, `xs: xN[S][N][L]` supplies the signedness, element width, and
 array length. In a computed dimension such as `uN[N + u32:1]`, supply `N`
 explicitly, give it a default, or infer it from another parameter.
 
-In function and block signatures, earlier data parameters are in scope in
-later annotations and in the result. A dimension must evaluate to a constant
-for the chosen specialization. For example, in
-`fn f<N: u32>(x: u32) -> uN[if N == u32:4 { u32:5 } else { x }]`,
-`f<4>` returns five bits. Calling `f<3>` requires the runtime value of
-`x` to determine the width and fails to typecheck, even with a literal
-argument. The same rule applies to a typed `let` or a local type alias in
-the function body. A formal shadows outer names in its own annotation.
-BX makes its runtime type available once that annotation is resolved.
+Type dimensions must be constexpr. In `fn f<X: u32>() -> uN[X]`, `X` is a
+value parametric, so `f<5>()` has a five-bit result. BX rejects
+`fn f(x: u32) -> uN[x]` because the width depends on a data input, even if
+every caller passes a literal.
+
+Earlier data parameters are in scope in later function and block annotations.
+For example, `array_size(flags)` can supply a width because the length is
+part of the declared array type. Every value of `flags: bool[4]` gives the
+same width of four. The same rule applies to typed lets and local type aliases.
 
 Explicit arguments bind a prefix of the declared parameters in source order.
 Use a bare name, number, boolean, or typed literal for a simple argument.

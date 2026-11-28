@@ -18,7 +18,7 @@ pub(super) struct ModuleDimensions<'a, 'm> {
     pub(super) warning_owner: Option<&'m str>,
     zero_binding: ZeroBinding<'a>,
     pub(super) block_formals: Option<&'a BlockDimensionFormals<'a>>,
-    pub(super) runtime_parameters: Option<RuntimeParameters<'a>>,
+    pub(super) data_parameters: Option<DataParameters<'a>>,
 }
 
 /// Bindings that become concrete when a block's data ports are specialized.
@@ -28,15 +28,14 @@ pub(super) struct BlockDimensionFormals<'a> {
 }
 
 /// Data inputs visible while checking a signature. The current name enters
-/// scope before its type resolves. Earlier inputs also have their runtime
-/// types.
+/// scope before its type resolves. Earlier inputs have known types.
 #[derive(Clone, Copy)]
-pub(super) struct RuntimeParameters<'a> {
+pub(super) struct DataParameters<'a> {
     params: &'a [Param],
     indices: &'a BTreeMap<&'a str, usize>,
 }
 
-impl<'a> RuntimeParameters<'a> {
+impl<'a> DataParameters<'a> {
     pub(super) fn contains(self, name: &str) -> bool {
         self.indices.contains_key(name)
     }
@@ -65,7 +64,7 @@ impl<'m> Declarations<'m> {
             warning_owner: self.positions.get_key_value(owner).map(|(&name, _)| name),
             zero_binding: ZeroBinding::Owner(owner),
             block_formals: None,
-            runtime_parameters: None,
+            data_parameters: None,
         }
     }
 
@@ -81,19 +80,19 @@ impl<'m> Declarations<'m> {
             warning_owner,
             zero_binding: ZeroBinding::Resolved(zero_binding),
             block_formals: None,
-            runtime_parameters: None,
+            data_parameters: None,
         }
     }
 }
 
 impl<'m> ModuleDimensions<'_, 'm> {
-    pub(super) fn with_runtime_parameters<'a>(
+    pub(super) fn with_data_parameters<'a>(
         &'a self,
         params: &'a [Param],
         indices: &'a BTreeMap<&'a str, usize>,
     ) -> ModuleDimensions<'a, 'm> {
         ModuleDimensions {
-            runtime_parameters: Some(RuntimeParameters { params, indices }),
+            data_parameters: Some(DataParameters { params, indices }),
             ..*self
         }
     }
@@ -106,7 +105,7 @@ impl<'m> ModuleDimensions<'_, 'm> {
                 formals.values.contains(name)
                     || formals.types.declares(name)
                     || self
-                        .runtime_parameters
+                        .data_parameters
                         .is_some_and(|params| params.contains(name))
             })
         })
@@ -136,13 +135,13 @@ impl<'m> ModuleDimensions<'_, 'm> {
         for (index, param) in params.iter().enumerate() {
             indices.insert(param.name.as_str(), index);
             if self
-                .with_runtime_parameters(params, &indices)
+                .with_data_parameters(params, &indices)
                 .has_dependent_port_operand(&param.ty)
             {
                 return true;
             }
         }
-        self.with_runtime_parameters(params, &indices)
+        self.with_data_parameters(params, &indices)
             .has_dependent_port_operand(result)
     }
 
@@ -166,6 +165,7 @@ impl<'m> ModuleDimensions<'_, 'm> {
     pub(super) fn resolve_or_defer_size(
         &self,
         expr: &Expr,
+        purpose: &str,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
         types: &mut TypeResolver<'_, 'm>,
@@ -173,7 +173,8 @@ impl<'m> ModuleDimensions<'_, 'm> {
         if self.defer_bit_or_array_operand(expr, is_local, types)? {
             Ok(None)
         } else {
-            self.size(expr, is_local, bindings, types).map(Some)
+            self.size(expr, purpose, is_local, bindings, types)
+                .map(Some)
         }
     }
 
@@ -225,6 +226,7 @@ impl<'m> ModuleDimensions<'_, 'm> {
         &self,
         expr: &Expr,
         expected: &Type,
+        purpose: &str,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
         types: &mut TypeResolver<'_, 'm>,
@@ -233,14 +235,14 @@ impl<'m> ModuleDimensions<'_, 'm> {
             Expr::Name(name)
                 if BitTypeAttribute::qualified(name).is_none()
                     && self
-                        .runtime_parameters
+                        .data_parameters
                         .is_none_or(|params| params.get(name).is_none()) =>
             {
                 name
             }
             _ => {
                 let mut checker = types.annotation_scope(*self, is_local, bindings);
-                return checker.parametric_value(expr, expected);
+                return checker.constexpr_operand_value(expr, expected, purpose);
             }
         };
         let head = name
@@ -281,6 +283,7 @@ impl<'m> ModuleDimensions<'_, 'm> {
     pub(super) fn size(
         &self,
         expr: &Expr,
+        purpose: &str,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
         types: &mut TypeResolver<'_, 'm>,
@@ -294,7 +297,7 @@ impl<'m> ModuleDimensions<'_, 'm> {
                 .map(|width| width as usize)
                 .map_err(|_| format!("invalid u32 type dimension '{text}'"));
         }
-        let value = self.constant(expr, &expected, is_local, bindings, types)?;
+        let value = self.constant(expr, &expected, purpose, is_local, bindings, types)?;
         ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
             .ok_or_else(|| "type dimension does not fit usize".into())
     }
@@ -309,9 +312,16 @@ impl<'m> ModuleDimensions<'_, 'm> {
         if let Expr::Bool(value) = expr {
             return Ok(*value);
         }
-        self.constant(expr, &Type::Bool, is_local, bindings, types)?
-            .to_bool()
-            .map_err(|e| e.to_string())
+        self.constant(
+            expr,
+            &Type::Bool,
+            "bit signedness",
+            is_local,
+            bindings,
+            types,
+        )?
+        .to_bool()
+        .map_err(|e| e.to_string())
     }
 }
 

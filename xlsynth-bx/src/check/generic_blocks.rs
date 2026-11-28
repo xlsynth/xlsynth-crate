@@ -289,7 +289,7 @@ impl<'m> BlockTemplate<'m> {
             let params = block
                 .params
                 .iter()
-                .map(|p| definition.resolve_runtime_formal(p, &mut resolve))
+                .map(|p| definition.resolve_data_parameter(p, &mut resolve))
                 .collect::<Result<_, String>>()?;
             let result = resolve(&mut definition, &block.result)?;
             Ok(Some(BlockPortTypes { params, result }))
@@ -311,17 +311,17 @@ impl<'m> BlockTemplate<'m> {
             checker.function_type_bindings = Some(bindings.clone());
             checker.check_block_default_names(block)?;
         }
-        let mut preceding = BTreeSet::new();
+        let mut formal_names = BTreeSet::new();
         for (index, formal) in block.parametric_bindings().enumerate() {
-            let name = match formal {
+            match formal {
                 FunctionParametricRef::Callback(callback) => {
                     required_arguments = index + 1;
-                    &callback.name
+                    formal_names.insert(callback.name.as_str());
                 }
                 FunctionParametricRef::Value(value) => {
-                    // Value formal types are concrete at declaration. Hide
-                    // the block's names while resolving the written type so
-                    // expanding a module alias cannot capture a type formal.
+                    // A value formal shadows module declarations starting at
+                    // its own annotation, before its type or value is known.
+                    formal_names.insert(value.name.as_str());
                     if !block.type_params.is_empty()
                         && references_formal(SourceNode::Annotation(&value.ty), |name| {
                             bindings.declares(name)
@@ -334,7 +334,7 @@ impl<'m> BlockTemplate<'m> {
                     }
                     let ty = resolve_type(
                         &value.ty,
-                        &|name| preceding.contains(name) || bindings.declares(name),
+                        &|name| formal_names.contains(name) || bindings.declares(name),
                         None,
                         dimensions,
                         types,
@@ -353,10 +353,8 @@ impl<'m> BlockTemplate<'m> {
                     if value.default.is_none() {
                         required_arguments = index + 1;
                     }
-                    &value.name
                 }
-            };
-            preceding.insert(name.as_str());
+            }
         }
         let reserved_ports = block
             .clock

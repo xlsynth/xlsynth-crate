@@ -23,8 +23,7 @@ fn compare_function(
 }
 
 #[test]
-fn concrete_signature_and_local_alias_see_the_same_runtime_parameters() -> Result<(), Box<dyn Error>>
-{
+fn concrete_signature_and_local_alias_see_the_same_data_parameters() -> Result<(), Box<dyn Error>> {
     let helpers = r#"
 const W = u32:7;
 fn narrow(W: u32, data: uN[if true { u32:5 } else { W }])
@@ -46,8 +45,8 @@ fn narrow(W: u32, data: uN[if true { u32:5 } else { W }])
 }
 
 #[test]
-fn a_signature_uses_the_runtime_array_length_when_checking_a_typed_loop()
--> Result<(), Box<dyn Error>> {
+fn a_signature_uses_the_input_array_length_when_checking_a_typed_loop() -> Result<(), Box<dyn Error>>
+{
     let source = r#"
 const xs = u32[2]:[0, 0];
 fn narrow(xs: u32[3]) -> uN[if true { u32:5 } else {
@@ -70,7 +69,7 @@ const RESULT = narrow(u32[3]:[1, 2, 3]);
 }
 
 #[test]
-fn a_runtime_formal_shadows_a_named_map_callback_in_a_dimension() -> Result<(), Box<dyn Error>> {
+fn a_data_parameter_shadows_a_named_map_callback_in_a_dimension() -> Result<(), Box<dyn Error>> {
     for (parameter, accepted) in [("other", true), ("incr", false)] {
         let source = format!(
             r#"

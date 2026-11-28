@@ -1088,7 +1088,8 @@ fn resolve_type<'m>(
             } else {
                 Some(dimensions.signed(signed, is_local, bindings, types)?)
             };
-            let fixed_width = dimensions.resolve_or_defer_size(width, is_local, bindings, types)?;
+            let fixed_width =
+                dimensions.resolve_or_defer_size(width, "bit width", is_local, bindings, types)?;
             if let (Some(signed), Some(width)) = (fixed_sign, fixed_width) {
                 Ok(Type::Bits { signed, width })
             } else {
@@ -1115,7 +1116,9 @@ fn resolve_type<'m>(
                 types,
                 child_type_budget(remaining)?,
             )?;
-            if let Some(size) = dimensions.resolve_or_defer_size(size, is_local, bindings, types)? {
+            if let Some(size) =
+                dimensions.resolve_or_defer_size(size, "array length", is_local, bindings, types)?
+            {
                 Ok(Type::array(element, size))
             } else {
                 Ok(Type::ParametricArray {
@@ -1370,7 +1373,7 @@ fn resolve_fields<'m>(
 }
 
 /// Resolve a signature in declaration order. Each parameter shadows outer
-/// names in its annotation and has a runtime type in subsequent annotations.
+/// names in its annotation. Later annotations can use its resolved type.
 fn resolve_signature<'a, 'm>(
     params: &[Param],
     result: &Type,
@@ -1388,7 +1391,7 @@ fn resolve_signature<'a, 'm>(
             &p.ty,
             &|name| indices.contains_key(name) || reserved.contains(name),
             bindings,
-            dimensions.with_runtime_parameters(&resolved, &indices),
+            dimensions.with_data_parameters(&resolved, &indices),
             types,
             MAX_ELABORATION_DEPTH,
         )?;
@@ -1401,7 +1404,7 @@ fn resolve_signature<'a, 'm>(
         result,
         &|name| indices.contains_key(name) || reserved.contains(name),
         bindings,
-        dimensions.with_runtime_parameters(&resolved, &indices),
+        dimensions.with_data_parameters(&resolved, &indices),
         types,
         MAX_ELABORATION_DEPTH,
     )?;
@@ -2863,10 +2866,10 @@ struct BodyChecker<'a, 'm> {
     decls: &'a Declarations<'m>,
     structs: &'a mut StructTable<'m>,
     resolver: &'a mut ImportResolver,
-    /// Runtime names that shadow module declarations in a type annotation.
+    /// Local names that shadow module declarations in a type annotation.
     enclosing_type_locals: Option<&'a dyn Fn(&str) -> bool>,
     /// Data parameters already typed in the signature that owns an annotation.
-    signature_parameters: Option<module_constants::RuntimeParameters<'a>>,
+    signature_parameters: Option<module_constants::DataParameters<'a>>,
     kind: BodyKind,
     has_block_only_behavior: Cell<bool>,
     /// A clockless source block requires every hardware operation to be
@@ -3402,15 +3405,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     }
 
     /// Make a formal's type available to later annotations and the body.
-    /// Its value is supplied at runtime, including when called with a literal.
-    fn bind_runtime_parameter(&mut self, name: &str, ty: &Type) {
+    /// Signature checking uses the input's type even when the argument is a
+    /// literal.
+    fn bind_data_parameter(&mut self, name: &str, ty: &Type) {
         self.names.insert(name.to_owned());
         self.values.insert(name.to_owned(), ty.clone());
     }
 
     /// Resolve a data parameter in a specialized signature. The name shadows
     /// outer bindings in its own annotation and gains its type afterwards.
-    fn resolve_runtime_formal(
+    fn resolve_data_parameter(
         &mut self,
         formal: &Param,
         resolve: impl FnOnce(&mut Self, &Type) -> Result<Type, String>,
@@ -3460,7 +3464,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
         }
         for p in &interface.params {
-            self.bind_runtime_parameter(&p.name, &p.ty);
+            self.bind_data_parameter(&p.name, &p.ty);
         }
         let output = self
             .scoped_result(&function.body, Some(&interface.result), false)
@@ -3544,10 +3548,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             c.clockless_block = Some(block);
         }
         if let Some(rst) = &block.reset {
-            c.bind_runtime_parameter(rst, &Type::Bool);
+            c.bind_data_parameter(rst, &Type::Bool);
         }
         for p in &interface.params {
-            c.bind_runtime_parameter(&p.name, &p.ty);
+            c.bind_data_parameter(&p.name, &p.ty);
         }
         c.body(block, &block.statements, false)?;
         for (name, driven) in &c.wires {
@@ -5012,9 +5016,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         let cond = self.expr(condition, Some(&Type::Bool))?;
-        // The result context or an explicitly typed arm can establish the
-        // type before an untaken arm's bindings are available. Implicit
-        // operands, including scoped lets, retain ordinary sibling inference.
         // Folding here is speculative. An enclosing expression may discard
         // this predicate, so a failed fold leaves ordinary checking in place.
         let pending_then = self.constructor_binding_pending(SourceNode::Expression(then_value));
@@ -5023,26 +5024,65 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             && let Ok(Some(predicate)) = self.checked_constant_for(&cond, self.dslx_constant_use)
             && let Ok(take_then) = predicate.to_bool()
         {
-            let (selected, pending_skipped) = if take_then {
-                (then_value, pending_else)
+            let (selected, skipped, pending_skipped) = if take_then {
+                (then_value, else_value, pending_else)
             } else {
-                (else_value, pending_then)
+                (else_value, then_value, pending_then)
             };
-            let fixed_type = expected.is_some()
-                || matches!(
-                    selected,
-                    Expr::Literal { ty: Some(_), .. }
-                        | Expr::Bool(_)
-                        | Expr::Cast { .. }
-                        | Expr::Zero(_)
-                );
-            if fixed_type && pending_skipped {
-                let value = self.expr_in_group(selected, expected)?;
-                return Ok((value.ty, value.kind));
+            if pending_skipped {
+                if expected.is_some() {
+                    let value = self.expr_in_group(selected, expected)?;
+                    return Ok((value.ty, value.kind));
+                }
+                return self.with_prepared_value(selected, |checker, selected| {
+                    // Inspect the selected operand with any scoped lets in
+                    // place. A literal or inferred let can still need the
+                    // skipped arm's type. A cast supplies its target without
+                    // reading its input.
+                    let value = if checker.has_concrete_element_type(selected)? {
+                        checker.expr_in_group(selected, None)?
+                    } else if let Some(ty) = Self::constructor_cast_target(skipped) {
+                        let ty = checker.source_type(ty)?;
+                        checker.expr_in_group(selected, Some(&ty))?
+                    } else {
+                        let arms = if take_then {
+                            [selected, skipped]
+                        } else {
+                            [skipped, selected]
+                        };
+                        return checker.conditional_results(cond, arms, None);
+                    };
+                    Ok((value.ty, value.kind))
+                });
             }
         }
+        self.conditional_results(cond, [then_value, else_value], expected)
+    }
+
+    /// Find a skipped arm's cast target that can be resolved in the enclosing
+    /// scope.
+    fn constructor_cast_target(arm: &Expr) -> Option<&Type> {
+        let mut result = arm;
+        while let Expr::Scope { result: inner, .. } = result {
+            result = inner;
+        }
+        let Expr::Cast { ty, .. } = result else {
+            return None;
+        };
+        // A primitive target needs no local bindings. A named target or a
+        // computed width may refer to a declaration inside the skipped scope.
+        (!matches!(arm, Expr::Scope { .. }) || bits(ty).is_some()).then_some(ty)
+    }
+
+    /// Check both arms in source order and retain their shared result type.
+    fn conditional_results(
+        &mut self,
+        cond: TypedExpr,
+        arms: [&Expr; 2],
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), String> {
         let [t, f] = self
-            .check_results(&[then_value, else_value], expected)?
+            .check_results(&arms, expected)?
             .try_into()
             .expect("two checked branches");
         Ok((

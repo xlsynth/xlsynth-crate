@@ -50,6 +50,30 @@ pub block capture(clk, words: Tagged<u12[3], 7>) -> u12[3] {
 }
 
 #[test]
+fn block_value_formals_shadow_module_constants_in_their_own_struct_arguments() -> Result<(), String>
+{
+    let source = r#"
+const D = u32:7;
+struct Word<W: u32> { x: uN[W] }
+block hold<D: Word<D>>(clk, v: bool) -> bool {
+    reg q: bool;
+    q := v;
+    q
+}
+pub block circuit(clk, v: bool) -> bool {
+    let y = hold<{Word<7>{x: u7:1}}>(v);
+    y
+}
+"#;
+    check_module(&parse_module(&source.replace("hold<D:", "hold<V:"))?)?;
+    assert_eq!(
+        check_module(&parse_module(source)?).unwrap_err(),
+        "block 'hold': struct 'Word' parametric 'W': unknown value 'D'"
+    );
+    Ok(())
+}
+
+#[test]
 fn unused_dimension_dependent_ports_check_independent_struct_arguments() -> Result<(), String> {
     for (formals, arguments, expected) in [
         ("T, Tag: u32", "u8, true", "u32"),
@@ -1384,7 +1408,7 @@ fn unused_dependent_block_dimensions_check_all_names_in_declaration_scope() -> R
 }
 
 #[test]
-fn generic_port_operands_use_earlier_inputs_as_runtime_values() -> Result<(), String> {
+fn generic_port_annotations_see_the_types_of_earlier_inputs() -> Result<(), String> {
     let operand = "if N == u32:4 { u32:5 } else { x }";
     for (result, concrete) in [
         (format!("uN[{operand}]"), "u5"),
@@ -1392,7 +1416,7 @@ fn generic_port_operands_use_earlier_inputs_as_runtime_values() -> Result<(), St
         (format!("xN[{operand} == u32:5][8]"), "s8"),
         (format!("Word<{{{operand}}}>"), "Word<5>"),
     ] {
-        // The runtime port shadows the module constant even for a literal
+        // The input port shadows the module constant even for a literal
         // argument at the call site.
         let decl = format!(
             "const x = u32:5; struct Word<W: u32> {{ data: bits[W] }} block stage<N: u32>(clk, x: u32, value: {result}) -> {result} {{ value }}"
@@ -1418,13 +1442,45 @@ fn generic_port_operands_use_earlier_inputs_as_runtime_values() -> Result<(), St
 }
 
 #[test]
-fn direct_runtime_width_waits_until_block_specialization() -> Result<(), String> {
+fn generic_block_port_widths_use_input_shapes_independently_of_input_values() -> Result<(), String>
+{
+    let source = r#"
+block capture<N: u32>(clk, flags: bool[N], value: uN[array_size(flags)]) -> uN[array_size(flags)] {
+    reg q: uN[array_size(flags)];
+    q := value;
+    q
+}
+pub block circuit(clk) -> (u4, u4, u2) {
+    let low = capture<4>(bool[4]:[false, ...], u4:0);
+    let high = capture<4>(bool[4]:[true, ...], u4:15);
+    let short = capture<2>(bool[2]:[true, ...], u2:3);
+    (low, high, short)
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let circuit = package.get_top_block().ok_or("missing circuit")?;
+    let [low, high, short] = circuit.instantiations.as_slice() else {
+        panic!("expected three capture instances");
+    };
+    assert_eq!(low.block, high.block);
+    assert_ne!(low.block, short.block);
+    for (instance, width) in [(low, 4), (short, 2)] {
+        let capture = package
+            .get_block(&instance.block)
+            .ok_or("missing capture")?;
+        assert_eq!(capture.registers[0].ty, Type::Bits(width));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_width_that_reads_an_input_is_rejected_at_block_specialization() -> Result<(), String> {
     let decl = "const x = u32:8; block stage<N: u32>(clk, x: u32) -> uN[x] { zero!() }";
     check_module(&parse_module(decl)?)?;
     let called = format!("{decl} pub block top(clk) -> u8 {{ let q = stage<1>(u32:8); q }}");
     assert_eq!(
         check_module(&parse_module(&called)?).unwrap_err(),
-        "block 'top': let 'q': call to block 'stage': value parametric requires a compile-time constant",
+        "block 'top': let 'q': call to block 'stage': bit width requires a compile-time constant",
     );
     Ok(())
 }

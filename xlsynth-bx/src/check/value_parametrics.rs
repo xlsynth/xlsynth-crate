@@ -738,19 +738,30 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Evaluate in the active lexical scope with the binding's declared type.
     pub(super) fn parametric_value(&mut self, expr: &Expr, ty: &Type) -> Result<IrValue, String> {
+        self.constexpr_operand_value(expr, ty, "value parametric")
+    }
+
+    /// Evaluate an operand that must be constant for the given use.
+    pub(super) fn constexpr_operand_value(
+        &mut self,
+        expr: &Expr,
+        ty: &Type,
+        purpose: &str,
+    ) -> Result<IrValue, String> {
         let retain = self.assert_operands.is_some();
-        let (constant, operand) = self.parametric_value_and_operand(expr, ty, retain)?;
+        let (constant, operand) = self.constexpr_value_and_operand(expr, ty, retain, purpose)?;
         self.record_assert_operand(operand);
         Ok(constant)
     }
 
     /// Fold an actual while optionally keeping its typed expression and
     /// constexpr-only lexical lets for an operand erased during lowering.
-    pub(super) fn parametric_value_and_operand(
+    pub(super) fn constexpr_value_and_operand(
         &mut self,
         expr: &Expr,
         ty: &Type,
         retain_operand: bool,
+        purpose: &str,
     ) -> Result<(IrValue, TypedExpr), String> {
         let had_functions = self.constant_functions.is_some();
         let first = self.statements.len();
@@ -762,7 +773,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             let value = checker.dslx_argument(expr, ty)?;
             let constant = checker
                 .checked_constant_for(&value, checker.dslx_constant_use)?
-                .ok_or_else(|| "value parametric requires a compile-time constant".to_owned())?;
+                .ok_or_else(|| format!("{purpose} requires a compile-time constant"))?;
             Ok((constant, value))
         });
         // Scope elaboration may materialize lets while computing an actual
@@ -838,11 +849,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         remaining: usize,
         copies: &mut Option<TypeArgumentCopies>,
     ) -> Result<Type, String> {
-        let size = |checker: &mut Self, expr: &Expr| {
+        let size = |checker: &mut Self, expr: &Expr, purpose: &str| {
             if let Some(n) = checker.struct_dimension(expr)? {
                 return Ok(n);
             }
-            let value = checker.parametric_value(expr, &dimension_type())?;
+            let value = checker.constexpr_operand_value(expr, &dimension_type(), purpose)?;
             ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
                 .ok_or_else(|| "dimension does not fit usize".to_owned())
         };
@@ -917,13 +928,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     Some(1) => true,
                     Some(n) => return Err(format!("bit signedness must be 0 or 1, got {n}")),
                     None => self
-                        .parametric_value(signed, &Type::Bool)?
+                        .constexpr_operand_value(signed, &Type::Bool, "bit signedness")?
                         .to_bool()
                         .map_err(|e| e.to_string())?,
                 };
                 Ok(Type::Bits {
                     signed,
-                    width: size(self, width)?,
+                    width: size(self, width, "bit width")?,
                 })
             }
             Type::ParametricArray {
@@ -931,7 +942,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 size: expr,
             } => Ok(Type::array(
                 self.resolve_annotation(element, child_type_budget(remaining)?, copies)?,
-                size(self, expr)?,
+                size(self, expr, "array length")?,
             )),
             Type::Array { element, size } => Ok(Type::array(
                 self.resolve_annotation(element, child_type_budget(remaining)?, copies)?,
@@ -1110,7 +1121,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         })
     }
 
-    /// Bind defaults in declaration order, then resolve each runtime parameter
+    /// Bind defaults in declaration order, then resolve each data parameter
     /// and the result in the completed value environment.
     fn bound_value_signature(
         &mut self,
@@ -1170,7 +1181,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let mut params = Vec::new();
         for p in &f.params {
-            params.push(self.function_runtime_formal(p)?);
+            params.push(self.resolve_function_data_parameter(p)?);
         }
         let result = self.source_type(&f.result)?;
         Ok(BoundValueSignature {
@@ -1191,8 +1202,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Charge each resolved data input before retaining its type in the
     /// specialization scope.
-    fn function_runtime_formal(&mut self, formal: &Param) -> Result<Param, String> {
-        self.resolve_runtime_formal(formal, |checker, source| {
+    fn resolve_function_data_parameter(&mut self, formal: &Param) -> Result<Param, String> {
+        self.resolve_data_parameter(formal, |checker, source| {
             let ty = checker.source_type(source)?;
             checker
                 .function_registry
@@ -1203,9 +1214,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         })
     }
 
-    /// An inferred annotation on a constexpr formal must select one of the
-    /// value types accepted for an explicitly annotated binding.
+    /// Resolve a constexpr formal's annotation with its name already in scope.
     fn value_binding_type(&mut self, formal: &ParametricBinding) -> Result<Type, String> {
+        self.names.insert(formal.name.clone());
         let ty = self.source_type(&formal.ty)?;
         if let Type::Named(name) = &formal.ty
             && self
@@ -1804,7 +1815,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             self.names.insert(param.name.clone());
             if required.contains(param.name.as_str()) {
                 self.probe_constructor_binding(SourceNode::Annotation(&param.ty), |checker| {
-                    checker.function_runtime_formal(param)
+                    checker.resolve_function_data_parameter(param)
                 })?;
             }
         }
@@ -2067,19 +2078,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         if !actuals.is_empty() {
             // Check explicit annotations before instantiating the callee.
-            // Preceding formals hide module declarations even though none of
-            // their values are available yet in this definition scope.
+            // Each formal hides module declarations starting at its own
+            // annotation, before its value is available in this scope.
             let types = self.with_value_definition(&f.name, |definition| {
                 let mut types = Vec::new();
                 for formal in f.parametric_bindings().take(actuals.len()) {
-                    let name = match formal {
+                    match formal {
                         FunctionParametricRef::Value(value) => {
-                            types.push(definition.source_type(&value.ty)?);
-                            &value.name
+                            types.push(definition.value_binding_type(value)?);
                         }
-                        FunctionParametricRef::Callback(callback) => &callback.name,
-                    };
-                    definition.names.insert(name.clone());
+                        FunctionParametricRef::Callback(callback) => {
+                            definition.names.insert(callback.name.clone());
+                        }
+                    }
                 }
                 Ok(types)
             })?;
@@ -2330,15 +2341,106 @@ const D = u5:0;
 struct S<T, W:u32={bit_count<T>()}> { item:T }
 fn typed<M:u32, D:uN[M]={0}>(y:S<uN[(if true { u5:5 } else { D }) as u32], M>) -> u32 { M }
 fn implicit<M:u32, D:u3={M as u3}>(y:S<uN[(!(if true { 0 } else { D })) as u32], M>) -> u32 { M }
-fn scoped<M:u32, D:u3={M as u3}>(y:S<uN[(!(if false { D } else { let x = 0; x })) as u32], M>) -> u32 { M }
-const R = (typed(S{item:1}), implicit(S{item:1}), scoped(S{item:1}));
+fn scoped<M:u32, D:u3={M as u3}>(y:S<uN[(!(if false { D } else { let D = u2:3; let x = 0; x })) as u32], M>) -> u32 { M }
+const K = u32:7;
+fn scoped_cast<M:u32>(pending:uN[M], y:S<uN[(!(if false { pending as uN[K] } else { let K = u32:3; 0 })) as u32], M>) -> u32 { M }
+const R = (typed(S{item:1}), implicit(S{item:1}), scoped(S{item:1}), scoped_cast(1,S{item:1}));
 "#;
         let checked = check_module(&parse_module(source)?)?;
         assert_eq!(
             checked.constants().last().unwrap().value,
-            IrValue::parse_typed("(bits[32]:5, bits[32]:7, bits[32]:7)")
+            IrValue::parse_typed("(bits[32]:5, bits[32]:7, bits[32]:7, bits[32]:127)")
                 .map_err(|e| e.to_string())?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_constructor_dimension_uses_the_known_type_of_either_conditional_arm() -> Result<(), String>
+    {
+        let source = r#"
+const SEVEN = u32:7;
+struct S<T,W:u32={bit_count<T>()}> { item:T }
+fn seven() -> u32 { SEVEN }
+fn read<M:u32>(pending:uN[M], y:S<uN[(if false { pending as u32 } else { SELECTED }) as u32], M>) -> u32 { M }
+const R = read(1, S{item:1});
+"#;
+        // With no cast on the skipped operand, only the selected arm can
+        // establish its type. Its value of seven specializes pending to u7.
+        let bare_operand = source
+            .replace("u32:7", "u7:7")
+            .replace("seven() -> u32", "seven() -> u7")
+            .replace("pending as u32", "pending");
+        for (program, arm) in [
+            (source, "SEVEN"),
+            (source, "7"),
+            (bare_operand.as_str(), "SEVEN"),
+            (bare_operand.as_str(), "let n:u7 = 7; n"),
+            (bare_operand.as_str(), "seven()"),
+            (bare_operand.as_str(), "SEVEN + 0"),
+        ] {
+            let source = program.replace("SELECTED", arm);
+            let checked = check_module(&parse_module(&source)?)?;
+            assert_eq!(
+                checked.constants().last().unwrap().value,
+                IrValue::make_ubits(32, 7).map_err(|e| e.to_string())?,
+                "{arm}"
+            );
+        }
+
+        for (invalid, expected_error) in [
+            (
+                source
+                    .replace("SELECTED", "SEVEN")
+                    .replace("if false", "if true"),
+                "unknown value 'pending'",
+            ),
+            (
+                source
+                    .replace("SELECTED", "7")
+                    .replace("pending as u32", "pending"),
+                "unknown value 'pending'",
+            ),
+            (
+                source
+                    .replace("pending:uN[M]", "runtime:u32, pending:uN[M]")
+                    .replace("SELECTED", "runtime")
+                    .replace("read(1,", "read(u32:7, 1,"),
+                "compile-time constant",
+            ),
+            (
+                source
+                    .replace("SELECTED", "SEVEN")
+                    .replace("pending as u32", "pending as u16"),
+                "expected u16, got u32",
+            ),
+        ] {
+            let error = check_module(&parse_module(&invalid)?).unwrap_err();
+            assert!(error.contains(expected_error), "{error}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_skipped_scope_cast_can_type_an_implicit_constructor_dimension() -> Result<(), String> {
+        let source = r#"
+struct S<T, W:u32={bit_count<T>()}> { item:T }
+fn f<M:u32>(pending:uN[M], y:S<uN[(if true { 5 } else { let t = pending; t as u32 }) as u32], M>) -> u32 { M }
+const R = f(1, S{item:1});
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::make_ubits(32, 5).map_err(|e| e.to_string())?
+        );
+        // Reading the skipped scope's local K as the module constant would
+        // hide a data-dependent cast width.
+        let runtime_width = format!("const K = u32:32; {source}").replace(
+            "let t = pending; t as u32",
+            "let K = pending as u32; pending as uN[K]",
+        );
+        let error = check_module(&parse_module(&runtime_width)?).unwrap_err();
+        assert!(error.contains("unknown value 'pending'"), "{error}");
         Ok(())
     }
 

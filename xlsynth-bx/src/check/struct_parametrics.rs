@@ -1635,7 +1635,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         functions: Option<&'a mut FunctionSpecializations<'m>>,
     ) -> Self {
         let mut checker = Self::new(dimensions.decls, resolver, structs, BodyKind::Function);
-        checker.signature_parameters = dimensions.runtime_parameters;
+        checker.signature_parameters = dimensions.data_parameters;
         checker.function_position = dimensions.position;
         checker.warning_owner = dimensions.warning_owner;
         checker.zero_binding = dimensions.zero_binding();

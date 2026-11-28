@@ -11,8 +11,46 @@ use xlsynth_bx::{check_module, check_source_with_options, parse_module};
 use xlsynth_pir::{IrValue, ir::NodePayload};
 
 #[test]
-fn signature_dimensions_see_earlier_runtime_parameters_at_specialization()
--> Result<(), Box<dyn Error>> {
+fn result_width_uses_a_value_parametric_or_input_shape() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+fn f<X: u32>() -> uN[X] { zero!() }
+fn pack<N: u32>(flags: bool[N]) -> uN[array_size(flags)] {
+    flags as uN[array_size(flags)]
+}
+const RESULT = (f<5>(), pack([false, false, false, false]), pack([true, true, true, true]));
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    assert_eq!(
+        checked.constants()[0].value,
+        IrValue::parse_typed("(bits[5]:0, bits[4]:0, bits[4]:15)")?,
+    );
+
+    Ok(())
+}
+
+#[test]
+fn function_dimensions_cannot_use_data_parameter_values() -> Result<(), Box<dyn Error>> {
+    for (param_type, result_type, literal, dimension) in [
+        ("u32", "uN[x]", "u32:5", "bit width"),
+        ("u32[1]", "uN[x[0]]", "u32[1]:[5]", "bit width"),
+        ("u32", "u8[x]", "u32:3", "array length"),
+        ("bool", "xN[x][8]", "true", "bit signedness"),
+    ] {
+        let decl = format!("fn f(x: {param_type}) -> {result_type} {{ zero!() }}");
+        for call in [String::new(), format!("const RESULT = f({literal});")] {
+            let error = check_module(&parse_module(&format!("{decl} {call}"))?).unwrap_err();
+            assert_eq!(
+                error,
+                format!("fn 'f': {dimension} requires a compile-time constant")
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn signature_dimensions_see_earlier_data_parameters_at_specialization() -> Result<(), Box<dyn Error>>
+{
     let declarations = r#"
 const x = u32:9;
 fn narrow<N:u32>(x:u32) -> uN[if N == u32:4 { u32:5 } else { x }] {
