@@ -35,6 +35,22 @@ pub struct OutlineFunctionParametric {
     pub ty: OutlineType,
 }
 
+/// A binding in a written DSLX signature, including its original braced
+/// value default. Native AST printing can replace lambdas with generated
+/// closure declarations that do not exist in the source module.
+pub(crate) struct WrittenParametric {
+    pub(crate) name: String,
+    pub(crate) ty: OutlineType,
+    pub(crate) default_expr: Option<String>,
+}
+
+/// A struct's ordered formals and the boundary immediately following its
+/// declaration, where witnesses have access to the same module bindings.
+pub(crate) struct WrittenStructTemplate {
+    pub(crate) formals: Vec<WrittenParametric>,
+    pub(crate) declaration_end: usize,
+}
+
 /// A module-level DSLX type declaration and its visibility.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutlineDecl {
@@ -104,7 +120,7 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
 #[derive(Default)]
 pub(crate) struct ImportedTypeDeclarations {
     pub(crate) sums: BTreeSet<String>,
-    pub(crate) struct_parametrics: BTreeMap<String, Vec<OutlineFunctionParametric>>,
+    pub(crate) struct_parametrics: BTreeMap<String, WrittenStructTemplate>,
     /// Structs whose derive list names ToBits and whose impl permits the
     /// method.
     pub(crate) derives_to_bits: BTreeMap<String, ToBitsDerive>,
@@ -368,7 +384,16 @@ fn parse_outline_with_functions<'s>(
                             module.public_values.insert(name.clone());
                             module.public_functions.insert(name.clone());
                             if !formals.is_empty() {
-                                module.function_parametrics.insert(name.clone(), formals);
+                                module.function_parametrics.insert(
+                                    name.clone(),
+                                    formals
+                                        .into_iter()
+                                        .map(|formal| OutlineFunctionParametric {
+                                            name: formal.name,
+                                            ty: formal.ty,
+                                        })
+                                        .collect(),
+                                );
                             }
                         }
                         let signature_start = parser.pos;
@@ -404,7 +429,14 @@ fn parse_outline_with_functions<'s>(
                 if let Some(imported) = &mut imported
                     && declaration.is_public_struct_template(&name)
                 {
-                    imported.struct_parametrics.insert(name.clone(), formals);
+                    let close = parser.tokens[parser.pos - 1];
+                    imported.struct_parametrics.insert(
+                        name.clone(),
+                        WrittenStructTemplate {
+                            formals,
+                            declaration_end: close.start + close.text.len(),
+                        },
+                    );
                 }
                 module.declarations.insert(name, declaration);
             }
@@ -551,7 +583,7 @@ impl Parser<'_> {
     /// Parametric bindings shadow module-level names in annotations.
     fn outline_bindings(
         &mut self,
-        mut formals: Option<&mut Vec<OutlineFunctionParametric>>,
+        mut formals: Option<&mut Vec<WrittenParametric>>,
     ) -> Result<BTreeSet<String>, String> {
         let mut names = BTreeSet::new();
         if self.eat("<") {
@@ -580,9 +612,17 @@ impl Parser<'_> {
                             }
                         }
                     };
-                    formals.push(OutlineFunctionParametric {
+                    let default_expr = if p.eat("=") && p.peek(0) == "{" {
+                        let start = p.pos;
+                        p.outline_group("{")?;
+                        Some(p.outline_syntax(start))
+                    } else {
+                        None
+                    };
+                    formals.push(WrittenParametric {
                         name: name.clone(),
                         ty,
+                        default_expr,
                     });
                 }
                 names.insert(name);

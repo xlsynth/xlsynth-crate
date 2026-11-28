@@ -14,9 +14,11 @@ use super::runfiles::XlsRunfiles;
 use crate::ast::{StructParametricKind, UsePath};
 use crate::check::{MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE};
 use crate::parser::dslx_tokens;
-use crate::parser::outline::{ImportedTypeDeclarations, ToBitsDerive, outline_import};
-use crate::parser::source_bytes::decode_dslx_source;
-use crate::{DslxOutline, OutlineFunctionParametric, OutlineKind, OutlineShape, OutlineType};
+use crate::parser::outline::{
+    ImportedTypeDeclarations, ToBitsDerive, WrittenStructTemplate, outline_import,
+};
+use crate::parser::source_bytes::decode_dslx_source_with_offsets;
+use crate::{DslxOutline, OutlineKind, OutlineShape, OutlineType};
 pub(super) use native_files::NativeSourceFiles;
 
 // XLS generates these names from the stdlib sources of the pinned DSO. A
@@ -384,7 +386,11 @@ impl OutlineGraph {
                     path.physical.display()
                 )
             })?;
-            let decoded = decode_dslx_source(&source).map_err(|e| {
+            let mut expansions = BTreeMap::new();
+            let decoded = decode_dslx_source_with_offsets(&source, |decoded_end, original_end| {
+                expansions.insert(decoded_end, original_end);
+            })
+            .map_err(|e| {
                 format!(
                     "decoding DSLX module '{subject}' at {}: {e}",
                     source_path.display()
@@ -397,6 +403,12 @@ impl OutlineGraph {
                     source_path.display()
                 )
             })?;
+            for template in type_declarations.struct_parametrics.values_mut() {
+                let end = template.declaration_end;
+                if let Some((&decoded_end, &original_end)) = expansions.range(..=end).next_back() {
+                    template.declaration_end = original_end + (end - decoded_end);
+                }
+            }
             // This private snapshot uses enum members for lookup. DSLX
             // evaluates discriminants from the original, source-ordered text.
             for declaration in outline.declarations.values_mut() {
@@ -722,20 +734,20 @@ impl OutlineGraph {
     /// A concrete alias can expose an instance of a private struct without
     /// exposing its template. Binding inference needs the template itself.
     pub(super) fn public_struct_template_arity(&self, subject: &str, name: &str) -> Option<usize> {
-        self.struct_formals(subject, name).map(<[_]>::len)
+        self.struct_template(subject, name)
+            .map(|template| template.formals.len())
     }
 
-    pub(super) fn struct_formals(
+    pub(super) fn struct_template(
         &self,
         subject: &str,
         name: &str,
-    ) -> Option<&[OutlineFunctionParametric]> {
+    ) -> Option<&WrittenStructTemplate> {
         self.modules
             .get(subject)?
             .type_declarations
             .struct_parametrics
             .get(name)
-            .map(Vec::as_slice)
     }
 
     pub(super) fn named(&self, subject: &str, name: &str) -> Option<ResolvedShape> {

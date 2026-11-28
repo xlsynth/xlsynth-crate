@@ -59,6 +59,7 @@ pub(crate) struct ImportedStructs {
     bindings: HashMap<dslx::StructDef, StructBinding>,
     declarations: BTreeMap<DeclId, dslx::StructDef>,
     struct_formal_types: BTreeMap<(DeclId, usize), specialization::StructFormalTypes>,
+    struct_default_values: BTreeMap<(DeclId, usize), specialization::StructDefaultValues>,
     explicit_types: BTreeMap<String, dslx::Type>,
     /// Concrete non-record exports already reflected from the native snapshot.
     reflected_aliases: BTreeMap<String, Type>,
@@ -142,6 +143,7 @@ impl ImportedStructs {
             bindings: HashMap::new(),
             declarations: BTreeMap::new(),
             struct_formal_types: BTreeMap::new(),
+            struct_default_values: BTreeMap::new(),
             explicit_types: BTreeMap::new(),
             reflected_aliases: BTreeMap::new(),
             aggregate_spellings: HashMap::new(),
@@ -1044,26 +1046,31 @@ fn probe(_bx_array_index: u32, {}) -> uN[{width}] {{ ({}).to_bits() }}"#,
 fn instance_spelling(member: &str, values: &[BoundParametricValue]) -> Result<String, String> {
     let values = values
         .iter()
-        .map(|bound| match &bound.ty {
-            Type::Bool => bound
-                .value
-                .to_bool()
-                .map(|b| b.to_string())
-                .map_err(|e| e.to_string()),
-            Type::Bits {
-                signed: false,
-                width: 32,
-            } => bound
-                .value
-                .to_u32()
-                .map(|n| format!("u32:{n}"))
-                .map_err(|e| e.to_string()),
-            ty => Err(format!(
-                "unsupported DSLX struct value parametric type '{ty}'"
-            )),
-        })
+        .map(scalar_argument_spelling)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(format!("{member}<{}>", values.join(", ")))
+}
+
+/// Render a supported DSLX struct parameter as a typed constant expression.
+fn scalar_argument_spelling(bound: &BoundParametricValue) -> Result<String, String> {
+    match &bound.ty {
+        Type::Bool => bound
+            .value
+            .to_bool()
+            .map(|b| b.to_string())
+            .map_err(|e| e.to_string()),
+        Type::Bits {
+            signed: false,
+            width: 32,
+        } => bound
+            .value
+            .to_u32()
+            .map(|n| format!("u32:{n}"))
+            .map_err(|e| e.to_string()),
+        ty => Err(format!(
+            "unsupported DSLX struct value parametric type '{ty}'"
+        )),
+    }
 }
 
 /// The declaration/explicit-type witnesses each contain one function.

@@ -355,9 +355,9 @@ struct BlockInterface {
     port_type_nodes: usize,
 }
 
-/// Output wires and the cost of materializing the checked data ports.
+/// Names occupied by physical ports and the cost of their checked types.
 struct BlockPortLayout {
-    outputs: Vec<Param>,
+    names: BTreeSet<String>,
     type_nodes: usize,
 }
 
@@ -368,7 +368,7 @@ struct BlockTemplate<'m> {
     /// Module constants give every specialization the same local port stages.
     stages: BlockStages<u64>,
     ports: BlockPortTypes,
-    /// Source nodes visited when specializing a dimension-dependent signature,
+    /// Source nodes visited when specializing a parameter-dependent signature,
     /// including phantom struct arguments. Fixed signatures skip this pass.
     port_binding_work: usize,
     /// Written input type nodes matched against data on every dependent call.
@@ -965,71 +965,8 @@ fn resolve_type<'m>(
                 .collect::<Result<Vec<_>, _>>()?;
             types.resolve_struct_type_application(name, args, bindings, dimensions, remaining)
         }
-        Type::MixedApplied { name, args } => {
-            if is_local(name) {
-                return Err(format!("'{name}' names a local value here"));
-            }
-            dimensions
-                .decls
-                .check_type_name_visibility(name, dimensions.position)?;
-            if let Some(bindings) = bindings {
-                bindings.reject_value(name)?;
-                if bindings.has_unbound_variable(ty)
-                    || (dimensions.block_formals.is_some()
-                        && generic_blocks::has_matching_dimension(ty, &|expr| {
-                            dimensions.is_dependent_block_size(expr)
-                        }))
-                {
-                    let template = types
-                        .structs
-                        .template(name)
-                        .ok_or_else(|| format!("unknown parametric struct '{name}'"))?;
-                    struct_parametrics::check_arity(template, args.len())?;
-                    if template.parametric_bindings().skip(args.len()).any(|formal|
-                        !matches!(formal, crate::ast::StructParametricRef::Value(p) if p.default.is_some())
-                    ) {
-                        return Err(format!("missing required argument in type '{ty}'"));
-                    }
-                    let depth = child_type_budget(remaining)?;
-                    let resolved_args = args
-                        .iter()
-                        .map(|arg| match arg {
-                            StructArgument::Type(ty) => {
-                                resolve_type(ty, is_local, Some(bindings), dimensions, types, depth)
-                                    .map(StructArgument::Type)
-                            }
-                            StructArgument::Value(_) => Ok(arg.clone()),
-                        })
-                        .collect::<Result<Vec<_>, String>>()?;
-                    types.structs.update_imports(types.resolver)?;
-                    let mut checker = types.struct_scope(dimensions);
-                    checker.enclosing_type_locals = Some(is_local);
-                    checker.function_type_bindings = Some(bindings.clone());
-                    checker.check_deferred_struct_arguments(
-                        template,
-                        args,
-                        &resolved_args,
-                        bindings,
-                    )?;
-                    return Ok(Type::MixedApplied {
-                        name: name.clone(),
-                        args: resolved_args,
-                    });
-                }
-            }
-            let mut checker = types.struct_scope(dimensions);
-            checker.enclosing_type_locals = Some(is_local);
-            checker.function_type_bindings = bindings.cloned();
-            let args =
-                checker.struct_prefix_at(name, StructLiteralArgs::Mixed(args), remaining, None)?;
-            checker.struct_applied_type(name, &args, remaining)
-        }
-        Type::ParametricStruct { name, args } => {
-            let mut checker = types.struct_scope(dimensions);
-            checker.enclosing_type_locals = Some(is_local);
-            checker.function_type_bindings = bindings.cloned();
-            let args = checker.struct_prefix(name, StructLiteralArgs::Expressions(args))?;
-            checker.struct_applied_type(name, &args, remaining)
+        Type::ParametricStruct { .. } | Type::MixedApplied { .. } => {
+            resolve_struct_application(ty, is_local, bindings, dimensions, types, remaining)
         }
         Type::Named(name) | Type::Applied { name, .. } => {
             if is_local(name) {
@@ -1146,15 +1083,27 @@ fn resolve_type<'m>(
             }
         }
         Type::ParametricBits { signed, width } => {
-            let signed = dimensions.signed(signed, is_local, bindings, types)?;
-            if let Some(width) =
-                dimensions.resolve_or_defer_size(width, is_local, bindings, types)?
-            {
+            let fixed_sign =
+                if dimensions.defer_bit_or_array_operand(signed, &Type::Bool, is_local, types)? {
+                    None
+                } else {
+                    Some(dimensions.signed(signed, is_local, bindings, types)?)
+                };
+            let fixed_width = dimensions.resolve_or_defer_size(width, is_local, bindings, types)?;
+            if let (Some(signed), Some(width)) = (fixed_sign, fixed_width) {
                 Ok(Type::Bits { signed, width })
             } else {
                 Ok(Type::ParametricBits {
-                    signed: Box::new(Expr::Bool(signed)),
-                    width: width.clone(),
+                    signed: fixed_sign.map_or_else(|| signed.clone(), |s| Box::new(Expr::Bool(s))),
+                    width: fixed_width.map_or_else(
+                        || width.clone(),
+                        |width| {
+                            Box::new(Expr::Literal {
+                                ty: None,
+                                text: width.to_string(),
+                            })
+                        },
+                    ),
                 })
             }
         }
@@ -1178,6 +1127,88 @@ fn resolve_type<'m>(
         }
         Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
     }
+}
+
+/// Resolve a value or mixed struct application. Keep dependent operands in a
+/// block signature until specialization can construct the concrete instance.
+fn resolve_struct_application<'m>(
+    ty: &Type,
+    is_local: &dyn Fn(&str) -> bool,
+    bindings: Option<&Bindings>,
+    dimensions: ModuleDimensions<'_, 'm>,
+    types: &mut TypeResolver<'_, 'm>,
+    remaining: usize,
+) -> Result<Type, String> {
+    let (name, args) = ty.struct_application().expect("struct application");
+    let dependent = dimensions.has_dependent_port_operand(ty);
+    if matches!(args, StructLiteralArgs::Expressions(_)) && !dependent {
+        let mut checker = types.struct_scope(dimensions);
+        checker.enclosing_type_locals = Some(is_local);
+        checker.function_type_bindings = bindings.cloned();
+        let bound = checker.struct_prefix(name, args)?;
+        return checker.struct_applied_type(name, &bound, remaining);
+    }
+    if is_local(name) {
+        return Err(format!("'{name}' names a local value here"));
+    }
+    dimensions
+        .decls
+        .check_type_name_visibility(name, dimensions.position)?;
+    if let Some(bindings) = bindings {
+        bindings.reject_value(name)?;
+        if bindings.has_unbound_variable(ty) || dependent {
+            let Some(template) = types.structs.template(name) else {
+                let (subject, member) = lookup_use(name, types.resolver, is_local)?
+                    .ok_or_else(|| format!("unknown parametric struct '{name}'"))?;
+                let mut checker = types.struct_scope(dimensions);
+                checker.enclosing_type_locals = Some(is_local);
+                checker.function_type_bindings = Some(bindings.clone());
+                checker.check_deferred_imported_struct(&subject, &member, args, dimensions)?;
+                return Ok(ty.clone());
+            };
+            struct_parametrics::check_arity(template, args.len())?;
+            if template.parametric_bindings().skip(args.len()).any(|formal|
+                !matches!(formal, crate::ast::StructParametricRef::Value(p) if p.default.is_some())
+            ) {
+                return Err(format!("missing required argument in type '{ty}'"));
+            }
+            let depth = child_type_budget(remaining)?;
+            let resolved = if let Type::MixedApplied { args, .. } = ty {
+                Type::MixedApplied {
+                    name: name.to_owned(),
+                    args: args
+                        .iter()
+                        .map(|arg| match arg {
+                            StructArgument::Type(ty) => {
+                                resolve_type(ty, is_local, Some(bindings), dimensions, types, depth)
+                                    .map(StructArgument::Type)
+                            }
+                            StructArgument::Value(_) => Ok(arg.clone()),
+                        })
+                        .collect::<Result<_, String>>()?,
+                }
+            } else {
+                ty.clone()
+            };
+            types.structs.update_imports(types.resolver)?;
+            let mut checker = types.struct_scope(dimensions);
+            checker.enclosing_type_locals = Some(is_local);
+            checker.function_type_bindings = Some(bindings.clone());
+            checker.check_deferred_struct_arguments(
+                template,
+                args,
+                resolved.struct_application().expect("struct application").1,
+                bindings,
+                dimensions,
+            )?;
+            return Ok(resolved);
+        }
+    }
+    let mut checker = types.struct_scope(dimensions);
+    checker.enclosing_type_locals = Some(is_local);
+    checker.function_type_bindings = bindings.cloned();
+    let args = checker.struct_prefix_at(name, args, remaining, None)?;
+    checker.struct_applied_type(name, &args, remaining)
 }
 
 /// Shared module state used to resolve types and evaluate struct arguments.
@@ -1205,8 +1236,7 @@ impl<'m> TypeResolver<'_, 'm> {
         let ty = match bindings {
             Some(bindings)
                 if bindings.has_unbound_variable(&application)
-                    || (dimensions.block_formals.is_some()
-                        && generic_blocks::has_block_dimension(&application)) =>
+                    || dimensions.has_dependent_port_operand(&application) =>
             {
                 return Ok(application);
             }
@@ -1682,87 +1712,99 @@ impl BlockInterface {
         structs: &StructTable,
         private_outputs: Option<&BTreeSet<String>>,
     ) -> Result<Self, String> {
-        let layout = Self::check_ports(
-            clock,
-            reset,
-            &params,
-            Some(&result),
-            structs,
-            None,
-            private_outputs,
-        )?;
-        Ok(Self {
-            params,
-            result,
-            outputs: layout.outputs,
-            port_type_nodes: layout.type_nodes,
-        })
-    }
-
-    /// Check physical port names and layout bounds. A bare type parameter can
-    /// introduce struct fields or tuple outputs once its binding is known.
-    fn check_ports(
-        clock: Option<&str>,
-        reset: Option<&str>,
-        params: &[Param],
-        result: Option<&Type>,
-        structs: &StructTable,
-        parameters: Option<&Bindings>,
-        private_outputs: Option<&BTreeSet<String>>,
-    ) -> Result<BlockPortLayout, String> {
-        let mut ports = BTreeSet::new();
-        for name in clock.into_iter().chain(reset) {
-            declare(&mut ports, name)?;
-        }
-        let mut type_nodes = 0usize;
-        for p in params {
-            declare(&mut ports, &p.name)?;
-            let shape = structs
-                .formal_shape(&p.ty, MAX_ELABORATION_DEPTH, parameters)
-                .map_err(|e| format!("input '{}': {e}", p.name))?;
-            type_nodes = type_nodes.saturating_add(shape.ir_nodes);
-        }
-        let Some(result) = result else {
-            // An unbound result formal has a one-node minimum layout. Its
-            // concrete type determines both the number and the names of
-            // outputs.
-            return Ok(BlockPortLayout {
-                outputs: Vec::new(),
-                type_nodes: type_nodes.saturating_add(TypeShape::LEAF.ir_nodes),
-            });
-        };
-        let shape = structs
-            .formal_shape(result, MAX_ELABORATION_DEPTH, parameters)
-            .map_err(|e| format!("result: {e}"))?;
-        type_nodes = type_nodes.saturating_add(shape.ir_nodes);
-        let mut outputs =
-            if let Type::TypeApplied { name, .. } | Type::MixedApplied { name, .. } = result {
-                structs
-                    .template(name)
-                    .ok_or_else(|| unknown_declaration("struct", name))?
-                    .fields
-                    .clone()
-            } else {
-                output_ports(result, &structs.definitions)?
-            };
+        let mut layout = BlockPortLayout::new(clock, reset, &params, Some(&result), structs, None)?;
+        let mut outputs = output_ports(&result, &structs.definitions)?;
         for output in &mut outputs {
             if let Some(reserved) = private_outputs {
                 while reserved.contains(&output.name) {
                     output.name.push('_');
                 }
             }
-            if !xlsynth_pir::ir_builder::is_valid_identifier(&output.name) {
-                return Err(format!(
-                    "output port '{}' is not a valid XLS IR identifier",
-                    output.name
-                ));
-            }
-            declare(&mut ports, &output.name)?;
+            layout.check_output_name(&output.name)?;
         }
-        Ok(BlockPortLayout {
+        Ok(Self {
+            params,
+            result,
             outputs,
-            type_nodes,
+            port_type_nodes: layout.type_nodes,
         })
+    }
+}
+
+impl BlockPortLayout {
+    /// Reserve input names and check the size of the concrete or minimum
+    /// layout.
+    fn new(
+        clock: Option<&str>,
+        reset: Option<&str>,
+        params: &[Param],
+        result: Option<&Type>,
+        structs: &StructTable,
+        parameters: Option<&Bindings>,
+    ) -> Result<Self, String> {
+        let mut names = BTreeSet::new();
+        for name in clock.into_iter().chain(reset) {
+            declare(&mut names, name)?;
+        }
+        let mut type_nodes = 0usize;
+        for p in params {
+            declare(&mut names, &p.name)?;
+            let shape = structs
+                .formal_shape(&p.ty, MAX_ELABORATION_DEPTH, parameters)
+                .map_err(|e| format!("input '{}': {e}", p.name))?;
+            type_nodes = type_nodes.saturating_add(shape.ir_nodes);
+        }
+        let result_shape = match result {
+            Some(result) => structs
+                .formal_shape(result, MAX_ELABORATION_DEPTH, parameters)
+                .map_err(|e| format!("result: {e}"))?,
+            None => TypeShape::LEAF,
+        };
+        Ok(Self {
+            names,
+            type_nodes: type_nodes.saturating_add(result_shape.ir_nodes),
+        })
+    }
+
+    /// A struct template determines its output names before its field types are
+    /// bound.
+    fn check_template_outputs(
+        &mut self,
+        result: &Type,
+        structs: &StructTable,
+        resolver: &ImportResolver,
+    ) -> Result<(), String> {
+        if let Some((name, _)) = result.struct_application() {
+            if let Some(template) = structs.template(name) {
+                for field in &template.fields {
+                    self.check_output_name(&field.name)?;
+                }
+            } else {
+                let (module, member) = resolver
+                    .lookup(name)?
+                    .ok_or_else(|| unknown_declaration("struct", name))?;
+                let fields = resolver
+                    .struct_field_names(&module, &member)
+                    .ok_or_else(|| unknown_declaration("struct", name))?;
+                for field in fields {
+                    self.check_output_name(field)?;
+                }
+            }
+        } else {
+            for output in output_ports(result, &structs.definitions)? {
+                self.check_output_name(&output.name)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_output_name(&mut self, name: &str) -> Result<(), String> {
+        if !xlsynth_pir::ir_builder::is_valid_identifier(name) {
+            return Err(format!(
+                "output port '{name}' is not a valid XLS IR identifier"
+            ));
+        }
+        declare(&mut self.names, name)
     }
 }
 

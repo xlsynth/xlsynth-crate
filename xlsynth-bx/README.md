@@ -1692,6 +1692,31 @@ type parameters from data inputs, including the element type of `T[N]`,
 then evaluates dependent dimensions and checks the concrete port types.
 A width can also use `bit_count<T>()` when another input supplies `T`.
 
+The same bindings apply to struct arguments and bit signedness in input and
+result types. For example, given `struct Word<N: u32> { data: uN[N] }`,
+this block accepts `Word<8>` at a call to `hold<8>(word)`:
+
+```text
+block hold<N: u32>(clk, word: Word<N>) -> uN[N] {
+    reg q: uN[N];
+    q := word.data;
+    q
+}
+```
+
+A port can likewise use an imported struct such as `words::Word<S, N>`
+or a bit type such as `xN[S][N]`, where `S` is a Boolean block parameter.
+At declaration, BX checks struct parameter types that are already known.
+For an omitted DSLX parameter, a default that is constant in the struct's
+declaration scope can supply the type of a later parameter. For example,
+`W: u32 = {u32:8}` makes a subsequent `X: uN[W]` an unsupported `u8`
+parameter. When an imported default refers to an unbound block value through
+an earlier struct parameter, BX waits for a call to evaluate that default.
+The same applies when DSLX cannot resolve the binding in the generic declaration.
+BX checks the size of the expanded struct and any enclosing array when a
+call binds its parameters. An unused block can therefore pass declaration
+checking even if the expanded port would exceed the concrete type size limit.
+
 Group named settings in a struct to pass them as a single compile-time
 argument. Its fields can determine port dimensions and select block behavior.
 
@@ -1762,6 +1787,11 @@ definition when the concrete types, values, and callback identities all agree.
 ### Named callbacks on blocks
 
 A block can declare type and callable parameters together. Supply the callback names in angle brackets at the call site. BX first infers types from data inputs, then resolves callbacks in declaration order. Each callback's input types must already be known. Its return type can supply a new type parameter or must agree with one already bound.
+
+For a callback on a parameterized payload, use an inferred type parameter as
+in `block stage<T, F: fn(T) -> T>(clk, x: T) -> T`. BX resolves callback
+signatures before applying block value defaults, so a signature such as
+`F: fn(uN[W]) -> uN[W]` cannot use a block value parameter `W`.
 
 ```text
 use math;

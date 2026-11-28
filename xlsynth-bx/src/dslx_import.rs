@@ -486,6 +486,32 @@ impl ImportResolver {
         self.with_imports(|structs, _| structs.struct_parametric_type(subject, member, previous))
     }
 
+    /// Check omitted arguments before a generic block has concrete bindings.
+    pub(crate) fn check_struct_defaults(
+        &mut self,
+        subject: &str,
+        member: &str,
+        previous: Vec<Option<BoundParametricValue>>,
+    ) -> Result<(), String> {
+        self.with_imports(|structs, data| {
+            structs.check_struct_defaults(subject, member, previous, data)
+        })
+    }
+
+    /// Return the next formal type if its dependencies have known values.
+    pub(crate) fn partial_struct_parametric_type(
+        &mut self,
+        subject: &str,
+        member: &str,
+        previous: &[Option<BoundParametricValue>],
+    ) -> Result<Option<Type>, String> {
+        self.with_imports(|structs, _| {
+            structs.struct_parametric_type_at(subject, member, previous.len(), |i| {
+                previous[i].as_ref()
+            })
+        })
+    }
+
     /// Struct layouts discovered through named references and inferred call
     /// results.
     pub(crate) fn struct_defs(&self) -> &[StructDef] {

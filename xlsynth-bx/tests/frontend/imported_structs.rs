@@ -1070,15 +1070,14 @@ fn rebuild<S: bool, N: u32>(w: words::Word<S, N>) -> words::Word<S, N> {
 }
 "#;
     let forward_body = r#"
-    let typed: words::Word<S, N> = w;
-    let copied = rebuild(typed);
+    let copied = rebuild(w);
     (copied.data as s16, words::widen(copied))
 "#;
     let expr = struct_expression(
         root.path(),
         &format!(
             "use words; {rebuild}
-             block forward<T, S: bool, N: u32>(clk, w: T) -> (s16, s16) {{ {forward_body} }}"
+             block forward<S: bool, N: u32>(clk, w: words::Word<S, N>) -> (s16, s16) {{ {forward_body} }}"
         ),
         &format!(
             "import words; {rebuild}
@@ -1101,6 +1100,32 @@ let b = forward<false, 9>(unsigned_word);
         ])?,
         IrValue::parse_typed("((bits[16]:65533,bits[16]:65533),(bits[16]:509,bits[16]:509))")?
     );
+    Ok(())
+}
+
+#[test]
+fn dependent_imported_result_exposes_field_names_on_an_unused_block() -> Result<(), Box<dyn Error>>
+{
+    let root = tempdir()?;
+    fs::write(
+        root.path().join("words.x"),
+        "pub struct Word<N: u32> { data: uN[N] }",
+    )?;
+    let options = search_paths(&[root.path()]);
+    for (binding, ty) in [("use words;", "words::Word"), ("use words::Word;", "Word")] {
+        let decl = format!(
+            "{binding} block wrap<N: u32>(clk, out: uN[N]) -> {ty}<N> {{ {ty}<N> {{ data: out }} }}
+             pub block top(clk, x: u8) -> u8 {{ x }}"
+        );
+        check_module_with_options(&parse_module(&decl)?, &options)?;
+        let collides = decl
+            .replace("out: uN[N]", "data: uN[N]")
+            .replace("data: out", "data");
+        assert_eq!(
+            check_module_with_options(&parse_module(&collides)?, &options).unwrap_err(),
+            "block 'wrap': duplicate name 'data'",
+        );
+    }
     Ok(())
 }
 
@@ -1396,5 +1421,80 @@ fn bang_field_followed_by_equality_matches_dslx() -> Result<(), Box<dyn Error>> 
             IrValue::bool(equal)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn unused_generic_block_checks_known_imported_struct_arguments() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::write(
+        root.path().join("words.x"),
+        r#"type Flag = bool;
+pub struct Word<N: u32, W: u32, CODE: uN[W], S: Flag = {false}> { payload: uN[N] }"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    let source = |args: &str| {
+        format!(
+            "use words;
+         block unused<N: u32>(x: words::Word<{args}>) -> u32 {{ N }}
+         pub block top(x: u32) -> u32 {{ x }}"
+        )
+    };
+    // The width of CODE is independent of the leading, unbound payload
+    // width. S can be checked through its alias or supplied by its default.
+    for args in ["N, 1, true", "N, 32, u32:2, true", "N, N, u32:2"] {
+        check_module_with_options(&parse_module(&source(args))?, &options)?;
+    }
+    for args in [
+        "N",                  // Missing W and CODE.
+        "N, 1",               // Missing CODE alone.
+        "N, 1, u32:2",        // W is known: CODE must be Boolean.
+        "N, N, u32:2, u32:2", // CODE is deferred, but S is still Boolean.
+    ] {
+        let bx = source(args);
+        assert!(
+            check_module_with_options(&parse_module(&bx)?, &options).is_err(),
+            "{bx}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn imported_struct_formal_dependencies_respect_member_names() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::write(
+        root.path().join("dims.x"),
+        "pub type Flag = bool; pub const W = u32:1;",
+    )?;
+    fs::write(
+        root.path().join("words.x"),
+        r#"import dims;
+struct Settings { Flag: u32 }
+const CFG = Settings { Flag: u32:1 };
+pub struct Alias<Flag: u32, S: dims::Flag> { payload: uN[Flag] }
+pub struct Projection<Flag: u32, S: uN[CFG.Flag]> { payload: uN[Flag] }
+pub struct Dependent<W: u32, S: uN[dims::W * W]> { payload: uN[W] }"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    let source = |application: &str| {
+        format!(
+            "use words;
+             block unused<N: u32>(x: words::{application}) -> u32 {{ N }}
+             pub block top(x: u32) -> u32 {{ x }}"
+        )
+    };
+    for name in ["Alias", "Projection"] {
+        let valid = source(&format!("{name}<N, true>"));
+        check_module_with_options(&parse_module(&valid)?, &options)?;
+        let invalid = source(&format!("{name}<N, u32:9>"));
+        assert_eq!(
+            check_module_with_options(&parse_module(&invalid)?, &options).unwrap_err(),
+            "block 'unused': expected bool, got u32"
+        );
+    }
+    // The unqualified W in the same annotation still needs a binding.
+    let dependent = source("Dependent<N, u32:9>");
+    check_module_with_options(&parse_module(&dependent)?, &options)?;
     Ok(())
 }

@@ -8,14 +8,14 @@ use std::fmt::{self, Write};
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
 use crate::ast::{
-    Expr, Param, ScopedSourceNodes, SourceNode, StructArgument, StructArgumentRef, StructDef,
-    StructLiteralArgs, StructParametricRef, Type,
+    Expr, Param, ScopedSourceNodes, SourceNode, StructArgumentRef, StructDef, StructLiteralArgs,
+    StructParametricRef, Type,
 };
 use crate::builtin::BuiltinOp;
 use crate::typed::{BoundParametricValue, TypedExpr, bits};
 
 use super::counted_for::CarryContext;
-use super::generic_blocks::{Bindings, has_block_dimension};
+use super::generic_blocks::Bindings;
 use super::generic_inputs::Input;
 use super::value_parametrics::{
     ExplicitScope, InferredBindings, TypeArgumentCopies, dimension_type,
@@ -306,6 +306,27 @@ impl<'m> BodyChecker<'_, 'm> {
         Ok(BoundParametricValue { ty, value })
     }
 
+    /// Bind a concrete argument or check the declared type of a forwarded
+    /// block value while its value remains symbolic.
+    fn bind_or_defer_struct_value(
+        &mut self,
+        expr: &Expr,
+        ty: Type,
+        dimensions: ModuleDimensions<'_, 'm>,
+    ) -> Result<Option<BoundParametricValue>, String> {
+        if let Some(actual) = dimensions.block_value_type(expr) {
+            if !super::compatible(actual, &ty) {
+                return Err(format!("expected {ty}, got {actual}"));
+            }
+            return Ok(None);
+        }
+        if dimensions.depends_on_block_formal(expr) {
+            return Ok(None);
+        }
+        self.bind_struct_argument(StructArgumentRef::Value(expr), ty)
+            .map(Some)
+    }
+
     /// Evaluate the supplied prefix using the imported declaration's formal
     /// types.
     pub(super) fn imported_struct_prefix(
@@ -329,6 +350,47 @@ impl<'m> BodyChecker<'_, 'm> {
             bound.push(self.bind_struct_argument(arg, ty)?);
         }
         Ok(bound)
+    }
+
+    /// Check every resolvable DSLX formal type, including omitted defaults,
+    /// and bind supplied arguments that are already concrete.
+    pub(super) fn check_deferred_imported_struct(
+        &mut self,
+        subject: &str,
+        member: &str,
+        args: StructLiteralArgs<'_>,
+        dimensions: ModuleDimensions<'_, 'm>,
+    ) -> Result<(), String> {
+        let StructLiteralArgs::Expressions(args) = args else {
+            return Err(format!(
+                "expected value arguments for '{subject}::{member}'"
+            ));
+        };
+        let arity = self.resolver.check_struct_template_name(subject, member)?;
+        if args.len() > arity {
+            return Err(format!(
+                "struct '{subject}::{member}' takes at most {arity} arguments, got {}",
+                args.len()
+            ));
+        }
+        let formals = dimensions.block_formals.expect("dependent block port");
+        let mut previous = Vec::with_capacity(args.len());
+        for expr in args {
+            self.check_block_dimension_names(expr, &formals.values)?;
+            let ty = self
+                .resolver
+                .partial_struct_parametric_type(subject, member, &previous)?;
+            let value = match ty {
+                Some(ty) => self.bind_or_defer_struct_value(expr, ty, dimensions)?,
+                None => None,
+            };
+            previous.push(value);
+        }
+        if args.len() < arity {
+            self.resolver
+                .check_struct_defaults(subject, member, previous)?;
+        }
+        Ok(())
     }
 
     /// Check an explicit prefix in order. Formal types are resolved in the
@@ -447,26 +509,35 @@ impl<'m> BodyChecker<'_, 'm> {
         Ok(result)
     }
 
-    /// Check concrete operands and omitted defaults of a mixed application
-    /// whose full layout depends on caller type or size arguments.
+    /// Check concrete operands and omitted defaults while other struct
+    /// arguments still depend on the caller's bindings.
     pub(super) fn check_deferred_struct_arguments(
         &mut self,
         template: &'m StructDef,
-        source_args: &[StructArgument],
-        args: &[StructArgument],
+        source_args: StructLiteralArgs<'_>,
+        args: StructLiteralArgs<'_>,
         caller_bindings: &Bindings,
+        dimensions: ModuleDimensions<'_, 'm>,
     ) -> Result<(), String> {
         let name = &template.name;
         let mut scope = ExplicitScope::default();
         let mut pending_value = None;
         let mut unresolved = BTreeSet::new();
-        for ((formal, arg), source) in template.parametric_bindings().zip(args).zip(source_args) {
+        for ((formal, arg), source) in template
+            .parametric_bindings()
+            .zip(args.iter())
+            .zip(source_args.iter())
+        {
             match (formal, arg) {
-                (StructParametricRef::Type(param), StructArgument::Type(ty)) => {
+                (StructParametricRef::Type(param), StructArgumentRef::Type(ty)) => {
                     // A module alias may resolve to a nominal type sharing a
                     // formal's name.
-                    let source_ty = source.as_type().expect("resolved type argument");
-                    if caller_bindings.has_unbound_variable(source_ty) || has_block_dimension(ty) {
+                    let StructArgumentRef::Type(source_ty) = source else {
+                        unreachable!("resolved type argument")
+                    };
+                    if caller_bindings.has_unbound_variable(source_ty)
+                        || dimensions.has_dependent_port_operand(ty)
+                    {
                         unresolved.insert(param);
                     } else {
                         let bindings = scope.types.get_or_insert_with(|| Bindings::new(&[]));
@@ -474,8 +545,12 @@ impl<'m> BodyChecker<'_, 'm> {
                         bindings.match_input(&Type::Named(param.to_owned()), ty, self.structs)?;
                     }
                 }
-                (StructParametricRef::Value(formal), StructArgument::Value(expr)) => {
-                    self.check_deferred_expr_names(expr)?;
+                (StructParametricRef::Value(formal), StructArgumentRef::Value(expr)) => {
+                    if let Some(formals) = dimensions.block_formals {
+                        self.check_block_dimension_names(expr, &formals.values)?;
+                    } else {
+                        self.check_deferred_expr_names(expr)?;
+                    }
                     if references_formal(SourceNode::Annotation(&formal.ty), |n| {
                         unresolved.contains(n)
                     }) || references_formal(SourceNode::Expression(expr), |n| {
@@ -493,11 +568,16 @@ impl<'m> BodyChecker<'_, 'm> {
                         scope.exchange(definition);
                         ty
                     })?;
-                    let value = self.struct_argument_value(expr, &ty).map_err(|e| {
-                        format!("struct '{name}' parametric '{}': {e}", formal.name)
-                    })?;
-                    pending_value =
-                        Some((formal.name.as_str(), BoundParametricValue { ty, value }));
+                    let bound = self
+                        .bind_or_defer_struct_value(expr, ty, dimensions)
+                        .map_err(|e| {
+                            format!("struct '{name}' parametric '{}': {e}", formal.name)
+                        })?;
+                    if let Some(bound) = bound {
+                        pending_value = Some((formal.name.as_str(), bound));
+                    } else {
+                        unresolved.insert(formal.name.as_str());
+                    }
                 }
                 (StructParametricRef::Type(param), _) => {
                     return Err(format!(
