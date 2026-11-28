@@ -11,7 +11,7 @@ use crate::{IrFormatPreference, IrValue};
 
 use crate::{ir, ir_parser, ir_utils::operands};
 
-pub use crate::ir_block::{Block, BlockPort, BlockReset, InoutNet};
+pub use crate::ir_block::{Block, BlockPort, BlockReset, InoutNet, RegisterAccesses};
 
 pub use xlsynth_ir_value::{ArrayTypeData, StartAndLimit, Type};
 
