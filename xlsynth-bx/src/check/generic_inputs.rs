@@ -184,8 +184,12 @@ impl<'m> BodyChecker<'_, 'm> {
                 .iter()
                 .zip(args)
                 .map(|(p, arg)| {
-                    checker
-                        .prepare_value(arg)
+                    let prepared = if checker.dslx_value_context {
+                        checker.prepare_dslx_argument(arg)
+                    } else {
+                        checker.prepare_value(arg)
+                    };
+                    prepared
                         .map_err(|e| format!("input '{}', call to block '{target}': {e}", p.name))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -289,6 +293,12 @@ impl<'m> BodyChecker<'_, 'm> {
             .into_iter()
             .zip(&specialization.interface.params)
             .map(|(input, p)| {
+                if self.dslx_value_context
+                    && let Some(expr) = input.source()
+                {
+                    self.check_dslx_argument_widths(expr, &p.ty)
+                        .map_err(|e| input_error(p, e))?;
+                }
                 self.finish_input(input, &p.ty)
                     .map_err(|e| input_error(p, e))
             })

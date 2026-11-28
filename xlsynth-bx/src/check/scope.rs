@@ -691,16 +691,30 @@ impl BodyChecker<'_, '_> {
     /// value and width available through both inference and elaboration.
     pub(super) fn dslx_argument(&mut self, expr: &Expr, ty: &Type) -> Result<TypedExpr, String> {
         self.with_scope_aliases(|checker| {
-            let arg =
-                checker.prepare_scopes(expr, PrepareOperands::CallArgument, &mut |_| Ok(()))?;
-            super::check_argument_widths(
-                &arg,
-                ty,
-                Some(&checker.inferred_bindings),
-                Some(&|| checker.zero_calls_function()),
-            )?;
+            let arg = checker.prepare_dslx_argument(expr)?;
+            checker.check_dslx_argument_widths(&arg, ty)?;
             checker.expr(&arg, Some(ty))
         })
+    }
+
+    /// Evaluate self-determined operands, including range bounds, before
+    /// applying the formal port or parameter type.
+    pub(super) fn prepare_dslx_argument<'e>(
+        &mut self,
+        expr: &'e Expr,
+    ) -> Result<Cow<'e, Expr>, String> {
+        self.prepare_scopes(expr, PrepareOperands::CallArgument, &mut |_| Ok(()))
+    }
+
+    /// Check literal groups against a concrete formal while lexical bindings
+    /// can still supply their inferred widths.
+    pub(super) fn check_dslx_argument_widths(&self, expr: &Expr, ty: &Type) -> Result<(), String> {
+        super::check_argument_widths(
+            expr,
+            ty,
+            Some(&self.inferred_bindings),
+            Some(&|| self.zero_calls_function()),
+        )
     }
 
     /// Keep scoped initializer values and their type constraints alive until
@@ -758,6 +772,13 @@ impl BodyChecker<'_, '_> {
     /// its trailing expression. Other edges (such as an index or a nested
     /// call's arguments) have independent contexts and are checked normally.
     pub(super) fn prepare_value<'e>(&mut self, expr: &'e Expr) -> Result<Cow<'e, Expr>, String> {
+        // Structural lets have already selected their outer match. Prepare
+        // that value exactly as if the selection occurred here.
+        if let Expr::SelectedMatchArm(arm) = expr {
+            return self
+                .prepare_selected_match_arm(arm, PrepareOperands::ScopesOnly, &mut |_| Ok(()))
+                .map(Cow::Owned);
+        }
         self.prepare_scopes(expr, PrepareOperands::ScopesOnly, &mut |_| Ok(()))
     }
 
@@ -875,6 +896,26 @@ impl BodyChecker<'_, '_> {
         })
     }
 
+    /// Prepare a selected result in DSLX context before exposing its member
+    /// types to surrounding BX operands.
+    fn prepare_selected_match_arm(
+        &mut self,
+        arm: &Expr,
+        mode: PrepareOperands,
+        before_scope: &mut dyn FnMut(&mut Self) -> Result<(), String>,
+    ) -> Result<Expr, String> {
+        let value = self.with_dslx_value_context(|checker| {
+            checker
+                .prepare_scopes(arm, mode, before_scope)
+                .map(Cow::into_owned)
+        })?;
+        Ok(if self.dslx_widths().is_none() {
+            selected_block_arm(value)
+        } else {
+            value
+        })
+    }
+
     fn prepare_scope_operands<'e>(
         &mut self,
         expr: &'e Expr,
@@ -897,16 +938,9 @@ impl BodyChecker<'_, '_> {
         if let Expr::ConstMatch { subject, arms } = expr {
             before_scope(self)?;
             let arm = self.const_match_arm(subject, arms)?;
-            let value = self.with_dslx_value_context(|checker| {
-                checker
-                    .prepare_scopes(&arm, mode, before_scope)
-                    .map(Cow::into_owned)
-            })?;
-            return Ok(Cow::Owned(if self.dslx_widths().is_none() {
-                selected_block_arm(value)
-            } else {
-                value
-            }));
+            return self
+                .prepare_selected_match_arm(&arm, mode, before_scope)
+                .map(Cow::Owned);
         }
         if let Expr::SelectedMatchArm(value) = expr {
             let prepared = self.with_dslx_value_context(|checker| {

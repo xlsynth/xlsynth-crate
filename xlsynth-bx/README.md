@@ -1559,8 +1559,32 @@ block stage<PIPE: bool>(clk, x: u8) -> u8 {
 `stage<false>` wires `x` directly to its output and contains no child or mux.
 The `allow` attribute permits a design that uses only this bypass specialization
 under the default warnings-as-errors setting.
-Each arm can choose a different child. The call must be the whole selected
-arm of an unconditional block `let` or a `let` in a structural `unroll_for!`.
+
+Use `const match` to choose among several implementations. Here the
+specialization `stage_by_mode<1>` instantiates one `pipe_reg` named `y`.
+Mode zero forwards the input directly. Other modes instantiate
+`invert_reg`, a child with the same signature.
+
+```text
+#[allow(combinational_block)]
+block stage_by_mode<MODE: u32>(clk, x: u8) -> u8 {
+    let y = const match MODE {
+        0 => x,
+        1 => pipe_reg(x),
+        _ => invert_reg(x),
+    };
+    y
+}
+```
+
+For either conditional, write the child call as the whole selected arm of
+an unconditional block `let`, a `let` in a structurally unrolled loop, or
+the result of a structural `unroll_map!` iteration. A tuple pattern can
+supply compile-time bindings to the selected child's arguments or
+parametrics. The child's declared port types supply the expected types for
+its arguments, and literals in a selected `const match` arm follow the
+same inference rules as in a value arm. Each specialization emits only the
+selected wiring.
 
 An ordinary block `let` or a tuple pattern can shadow a data input or an earlier `let`. The initializer reads the bindings visible before the statement. For example, `let previous = x; let x = x + u8:1;` keeps the original input in `previous` and makes the sum available as `x`. A binding inside a guarded update is visible only in that guard's body. Clock, reset, register, and deferred wire names remain reserved.
 
