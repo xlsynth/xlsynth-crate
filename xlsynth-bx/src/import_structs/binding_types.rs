@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Resolve native function value-binding annotations before BX elaborates the
+//! Resolve native value-binding annotations before BX elaborates the
 //! actuals.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,7 +19,10 @@ use crate::parser::source_bytes::decode_dslx_source;
 
 /// Allocate witness declaration names outside the source's existing
 /// identifiers.
-fn witness_names<'a>(source: &[u8], prefix: &'a str) -> impl Iterator<Item = String> + 'a {
+pub(super) fn witness_names<'a>(
+    source: &[u8],
+    prefix: &'a str,
+) -> impl Iterator<Item = String> + 'a {
     let occupied: BTreeSet<_> = source
         .split(|b| !b.is_ascii_alphanumeric() && *b != b'_')
         .filter_map(|word| {
@@ -188,7 +191,7 @@ impl ImportedStructs {
 
     /// Typecheck added witness declarations without changing the native module
     /// used for IR.
-    fn annotation_snapshot(
+    pub(super) fn annotation_snapshot(
         &self,
         subject: &str,
         bytes: Vec<u8>,

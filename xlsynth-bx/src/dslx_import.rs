@@ -422,14 +422,10 @@ impl ImportResolver {
         &self,
         subject: &str,
         member: &str,
-    ) -> Result<(), String> {
-        if self.struct_template_arity(subject, member).is_some() {
-            Ok(())
-        } else {
-            Err(format!(
+    ) -> Result<usize, String> {
+        self.struct_template_arity(subject, member).ok_or_else(|| format!(
                 "type application '{subject}::{member}' requires a public parametric DSLX struct declaration"
-            ))
-        }
+        ))
     }
 
     /// Use the shared native context until the first failed resolution.
@@ -470,7 +466,7 @@ impl ImportResolver {
         &mut self,
         subject: &str,
         member: &str,
-        args: &[u32],
+        args: &[BoundParametricValue],
     ) -> Result<Type, String> {
         self.check_struct_template_name(subject, member)?;
         self.with_imports(|structs, imports| {
@@ -478,6 +474,16 @@ impl ImportResolver {
                 .resolve_applied(subject, member, args, imports)
                 .map(Type::Named)
         })
+    }
+
+    /// Return the next BX scalar formal type under the supplied prefix.
+    pub(crate) fn struct_parametric_type(
+        &mut self,
+        subject: &str,
+        member: &str,
+        previous: &[BoundParametricValue],
+    ) -> Result<Type, String> {
+        self.with_imports(|structs, _| structs.struct_parametric_type(subject, member, previous))
     }
 
     /// Struct layouts discovered through named references and inferred call
@@ -500,7 +506,7 @@ impl ImportResolver {
         &self,
         template: &str,
         canonical: &str,
-    ) -> Result<Option<&[u32]>, String> {
+    ) -> Result<Option<&[BoundParametricValue]>, String> {
         let Some((subject, member)) = self.lookup(template)? else {
             return Ok(None);
         };
@@ -983,7 +989,6 @@ fn probe(_bx_array_index: u32, {}) {{ let ({args},) = {}; capture({args}) }}
 pub(crate) struct ProbeCapture {
     capture: dslx::Function,
     context: dslx::TypeInfo,
-    invocation: dslx::InvocationCalleeData,
 }
 
 impl ProbeCapture {
@@ -1016,24 +1021,13 @@ impl ProbeCapture {
         let context = invocation
             .derived_type_info()
             .ok_or("missing DSLX type information for the capture invocation")?;
-        Ok(Self {
-            capture,
-            context,
-            invocation,
-        })
+        Ok(Self { capture, context })
     }
 
     pub(crate) fn param_type(&self, index: usize) -> Result<dslx::Type, String> {
         self.context
             .get_type_for_type_annotation(&self.capture.get_param(index).get_type_annotation())
             .ok_or_else(|| "could not resolve the captured DSLX type".to_string())
-    }
-
-    /// Concrete value bindings inferred by DSLX for the capture invocation.
-    pub(crate) fn bindings(&self) -> Result<dslx::ParametricEnv, String> {
-        self.invocation
-            .callee_bindings()
-            .ok_or_else(|| "could not resolve the captured DSLX parametric bindings".to_string())
     }
 }
 
@@ -1187,6 +1181,111 @@ mod tests {
     use xlsynth_pir::IrValue;
     use xlsynth_pir::ir_eval::eval_fn_in_package_value;
 
+    fn u32_args(values: &[u32]) -> Vec<BoundParametricValue> {
+        values
+            .iter()
+            .map(|&n| BoundParametricValue {
+                ty: Type::Bits {
+                    signed: false,
+                    width: 32,
+                },
+                value: IrValue::u32(n),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mixed_struct_bindings_preserve_alias_types_defaults_and_phantom_identity()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("flags.x"),
+            r#"
+type Enabled = bool;
+type Width = u32;
+pub struct Tag<Z: Width, B: Enabled = {Z == u32:4}> { x: u8 }
+pub type DefaultTag = Tag<4>;
+pub struct Frame { tags: DefaultTag[1] }
+pub fn frame() -> Frame { zero!<Frame>() }
+const W = u32:8;
+pub struct SizedTag<W: Width, V: uN[W]> { x: u8 }
+pub type WideTag = SizedTag<32, u32:13>;
+pub fn flag() -> SizedTag<1, true> { zero!<SizedTag<1, true>>() }
+pub struct Unsupported<T: s1> { x: u8 }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let uses = crate::parse_module("use flags;")?.uses;
+        let mut resolver = ImportResolver::new(&uses, &options)?;
+        let mut values = u32_args(&[4]);
+        values.push(BoundParametricValue {
+            ty: Type::Bool,
+            value: IrValue::bool(true),
+        });
+        // Reflect the nested instance before asking for its alias or template.
+        let (_, result) = resolver.resolve("flags", "frame", vec![])?;
+        let Type::Named(frame) = result else {
+            panic!("expected Frame")
+        };
+        let layout = resolver
+            .struct_defs()
+            .iter()
+            .find(|def| def.name == frame)
+            .ok_or("missing Frame")?;
+        let tag = Type::Named("flags::Tag<u32:4, true>".into());
+        assert_eq!(layout.fields[0].ty, Type::array(tag.clone(), 1));
+        assert_eq!(
+            resolver.struct_parametric_type("flags", "Tag", &[])?,
+            values[0].ty
+        );
+        assert_eq!(
+            resolver.struct_parametric_type("flags", "Tag", &values[..1])?,
+            Type::Bool
+        );
+        assert_eq!(resolver.resolve_named("flags", "DefaultTag")?, tag);
+        assert_eq!(resolver.resolve_applied("flags", "Tag", &values[..1])?, tag);
+        assert_eq!(resolver.resolve_applied("flags", "Tag", &values)?, tag);
+        assert_eq!(
+            resolver.struct_parametric_values("flags::Tag", "flags::Tag<u32:4, true>")?,
+            Some(values.as_slice())
+        );
+        values[1].value = IrValue::bool(false);
+        assert_eq!(
+            resolver.resolve_applied("flags", "Tag", &values)?,
+            Type::Named("flags::Tag<u32:4, false>".into())
+        );
+        let wide = u32_args(&[32, 13]);
+        let wide_name = Type::Named("flags::SizedTag<u32:32, u32:13>".into());
+        assert_eq!(resolver.resolve_named("flags", "WideTag")?, wide_name);
+        assert_eq!(
+            resolver.struct_parametric_type("flags", "SizedTag", &wide[..1])?,
+            wide[1].ty
+        );
+        assert_eq!(
+            resolver.resolve_applied("flags", "SizedTag", &wide)?,
+            wide_name
+        );
+        let narrow_name = Type::Named("flags::SizedTag<u32:1, true>".into());
+        assert_eq!(resolver.resolve("flags", "flag", vec![])?.1, narrow_name);
+        let mut narrow = u32_args(&[1]);
+        assert_eq!(
+            resolver.struct_parametric_type("flags", "SizedTag", &narrow)?,
+            Type::Bool
+        );
+        narrow.push(BoundParametricValue {
+            ty: Type::Bool,
+            value: IrValue::bool(true),
+        });
+        assert_eq!(
+            resolver.resolve_applied("flags", "SizedTag", &narrow)?,
+            narrow_name
+        );
+        Ok(())
+    }
+
     #[test]
     fn applied_structs_share_native_layouts_with_aliases_and_inferred_results()
     -> Result<(), Box<dyn Error>> {
@@ -1218,16 +1317,25 @@ pub fn make(x: u8) -> Seven { Seven { value: x } }
                 );
             }
             for args in [&[][..], &[7], &[7, 14]] {
-                assert_eq!(resolver.resolve_applied("wire", "Tag", args)?, expected);
+                assert_eq!(
+                    resolver.resolve_applied("wire", "Tag", &u32_args(args))?,
+                    expected
+                );
             }
             assert_eq!(resolver.resolve_named("wire", "Tag")?, expected);
             assert_eq!(resolver.resolve_named("wire", "Seven")?, expected);
             assert_eq!(resolver.resolve("wire", "make", vec![byte])?.1, expected);
             assert_eq!(resolver.struct_defs().len(), 1);
             let probes = resolver.structs.type_witnesses();
-            assert_eq!(resolver.resolve_applied("wire", "Tag", &[7])?, expected);
+            assert_eq!(
+                resolver.resolve_applied("wire", "Tag", &u32_args(&[7]))?,
+                expected
+            );
             assert_eq!(resolver.structs.type_witnesses(), probes);
-            assert_ne!(resolver.resolve_applied("wire", "Tag", &[7, 15])?, expected);
+            assert_ne!(
+                resolver.resolve_applied("wire", "Tag", &u32_args(&[7, 15]))?,
+                expected
+            );
             assert_eq!(resolver.struct_defs().len(), 2);
         }
         Ok(())
@@ -1257,7 +1365,9 @@ pub struct Generic<N: u32, T: type = u8> { x: T }
         let mut resolver = ImportResolver::new(&uses, &options)?;
         for member in ["Hidden", "Missing", "Plain", "value", "Alias", "Pair<1, 2>"] {
             assert_eq!(
-                resolver.resolve_applied("wire", member, &[1]).unwrap_err(),
+                resolver
+                    .resolve_applied("wire", member, &u32_args(&[1]))
+                    .unwrap_err(),
                 format!(
                     "type application 'wire::{member}' requires a public parametric DSLX struct declaration"
                 )
@@ -1265,7 +1375,7 @@ pub struct Generic<N: u32, T: type = u8> { x: T }
         }
         assert_eq!(resolver.structs.type_witnesses(), 0);
         assert_eq!(
-            resolver.resolve_applied("wire", "Pair", &[1, 2])?,
+            resolver.resolve_applied("wire", "Pair", &u32_args(&[1, 2]))?,
             Type::Named("wire::Pair<u32:1, u32:2>".into())
         );
         for (member, args) in [
@@ -1277,13 +1387,17 @@ pub struct Generic<N: u32, T: type = u8> { x: T }
             ("Generic", &[1, 2]),
         ] {
             let mut resolver = ImportResolver::new(&uses, &options)?;
-            let error = resolver.resolve_applied("wire", member, args).unwrap_err();
+            let error = resolver
+                .resolve_applied("wire", member, &u32_args(args))
+                .unwrap_err();
             assert!(error.starts_with(&format!("wire::{member}<")), "{error}");
             // Retrying against failed ImportData can abort inside libxls v0.61.
             // Every entrypoint that could issue another probe retains the
             // error.
             assert_eq!(
-                resolver.resolve_applied("wire", "Pair", &[1]).unwrap_err(),
+                resolver
+                    .resolve_applied("wire", "Pair", &u32_args(&[1]))
+                    .unwrap_err(),
                 error
             );
             assert_eq!(resolver.resolve_named("wire", "Alias").unwrap_err(), error);

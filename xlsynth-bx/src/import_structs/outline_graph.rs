@@ -16,7 +16,7 @@ use crate::check::{MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE};
 use crate::parser::dslx_tokens;
 use crate::parser::outline::{ImportedTypeDeclarations, ToBitsDerive, outline_import};
 use crate::parser::source_bytes::decode_dslx_source;
-use crate::{DslxOutline, OutlineKind, OutlineShape, OutlineType};
+use crate::{DslxOutline, OutlineFunctionParametric, OutlineKind, OutlineShape, OutlineType};
 pub(super) use native_files::NativeSourceFiles;
 
 // XLS generates these names from the stdlib sources of the pinned DSO. A
@@ -722,12 +722,20 @@ impl OutlineGraph {
     /// A concrete alias can expose an instance of a private struct without
     /// exposing its template. Binding inference needs the template itself.
     pub(super) fn public_struct_template_arity(&self, subject: &str, name: &str) -> Option<usize> {
+        self.struct_formals(subject, name).map(<[_]>::len)
+    }
+
+    pub(super) fn struct_formals(
+        &self,
+        subject: &str,
+        name: &str,
+    ) -> Option<&[OutlineFunctionParametric]> {
         self.modules
             .get(subject)?
             .type_declarations
-            .struct_arities
+            .struct_parametrics
             .get(name)
-            .copied()
+            .map(Vec::as_slice)
     }
 
     pub(super) fn named(&self, subject: &str, name: &str) -> Option<ResolvedShape> {

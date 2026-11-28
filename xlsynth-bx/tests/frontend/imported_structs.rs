@@ -1053,6 +1053,111 @@ fn inferred_parametric_struct_result_exposes_its_specialized_field() -> Result<(
 }
 
 #[test]
+fn imported_signedness_and_width_follow_the_struct_through_functions_and_blocks()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::write(
+        root.path().join("words.x"),
+        r#"
+pub struct Word<S: bool, N: u32> { data: xN[S][N] }
+pub fn make<S: bool, N: u32>(x: xN[S][N]) -> Word<S, N> { Word<S, N> { data: x } }
+pub fn widen<S: bool, N: u32>(w: Word<S, N>) -> s16 { w.data as s16 }
+"#,
+    )?;
+    let rebuild = r#"
+fn rebuild<S: bool, N: u32>(w: words::Word<S, N>) -> words::Word<S, N> {
+    words::Word<S, N> { data: w.data }
+}
+"#;
+    let forward_body = r#"
+    let typed: words::Word<S, N> = w;
+    let copied = rebuild(typed);
+    (copied.data as s16, words::widen(copied))
+"#;
+    let expr = struct_expression(
+        root.path(),
+        &format!(
+            "use words; {rebuild}
+             block forward<T, S: bool, N: u32>(clk, w: T) -> (s16, s16) {{ {forward_body} }}"
+        ),
+        &format!(
+            "import words; {rebuild}
+             fn forward<S: bool, N: u32>(w: words::Word<S, N>) -> (s16, s16) {{ {forward_body} }}"
+        ),
+        "x: words::Word<true, 7>, y: u9",
+        "((s16, s16), (s16, s16))",
+        r#"
+let signed_word = words::make(x.data);
+let unsigned_word = words::Word<false, 9> { data: y };
+let a = forward<true, 7>(signed_word);
+let b = forward<false, 9>(unsigned_word);
+(a, b)
+"#,
+    )?;
+    assert_eq!(
+        expr.compare(&[
+            IrValue::make_tuple(&[IrValue::make_sbits(7, -3)?]),
+            IrValue::make_ubits(9, 509)?,
+        ])?,
+        IrValue::parse_typed("((bits[16]:65533,bits[16]:65533),(bits[16]:509,bits[16]:509))")?
+    );
+    Ok(())
+}
+
+#[test]
+fn imported_phantom_boolean_survives_defaults_aliases_and_inferred_results()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::write(
+        root.path().join("tags.x"),
+        r#"
+pub struct Tagged<W: u32, M: bool = {W == u32:8}> { value: uN[W] }
+pub type Marked = Tagged<8>;
+pub type Plain = Tagged<8, false>;
+pub fn marked<W: u32, M: bool>(_v: Tagged<W, M>) -> bool { M }
+pub fn pair(a: Marked, b: Plain) -> (Plain, Marked[1]) { (b, [a]) }
+"#,
+    )?;
+    let expr = struct_expression(
+        root.path(),
+        "use tags;",
+        "import tags;",
+        "x: u8",
+        "(bool, bool)",
+        r#"
+let a: tags::Tagged<8, true> = tags::Marked { value: x };
+let b = tags::Tagged<8, false> { value: x };
+let p = tags::pair(a, b);
+(tags::marked(p.0), tags::marked(p.1[u32:0]))
+"#,
+    )?;
+    assert_eq!(
+        expr.compare(&[IrValue::make_ubits(8, 7)?])?,
+        IrValue::parse_typed("(bits[1]:0,bits[1]:1)")?
+    );
+    let paths = [root.path()];
+    let options = search_paths(&paths);
+    for body in [
+        "let p: tags::Plain = a; p.value",
+        "let p = tags::pair(a, a); p.0.value",
+        "let p: tags::Tagged<true, false> = a; p.value",
+        "let p: tags::Tagged<8, u32:1> = a; p.value",
+    ] {
+        let bx = format!("use tags; {}", bx_source("a: tags::Marked", "u8", body));
+        let dslx = format!(
+            "import tags; {}",
+            dslx_source("a: tags::Marked", "u8", body)
+        );
+        assert!(
+            check_module_with_options(&parse_module(&bx)?, &options).is_err(),
+            "{bx}"
+        );
+        assert!(compile_dslx_module(&dslx, &paths).is_err(), "{dslx}");
+    }
+    Ok(())
+}
+
+#[test]
 fn imported_parametric_struct_updates_accept_direct_and_let_bound_bases()
 -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;

@@ -1065,7 +1065,12 @@ fn resolve_type<'m>(
             }
             if let Some((subject, member)) = lookup_use(name, types.resolver, is_local)? {
                 if let Type::Applied { args, .. } = ty {
-                    types.resolver.resolve_applied(&subject, &member, args)
+                    let values = types.struct_scope(dimensions).imported_struct_prefix(
+                        &subject,
+                        &member,
+                        StructLiteralArgs::Integers(args),
+                    )?;
+                    types.resolver.resolve_applied(&subject, &member, &values)
                 } else {
                     types.resolver.resolve_named(&subject, &member)
                 }

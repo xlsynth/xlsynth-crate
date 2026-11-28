@@ -28,7 +28,7 @@ pub struct DslxOutline {
     pub functions: BTreeMap<String, OutlineType>,
 }
 
-/// A function parametric and its written annotation in the declaring module.
+/// A parametric formal and its written annotation in the declaring module.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutlineFunctionParametric {
     pub name: String,
@@ -104,7 +104,7 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
 #[derive(Default)]
 pub(crate) struct ImportedTypeDeclarations {
     pub(crate) sums: BTreeSet<String>,
-    pub(crate) struct_arities: BTreeMap<String, usize>,
+    pub(crate) struct_parametrics: BTreeMap<String, Vec<OutlineFunctionParametric>>,
     /// Structs whose derive list names ToBits and whose impl permits the
     /// method.
     pub(crate) derives_to_bits: BTreeMap<String, ToBitsDerive>,
@@ -318,9 +318,10 @@ fn parse_outline_with_functions<'s>(
                 parser.pos += 1;
                 let name = parser.outline_identifier()?;
                 let bindings_start = parser.pos;
-                let mut function_parametrics = Vec::new();
+                let mut formals = Vec::new();
                 let bindings = parser.outline_bindings(
-                    (public && keyword == "fn").then_some(&mut function_parametrics),
+                    (public && (keyword == "fn" || (keyword == "struct" && imported.is_some())))
+                        .then_some(&mut formals),
                 )?;
                 let kind = match keyword {
                     "type" => {
@@ -366,10 +367,8 @@ fn parse_outline_with_functions<'s>(
                         if public {
                             module.public_values.insert(name.clone());
                             module.public_functions.insert(name.clone());
-                            if !function_parametrics.is_empty() {
-                                module
-                                    .function_parametrics
-                                    .insert(name.clone(), function_parametrics);
+                            if !formals.is_empty() {
+                                module.function_parametrics.insert(name.clone(), formals);
                             }
                         }
                         let signature_start = parser.pos;
@@ -405,7 +404,7 @@ fn parse_outline_with_functions<'s>(
                 if let Some(imported) = &mut imported
                     && declaration.is_public_struct_template(&name)
                 {
-                    imported.struct_arities.insert(name.clone(), bindings.len());
+                    imported.struct_parametrics.insert(name.clone(), formals);
                 }
                 module.declarations.insert(name, declaration);
             }

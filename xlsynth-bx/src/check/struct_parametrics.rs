@@ -5,7 +5,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write};
 
-use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
 use crate::ast::{
@@ -251,14 +250,6 @@ impl<'m> StructTable<'m> {
     }
 }
 
-/// Convert a checked u32 parametric to the canonical binding representation.
-fn binding_value(value: &IrValue) -> Result<u32, String> {
-    let bits = value.as_bits().map_err(|e| e.to_string())?;
-    ir_bits_to_usize(bits)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| "struct value parametric does not fit in u32".into())
-}
-
 impl<'m> BodyChecker<'_, 'm> {
     /// Find the value substituted for a bare formal in a struct declaration.
     pub(super) fn direct_struct_binding(&self, expr: &Expr) -> Option<(&Type, &IrValue)> {
@@ -293,6 +284,51 @@ impl<'m> BodyChecker<'_, 'm> {
             .ok_or_else(|| format!("forwarded {source} value does not fit {target}"));
         }
         self.parametric_value(expr, target)
+    }
+
+    /// Check a written value against the struct formal's declared type.
+    fn bind_struct_argument(
+        &mut self,
+        arg: StructArgumentRef<'_>,
+        ty: Type,
+    ) -> Result<BoundParametricValue, String> {
+        let value = match arg {
+            StructArgumentRef::Value(expr) => self.struct_argument_value(expr, &ty)?,
+            StructArgumentRef::Integer(value) => self.parametric_value(
+                &Expr::Literal {
+                    ty: None,
+                    text: value.to_string(),
+                },
+                &ty,
+            )?,
+            StructArgumentRef::Type(_) => return Err("expected a struct value argument".into()),
+        };
+        Ok(BoundParametricValue { ty, value })
+    }
+
+    /// Evaluate the supplied prefix using the imported declaration's formal
+    /// types.
+    pub(super) fn imported_struct_prefix(
+        &mut self,
+        subject: &str,
+        member: &str,
+        args: StructLiteralArgs<'_>,
+    ) -> Result<Vec<BoundParametricValue>, String> {
+        let arity = self.resolver.check_struct_template_name(subject, member)?;
+        if args.len() > arity {
+            return Err(format!(
+                "struct '{subject}::{member}' takes at most {arity} arguments, got {}",
+                args.len()
+            ));
+        }
+        let mut bound = Vec::with_capacity(args.len());
+        for arg in args.iter() {
+            let ty = self
+                .resolver
+                .struct_parametric_type(subject, member, &bound)?;
+            bound.push(self.bind_struct_argument(arg, ty)?);
+        }
+        Ok(bound)
     }
 
     /// Check an explicit prefix in order. Formal types are resolved in the
@@ -340,31 +376,21 @@ impl<'m> BodyChecker<'_, 'm> {
         mut resolve_type: impl FnMut(&mut Self, &Type) -> Result<Type, String>,
     ) -> Result<Vec<BoundStructArgument>, String> {
         let Some(template) = self.structs.template(name) else {
-            let ty = dimension_type();
-            return match args {
-                StructLiteralArgs::Omitted => Ok(Vec::new()),
-                StructLiteralArgs::Types(_) | StructLiteralArgs::Mixed(_) => {
-                    Err(format!("unknown type-parametric struct '{name}'"))
-                }
-                StructLiteralArgs::Expressions(args) => args
-                    .iter()
-                    .map(|arg| {
-                        Ok(BoundStructArgument::Value(BoundParametricValue {
-                            value: self.struct_argument_value(arg, &ty)?,
-                            ty: ty.clone(),
-                        }))
-                    })
-                    .collect(),
-                StructLiteralArgs::Integers(args) => Ok(args
-                    .iter()
-                    .map(|&value| {
-                        BoundStructArgument::Value(BoundParametricValue {
-                            ty: ty.clone(),
-                            value: IrValue::u32(value),
-                        })
-                    })
-                    .collect()),
-            };
+            if matches!(args, StructLiteralArgs::Omitted) {
+                return Ok(Vec::new());
+            }
+            if matches!(
+                args,
+                StructLiteralArgs::Types(_) | StructLiteralArgs::Mixed(_)
+            ) {
+                return Err(format!("unknown type-parametric struct '{name}'"));
+            }
+            let (subject, member) = self.imported_struct_template(name)?;
+            return Ok(self
+                .imported_struct_prefix(&subject, &member, args)?
+                .into_iter()
+                .map(BoundStructArgument::Value)
+                .collect());
         };
         let count = args.len();
         if matches!(args, StructLiteralArgs::Types(_)) {
@@ -403,24 +429,15 @@ impl<'m> BodyChecker<'_, 'm> {
                         scope.exchange(definition);
                         result
                     })?;
-                    let value = match arg {
-                        StructArgumentRef::Value(expr) => self.struct_argument_value(expr, &ty),
-                        StructArgumentRef::Integer(value) => self.parametric_value(
-                            &Expr::Literal {
-                                ty: None,
-                                text: value.to_string(),
-                            },
-                            &ty,
-                        ),
-                        StructArgumentRef::Type(_) => {
-                            return Err(format!(
-                                "struct '{name}' requires a value argument for '{}'",
-                                formal.name
-                            ));
-                        }
+                    if matches!(arg, StructArgumentRef::Type(_)) {
+                        return Err(format!(
+                            "struct '{name}' requires a value argument for '{}'",
+                            formal.name
+                        ));
                     }
-                    .map_err(|e| format!("struct '{name}' parametric '{}': {e}", formal.name))?;
-                    let bound = BoundParametricValue { ty, value };
+                    let bound = self.bind_struct_argument(arg, ty).map_err(|e| {
+                        format!("struct '{name}' parametric '{}': {e}", formal.name)
+                    })?;
                     previous_value = Some((formal.name.as_str(), index));
                     BoundStructArgument::Value(bound)
                 }
@@ -549,25 +566,34 @@ impl<'m> BodyChecker<'_, 'm> {
                 remaining,
             )
         } else {
-            let args = args
+            let (subject, member) = self.imported_struct_template(name)?;
+            let values = args
                 .iter()
                 .map(|arg| match arg {
-                    BoundStructArgument::Value(arg) => binding_value(&arg.value),
+                    BoundStructArgument::Value(arg) => Ok(arg.clone()),
                     BoundStructArgument::Type(_) => {
                         Err(format!("struct '{name}' requires value arguments"))
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let ty = self.resolve_dimensions(
-                &Type::Applied {
-                    name: name.to_owned(),
-                    args,
-                },
-                remaining,
-            )?;
+            let ty = self.resolver.resolve_applied(&subject, &member, &values)?;
             self.structs.update_imports(self.resolver)?;
             Ok(ty)
         }
+    }
+
+    /// Look up an applied DSLX type while honoring aliases in the BX scope.
+    fn imported_struct_template(&self, name: &str) -> Result<(String, String), String> {
+        if self.decls.type_aliases.contains_key(name) || self.local_type_aliases.contains_key(name)
+        {
+            return Err(format!("type alias '{name}' takes no arguments"));
+        }
+        self.resolver
+            .lookup(name)?
+            .ok_or_else(|| match name.split_once("::") {
+                Some((qualifier, _)) => format!("unknown use binding '{qualifier}' in '{name}'"),
+                None => format!("'{name}' requires an imported DSLX struct template"),
+            })
     }
 
     /// Resolve a fully determined constructor in the surrounding type scope.
@@ -1063,8 +1089,8 @@ impl<'m> BodyChecker<'_, 'm> {
             instance.args.starts_with(prefix)
         } else if let Some(values) = self.resolver.struct_parametric_values(name, canonical)? {
             prefix.len() <= values.len()
-                && prefix.iter().zip(values).all(|(bound, &value)| {
-                    matches!(bound, BoundStructArgument::Value(bound) if bound.ty == dimension_type() && bound.value == IrValue::u32(value))
+                && prefix.iter().zip(values).all(|(bound, value)| {
+                    matches!(bound, BoundStructArgument::Value(bound) if bound == value)
                 })
         } else {
             return Ok(None);

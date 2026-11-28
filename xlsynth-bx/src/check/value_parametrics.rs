@@ -429,13 +429,8 @@ impl<'f> InferredBindings<'f> {
                 } else if let StructLiteralArgs::Expressions(args) = args
                     && let Some(values) = resolver.struct_parametric_values(name, canonical)?
                 {
-                    for (arg, &value) in args.iter().zip(values) {
-                        self.bind_witness(
-                            arg,
-                            &dimension_type(),
-                            IrValue::u32(value),
-                            WitnessType::Exact,
-                        )?;
+                    for (arg, bound) in args.iter().zip(values) {
+                        self.bind_witness(arg, &bound.ty, bound.value.clone(), WitnessType::Exact)?;
                     }
                 }
             }

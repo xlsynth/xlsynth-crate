@@ -22,7 +22,7 @@ use crate::check::MAX_ELABORATION_DEPTH;
 use crate::dslx_import::TypeWitness;
 use crate::parser::outline::ToBitsDerive;
 use crate::parser::parse_value_type;
-use crate::typed::CheckedEnum;
+use crate::typed::{BoundParametricValue, CheckedEnum};
 pub(crate) use effect_source::{EffectFunctionSource, EffectSources, is_token_builtin};
 pub(crate) use outline_graph::DslxSourceLoader;
 use outline_graph::{DeclId, ImportFeatures, NativeSourceFiles, OutlineGraph, ResolvedShape};
@@ -34,13 +34,13 @@ struct StructBinding {
     public_name: Option<String>,
     /// Ordered value bindings distinguish instances even when all fields
     /// coincide.
-    layouts: BTreeMap<Rc<[u32]>, usize>,
+    layouts: HashMap<Rc<[BoundParametricValue]>, usize>,
 }
 
 /// The template and concrete bindings of a reflected DSLX layout.
 struct ImportedStructInstance {
     template: DeclId,
-    values: Rc<[u32]>,
+    values: Rc<[BoundParametricValue]>,
 }
 
 /// A projection from a public DSLX aggregate to a type containing private
@@ -58,6 +58,7 @@ pub(crate) struct ImportedStructs {
     pub(crate) files: Option<NativeSourceFiles>,
     bindings: HashMap<dslx::StructDef, StructBinding>,
     declarations: BTreeMap<DeclId, dslx::StructDef>,
+    struct_formal_types: BTreeMap<(DeclId, usize), specialization::StructFormalTypes>,
     explicit_types: BTreeMap<String, dslx::Type>,
     /// Concrete non-record exports already reflected from the native snapshot.
     reflected_aliases: BTreeMap<String, Type>,
@@ -140,6 +141,7 @@ impl ImportedStructs {
             files,
             bindings: HashMap::new(),
             declarations: BTreeMap::new(),
+            struct_formal_types: BTreeMap::new(),
             explicit_types: BTreeMap::new(),
             reflected_aliases: BTreeMap::new(),
             aggregate_spellings: HashMap::new(),
@@ -635,27 +637,27 @@ fn probe(_bx_array_index: u32, {}) -> uN[{width}] {{ ({}).to_bits() }}"#,
         self.resolve_spelling(subject, member, member, data)
     }
 
-    /// Supply typed literals so DSLX checks supplied bindings against u32 and
+    /// Supply typed literals so DSLX checks supplied bindings and
     /// evaluates defaults in the template's declaration context.
     pub(crate) fn resolve_applied(
         &mut self,
         subject: &str,
         member: &str,
-        args: &[u32],
+        args: &[BoundParametricValue],
         data: &mut ImportData,
     ) -> Result<String, String> {
-        let spelling = instance_spelling(member, args);
+        let spelling = instance_spelling(member, args)?;
         self.resolve_spelling(subject, member, &spelling, data)
             .map_err(|e| format!("{subject}::{spelling}: {}", self.remap_diagnostic(e)))
     }
 
-    /// Get the captured bindings when a layout belongs to the named template.
+    /// Get the concrete bindings when a layout belongs to the named template.
     pub(crate) fn struct_parametric_values(
         &self,
         canonical: &str,
         subject: &str,
         member: &str,
-    ) -> Option<&[u32]> {
+    ) -> Option<&[BoundParametricValue]> {
         let index = self.named_layouts.get(canonical)?;
         let instance = self.parametric_instances.get(index)?;
         (instance.template.subject == subject && instance.template.name == member)
@@ -920,7 +922,7 @@ fn probe(_bx_array_index: u32, {}) -> uN[{width}] {{ ({}).to_bits() }}"#,
                 .cloned().ok_or_else(|| format!(
                     "cannot identify a public DSLX struct template for '{identifier}'; name the concrete struct or a public alias in the DSLX type annotation"
                 ))?;
-            let values = self.capture_struct_bindings(&id, &def, witness, data)?;
+            let values = self.read_struct_bindings(&id, &def, ty)?;
             self.bind_declaration(&def, &id)?;
             (Some(id), values)
         } else {
@@ -937,7 +939,7 @@ fn probe(_bx_array_index: u32, {}) -> uN[{width}] {{ ({}).to_bits() }}"#,
             Some(format!(
                 "{}::{}",
                 id.subject,
-                instance_spelling(&id.name, &actuals)
+                instance_spelling(&id.name, &actuals)?
             ))
         } else {
             binding.public_name.clone()
@@ -990,7 +992,7 @@ fn probe(_bx_array_index: u32, {}) -> uN[{width}] {{ ({}).to_bits() }}"#,
         let index = self.definitions.len();
         let public = path.is_some();
         let name = path.unwrap_or_else(|| format!("0bx_private_{index}::{identifier}"));
-        let actuals: Rc<[u32]> = actuals.into();
+        let actuals: Rc<[BoundParametricValue]> = actuals.into();
         if let Some(template) = template {
             self.parametric_instances.insert(
                 index,
@@ -1039,12 +1041,29 @@ fn probe(_bx_array_index: u32, {}) -> uN[{width}] {{ ({}).to_bits() }}"#,
 
 /// Render value arguments in the type spelling used for native witnesses and
 /// canonical BX struct identities.
-fn instance_spelling(member: &str, values: &[u32]) -> String {
+fn instance_spelling(member: &str, values: &[BoundParametricValue]) -> Result<String, String> {
     let values = values
         .iter()
-        .map(|v| format!("u32:{v}"))
-        .collect::<Vec<_>>();
-    format!("{member}<{}>", values.join(", "))
+        .map(|bound| match &bound.ty {
+            Type::Bool => bound
+                .value
+                .to_bool()
+                .map(|b| b.to_string())
+                .map_err(|e| e.to_string()),
+            Type::Bits {
+                signed: false,
+                width: 32,
+            } => bound
+                .value
+                .to_u32()
+                .map(|n| format!("u32:{n}"))
+                .map_err(|e| e.to_string()),
+            ty => Err(format!(
+                "unsupported DSLX struct value parametric type '{ty}'"
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("{member}<{}>", values.join(", ")))
 }
 
 /// The declaration/explicit-type witnesses each contain one function.
