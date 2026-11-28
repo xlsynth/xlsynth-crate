@@ -1297,7 +1297,7 @@ fn tag_header(h: Header) -> Header {
 
 BX can read fields through a private struct nested inside a public one. To pass the nested value itself as a DSLX function argument, expose its type through a public name or type alias. A public DSLX type alias preserves the identity of its underlying struct. Imported calls accept these structs as arguments and results, alongside bits, booleans, tuples, and fixed-size arrays. Functions must be public and pure. Linked functions and their module path components use letters, digits, and underscores so their generated names are valid XLS IR identifiers.
 
-BX accepts concrete instances of public DSLX struct templates with `u32` value
+BX accepts concrete instances of public DSLX struct templates with `bool` and `u32` value
 parameters. Write the application directly in a type annotation or struct
 literal.
 DSLX supplies defaults for omitted trailing parameters, including
@@ -1317,8 +1317,19 @@ constructor can use `APFloat<5, 10> { sign: false, bexp: u5:15, fraction: u10:0 
 A public DSLX alias and its direct application are interchangeable, such as
 `float32::F32` and `apfloat::APFloat<8, 23>`. An imported function can
 also return a new instance by naming the public template or a concrete alias
-in its DSLX result type. BX recovers the instance's `u32` bindings from the
+in its DSLX result type. BX recovers the instance's value bindings from the
 checked value, including parameters that do not appear in any field.
+
+For example, a DSLX library can declare
+`pub struct Word<S: bool, N: u32> { data: xN[S][N] }`. With `use words;`,
+a BX function taking `words::Word<true, 8>` reads `data` as `s8`, so
+`w.data as u16` sign-extends. For `words::Word<false, 8>`, the same cast
+zero-extends the `u8` field.
+
+BX applies trailing defaults in a local type annotation. Pinned DSLX can
+infer an omitted parameter from an imported generic function's return value
+even when it differs from the default. Write the full specialization or
+omit the local annotation to give the two frontends the same type.
 
 When a BX call passes or returns a concrete parametric struct, its imported
 DSLX functions can bind a type parameter such as `T: type` to bits or an

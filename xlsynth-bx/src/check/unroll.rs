@@ -1604,7 +1604,9 @@ impl BodyChecker<'_, '_> {
             lookup_use(name, self.resolver, |binding| locals.contains(binding))?
         {
             if usage == NominalUse::AppliedStruct {
-                self.resolver.check_struct_template_name(&module, &member)
+                self.resolver
+                    .check_struct_template_name(&module, &member)
+                    .map(|_| ())
             } else if usage == NominalUse::Constructor
                 && !self.resolver.is_struct_type(&module, &member)
                 && self

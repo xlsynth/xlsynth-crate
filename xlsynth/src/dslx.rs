@@ -2788,6 +2788,18 @@ impl Type {
         count as usize
     }
 
+    /// Returns the value bindings of this concrete struct, including defaults
+    /// and bindings that do not occur in its fields.
+    pub fn get_struct_parametric_env(&self) -> Result<ParametricEnv, XlsynthError> {
+        let mut error = std::ptr::null_mut();
+        let mut env = std::ptr::null_mut();
+        if unsafe { sys::xls_dslx_type_get_struct_parametric_env(self.ptr, &mut error, &mut env) } {
+            Ok(ParametricEnv { ptr: env })
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error) }))
+        }
+    }
+
     pub fn get_struct_member_type(&self, index: usize) -> Type {
         assert!(self.is_struct());
         assert!(index < self.get_struct_member_count());

@@ -547,7 +547,7 @@ pub fn f<N:u32>(_:Operand)->u32 { N }
                 width: 8,
             },
             Type::Array {
-                element: Box::new(resolver.resolve_applied("wire", "Config", &[8])?),
+                element: Box::new(resolver.resolve_applied("wire", "Config", &values)?),
                 size: 0,
             },
             Type::Array {
