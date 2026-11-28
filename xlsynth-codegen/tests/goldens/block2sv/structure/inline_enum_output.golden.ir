@@ -1,0 +1,13 @@
+package inline_enum_output
+
+top block inline_enum_output(data: bits[2], result: bits[2]) {
+  data: bits[2] = input_port(name=data, id=1)
+  result: () = output_port(data, name=result, sv_type="/* port */ enum logic [1:0] { A=0, B=1 }", id=2)
+}
+
+// EXPECT-SV: module inline_enum_output(
+// EXPECT-SV:   input logic [1:0] data,
+// EXPECT-SV:   output enum logic [1:0] { A=0, B=1 } result
+// EXPECT-SV: );
+// EXPECT-SV:   assign {result} = data;
+// EXPECT-SV: endmodule

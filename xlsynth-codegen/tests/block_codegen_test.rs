@@ -470,7 +470,9 @@ top block typed(value: bits[8], result: bits[8]) {
   input types::input_t value,
   output types::output_t result
 );
-  assign result = value;
+  logic [7:0] value__1;
+  assign value__1 = value;
+  assign result = types::output_t'(value__1);
 endmodule
 "#
     );

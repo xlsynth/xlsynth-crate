@@ -80,6 +80,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_codegen_port_type_semantics"
+path = "fuzz_targets/fuzz_codegen_port_type_semantics.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_codegen_partial_products"
 path = "fuzz_targets/fuzz_codegen_partial_products.rs"
 test = false

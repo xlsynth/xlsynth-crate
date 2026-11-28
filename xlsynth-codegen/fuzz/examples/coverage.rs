@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut seed = 1u64;
     let mut byte_count = 2048usize;
     let mut check = false;
+    let mut port_types = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--corpus" => {
@@ -34,14 +35,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--seed" => seed = args.next().ok_or("--seed needs an integer")?.parse()?,
             "--bytes" => byte_count = args.next().ok_or("--bytes needs a count")?.parse()?,
             "--check" => check = true,
+            "--port-types" => port_types = true,
             "--help" => {
                 println!(
-                    "coverage [--corpus PATH | --samples N --seed N --bytes N] [--check] [--write-corpus DIR]"
+                    "coverage [--corpus PATH | --samples N --seed N --bytes N] [--check] [--port-types] [--write-corpus DIR]"
                 );
                 return Ok(());
             }
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
+    }
+    if port_types && !check {
+        return Err("--port-types requires --check".into());
     }
     if check {
         xlsynth_codegen_fuzz::preflight::validate(
@@ -74,12 +79,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             let mut bytes = vec![0; byte_count];
             rng.fill_bytes(&mut bytes);
-            mark_versioned(&mut bytes);
+            if !port_types {
+                mark_versioned(&mut bytes);
+            }
             bytes
         };
         // Save before checking so a failing sample is directly replayable.
         if let Some(path) = &write_corpus {
             std::fs::write(path.join(blake3::hash(&data).to_hex().as_str()), &data)?;
+        }
+        if port_types {
+            let (result, _) = xlsynth_codegen_fuzz::port_types::check_with_progress(&data);
+            if let Err(error) = result {
+                if !error.is_resource_failure() {
+                    return Err(error.into());
+                }
+            }
+            continue;
         }
         let case = match FuzzCase::decode(&data) {
             Ok(case) => case,
@@ -99,7 +115,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let trace = checked.as_ref().and_then(|c| c.checked_trace());
         report.record_case(&case, outcome, trace);
     }
-    println!("{}", report.json());
+    let json = if port_types {
+        xlsynth_codegen_fuzz::port_type_coverage::snapshot()
+    } else {
+        report.json()
+    };
+    println!("{json}");
     Ok(())
 }
 

@@ -1,0 +1,52 @@
+package typed_hierarchy
+
+block typed_child(code: bits[2], pair: bits[2], inverted: bits[2], forwarded: bits[2]) {
+  code: bits[2] = input_port(name=code, sv_type="/* child */ data__1 /* trailing */", id=1)
+  pair: bits[2] = input_port(name=pair, sv_type="types::pair_t", id=2)
+  not.3: bits[2] = not(code, id=3)
+  inverted: () = output_port(not.3, name=inverted, sv_type="data__1", id=4)
+  forwarded: () = output_port(pair, name=forwarded, sv_type="types::pair_t", id=5)
+}
+
+top block typed_parent(data: bits[2], result: bits[2], forwarded: bits[2]) {
+  instantiation child(block=typed_child, kind=block)
+  data: bits[2] = input_port(name=data, sv_type="data__1", id=6)
+  instantiation_input.7: () = instantiation_input(data, instantiation=child, port_name=code, id=7)
+  instantiation_input.8: () = instantiation_input(data, instantiation=child, port_name=pair, id=8)
+  inv: bits[2] = instantiation_output(instantiation=child, port_name=inverted, id=9)
+  pair: bits[2] = instantiation_output(instantiation=child, port_name=forwarded, id=10)
+  result: () = output_port(inv, name=result, sv_type="data__1", id=11)
+  forwarded: () = output_port(pair, name=forwarded, sv_type="types::pair_t", id=12)
+}
+
+// EXPECT-SV: module typed_child(
+// EXPECT-SV:   input data__1 code,
+// EXPECT-SV:   input types::pair_t pair,
+// EXPECT-SV:   output data__1 inverted,
+// EXPECT-SV:   output types::pair_t forwarded
+// EXPECT-SV: );
+// EXPECT-SV:   logic [1:0] code__1;
+// EXPECT-SV:   logic [1:0] pair__1;
+// EXPECT-SV:   assign code__1 = code;
+// EXPECT-SV:   assign pair__1 = pair;
+// EXPECT-SV:   assign inverted = data__1'(~code__1);
+// EXPECT-SV:   assign forwarded = types::pair_t'(pair__1);
+// EXPECT-SV: endmodule
+// EXPECT-SV: module typed_parent(
+// EXPECT-SV:   input data__1 data,
+// EXPECT-SV:   output data__1 result,
+// EXPECT-SV:   output types::pair_t forwarded
+// EXPECT-SV: );
+// EXPECT-SV:   logic [1:0] data__2;
+// EXPECT-SV:   logic [1:0] inv;
+// EXPECT-SV:   logic [1:0] pair;
+// EXPECT-SV:   assign data__2 = data;
+// EXPECT-SV:   assign result = data__1'(inv);
+// EXPECT-SV:   assign forwarded = types::pair_t'(pair);
+// EXPECT-SV:   typed_child child (
+// EXPECT-SV:     .code(data__1'(data__2)),
+// EXPECT-SV:     .pair(types::pair_t'(data__2)),
+// EXPECT-SV:     .inverted(inv),
+// EXPECT-SV:     .forwarded(pair)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

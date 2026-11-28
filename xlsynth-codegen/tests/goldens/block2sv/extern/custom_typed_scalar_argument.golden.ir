@@ -1,0 +1,26 @@
+package extern_scalar
+
+#[ffi_proto("""code_template: "assign {return} = {data}[1];"
+""")]
+fn bit_one(data: bits[8] id=1) -> bits[1] {
+  ret bit_slice.2: bits[1] = bit_slice(data, start=1, width=1, id=2)
+}
+
+top block typed_scalar_argument(data: bits[8], selected: bits[1]) {
+  instantiation extract(foreign_function=bit_one, kind=extern)
+  data: bits[8] = input_port(name=data, sv_type="types::input_t", id=3)
+  instantiation_input.4: () = instantiation_input(data, instantiation=extract, port_name=data, id=4)
+  bit_one_result: bits[1] = instantiation_output(instantiation=extract, port_name=return, id=5)
+  selected: () = output_port(bit_one_result, name=selected, id=6)
+}
+
+// EXPECT-SV: module typed_scalar_argument(
+// EXPECT-SV:   input types::input_t data,
+// EXPECT-SV:   output logic selected
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] data__1;
+// EXPECT-SV:   logic bit_one_result;
+// EXPECT-SV:   assign data__1 = data;
+// EXPECT-SV:   assign selected = bit_one_result;
+// EXPECT-SV:   assign bit_one_result = data__1[1];
+// EXPECT-SV: endmodule

@@ -620,3 +620,118 @@ fn block_calls_require_an_unconditional_binding_and_an_acyclic_hierarchy() {
         assert!(check_module(&parsed).is_err(), "{parent}");
     }
 }
+
+/// Compares BX-linked typed hierarchy and registered slices against PIR in both
+/// layouts.
+#[test]
+fn linked_annotated_block_preserves_registered_slice_semantics()
+-> Result<(), Box<dyn std::error::Error>> {
+    use xlsynth_codegen::Layout;
+    use xlsynth_pir::IrValue;
+    use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
+    use xlsynth_vastly::{Signedness, compile_combo_module, compile_pipeline_module_with_top};
+
+    let child = r#"package linked
+block select_lane(data: bits[8], limit: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, sv_type="logic signed [1:0][3:0]", id=1)
+  limit: bits[8] = input_port(name=limit, sv_type="logic signed [7:0]", id=2)
+  bit: bits[1] = bit_slice(data, start=1, width=1, id=3)
+  low: bits[6] = bit_slice(data, start=0, width=6, id=4)
+  below: bits[1] = ult(limit, data, id=5)
+  value: bits[8] = concat(below, bit, low, id=6)
+  out: () = output_port(value, name=out, sv_type="logic signed [7:0]", id=7)
+}"#;
+    let source = r#"extern block select_lane(data: u8, limit: u8) -> u8;
+pub block wrapper(clk, data: u8, limit: u8) -> u8 {
+    let selected = select_lane(data, limit);
+    reg saved: u8;
+    saved := selected;
+    saved
+}"#;
+    let linked = Parser::new(child).parse_and_validate_package()?;
+    let package = compile(source, linked, ResetBehavior::default())?;
+    let top = package.get_top_block().ok_or("missing BX top block")?;
+    assert_eq!(top.name, "wrapper");
+    assert_eq!(top.instantiations.len(), 1);
+    assert_eq!(top.instantiations[0].block, "select_lane");
+    let child = package
+        .get_block("select_lane")
+        .ok_or("missing linked child")?;
+    let annotations = child
+        .input_ports()
+        .chain(child.output_ports())
+        .map(|port| match &child.get_node(port).payload {
+            NodePayload::InputPort { name, sv_type }
+            | NodePayload::OutputPort { name, sv_type, .. } => (name.as_str(), sv_type.as_deref()),
+            _ => unreachable!("block data port"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        annotations,
+        [
+            ("data", Some("logic signed [1:0][3:0]")),
+            ("limit", Some("logic signed [7:0]")),
+            ("out", Some("logic signed [7:0]")),
+        ]
+    );
+    let evaluator = BlockEvaluator::prepare(&package, "wrapper")?;
+
+    for layout in [Layout::None, Layout::Pipeline] {
+        let options = BlockCodegenOptions {
+            layout,
+            emit_sv_types: true,
+            ..Default::default()
+        };
+        let rtl = emit_system_verilog(&package, &options)?;
+        let emitted_child = compile_combo_module(&rtl.system_verilog).unwrap();
+        assert_eq!(emitted_child.module_name, "select_lane");
+        let typed_data = &emitted_child.decls["data"];
+        assert_eq!(typed_data.signedness, Signedness::Signed);
+        assert_eq!(typed_data.packed_dims, [2, 4]);
+        assert_eq!(emitted_child.decls["limit"].signedness, Signedness::Signed);
+        assert_eq!(emitted_child.decls["out"].signedness, Signedness::Signed);
+        let module = compile_pipeline_module_with_top(&rtl.system_verilog, "wrapper").unwrap();
+        let mut runner = FixtureRunner::new(&module).unwrap();
+        let ports = runner.port_bindings();
+        let data_port = ports.input_with_width("data", 8).unwrap();
+        let limit_port = ports.input_with_width("limit", 8).unwrap();
+        let mut state = evaluator.initial_state(RegisterInit::AllZeros)?;
+        for (cycle, (data, limit)) in [
+            (0x02, 0x80),
+            (0x10, 0x01),
+            (0x81, 0x7f),
+            (0xff, 0xff),
+            (0, 0xff),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let inputs = [
+                IrValue::make_ubits(8, data)?,
+                IrValue::make_ubits(8, limit)?,
+            ];
+            let reference = evaluator.step(&state, &inputs)?;
+            state = reference.next_state;
+            let expected = evaluator.step(&state, &inputs)?.outputs[0].to_u64()?;
+            let edge = runner
+                .step_cycle_with_drive(&mut [], |drive| {
+                    drive.set_u64(&data_port, data)?;
+                    drive.set_u64(&limit_port, limit)
+                })
+                .unwrap();
+            if cycle != 0 {
+                assert_eq!(
+                    edge.pre_outputs["out"].to_u64_if_known(),
+                    Some(reference.outputs[0].to_u64()?),
+                    "pre-edge layout={layout:?}, data={data:#x}, limit={limit:#x}"
+                );
+            }
+            assert_eq!(
+                edge.outputs["out"].to_u64_if_known(),
+                Some(expected),
+                "layout={layout:?}, data={data:#x}, limit={limit:#x}"
+            );
+        }
+    }
+    Ok(())
+}

@@ -38,6 +38,27 @@ fn block2sv_golden_fixtures() {
     );
 }
 
+/// Checks annotated module boundaries with Slang's SystemVerilog type checker.
+#[test]
+fn custom_port_types_compile_with_slang() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/block2sv");
+    for relative_path in [
+        "structure/custom_typed_unsigned_compare.golden.ir",
+        "structure/custom_typed_bit_slices.golden.ir",
+        "structure/inline_port_type.golden.ir",
+        "structure/inline_enum_output.golden.ir",
+        "registers/custom_typed_registered_compare.golden.ir",
+        "extern/custom_typed_scalar_argument.golden.ir",
+        "hierarchy/custom_typed_ports.golden.ir",
+    ] {
+        let path = directory.join(relative_path);
+        let source = fs::read_to_string(&path).expect("read annotated port fixture");
+        let fixture = parse_golden_fixture(&path, &source).expect("parse annotated port fixture");
+        let generated = execute_golden_fixture(&fixture).expect("emit annotated port fixture");
+        xlsynth_test_helpers::assert_valid_sv(&format!("{}{generated}", custom_port_types(&path)));
+    }
+}
+
 /// Binds the default module name while emitting only the wrapper definition.
 #[test]
 fn external_block_uses_its_model_name_by_default() {
