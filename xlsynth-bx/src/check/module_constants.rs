@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
 
-use crate::ast::{BitTypeAttribute, Block, BlockStages, ConstDef, Expr, SourceNode, Type};
+use crate::ast::{BitTypeAttribute, Block, BlockStages, ConstDef, Expr, Param, SourceNode, Type};
 use crate::infer_literal::has_implicit_constant_type;
 use crate::typed::bits;
 
@@ -18,13 +18,34 @@ pub(super) struct ModuleDimensions<'a, 'm> {
     pub(super) warning_owner: Option<&'m str>,
     zero_binding: ZeroBinding<'a>,
     pub(super) block_formals: Option<&'a BlockDimensionFormals<'a>>,
+    pub(super) data_parameters: Option<DataParameters<'a>>,
 }
 
 /// Bindings that become concrete when a block's data ports are specialized.
 pub(super) struct BlockDimensionFormals<'a> {
     pub(super) values: BTreeSet<String>,
-    pub(super) value_types: BTreeMap<&'a str, &'a Type>,
     pub(super) types: &'a Bindings,
+}
+
+/// Data inputs visible while checking a signature. The current name enters
+/// scope before its type resolves. Earlier inputs have known types.
+#[derive(Clone, Copy)]
+pub(super) struct DataParameters<'a> {
+    params: &'a [Param],
+    indices: &'a BTreeMap<&'a str, usize>,
+}
+
+impl<'a> DataParameters<'a> {
+    pub(super) fn contains(self, name: &str) -> bool {
+        self.indices.contains_key(name)
+    }
+
+    pub(super) fn get(self, name: &str) -> Option<&'a Type> {
+        self.indices
+            .get(name)
+            .and_then(|&index| self.params.get(index))
+            .map(|param| &param.ty)
+    }
 }
 
 /// The declaration that owns the lexical `zero!` binding, or a binding
@@ -43,6 +64,7 @@ impl<'m> Declarations<'m> {
             warning_owner: self.positions.get_key_value(owner).map(|(&name, _)| name),
             zero_binding: ZeroBinding::Owner(owner),
             block_formals: None,
+            data_parameters: None,
         }
     }
 
@@ -58,24 +80,33 @@ impl<'m> Declarations<'m> {
             warning_owner,
             zero_binding: ZeroBinding::Resolved(zero_binding),
             block_formals: None,
+            data_parameters: None,
         }
     }
 }
 
 impl<'m> ModuleDimensions<'_, 'm> {
-    /// A bare block value formal has a concrete declared type before its value
-    /// is supplied at specialization.
-    pub(super) fn block_value_type(&self, expr: &Expr) -> Option<&Type> {
-        let Expr::Name(name) = expr else { return None };
-        self.block_formals?.value_types.get(name.as_str()).copied()
+    pub(super) fn with_data_parameters<'a>(
+        &'a self,
+        params: &'a [Param],
+        indices: &'a BTreeMap<&'a str, usize>,
+    ) -> ModuleDimensions<'a, 'm> {
+        ModuleDimensions {
+            data_parameters: Some(DataParameters { params, indices }),
+            ..*self
+        }
     }
 
-    /// Does this expression need a value or type supplied at block
-    /// specialization?
-    pub(super) fn depends_on_block_formal(&self, expr: &Expr) -> bool {
+    /// A generic port operand gets its concrete lexical scope on
+    /// specialization.
+    pub(super) fn depends_on_port_binding(&self, expr: &Expr) -> bool {
         self.block_formals.is_some_and(|formals| {
             super::struct_parametrics::references_formal(SourceNode::Expression(expr), |name| {
-                formals.values.contains(name) || formals.types.declares(name)
+                formals.values.contains(name)
+                    || formals.types.declares(name)
+                    || self
+                        .data_parameters
+                        .is_some_and(|params| params.contains(name))
             })
         })
     }
@@ -91,10 +122,27 @@ impl<'m> ModuleDimensions<'_, 'm> {
             ty,
             |_, _| {},
             |expr| {
-                dependent = dependent || self.depends_on_block_formal(expr);
+                dependent = dependent || self.depends_on_port_binding(expr);
             },
         );
         dependent
+    }
+
+    /// Find retained operands using the scope of their original annotation.
+    /// A later input can share a module constant's name.
+    pub(super) fn has_dependent_signature(&self, params: &[Param], result: &Type) -> bool {
+        let mut indices = BTreeMap::new();
+        for (index, param) in params.iter().enumerate() {
+            indices.insert(param.name.as_str(), index);
+            if self
+                .with_data_parameters(params, &indices)
+                .has_dependent_port_operand(&param.ty)
+            {
+                return true;
+            }
+        }
+        self.with_data_parameters(params, &indices)
+            .has_dependent_port_operand(result)
     }
 
     /// Keep a dependent width, length or signedness symbolic after checking its
@@ -102,24 +150,14 @@ impl<'m> ModuleDimensions<'_, 'm> {
     pub(super) fn defer_bit_or_array_operand(
         &self,
         expr: &Expr,
-        expected: &Type,
         is_local: &dyn Fn(&str) -> bool,
         types: &mut TypeResolver<'_, 'm>,
     ) -> Result<bool, String> {
-        if !self.depends_on_block_formal(expr) {
+        if !self.depends_on_port_binding(expr) {
             return Ok(false);
         }
-        if matches!(expr, Expr::Name(_)) {
-            // A bare formal must have the operand's required type. Otherwise
-            // the ordinary resolver will diagnose the invalid dimension.
-            return Ok(self
-                .block_value_type(expr)
-                .is_some_and(|ty| compatible(ty, expected)));
-        }
         let formals = self.block_formals.expect("dependent block port");
-        let mut checker = types.struct_scope(*self);
-        checker.enclosing_type_locals = Some(is_local);
-        checker.function_type_bindings = Some(formals.types.clone());
+        let mut checker = types.annotation_scope(*self, is_local, Some(formals.types));
         checker.check_block_dimension_names(expr, &formals.values)?;
         Ok(true)
     }
@@ -127,14 +165,16 @@ impl<'m> ModuleDimensions<'_, 'm> {
     pub(super) fn resolve_or_defer_size(
         &self,
         expr: &Expr,
+        purpose: &str,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
         types: &mut TypeResolver<'_, 'm>,
     ) -> Result<Option<usize>, String> {
-        if self.defer_bit_or_array_operand(expr, &Type::unsigned(32), is_local, types)? {
+        if self.defer_bit_or_array_operand(expr, is_local, types)? {
             Ok(None)
         } else {
-            self.size(expr, is_local, bindings, types).map(Some)
+            self.size(expr, purpose, is_local, bindings, types)
+                .map(Some)
         }
     }
 
@@ -186,17 +226,23 @@ impl<'m> ModuleDimensions<'_, 'm> {
         &self,
         expr: &Expr,
         expected: &Type,
+        purpose: &str,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
         types: &mut TypeResolver<'_, 'm>,
     ) -> Result<IrValue, String> {
         let name = match expr {
-            Expr::Name(name) if BitTypeAttribute::qualified(name).is_none() => name,
+            Expr::Name(name)
+                if BitTypeAttribute::qualified(name).is_none()
+                    && self
+                        .data_parameters
+                        .is_none_or(|params| params.get(name).is_none()) =>
+            {
+                name
+            }
             _ => {
-                let mut checker = types.struct_scope(*self);
-                checker.enclosing_type_locals = Some(is_local);
-                checker.function_type_bindings = bindings.cloned();
-                return checker.parametric_value(expr, expected);
+                let mut checker = types.annotation_scope(*self, is_local, bindings);
+                return checker.constexpr_operand_value(expr, expected, purpose);
             }
         };
         let head = name
@@ -237,6 +283,7 @@ impl<'m> ModuleDimensions<'_, 'm> {
     pub(super) fn size(
         &self,
         expr: &Expr,
+        purpose: &str,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
         types: &mut TypeResolver<'_, 'm>,
@@ -250,7 +297,7 @@ impl<'m> ModuleDimensions<'_, 'm> {
                 .map(|width| width as usize)
                 .map_err(|_| format!("invalid u32 type dimension '{text}'"));
         }
-        let value = self.constant(expr, &expected, is_local, bindings, types)?;
+        let value = self.constant(expr, &expected, purpose, is_local, bindings, types)?;
         ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
             .ok_or_else(|| "type dimension does not fit usize".into())
     }
@@ -265,9 +312,16 @@ impl<'m> ModuleDimensions<'_, 'm> {
         if let Expr::Bool(value) = expr {
             return Ok(*value);
         }
-        self.constant(expr, &Type::Bool, is_local, bindings, types)?
-            .to_bool()
-            .map_err(|e| e.to_string())
+        self.constant(
+            expr,
+            &Type::Bool,
+            "bit signedness",
+            is_local,
+            bindings,
+            types,
+        )?
+        .to_bool()
+        .map_err(|e| e.to_string())
     }
 }
 

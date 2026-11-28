@@ -437,6 +437,12 @@ Compares BX structural `const match` with an equivalent `const if` chain in a bl
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_structural_const_match -- -max_len=12 -len_control=0`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_annotation_scope.rs
+
+Moves the same conditional width or signedness expression among function and block parameters and results, typed lets, and function-local type aliases. An alias uses the expression directly or through a preceding let. The DSLX reference uses the corresponding function signature for each block. It compares source acceptance with the template unused, specialized once, and specialized repeatedly in different orders. A data parameter shadows a module constant, a branch-local let shadows the data parameter, and skipped arms can refer to unknown or later declarations. For accepted programs it compares the inferred width, signedness, and widened value on shared inputs against compiled DSLX IR and native constexpr evaluation.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_annotation_scope -- -max_len=4 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_local_declarations.rs
 
 Generates function-local constants and type aliases in nested blocks and conditional branches. Cases vary lexical shadowing, constexpr lets, alias chains, signed and unsigned widths, aggregate types, and successive value and type parameter bindings. For each accepted case the BX block returns results from both the local function and a concrete function with its declarations hoisted to module scope under fresh names. Compiled DSLX IR and concrete DSLX calls evaluate the local function on the same inputs and supply the expected value for both BX results. Rejection cases check runtime-dependent initializers and dimensions, mismatched annotations, forward references, and references outside a declaration's scope.

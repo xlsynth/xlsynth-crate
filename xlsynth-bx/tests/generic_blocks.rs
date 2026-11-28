@@ -319,11 +319,16 @@ fn unused_block_signatures_reject_unavailable_dimension_names() -> Result<(), St
         "block b<T>(clk, xs: T[N]) -> T { xs[0] } const N = u32:2;",
         "const N = u32:2; block b<N>(clk, xs: N[N]) -> N { xs[0] }",
         "const N = u32:2; block b<T, N: fn(T[N]) -> T>(clk, x: T) -> T { x }",
-        "const N = u32:2; extern block device(clk, N: u32, xs: u8[N]) -> u8;",
     ] {
         let error = check_module(&parse_module(source)?).unwrap_err();
         assert!(error.contains("'N'"), "{source}\n{error}");
     }
+    let runtime = "const N = u32:2; extern block device(clk, N: u32, xs: u8[N]) -> u8;";
+    let error = check_module(&parse_module(runtime)?).unwrap_err();
+    assert!(
+        error.contains("requires a compile-time constant"),
+        "{error}"
+    );
     Ok(())
 }
 

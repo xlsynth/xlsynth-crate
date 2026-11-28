@@ -23,6 +23,75 @@ fn compare_function(
 }
 
 #[test]
+fn concrete_signature_and_local_alias_see_the_same_data_parameters() -> Result<(), Box<dyn Error>> {
+    let helpers = r#"
+const W = u32:7;
+fn narrow(W: u32, data: uN[if true { u32:5 } else { W }])
+    -> uN[if false { W } else { u32:4 }] {
+    type Result = uN[if false { W } else { u32:4 }];
+    let value: Result = data as Result;
+    value
+}
+"#;
+    let evaluator = compare_function(helpers, "W: u32, data: u5", "u4", "narrow(W, data)")?;
+    assert_eq!(
+        evaluator.compare(&[IrValue::make_ubits(32, 19)?, IrValue::make_ubits(5, 31)?])?,
+        IrValue::make_ubits(4, 15)?
+    );
+    let selected = helpers.replace("if true", "if false");
+    assert!(compile_dslx_module(&selected, &[]).is_err());
+    assert!(check_module(&parse_module(&selected)?).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_signature_uses_the_input_array_length_when_checking_a_typed_loop() -> Result<(), Box<dyn Error>>
+{
+    let source = r#"
+const xs = u32[2]:[0, 0];
+fn narrow(xs: u32[3]) -> uN[if true { u32:5 } else {
+    for (v, acc): (u32, u32) in xs { v + acc }(u32:0)
+}] { u5:1 }
+const RESULT = narrow(u32[3]:[1, 2, 3]);
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    assert_eq!(
+        checked.constants().last().unwrap().value,
+        IrValue::make_ubits(5, 1)?
+    );
+    let runtime = source.replace("if true", "if false");
+    let error = check_module(&parse_module(&runtime)?).unwrap_err();
+    assert!(
+        error.contains("requires a compile-time constant"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_data_parameter_shadows_a_named_map_callback_in_a_dimension() -> Result<(), Box<dyn Error>> {
+    for (parameter, accepted) in [("other", true), ("incr", false)] {
+        let source = format!(
+            r#"
+fn incr(x: u32) -> u32 {{ x + u32:1 }}
+fn sample({parameter}: u32) -> uN[map([u32:4], incr)[u32:0]] {{ u5:0 }}
+"#
+        );
+        assert_eq!(
+            compile_dslx_module(&source, &[]).is_ok(),
+            accepted,
+            "{source}"
+        );
+        assert_eq!(
+            check_module(&parse_module(&source)?).is_ok(),
+            accepted,
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn aliases_and_constants_follow_lexical_scope() -> Result<(), Box<dyn Error>> {
     let helpers = r#"
 const W = u32:3;

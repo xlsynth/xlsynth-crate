@@ -45,7 +45,7 @@ impl BodyChecker<'_, '_> {
         callback: &str,
         parametrics: &[Expr],
     ) -> Result<(Type, K), String> {
-        if !self.is_builtin_map(target, |target| self.names.contains(target))? {
+        if !self.is_builtin_map(target, |target| self.has_local_name(target))? {
             return Err("this named map requires the built-in map".into());
         }
         let array = self.map_iterable(iterable)?;
@@ -109,7 +109,7 @@ impl BodyChecker<'_, '_> {
         let (bindings, output) = match callback {
             MapCallback::Lambda(map) => self.map_lambda_body(map, &parameter, id)?,
             MapCallback::Named(name, parametrics) => {
-                let callee = self.map_callee(name, |head| self.names.contains(head))?;
+                let callee = self.map_callee(name, |head| self.has_local_name(head))?;
                 if matches!(callee, MapCallee::Builtin("ceillog2")) && parametrics.is_empty() {
                     let size = *size;
                     return self.map_ceillog2(array, &parameter.ty, size);

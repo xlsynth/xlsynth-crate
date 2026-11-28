@@ -174,10 +174,11 @@ impl BodyChecker<'_, '_> {
                     }
                     "one_hot" => {
                         let (priority, operand) = self
-                            .parametric_value_and_operand(
+                            .constexpr_value_and_operand(
                                 &args[1],
                                 &Type::Bool,
                                 self.preserve_assert_inputs,
+                                "priority operand",
                             )
                             .map_err(|e| format!("'one_hot' priority: {e}"))?;
                         let lsb_priority = priority == IrValue::bool(true);

@@ -11,6 +11,89 @@ use xlsynth_bx::{check_module, check_source_with_options, parse_module};
 use xlsynth_pir::{IrValue, ir::NodePayload};
 
 #[test]
+fn result_width_uses_a_value_parametric_or_input_shape() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+fn f<X: u32>() -> uN[X] { zero!() }
+fn pack<N: u32>(flags: bool[N]) -> uN[array_size(flags)] {
+    flags as uN[array_size(flags)]
+}
+const RESULT = (f<5>(), pack([false, false, false, false]), pack([true, true, true, true]));
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    assert_eq!(
+        checked.constants()[0].value,
+        IrValue::parse_typed("(bits[5]:0, bits[4]:0, bits[4]:15)")?,
+    );
+
+    Ok(())
+}
+
+#[test]
+fn function_dimensions_cannot_use_data_parameter_values() -> Result<(), Box<dyn Error>> {
+    for (param_type, result_type, literal, dimension) in [
+        ("u32", "uN[x]", "u32:5", "bit width"),
+        ("u32[1]", "uN[x[0]]", "u32[1]:[5]", "bit width"),
+        ("u32", "u8[x]", "u32:3", "array length"),
+        ("bool", "xN[x][8]", "true", "bit signedness"),
+    ] {
+        let decl = format!("fn f(x: {param_type}) -> {result_type} {{ zero!() }}");
+        for call in [String::new(), format!("const RESULT = f({literal});")] {
+            let error = check_module(&parse_module(&format!("{decl} {call}"))?).unwrap_err();
+            assert_eq!(
+                error,
+                format!("fn 'f': {dimension} requires a compile-time constant")
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn signature_dimensions_see_earlier_data_parameters_at_specialization() -> Result<(), Box<dyn Error>>
+{
+    let declarations = r#"
+const x = u32:9;
+fn narrow<N:u32>(x:u32) -> uN[if N == u32:4 { u32:5 } else { x }] {
+    x as uN[if N == u32:4 { u32:5 } else { x }]
+}
+fn later<N:u32>(x:u32, y:uN[if N == u32:4 { u32:5 } else { x }]) -> u32 { y as u32 }
+fn earlier<N:u32>(y:uN[x], x:u32) -> u32 { y as u32 }
+fn infer<N:u32>(witness:uN[N], x:u32) -> uN[if N == u32:4 { u32:5 } else { x }] {
+    x as uN[if N == u32:4 { u32:5 } else { x }]
+}
+"#;
+    let call = "(narrow<4>(v), later<4>(v, 31), earlier<4>(u9:511, v), infer(u4:0,v))";
+    let result = "(u5,u32,u32,u5)";
+    let bx = format!("{declarations}\n{}", bx_source("v:u32", result, call));
+    let checked = check_module(&parse_module(&bx)?)?;
+    let native = format!("{declarations}\n{}", dslx_source("v:u32", result, call));
+    assert_eq!(
+        BlockEvaluator::lower(&checked, &bx)?.compare_ir(
+            &compile_dslx_module(&native, &[])?,
+            &[IrValue::make_ubits(32, 63)?],
+        )?,
+        IrValue::parse_typed("(bits[5]:31, bits[32]:31, bits[32]:511, bits[5]:31)")?
+    );
+
+    for (call, result) in [
+        ("narrow<3>(u32:9)", "u9"),
+        ("later<3>(u32:9,u9:0)", "u32"),
+        ("infer(u3:0,u32:9)", "u9"),
+    ] {
+        let source = format!("{declarations}\nfn sample()->{result} {{ {call} }}");
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert!(
+            error.contains("requires a compile-time constant"),
+            "{error}"
+        );
+        assert!(
+            parse_and_typecheck(&source, "sample.x", "sample", &mut ImportData::default()).is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn scalar_and_enum_match_patterns_compare_against_the_bound_parametric()
 -> Result<(), Box<dyn Error>> {
     let declarations = r#"

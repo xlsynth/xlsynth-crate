@@ -221,20 +221,26 @@ block sample(clk, tag: Tag<3>) -> u8 { read(tag) }
 #[test]
 fn type_arguments_and_defaults_respect_shadowing() -> Result<(), Box<dyn Error>> {
     let cases = [
-        r#"
+        (
+            r#"
 const N = u32:7;
 struct Word<W: u32> { data: uN[W] }
 fn read(N: u32, x: Word<{N + u32:1}>) -> u8 { x.data }
 "#,
-        r#"
+            "value parametric requires a compile-time constant",
+        ),
+        (
+            r#"
 const N = u32:7;
 struct Word<N: u32 = {N}> { data: uN[N] }
 fn read(x: Word<>) -> u7 { x.data }
 "#,
+            "unknown value 'N'",
+        ),
     ];
-    for source in cases {
+    for (source, expected) in cases {
         let error = check_module(&parse_module(source)?).unwrap_err();
-        assert!(error.contains("unknown value 'N'"), "{error}");
+        assert!(error.contains(expected), "{error}");
     }
     Ok(())
 }

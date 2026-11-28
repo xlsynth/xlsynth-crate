@@ -57,22 +57,23 @@ fn expected_result_reaches_nested_type_and_value_parametrics() -> Result<(), Box
 fn id<T>(x: T) -> T { x }
 fn pair<T>() -> (T, T) { (zero!<T>(), zero!<T>()) }
 fn width<N: u32>() -> uN[N] { N as uN[N] }
+fn narrow<N: u32>(x: u32, y: uN[if N == u32:4 { u32:5 } else { x }]) -> uN[N] { y as uN[N] }
 "#;
     let body = r#"
 let byte: u8 = id(0);
 let words: (u4[2], u4[2]) = id(pair());
-(byte, words, width())
+(byte, words, width(), narrow(u32:9, 31))
 "#;
     let source = format!(
         "{helpers}{}",
-        bx_source("", "(u8, (u4[2], u4[2]), u5)", body)
+        bx_source("", "(u8, (u4[2], u4[2]), u5, u4)", body)
     );
     let checked = check_module(&parse_module(&source)?)?;
     let evaluator = BlockEvaluator::lower(&checked, &source)?;
     assert_eq!(
         evaluator.evaluate(&[])?,
         IrValue::parse_typed(
-            "(bits[8]:0, ([bits[4]:0, bits[4]:0], [bits[4]:0, bits[4]:0]), bits[5]:5)"
+            "(bits[8]:0, ([bits[4]:0, bits[4]:0], [bits[4]:0, bits[4]:0]), bits[5]:5, bits[4]:15)"
         )?
     );
     Ok(())

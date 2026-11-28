@@ -8,8 +8,8 @@ use std::fmt::{self, Write};
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
 use crate::ast::{
-    Expr, Param, ScopedSourceNodes, SourceNode, StructArgumentRef, StructDef, StructLiteralArgs,
-    StructParametricRef, Type,
+    Expr, Param, SourceNode, StructArgumentRef, StructDef, StructLiteralArgs, StructParametricRef,
+    Type,
 };
 use crate::builtin::BuiltinOp;
 use crate::typed::{BoundParametricValue, TypedExpr, bits};
@@ -306,21 +306,15 @@ impl<'m> BodyChecker<'_, 'm> {
         Ok(BoundParametricValue { ty, value })
     }
 
-    /// Bind a concrete argument or check the declared type of a forwarded
-    /// block value while its value remains symbolic.
+    /// Bind an independent argument now. A dependent argument gets its
+    /// concrete type and value when the block specializes.
     fn bind_or_defer_struct_value(
         &mut self,
         expr: &Expr,
         ty: Type,
         dimensions: ModuleDimensions<'_, 'm>,
     ) -> Result<Option<BoundParametricValue>, String> {
-        if let Some(actual) = dimensions.block_value_type(expr) {
-            if !super::compatible(actual, &ty) {
-                return Err(format!("expected {ty}, got {actual}"));
-            }
-            return Ok(None);
-        }
-        if dimensions.depends_on_block_formal(expr) {
+        if dimensions.depends_on_port_binding(expr) {
             return Ok(None);
         }
         self.bind_struct_argument(StructArgumentRef::Value(expr), ty)
@@ -1600,23 +1594,7 @@ pub(super) fn struct_field_map<'e>(
 /// Check whether a type annotation or constexpr expression refers to an
 /// enclosing formal, accounting for names rebound in local expressions.
 pub(super) fn references_formal(node: SourceNode<'_>, is_formal: impl Fn(&str) -> bool) -> bool {
-    let mut nodes = ScopedSourceNodes::default();
-    nodes.push(node);
-    while let Some(node) = nodes.next() {
-        let name = match node {
-            SourceNode::Annotation(Type::Named(name))
-            | SourceNode::Expression(Expr::Name(name)) => Some(name.as_str()),
-            SourceNode::Expression(expr) => expr.struct_literal().map(|literal| literal.name),
-            _ => None,
-        };
-        if let Some(name) = name
-            && !nodes.is_local(name)
-            && is_formal(name.split_once("::").map_or(name, |(head, _)| head))
-        {
-            return true;
-        }
-    }
-    false
+    node.free_names().any(is_formal)
 }
 
 /// An application can supply at most one argument per formal in source order.
@@ -1657,6 +1635,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         functions: Option<&'a mut FunctionSpecializations<'m>>,
     ) -> Self {
         let mut checker = Self::new(dimensions.decls, resolver, structs, BodyKind::Function);
+        checker.signature_parameters = dimensions.data_parameters;
         checker.function_position = dimensions.position;
         checker.warning_owner = dimensions.warning_owner;
         checker.zero_binding = dimensions.zero_binding();

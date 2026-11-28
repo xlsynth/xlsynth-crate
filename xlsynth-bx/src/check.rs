@@ -14,8 +14,8 @@ use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, BlockStages, CallbackParam, Expr, ExternBlock, ExternFn, ForIterable,
     Function, FunctionParametricRef, InvariantDecl, InvariantLemma, LetBinding, MatchArm,
-    MatchPattern, Module, Param, SourcePosition, SourceSpan, Stmt, StructArgument, StructDef,
-    StructLiteralArgs, StructSplat, Type, UnaryOp, WidthSliceType,
+    MatchPattern, Module, Param, SourceNode, SourcePosition, SourceSpan, Stmt, StructArgument,
+    StructDef, StructLiteralArgs, StructSplat, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -1083,13 +1083,13 @@ fn resolve_type<'m>(
             }
         }
         Type::ParametricBits { signed, width } => {
-            let fixed_sign =
-                if dimensions.defer_bit_or_array_operand(signed, &Type::Bool, is_local, types)? {
-                    None
-                } else {
-                    Some(dimensions.signed(signed, is_local, bindings, types)?)
-                };
-            let fixed_width = dimensions.resolve_or_defer_size(width, is_local, bindings, types)?;
+            let fixed_sign = if dimensions.defer_bit_or_array_operand(signed, is_local, types)? {
+                None
+            } else {
+                Some(dimensions.signed(signed, is_local, bindings, types)?)
+            };
+            let fixed_width =
+                dimensions.resolve_or_defer_size(width, "bit width", is_local, bindings, types)?;
             if let (Some(signed), Some(width)) = (fixed_sign, fixed_width) {
                 Ok(Type::Bits { signed, width })
             } else {
@@ -1116,7 +1116,9 @@ fn resolve_type<'m>(
                 types,
                 child_type_budget(remaining)?,
             )?;
-            if let Some(size) = dimensions.resolve_or_defer_size(size, is_local, bindings, types)? {
+            if let Some(size) =
+                dimensions.resolve_or_defer_size(size, "array length", is_local, bindings, types)?
+            {
                 Ok(Type::array(element, size))
             } else {
                 Ok(Type::ParametricArray {
@@ -1142,9 +1144,7 @@ fn resolve_struct_application<'m>(
     let (name, args) = ty.struct_application().expect("struct application");
     let dependent = dimensions.has_dependent_port_operand(ty);
     if matches!(args, StructLiteralArgs::Expressions(_)) && !dependent {
-        let mut checker = types.struct_scope(dimensions);
-        checker.enclosing_type_locals = Some(is_local);
-        checker.function_type_bindings = bindings.cloned();
+        let mut checker = types.annotation_scope(dimensions, is_local, bindings);
         let bound = checker.struct_prefix(name, args)?;
         return checker.struct_applied_type(name, &bound, remaining);
     }
@@ -1160,9 +1160,7 @@ fn resolve_struct_application<'m>(
             let Some(template) = types.structs.template(name) else {
                 let (subject, member) = lookup_use(name, types.resolver, is_local)?
                     .ok_or_else(|| format!("unknown parametric struct '{name}'"))?;
-                let mut checker = types.struct_scope(dimensions);
-                checker.enclosing_type_locals = Some(is_local);
-                checker.function_type_bindings = Some(bindings.clone());
+                let mut checker = types.annotation_scope(dimensions, is_local, Some(bindings));
                 checker.check_deferred_imported_struct(&subject, &member, args, dimensions)?;
                 return Ok(ty.clone());
             };
@@ -1191,9 +1189,7 @@ fn resolve_struct_application<'m>(
                 ty.clone()
             };
             types.structs.update_imports(types.resolver)?;
-            let mut checker = types.struct_scope(dimensions);
-            checker.enclosing_type_locals = Some(is_local);
-            checker.function_type_bindings = Some(bindings.clone());
+            let mut checker = types.annotation_scope(dimensions, is_local, Some(bindings));
             checker.check_deferred_struct_arguments(
                 template,
                 args,
@@ -1204,9 +1200,7 @@ fn resolve_struct_application<'m>(
             return Ok(resolved);
         }
     }
-    let mut checker = types.struct_scope(dimensions);
-    checker.enclosing_type_locals = Some(is_local);
-    checker.function_type_bindings = bindings.cloned();
+    let mut checker = types.annotation_scope(dimensions, is_local, bindings);
     let args = checker.struct_prefix_at(name, args, remaining, None)?;
     checker.struct_applied_type(name, &args, remaining)
 }
@@ -1338,6 +1332,20 @@ impl<'m> TypeResolver<'_, 'm> {
             self.functions.as_deref_mut(),
         )
     }
+
+    /// Check expressions inside a type with the lexical names and type
+    /// bindings that are visible at the annotation.
+    fn annotation_scope<'a>(
+        &'a mut self,
+        dimensions: ModuleDimensions<'a, 'm>,
+        is_local: &'a dyn Fn(&str) -> bool,
+        bindings: Option<&Bindings>,
+    ) -> BodyChecker<'a, 'm> {
+        let mut checker = self.struct_scope(dimensions);
+        checker.enclosing_type_locals = Some(is_local);
+        checker.function_type_bindings = bindings.cloned();
+        checker
+    }
 }
 
 /// Resolve struct fields in the enclosing module scope.
@@ -1364,8 +1372,8 @@ fn resolve_fields<'m>(
         .collect()
 }
 
-/// A parameter name enters scope before its type annotation and remains
-/// visible in later parameters and the result type.
+/// Resolve a signature in declaration order. Each parameter shadows outer
+/// names in its annotation. Later annotations can use its resolved type.
 fn resolve_signature<'a, 'm>(
     params: &[Param],
     result: &Type,
@@ -1374,27 +1382,29 @@ fn resolve_signature<'a, 'm>(
     dimensions: ModuleDimensions<'_, 'm>,
     types: &mut TypeResolver<'_, 'm>,
 ) -> Result<(Vec<Param>, Type), String> {
-    let mut scope: BTreeSet<_> = timing_ports.into_iter().cloned().collect();
+    let reserved: BTreeSet<_> = timing_ports.into_iter().map(String::as_str).collect();
     let mut resolved = Vec::with_capacity(params.len());
+    let mut indices = BTreeMap::new();
     for p in params {
-        scope.insert(p.name.clone());
+        indices.insert(p.name.as_str(), resolved.len());
+        let ty = resolve_type(
+            &p.ty,
+            &|name| indices.contains_key(name) || reserved.contains(name),
+            bindings,
+            dimensions.with_data_parameters(&resolved, &indices),
+            types,
+            MAX_ELABORATION_DEPTH,
+        )?;
         resolved.push(Param {
             name: p.name.clone(),
-            ty: resolve_type(
-                &p.ty,
-                &|name| scope.contains(name),
-                bindings,
-                dimensions,
-                types,
-                MAX_ELABORATION_DEPTH,
-            )?,
+            ty,
         });
     }
     let result = resolve_type(
         result,
-        &|name| scope.contains(name),
+        &|name| indices.contains_key(name) || reserved.contains(name),
         bindings,
-        dimensions,
+        dimensions.with_data_parameters(&resolved, &indices),
         types,
         MAX_ELABORATION_DEPTH,
     )?;
@@ -2856,8 +2866,10 @@ struct BodyChecker<'a, 'm> {
     decls: &'a Declarations<'m>,
     structs: &'a mut StructTable<'m>,
     resolver: &'a mut ImportResolver,
-    /// Runtime names that shadow module declarations in a type annotation.
+    /// Local names that shadow module declarations in a type annotation.
     enclosing_type_locals: Option<&'a dyn Fn(&str) -> bool>,
+    /// Data parameters already typed in the signature that owns an annotation.
+    signature_parameters: Option<module_constants::DataParameters<'a>>,
     kind: BodyKind,
     has_block_only_behavior: Cell<bool>,
     /// A clockless source block requires every hardware operation to be
@@ -2925,6 +2937,9 @@ struct BodyChecker<'a, 'm> {
     /// Bare dimension bindings in a struct declaration can have any integer
     /// type.
     in_struct_definition: bool,
+    /// A constructor is supplying a witness before its formal signature is
+    /// complete.
+    probing_constructor_types: bool,
     /// Physical output names take precedence over internal hardware names.
     outputs: BTreeSet<String>,
     reserved_hardware_names: BTreeSet<String>,
@@ -3325,6 +3340,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             structs,
             resolver,
             enclosing_type_locals: None,
+            signature_parameters: None,
             kind,
             has_block_only_behavior: Cell::new(false),
             clockless_block: None,
@@ -3357,6 +3373,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             constant_pattern_names: BTreeSet::new(),
             local_type_aliases: BTreeMap::new(),
             in_struct_definition: false,
+            probing_constructor_types: false,
             outputs: BTreeSet::new(),
             reserved_hardware_names: BTreeSet::new(),
             values: BTreeMap::new(),
@@ -3385,6 +3402,30 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             constant_budgets: ConstantBudgets::default(),
             unroll_binding_count: 0,
         }
+    }
+
+    /// Make a formal's type available to later annotations and the body.
+    /// Signature checking uses the input's type even when the argument is a
+    /// literal.
+    fn bind_data_parameter(&mut self, name: &str, ty: &Type) {
+        self.names.insert(name.to_owned());
+        self.values.insert(name.to_owned(), ty.clone());
+    }
+
+    /// Resolve a data parameter in a specialized signature. The name shadows
+    /// outer bindings in its own annotation and gains its type afterwards.
+    fn resolve_data_parameter(
+        &mut self,
+        formal: &Param,
+        resolve: impl FnOnce(&mut Self, &Type) -> Result<Type, String>,
+    ) -> Result<Param, String> {
+        self.names.insert(formal.name.clone());
+        let ty = resolve(self, &formal.ty)?;
+        self.values.insert(formal.name.clone(), ty.clone());
+        Ok(Param {
+            name: formal.name.clone(),
+            ty,
+        })
     }
 
     /// Check ordered let bindings and a return expression in a pure scope.
@@ -3423,8 +3464,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
         }
         for p in &interface.params {
-            self.names.insert(p.name.clone());
-            self.values.insert(p.name.clone(), p.ty.clone());
+            self.bind_data_parameter(&p.name, &p.ty);
         }
         let output = self
             .scoped_result(&function.body, Some(&interface.result), false)
@@ -3508,12 +3548,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             c.clockless_block = Some(block);
         }
         if let Some(rst) = &block.reset {
-            declare(&mut c.names, rst)?;
-            c.values.insert(rst.clone(), Type::Bool);
+            c.bind_data_parameter(rst, &Type::Bool);
         }
         for p in &interface.params {
-            declare(&mut c.names, &p.name)?;
-            c.values.insert(p.name.clone(), p.ty.clone());
+            c.bind_data_parameter(&p.name, &p.ty);
         }
         c.body(block, &block.statements, false)?;
         for (name, driven) in &c.wires {
@@ -4421,7 +4459,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             self.charge_reference_copy(work)?;
             return Ok((value.ty.clone(), value.kind.clone()));
         }
-        if let Some(ty) = self.values.get(name) {
+        if let Some(ty) = self.local_value_type(name) {
             let work = source_type_nodes(ty) - 1;
             self.charge_reference_copy(work)?;
             return Ok((ty.clone(), K::Name(name.to_owned())));
@@ -4495,6 +4533,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         self.loop_values
             .get(name)
             .or_else(|| self.function_values.get(name))
+    }
+
+    /// Look up a typed local or an earlier data parameter in a signature.
+    fn local_value_type(&self, name: &str) -> Option<&Type> {
+        self.values.get(name).or_else(|| {
+            self.signature_parameters
+                .and_then(|parameters| parameters.get(name))
+        })
     }
 
     fn module_constant(&self, name: &str) -> Option<&CheckedConstant> {
@@ -4970,8 +5016,73 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         let cond = self.expr(condition, Some(&Type::Bool))?;
+        // Folding here is speculative. An enclosing expression may discard
+        // this predicate, so a failed fold leaves ordinary checking in place.
+        let pending_then = self.constructor_binding_pending(SourceNode::Expression(then_value));
+        let pending_else = self.constructor_binding_pending(SourceNode::Expression(else_value));
+        if (pending_then || pending_else)
+            && let Ok(Some(predicate)) = self.checked_constant_for(&cond, self.dslx_constant_use)
+            && let Ok(take_then) = predicate.to_bool()
+        {
+            let (selected, skipped, pending_skipped) = if take_then {
+                (then_value, else_value, pending_else)
+            } else {
+                (else_value, then_value, pending_then)
+            };
+            if pending_skipped {
+                if expected.is_some() {
+                    let value = self.expr_in_group(selected, expected)?;
+                    return Ok((value.ty, value.kind));
+                }
+                return self.with_prepared_value(selected, |checker, selected| {
+                    // Inspect the selected operand with any scoped lets in
+                    // place. A literal or inferred let can still need the
+                    // skipped arm's type. A cast supplies its target without
+                    // reading its input.
+                    let value = if checker.has_concrete_element_type(selected)? {
+                        checker.expr_in_group(selected, None)?
+                    } else if let Some(ty) = Self::constructor_cast_target(skipped) {
+                        let ty = checker.source_type(ty)?;
+                        checker.expr_in_group(selected, Some(&ty))?
+                    } else {
+                        let arms = if take_then {
+                            [selected, skipped]
+                        } else {
+                            [skipped, selected]
+                        };
+                        return checker.conditional_results(cond, arms, None);
+                    };
+                    Ok((value.ty, value.kind))
+                });
+            }
+        }
+        self.conditional_results(cond, [then_value, else_value], expected)
+    }
+
+    /// Find a skipped arm's cast target that can be resolved in the enclosing
+    /// scope.
+    fn constructor_cast_target(arm: &Expr) -> Option<&Type> {
+        let mut result = arm;
+        while let Expr::Scope { result: inner, .. } = result {
+            result = inner;
+        }
+        let Expr::Cast { ty, .. } = result else {
+            return None;
+        };
+        // A primitive target needs no local bindings. A named target or a
+        // computed width may refer to a declaration inside the skipped scope.
+        (!matches!(arm, Expr::Scope { .. }) || bits(ty).is_some()).then_some(ty)
+    }
+
+    /// Check both arms in source order and retain their shared result type.
+    fn conditional_results(
+        &mut self,
+        cond: TypedExpr,
+        arms: [&Expr; 2],
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), String> {
         let [t, f] = self
-            .check_results(&[then_value, else_value], expected)?
+            .check_results(&arms, expected)?
             .try_into()
             .expect("two checked branches");
         Ok((
@@ -5169,8 +5280,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 let ty = self
                     .lexical_value(name)
                     .map(|v| &v.ty)
-                    .or_else(|| self.values.get(name))
-                    .or_else(|| self.module_constant(name).map(|c| &c.ty))?;
+                    .or_else(|| self.local_value_type(name))
+                    .or_else(|| {
+                        self.module_constant(name)
+                            .filter(|_| !self.has_local_name(name))
+                            .map(|constant| &constant.ty)
+                    })?;
                 Some((name, ty))
             }
             Expr::Field { value, name } => {
@@ -5853,7 +5968,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Result<MatchSelector, String> {
         let operands = match_operands(subject, arms, |name| {
             let head = name.split_once("::").map_or(name, |(head, _)| head);
-            if self.names.contains(head) {
+            if self.has_local_name(head) {
                 if let Some(TypedExpr {
                     kind: K::Call { name: target, .. },
                     ..

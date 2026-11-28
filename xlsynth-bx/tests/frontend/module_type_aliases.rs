@@ -88,6 +88,24 @@ fn value_formals_shadow_type_aliases_in_their_own_annotations() -> Result<(), Bo
 }
 
 #[test]
+fn value_formals_shadow_module_constants_in_their_own_widths() -> Result<(), Box<dyn Error>> {
+    let declaration = r#"
+const D = u32:5;
+fn f<D: uN[D] = {u5:5}>() -> u32 { D as u32 }
+fn g<T, D: uN[D] = {u5:5}>(x: T) -> u32 { D as u32 }
+"#;
+    for call in ["f()", "f<u5:5>()", "f<false>()", "g<u5:5>(u8:1)"] {
+        let source = format!("{declaration} const RESULT = {call};");
+        assert_eq!(
+            check_module(&parse_module(&source)?).unwrap_err(),
+            "const 'RESULT': unknown value 'D'",
+            "{call}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn aliases_resolve_once_in_definition_scope() -> Result<(), Box<dyn Error>> {
     let source = r#"
 const WIDTH = u32:8;

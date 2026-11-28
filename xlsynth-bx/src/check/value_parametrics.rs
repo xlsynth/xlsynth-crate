@@ -23,8 +23,8 @@ use super::{
     compatible, declare, literal_copy_work, minimum_type, resolve_type, source_type_nodes,
 };
 use crate::ast::{
-    CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding, StructArgument,
-    StructArgumentRef, StructLiteralArgs, StructParametricRef, Type,
+    CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding, SourceNode,
+    StructArgument, StructArgumentRef, StructLiteralArgs, StructParametricRef, Type,
 };
 use crate::dslx_import::ImportResolver;
 use crate::typed::{BoundParametricValue, TypedExpr};
@@ -621,6 +621,38 @@ enum DataArgument<'e> {
     Checked(TypedExpr),
 }
 
+/// Declaration scope for the current field or function input during constructor
+/// inference.
+#[derive(Clone, Copy)]
+struct ConstructorScope<'s> {
+    owner: &'s str,
+    /// Function inputs through the current parameter, or an empty slice for a
+    /// struct field.
+    params: &'s [Param],
+}
+
+/// Follow each required binding's annotation and default back to preceding
+/// declarations. A later formal cannot shadow a name used by an earlier one.
+fn required_bindings<'n>(
+    roots: impl Iterator<Item = SourceNode<'n>>,
+    declarations: impl DoubleEndedIterator<Item = (&'n str, &'n Type, Option<&'n Expr>)>,
+) -> BTreeSet<&'n str> {
+    let mut pending = roots
+        .flat_map(SourceNode::free_names)
+        .collect::<BTreeSet<_>>();
+    let mut required = BTreeSet::new();
+    for (name, ty, default) in declarations.rev() {
+        if pending.remove(name) {
+            required.insert(name);
+            pending.extend(SourceNode::Annotation(ty).free_names());
+            if let Some(default) = default {
+                pending.extend(SourceNode::Expression(default).free_names());
+            }
+        }
+    }
+    required
+}
+
 /// Earlier explicit formals stay in declaration scope while the caller
 /// evaluates each constexpr actual with the type of the next formal.
 #[derive(Default)]
@@ -706,19 +738,30 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Evaluate in the active lexical scope with the binding's declared type.
     pub(super) fn parametric_value(&mut self, expr: &Expr, ty: &Type) -> Result<IrValue, String> {
+        self.constexpr_operand_value(expr, ty, "value parametric")
+    }
+
+    /// Evaluate an operand that must be constant for the given use.
+    pub(super) fn constexpr_operand_value(
+        &mut self,
+        expr: &Expr,
+        ty: &Type,
+        purpose: &str,
+    ) -> Result<IrValue, String> {
         let retain = self.assert_operands.is_some();
-        let (constant, operand) = self.parametric_value_and_operand(expr, ty, retain)?;
+        let (constant, operand) = self.constexpr_value_and_operand(expr, ty, retain, purpose)?;
         self.record_assert_operand(operand);
         Ok(constant)
     }
 
     /// Fold an actual while optionally keeping its typed expression and
     /// constexpr-only lexical lets for an operand erased during lowering.
-    pub(super) fn parametric_value_and_operand(
+    pub(super) fn constexpr_value_and_operand(
         &mut self,
         expr: &Expr,
         ty: &Type,
         retain_operand: bool,
+        purpose: &str,
     ) -> Result<(IrValue, TypedExpr), String> {
         let had_functions = self.constant_functions.is_some();
         let first = self.statements.len();
@@ -730,7 +773,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             let value = checker.dslx_argument(expr, ty)?;
             let constant = checker
                 .checked_constant_for(&value, checker.dslx_constant_use)?
-                .ok_or_else(|| "value parametric requires a compile-time constant".to_owned())?;
+                .ok_or_else(|| format!("{purpose} requires a compile-time constant"))?;
             Ok((constant, value))
         });
         // Scope elaboration may materialize lets while computing an actual
@@ -744,6 +787,33 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             self.constant_functions = None;
         }
         result
+    }
+
+    /// Whether checking this operand may require a witness from the constructor
+    /// itself.
+    pub(super) fn constructor_binding_pending(&self, source: SourceNode<'_>) -> bool {
+        self.probing_constructor_types
+            && source.free_names().any(|name| {
+                (self.names.contains(name) && !self.constexpr_names.contains(name))
+                    || self
+                        .type_bindings()
+                        .is_some_and(|types| types.declares(name) && types.get(name).is_none())
+            })
+    }
+
+    /// An intermediate binding may depend on the very dimension its
+    /// constructor will establish. Retain successful partial evaluations and
+    /// leave unresolved declarations shadowing their module names.
+    fn probe_constructor_binding<T>(
+        &mut self,
+        source: SourceNode<'_>,
+        resolve: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        match resolve(self) {
+            Ok(bound) => Ok(Some(bound)),
+            Err(_) if self.constructor_binding_pending(source) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// A directly named struct value parameter can supply a dimension at its
@@ -779,11 +849,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         remaining: usize,
         copies: &mut Option<TypeArgumentCopies>,
     ) -> Result<Type, String> {
-        let size = |checker: &mut Self, expr: &Expr| {
+        let size = |checker: &mut Self, expr: &Expr, purpose: &str| {
             if let Some(n) = checker.struct_dimension(expr)? {
                 return Ok(n);
             }
-            let value = checker.parametric_value(expr, &dimension_type())?;
+            let value = checker.constexpr_operand_value(expr, &dimension_type(), purpose)?;
             ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
                 .ok_or_else(|| "dimension does not fit usize".to_owned())
         };
@@ -858,13 +928,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     Some(1) => true,
                     Some(n) => return Err(format!("bit signedness must be 0 or 1, got {n}")),
                     None => self
-                        .parametric_value(signed, &Type::Bool)?
+                        .constexpr_operand_value(signed, &Type::Bool, "bit signedness")?
                         .to_bool()
                         .map_err(|e| e.to_string())?,
                 };
                 Ok(Type::Bits {
                     signed,
-                    width: size(self, width)?,
+                    width: size(self, width, "bit width")?,
                 })
             }
             Type::ParametricArray {
@@ -872,7 +942,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 size: expr,
             } => Ok(Type::array(
                 self.resolve_annotation(element, child_type_budget(remaining)?, copies)?,
-                size(self, expr)?,
+                size(self, expr, "array length")?,
             )),
             Type::Array { element, size } => Ok(Type::array(
                 self.resolve_annotation(element, child_type_budget(remaining)?, copies)?,
@@ -1051,7 +1121,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         })
     }
 
-    /// Bind defaults in declaration order, then resolve each runtime parameter
+    /// Bind defaults in declaration order, then resolve each data parameter
     /// and the result in the completed value environment.
     fn bound_value_signature(
         &mut self,
@@ -1111,13 +1181,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let mut params = Vec::new();
         for p in &f.params {
-            let ty = self.source_type(&p.ty)?;
-            charge(self, source_type_nodes(&ty))?;
-            self.names.insert(p.name.clone());
-            params.push(Param {
-                name: p.name.clone(),
-                ty,
-            });
+            params.push(self.resolve_function_data_parameter(p)?);
         }
         let result = self.source_type(&f.result)?;
         Ok(BoundValueSignature {
@@ -1136,9 +1200,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         })
     }
 
-    /// An inferred annotation on a constexpr formal must select one of the
-    /// value types accepted for an explicitly annotated binding.
+    /// Charge each resolved data input before retaining its type in the
+    /// specialization scope.
+    fn resolve_function_data_parameter(&mut self, formal: &Param) -> Result<Param, String> {
+        self.resolve_data_parameter(formal, |checker, source| {
+            let ty = checker.source_type(source)?;
+            checker
+                .function_registry
+                .as_deref_mut()
+                .expect("module function registry")
+                .charge_bindings(source_type_nodes(&ty))?;
+            Ok(ty)
+        })
+    }
+
+    /// Resolve a constexpr formal's annotation with its name already in scope.
     fn value_binding_type(&mut self, formal: &ParametricBinding) -> Result<Type, String> {
+        self.names.insert(formal.name.clone());
         let ty = self.source_type(&formal.ty)?;
         if let Type::Named(name) = &formal.ty
             && self
@@ -1504,7 +1582,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if inferred.values.iter().all(Option::is_some) {
             return Ok(());
         }
-        for (input, param) in inputs.iter_mut().zip(params) {
+        let function = self.decls.function_templates.get(owner).copied();
+        for (index, (input, param)) in inputs.iter_mut().zip(params).enumerate() {
+            let scope = ConstructorScope {
+                owner,
+                params: function.map_or(&[][..], |f| &f.params[..=index]),
+            };
             input.visit_leaves(&param.ty, &mut |pattern, leaf| {
                 if let Input::Contextual {
                     expr,
@@ -1514,7 +1597,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     self.infer_constructor_default(
                         pattern,
                         expr,
-                        owner,
+                        scope,
                         types,
                         inferred,
                         MAX_ELABORATION_DEPTH,
@@ -1533,7 +1616,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         &mut self,
         pattern: &Type,
         expr: &Expr,
-        owner: &str,
+        scope: ConstructorScope<'_>,
         types: &Bindings,
         inferred: &mut InferredBindings<'_>,
         remaining: usize,
@@ -1545,21 +1628,21 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         match expr {
             Expr::Scope { result, .. } if !expr.needs_scope_preparation() => {
                 return self
-                    .infer_constructor_default(pattern, result, owner, types, inferred, depth);
+                    .infer_constructor_default(pattern, result, scope, types, inferred, depth);
             }
             Expr::If {
                 then_value,
                 else_value,
                 ..
             } => {
-                self.infer_constructor_default(pattern, then_value, owner, types, inferred, depth)?;
+                self.infer_constructor_default(pattern, then_value, scope, types, inferred, depth)?;
                 return self
-                    .infer_constructor_default(pattern, else_value, owner, types, inferred, depth);
+                    .infer_constructor_default(pattern, else_value, scope, types, inferred, depth);
             }
             Expr::Match { arms, .. } => {
                 for arm in arms {
                     self.infer_constructor_default(
-                        pattern, &arm.value, owner, types, inferred, depth,
+                        pattern, &arm.value, scope, types, inferred, depth,
                     )?;
                 }
                 return Ok(());
@@ -1573,7 +1656,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return self.infer_constructor_default(
                 pattern,
                 &base.value,
-                owner,
+                scope,
                 types,
                 inferred,
                 depth,
@@ -1596,30 +1679,37 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let mut child_types = Bindings::new(&template.type_params);
         {
             let mut definition = BodyChecker::struct_type_scope(
-                self.decls.module_dimensions(owner),
+                self.decls.module_dimensions(scope.owner),
                 self.resolver,
                 self.structs,
                 self.function_registry.as_deref_mut(),
             );
-            definition.in_struct_definition = definition.structs.template(owner).is_some();
+            definition.in_struct_definition = definition.structs.template(scope.owner).is_some();
             definition.function_type_bindings = Some(types.clone());
-            for (formal, bound) in inferred.formals.iter().zip(&inferred.values) {
-                if let Some(bound) = bound {
-                    definition.bind_parametric_value(&formal.name, bound);
-                }
-            }
-            for (formal, arg) in template.parametric_bindings().zip(args).skip(count) {
-                if let (StructParametricRef::Type(name), StructArgument::Type(ty)) = (formal, arg)
-                    && !types.has_unbound_variable(ty)
-                    && !inferred.needs_witness(ty)
-                {
-                    let actual = definition.source_type(ty)?;
-                    child_types.match_input(
-                        &Type::Named(name.to_owned()),
-                        &actual,
-                        definition.structs,
-                    )?;
-                }
+            let context_types = template
+                .parametric_bindings()
+                .zip(args)
+                .skip(count)
+                .filter_map(|(formal, arg)| {
+                    if let (StructParametricRef::Type(name), StructArgument::Type(ty)) =
+                        (formal, arg)
+                        && !types.has_unbound_variable(ty)
+                        && !inferred.needs_witness(ty)
+                    {
+                        Some((name, ty))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            definition.bind_constructor_input_types(scope, &context_types, inferred)?;
+            for (name, ty) in context_types {
+                let actual = definition.source_type(ty)?;
+                child_types.match_input(
+                    &Type::Named(name.to_owned()),
+                    &actual,
+                    definition.structs,
+                )?;
             }
         }
         if count == 0
@@ -1648,6 +1738,89 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Err(StructLiteralError::Unbound(_)) => Ok(()),
             Err(error) => Err(error.into_message()),
         }
+    }
+
+    /// Resolve only the earlier inputs and omitted defaults needed by these
+    /// type arguments. Other inputs may still depend on the witness this
+    /// constructor is supplying.
+    fn bind_constructor_input_types(
+        &mut self,
+        scope: ConstructorScope<'_>,
+        context_types: &[(&str, &Type)],
+        inferred: &InferredBindings<'_>,
+    ) -> Result<(), String> {
+        if context_types.is_empty() {
+            return Ok(());
+        }
+        let Some((current, earlier)) = scope.params.split_last() else {
+            for (formal, bound) in inferred.formals.iter().zip(&inferred.values) {
+                if let Some(bound) = bound {
+                    self.bind_parametric_value(&formal.name, bound);
+                }
+            }
+            return Ok(());
+        };
+        let missing = inferred
+            .formals
+            .iter()
+            .zip(&inferred.values)
+            .filter(|(_, value)| value.is_none());
+        let required = required_bindings(
+            context_types
+                .iter()
+                .map(|(_, ty)| SourceNode::Annotation(ty)),
+            missing
+                .map(|(formal, _)| (formal.name.as_str(), &formal.ty, formal.default.as_ref()))
+                .chain(
+                    earlier
+                        .iter()
+                        .map(|param| (param.name.as_str(), &param.ty, None)),
+                ),
+        );
+        let function = self.decls.function_templates[scope.owner];
+        self.probing_constructor_types = true;
+        let mut values = inferred.values.iter();
+        for formal in function.parametric_bindings() {
+            let formal = match formal {
+                FunctionParametricRef::Callback(callback) => {
+                    self.names.insert(callback.name.clone());
+                    continue;
+                }
+                FunctionParametricRef::Value(formal) => formal,
+            };
+            self.names.insert(formal.name.clone());
+            if let Some(bound) = values.next().expect("one slot per value formal") {
+                self.bind_parametric_value(&formal.name, bound);
+                continue;
+            }
+            if required.contains(formal.name.as_str())
+                && let Some(ty) = self
+                    .probe_constructor_binding(SourceNode::Annotation(&formal.ty), |checker| {
+                        checker.value_binding_type(formal)
+                    })?
+            {
+                if let Some(default) = &formal.default
+                    && let Some(bound) = self
+                        .probe_constructor_binding(SourceNode::Expression(default), |checker| {
+                            checker.value_or_default(scope.owner, formal, ty.clone(), None)
+                        })?
+                {
+                    self.bind_parametric_value(&formal.name, &bound);
+                    continue;
+                }
+                self.values.insert(formal.name.clone(), ty);
+            }
+        }
+        for param in earlier {
+            self.names.insert(param.name.clone());
+            if required.contains(param.name.as_str()) {
+                self.probe_constructor_binding(SourceNode::Annotation(&param.ty), |checker| {
+                    checker.resolve_function_data_parameter(param)
+                })?;
+            }
+        }
+        self.names.insert(current.name.clone());
+        Ok(())
     }
 
     /// Infer type variables from the result context, data and callbacks before
@@ -1905,19 +2078,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         if !actuals.is_empty() {
             // Check explicit annotations before instantiating the callee.
-            // Preceding formals hide module declarations even though none of
-            // their values are available yet in this definition scope.
+            // Each formal hides module declarations starting at its own
+            // annotation, before its value is available in this scope.
             let types = self.with_value_definition(&f.name, |definition| {
                 let mut types = Vec::new();
                 for formal in f.parametric_bindings().take(actuals.len()) {
-                    let name = match formal {
+                    match formal {
                         FunctionParametricRef::Value(value) => {
-                            types.push(definition.source_type(&value.ty)?);
-                            &value.name
+                            types.push(definition.value_binding_type(value)?);
                         }
-                        FunctionParametricRef::Callback(callback) => &callback.name,
-                    };
-                    definition.names.insert(name.clone());
+                        FunctionParametricRef::Callback(callback) => {
+                            definition.names.insert(callback.name.clone());
+                        }
+                    }
                 }
                 Ok(types)
             })?;
@@ -2089,6 +2262,204 @@ const RESULT = sample(u8:42);
             checked.constants()[0].value,
             IrValue::parse_typed("(bits[32]:8, bits[32]:8, bits[32]:8, bits[32]:8)")
                 .map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_constructor_witness_can_precede_bindings_in_an_untaken_dimension_arm() -> Result<(), String>
+    {
+        let source = r#"
+const A = u32:12;
+const pending = u32:19;
+struct S<T, W:u32={bit_count<T>()}> { item:T }
+fn defaulted<M:u32, A:u32={M}>(y:S<uN[if true { u32:5 } else { A }], M>) -> u32 { A }
+fn runtime<M:u32>(pending:uN[M], y:S<uN[if false { pending as u32 } else { u32:7 }], M>) -> u32 { M }
+fn nested<M:u32, N:u32={u32:3}, D:u32={if true { N+u32:1 } else { M }}>(
+    pending:uN[M],
+    y:S<uN[(if D == u32:4 { D } else { let x = pending as u32; x }) + u32:1], M>
+) -> u32 { M }
+const RESULT = (defaulted(S{item:1}), runtime(1, S{item:1}), nested(1, S{item:1}));
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants().last().unwrap().value,
+            IrValue::parse_typed("(bits[32]:5, bits[32]:7, bits[32]:5)")
+                .map_err(|e| e.to_string())?
+        );
+        for (invalid, expected_error) in [
+            (
+                source.replace("if true { u32:5 }", "if false { u32:5 }"),
+                "compile-time constant",
+            ),
+            (
+                source.replace("if false { pending as u32 }", "if true { pending as u32 }"),
+                "unknown value 'pending'",
+            ),
+            (
+                source.replace(
+                    "if false { pending as u32 }",
+                    "if false { pending as bool }",
+                ),
+                "expected u32, got bool",
+            ),
+        ] {
+            let error = check_module(&parse_module(&invalid)?).unwrap_err();
+            assert!(error.contains(expected_error), "{error}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn constructor_witness_folds_only_required_predicates() -> Result<(), String> {
+        let source = r#"
+enum E:u2 { Z = u2:0 }
+struct S<T, W:u32={bit_count<T>()}> { item:T }
+fn read<M:u32>(y:S<uN[if true { u32:5 } else {
+    if (u2:3 as E) == E::Z { u32:1 } else { u32:2 }
+}], M>) -> u32 { M }
+fn sibling<M:u32, D:u32={M}>(y:S<uN[(if true { 5 } else {
+    if (u2:3 as E) == E::Z { D } else { u32:2 }
+}) as u32], M>) -> u32 { M }
+const RESULT = (read(S{item:1}), sibling(S{item:1}));
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::parse_typed("(bits[32]:5, bits[32]:5)").map_err(|e| e.to_string())?
+        );
+        let required = source.replace("if true { u32:5 }", "if false { u32:5 }");
+        let error = check_module(&parse_module(&required)?).unwrap_err();
+        assert!(error.contains("constant cast to enum 'E'"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_constructor_dimension_cast_preserves_its_branch_operand_width() -> Result<(), String> {
+        let source = r#"
+const D = u5:0;
+struct S<T, W:u32={bit_count<T>()}> { item:T }
+fn typed<M:u32, D:uN[M]={0}>(y:S<uN[(if true { u5:5 } else { D }) as u32], M>) -> u32 { M }
+fn implicit<M:u32, D:u3={M as u3}>(y:S<uN[(!(if true { 0 } else { D })) as u32], M>) -> u32 { M }
+fn scoped<M:u32, D:u3={M as u3}>(y:S<uN[(!(if false { D } else { let D = u2:3; let x = 0; x })) as u32], M>) -> u32 { M }
+const K = u32:7;
+fn scoped_cast<M:u32>(pending:uN[M], y:S<uN[(!(if false { pending as uN[K] } else { let K = u32:3; 0 })) as u32], M>) -> u32 { M }
+const R = (typed(S{item:1}), implicit(S{item:1}), scoped(S{item:1}), scoped_cast(1,S{item:1}));
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants().last().unwrap().value,
+            IrValue::parse_typed("(bits[32]:5, bits[32]:7, bits[32]:7, bits[32]:127)")
+                .map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_constructor_dimension_uses_the_known_type_of_either_conditional_arm() -> Result<(), String>
+    {
+        let source = r#"
+const SEVEN = u32:7;
+struct S<T,W:u32={bit_count<T>()}> { item:T }
+fn seven() -> u32 { SEVEN }
+fn read<M:u32>(pending:uN[M], y:S<uN[(if false { pending as u32 } else { SELECTED }) as u32], M>) -> u32 { M }
+const R = read(1, S{item:1});
+"#;
+        // With no cast on the skipped operand, only the selected arm can
+        // establish its type. Its value of seven specializes pending to u7.
+        let bare_operand = source
+            .replace("u32:7", "u7:7")
+            .replace("seven() -> u32", "seven() -> u7")
+            .replace("pending as u32", "pending");
+        for (program, arm) in [
+            (source, "SEVEN"),
+            (source, "7"),
+            (bare_operand.as_str(), "SEVEN"),
+            (bare_operand.as_str(), "let n:u7 = 7; n"),
+            (bare_operand.as_str(), "seven()"),
+            (bare_operand.as_str(), "SEVEN + 0"),
+        ] {
+            let source = program.replace("SELECTED", arm);
+            let checked = check_module(&parse_module(&source)?)?;
+            assert_eq!(
+                checked.constants().last().unwrap().value,
+                IrValue::make_ubits(32, 7).map_err(|e| e.to_string())?,
+                "{arm}"
+            );
+        }
+
+        for (invalid, expected_error) in [
+            (
+                source
+                    .replace("SELECTED", "SEVEN")
+                    .replace("if false", "if true"),
+                "unknown value 'pending'",
+            ),
+            (
+                source
+                    .replace("SELECTED", "7")
+                    .replace("pending as u32", "pending"),
+                "unknown value 'pending'",
+            ),
+            (
+                source
+                    .replace("pending:uN[M]", "runtime:u32, pending:uN[M]")
+                    .replace("SELECTED", "runtime")
+                    .replace("read(1,", "read(u32:7, 1,"),
+                "compile-time constant",
+            ),
+            (
+                source
+                    .replace("SELECTED", "SEVEN")
+                    .replace("pending as u32", "pending as u16"),
+                "expected u16, got u32",
+            ),
+        ] {
+            let error = check_module(&parse_module(&invalid)?).unwrap_err();
+            assert!(error.contains(expected_error), "{error}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_skipped_scope_cast_can_type_an_implicit_constructor_dimension() -> Result<(), String> {
+        let source = r#"
+struct S<T, W:u32={bit_count<T>()}> { item:T }
+fn f<M:u32>(pending:uN[M], y:S<uN[(if true { 5 } else { let t = pending; t as u32 }) as u32], M>) -> u32 { M }
+const R = f(1, S{item:1});
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::make_ubits(32, 5).map_err(|e| e.to_string())?
+        );
+        // Reading the skipped scope's local K as the module constant would
+        // hide a data-dependent cast width.
+        let runtime_width = format!("const K = u32:32; {source}").replace(
+            "let t = pending; t as u32",
+            "let K = pending as u32; pending as uN[K]",
+        );
+        let error = check_module(&parse_module(&runtime_width)?).unwrap_err();
+        assert!(error.contains("unknown value 'pending'"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn constructor_default_inference_uses_the_earlier_function_parameters() -> Result<(), String> {
+        let source = r#"
+struct S<T, M:u32={bit_count<T>()}> { item:T }
+fn width<N:u32={u32:4}, M:u32>(
+    pending:uN[M],
+    previous:u32,
+    x:uN[if N == u32:4 { u32:32 } else { previous }],
+    y:S<uN[if N == u32:4 { u32:5 } else { x }], M>
+) -> u32 { M }
+const RESULT = width(1, u32:9, u32:7, S{item:1});
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::make_ubits(32, 5).map_err(|e| e.to_string())?
         );
         Ok(())
     }

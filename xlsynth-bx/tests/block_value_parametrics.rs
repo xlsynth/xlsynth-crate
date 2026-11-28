@@ -50,6 +50,30 @@ pub block capture(clk, words: Tagged<u12[3], 7>) -> u12[3] {
 }
 
 #[test]
+fn block_value_formals_shadow_module_constants_in_their_own_struct_arguments() -> Result<(), String>
+{
+    let source = r#"
+const D = u32:7;
+struct Word<W: u32> { x: uN[W] }
+block hold<D: Word<D>>(clk, v: bool) -> bool {
+    reg q: bool;
+    q := v;
+    q
+}
+pub block circuit(clk, v: bool) -> bool {
+    let y = hold<{Word<7>{x: u7:1}}>(v);
+    y
+}
+"#;
+    check_module(&parse_module(&source.replace("hold<D:", "hold<V:"))?)?;
+    assert_eq!(
+        check_module(&parse_module(source)?).unwrap_err(),
+        "block 'hold': struct 'Word' parametric 'W': unknown value 'D'"
+    );
+    Ok(())
+}
+
+#[test]
 fn unused_dimension_dependent_ports_check_independent_struct_arguments() -> Result<(), String> {
     for (formals, arguments, expected) in [
         ("T, Tag: u32", "u8, true", "u32"),
@@ -102,7 +126,8 @@ pub block top(clk, x: bool) -> bool {{ x }}
 }
 
 #[test]
-fn unused_block_checks_bare_struct_arguments_of_known_type() -> Result<(), Box<dyn Error>> {
+fn specializing_a_block_checks_the_types_of_forwarded_struct_arguments()
+-> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let template = "struct Tag<N: u32, Value: uN[N]> { data: u8 }";
     fs::write(directory.path().join("words.x"), format!("pub {template}"))?;
@@ -114,9 +139,12 @@ fn unused_block_checks_bare_struct_arguments_of_known_type() -> Result<(), Box<d
         let source = format!(
             "{decl} block stage<N: u32, S: bool>(clk, x: {name}<32, S>) -> bool {{ true }}"
         );
+        check_module_with_options(&parse_module(&source)?, &options)?;
+        let called =
+            format!("{source} pub block top(clk) -> bool {{ let q = stage<1, true>(zero!()); q }}");
         assert_eq!(
-            check_module_with_options(&parse_module(&source)?, &options).unwrap_err(),
-            format!("block 'stage': {context}expected u32, got bool"),
+            check_module_with_options(&parse_module(&called)?, &options).unwrap_err(),
+            format!("block 'top': let 'q': call to block 'stage': {context}expected u32, got bool"),
         );
         // N may be one, in which case S is a valid argument for Value.
         let dependent = source.replace("<32, S>", "<N, S>");
@@ -1273,14 +1301,20 @@ block circuit(clk, a: u3[3], b: u3[2]) -> (u3[3], u3[2]) {
 }
 
 #[test]
-fn boolean_block_parameters_cannot_supply_port_sizes() -> Result<(), String> {
-    for ty in ["bits[FLAG]", "u8[FLAG]"] {
-        let source =
-            format!("type Flag = bool; block bank<FLAG: Flag>(clk, x: {ty}) -> {ty} {{ x }}");
-        let error = check_module(&parse_module(&source)?).unwrap_err();
+fn specializing_a_port_checks_the_type_of_its_size_or_signedness() -> Result<(), String> {
+    for (ty, value, formal, diagnostic) in [
+        ("bits[V]", "true", "bool", "expected u32, got bool"),
+        ("u8[V]", "true", "bool", "expected u32, got bool"),
+        ("xN[V][8]", "1", "u32", "expected bool, got u32"),
+    ] {
+        let source = format!("block bank<V: {formal}>(clk, x: {ty}) -> {ty} {{ x }}");
+        check_module(&parse_module(&source)?)?;
+        let called =
+            format!("{source} pub block top(clk) -> u8 {{ let q = bank<{value}>(u8:0); q }}");
+        let error = check_module(&parse_module(&called)?).unwrap_err();
         assert_eq!(
             error,
-            "block 'bank': 'FLAG' names a local value in this type dimension"
+            format!("block 'top': let 'q': call to block 'bank': {diagnostic}")
         );
     }
     Ok(())
@@ -1356,20 +1390,108 @@ pub block circuit(clk, x: u4) -> u3 { let y = index<5>(x); y }
 
 #[test]
 fn unused_dependent_block_dimensions_check_all_names_in_declaration_scope() -> Result<(), String> {
-    for name in ["missing", "input"] {
-        for signature in [
-            format!("(clk, input: u32, x: bits[N + {name}]) -> u32 {{ input }}"),
-            format!("(clk, input: u32) -> u8[N + {name}] {{ zero!() }}"),
-            format!("(clk, input: u32, x: Word<{{N + {name}}}>) -> u32 {{ input }}"),
-            format!("(clk, input: u32) -> xN[N == {name}][8] {{ zero!() }}"),
-        ] {
-            let source = format!(
-                "const input = u32:4; struct Word<W: u32> {{ data: uN[W] }} block bank<N: u32>{signature} pub block top(clk, x: u8) -> u8 {{ x }}"
-            );
-            let error = check_module(&parse_module(&source)?).unwrap_err();
-            assert!(error.contains(name), "{signature}: {error}");
-        }
+    for signature in [
+        "(clk, input: u32, x: bits[N + input]) -> u32 { input }",
+        "(clk, input: u32) -> u8[N + input] { zero!() }",
+        "(clk, input: u32, x: Word<{N + input}>) -> u32 { input }",
+        "(clk, input: u32) -> xN[N == input][8] { zero!() }",
+    ] {
+        let header = "const input = u32:4; struct Word<W: u32> { data: uN[W] } block bank<N: u32>";
+        check_module(&parse_module(&format!("{header}{signature}"))?)?;
+        let missing = signature
+            .replace("+ input", "+ missing")
+            .replace("== input", "== missing");
+        let error = check_module(&parse_module(&format!("{header}{missing}"))?).unwrap_err();
+        assert_eq!(error, "block 'bank': unknown value 'missing'");
     }
+    Ok(())
+}
+
+#[test]
+fn generic_port_annotations_see_the_types_of_earlier_inputs() -> Result<(), String> {
+    let operand = "if N == u32:4 { u32:5 } else { x }";
+    for (result, concrete) in [
+        (format!("uN[{operand}]"), "u5"),
+        (format!("u8[{operand}]"), "u8[5]"),
+        (format!("xN[{operand} == u32:5][8]"), "s8"),
+        (format!("Word<{{{operand}}}>"), "Word<5>"),
+    ] {
+        // The input port shadows the module constant even for a literal
+        // argument at the call site.
+        let decl = format!(
+            "const x = u32:5; struct Word<W: u32> {{ data: bits[W] }} block stage<N: u32>(clk, x: u32, value: {result}) -> {result} {{ value }}"
+        );
+        let used = format!(
+            "{decl} pub block top(clk, a: {concrete}) -> {concrete} {{ let q = stage<4>(u32:5, a); q }}"
+        );
+        check_module(&parse_module(&used)?)?;
+        let runtime = used.replace("stage<4>(", "stage<3>(");
+        let error = check_module(&parse_module(&runtime)?).unwrap_err();
+        assert!(
+            error.contains("requires a compile-time constant"),
+            "{result}: {error}"
+        );
+        let missing = decl.replace("else { x }", "else { missing }");
+        assert_eq!(
+            check_module(&parse_module(&missing)?).unwrap_err(),
+            "block 'stage': unknown value 'missing'",
+            "{result}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn generic_block_port_widths_use_input_shapes_independently_of_input_values() -> Result<(), String>
+{
+    let source = r#"
+block capture<N: u32>(clk, flags: bool[N], value: uN[array_size(flags)]) -> uN[array_size(flags)] {
+    reg q: uN[array_size(flags)];
+    q := value;
+    q
+}
+pub block circuit(clk) -> (u4, u4, u2) {
+    let low = capture<4>(bool[4]:[false, ...], u4:0);
+    let high = capture<4>(bool[4]:[true, ...], u4:15);
+    let short = capture<2>(bool[2]:[true, ...], u2:3);
+    (low, high, short)
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let circuit = package.get_top_block().ok_or("missing circuit")?;
+    let [low, high, short] = circuit.instantiations.as_slice() else {
+        panic!("expected three capture instances");
+    };
+    assert_eq!(low.block, high.block);
+    assert_ne!(low.block, short.block);
+    for (instance, width) in [(low, 4), (short, 2)] {
+        let capture = package
+            .get_block(&instance.block)
+            .ok_or("missing capture")?;
+        assert_eq!(capture.registers[0].ty, Type::Bits(width));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_width_that_reads_an_input_is_rejected_at_block_specialization() -> Result<(), String> {
+    let decl = "const x = u32:8; block stage<N: u32>(clk, x: u32) -> uN[x] { zero!() }";
+    check_module(&parse_module(decl)?)?;
+    let called = format!("{decl} pub block top(clk) -> u8 {{ let q = stage<1>(u32:8); q }}");
+    assert_eq!(
+        check_module(&parse_module(&called)?).unwrap_err(),
+        "block 'top': let 'q': call to block 'stage': bit width requires a compile-time constant",
+    );
+    Ok(())
+}
+
+#[test]
+fn current_port_shadows_module_values_before_its_type_is_available() -> Result<(), String> {
+    let decl = "const x = u32:8; block stage<N: u32>(clk, x: uN[x]) -> bool { true }";
+    check_module(&parse_module(decl)?)?;
+    let called = format!("{decl} block top(clk) -> bool {{ let q = stage<4>(u8:1); q }}");
+    let error = check_module(&parse_module(&called)?).unwrap_err();
+    assert!(error.contains("'x'"), "{error}");
     Ok(())
 }
 
