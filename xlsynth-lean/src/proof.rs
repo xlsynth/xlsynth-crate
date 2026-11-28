@@ -21,7 +21,7 @@ import UserProof
 example : Target.Equivalent := UserProof.equivalent
 "#;
 
-const TARGET_ARTIFACTS: &[&str] = &["Lhs.aag", "Rhs.aag", "Target.lean", "Check.lean"];
+const AIG_TARGET_ARTIFACTS: &[&str] = &["Lhs.aag", "Rhs.aag", "Target.lean"];
 
 /// Mechanically generated circuits and root proposition for an equivalence
 /// proof.
@@ -36,10 +36,24 @@ pub struct LeanEquivalenceTarget {
 impl LeanEquivalenceTarget {
     /// Writes the complete prepared target using a fixed portable layout.
     pub fn write_to(&self, root: &Path) -> Result<(), LeanError> {
+        self.write_to_with_policy(root, LeanAxiomPolicy::ReplayNativeChecks)
+    }
+
+    /// Writes the target with AAG parse-success witnesses allowed by the
+    /// policy.
+    ///
+    /// Native evaluation scales to large graphs. Strict preparation instead
+    /// reduces both parser calls in the kernel, so even a reflexive proof of
+    /// the generated proposition can be audited without native axioms.
+    pub fn write_to_with_policy(
+        &self,
+        root: &Path,
+        policy: LeanAxiomPolicy,
+    ) -> Result<(), LeanError> {
         AIG_PROOF_SUPPORT.write_to(root)?;
         write_file(root, Path::new("Lhs.aag"), self.lhs_aag.as_bytes())?;
         write_file(root, Path::new("Rhs.aag"), self.rhs_aag.as_bytes())?;
-        let target_source = target_source(self.input_count, self.output_count);
+        let target_source = target_source(self.input_count, self.output_count, policy);
         write_file(root, Path::new("Target.lean"), target_source.as_bytes())?;
         write_file(root, Path::new("Check.lean"), CHECK_SOURCE.as_bytes())
     }
@@ -47,7 +61,11 @@ impl LeanEquivalenceTarget {
 
 /// Defines both circuits through the shared AAG loader and the root
 /// proposition.
-fn target_source(input_count: usize, output_count: usize) -> String {
+fn target_source(input_count: usize, output_count: usize, policy: LeanAxiomPolicy) -> String {
+    let parse_witness = match policy {
+        LeanAxiomPolicy::ReplayNativeChecks => "native_decide",
+        LeanAxiomPolicy::RejectNativeChecks => "decide +kernel",
+    };
     format!(
         r#"-- SPDX-License-Identifier: Apache-2.0
 
@@ -57,7 +75,7 @@ namespace Generated.Lhs
 
 def circuit : XlsynthLean.Aig.Circuit {input_count} {output_count} :=
   (XlsynthLean.Aag.parse {input_count} {output_count}
-    (include_str "Lhs.aag")).toOption.get (by native_decide)
+    (include_str "Lhs.aag")).toOption.get (by {parse_witness})
 
 def eval (inputs : BitVec {input_count}) : BitVec {output_count} :=
   circuit.eval inputs
@@ -68,7 +86,7 @@ namespace Generated.Rhs
 
 def circuit : XlsynthLean.Aig.Circuit {input_count} {output_count} :=
   (XlsynthLean.Aag.parse {input_count} {output_count}
-    (include_str "Rhs.aag")).toOption.get (by native_decide)
+    (include_str "Rhs.aag")).toOption.get (by {parse_witness})
 
 def eval (inputs : BitVec {input_count}) : BitVec {output_count} :=
   circuit.eval inputs
@@ -98,7 +116,7 @@ pub struct LeanProofSources {
     pub modules: Vec<PathBuf>,
 }
 
-/// Fully qualified Lean declaration name selected by an IR equivalence target.
+/// Fully qualified Lean declaration name selected by an equivalence target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeanTheoremName(String);
 
@@ -123,18 +141,22 @@ impl LeanTheoremName {
     }
 }
 
-/// A user module defining the selected IR theorem, and its available imports.
+/// A user module defining the selected equivalence theorem, and its available
+/// imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LeanIrProofSources {
+pub struct LeanNamedProofSources {
     pub root: PathBuf,
     pub module: PathBuf,
     pub theorem: LeanTheoremName,
     pub modules: Vec<PathBuf>,
 }
 
-/// Axiom policy applied to the selected IR theorem and its dependencies.
+/// Name retained for callers using the IR equivalence API.
+pub use LeanNamedProofSources as LeanIrProofSources;
+
+/// Axiom policy applied to the selected theorem and its dependencies.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum LeanIrAxiomPolicy {
+pub enum LeanAxiomPolicy {
     /// Allow the three standard axioms and replay closed Boolean checks.
     #[default]
     ReplayNativeChecks,
@@ -142,13 +164,16 @@ pub enum LeanIrAxiomPolicy {
     RejectNativeChecks,
 }
 
+/// Name retained for callers using the IR equivalence API.
+pub use LeanAxiomPolicy as LeanIrAxiomPolicy;
+
 /// Captured diagnostics from a successful equivalence proof check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeanProofOutput {
     /// Version string reported by the selected Lean executable.
     pub lean_version: String,
-    /// Number of distinct native Boolean axioms replayed by the IR audit.
-    /// AIG proof checks omit the audit and return `None`.
+    /// Number of distinct native Boolean axioms replayed for a named theorem.
+    /// Legacy AIG proof-body checks omit the audit and return `None`.
     pub native_checks_replayed: Option<usize>,
     /// Combined standard output from the compilation steps.
     pub stdout: String,
@@ -236,10 +261,46 @@ pub fn run_equivalence_proof(
     proof_sources: &LeanProofSources,
     work_root: &Path,
 ) -> Result<LeanProofOutput, LeanProofFailure> {
-    let artifacts = AIG_PROOF_SUPPORT
+    run_gate_proof(
+        lean_executable,
+        target_root,
+        ProofInputs::Body(proof_sources),
+        work_root,
+    )
+}
+
+/// Checks a theorem from a user module against the prepared gate equivalence
+/// target and audits its transitive axioms according to the selected policy.
+pub fn run_gate_equivalence_proof_with_policy(
+    lean_executable: &Path,
+    target_root: &Path,
+    proof_sources: &LeanNamedProofSources,
+    work_root: &Path,
+    policy: LeanAxiomPolicy,
+) -> Result<LeanProofOutput, LeanProofFailure> {
+    run_gate_proof(
+        lean_executable,
+        target_root,
+        ProofInputs::Named(proof_sources, policy),
+        work_root,
+    )
+}
+
+/// Compiles the AAG-based target for either proof interface.
+fn run_gate_proof(
+    lean_executable: &Path,
+    target_root: &Path,
+    proof_sources: ProofInputs<'_>,
+    work_root: &Path,
+) -> Result<LeanProofOutput, LeanProofFailure> {
+    let mut artifacts = AIG_PROOF_SUPPORT
         .paths()
-        .chain(TARGET_ARTIFACTS.iter().copied())
+        .chain(AIG_TARGET_ARTIFACTS.iter().copied())
         .collect::<Vec<_>>();
+    if matches!(proof_sources, ProofInputs::Body(_)) {
+        // Keep the prepared-file contract for the original proof-body API.
+        artifacts.push("Check.lean");
+    }
     let modules = AIG_PROOF_SUPPORT
         .module_paths()
         .chain(["Target.lean"])
@@ -247,10 +308,11 @@ pub fn run_equivalence_proof(
     run_prepared_proof(
         lean_executable,
         target_root,
-        ProofInputs::Aig(proof_sources),
+        proof_sources,
         work_root,
         &artifacts,
         &modules,
+        &[],
     )
 }
 
@@ -294,18 +356,20 @@ pub fn run_ir_function_equivalence_proof_with_policy(
     run_prepared_proof(
         lean_executable,
         target_root,
-        ProofInputs::Ir(proof_sources, policy),
+        ProofInputs::Named(proof_sources, policy),
         work_root,
         &artifacts,
         &modules,
+        FIXED_IR_PROOF_FILES,
     )
 }
 
-/// Selects the target's support files and the verifier's axiom policy.
+/// Selects the legacy proof-body interface or a named theorem with an axiom
+/// policy.
 #[derive(Clone, Copy)]
 enum ProofInputs<'a> {
-    Aig(&'a LeanProofSources),
-    Ir(&'a LeanIrProofSources, LeanIrAxiomPolicy),
+    Body(&'a LeanProofSources),
+    Named(&'a LeanNamedProofSources, LeanAxiomPolicy),
 }
 
 /// Stages the fixed target before any user modules and checks the generated
@@ -317,13 +381,14 @@ fn run_prepared_proof(
     work_root: &Path,
     artifacts: &[&str],
     modules: &[&str],
+    fixed_files: &[(&str, &[u8])],
 ) -> Result<LeanProofOutput, LeanProofFailure> {
     let lean_executable = resolve_lean_executable(lean_executable)?;
     let work_root = absolute_path(work_root)?;
     prepare_empty_work_directory(&work_root)?;
-    let (ir_audit, fixed_files) = match proof_sources {
-        ProofInputs::Aig(_) => (None, &[][..]),
-        ProofInputs::Ir(ir, policy) => (Some((&ir.theorem, policy)), FIXED_IR_PROOF_FILES),
+    let audit = match proof_sources {
+        ProofInputs::Body(_) => None,
+        ProofInputs::Named(sources, policy) => Some((&sources.theorem, policy)),
     };
     copy_prepared_target(target_root, &work_root, artifacts, fixed_files)?;
     let module_roots = [work_root.as_path()];
@@ -380,7 +445,7 @@ fn run_prepared_proof(
         &work_root,
         target_objects,
         &proof_modules,
-        ir_audit,
+        audit,
         &mut result,
     )
     .map_err(|error| LeanProofFailure::with_output(error, &result))?;
@@ -426,7 +491,7 @@ fn verify_compiled_proof(
     work_root: &Path,
     target_objects: BTreeMap<PathBuf, Vec<u8>>,
     proof_modules: &[PathBuf],
-    ir_audit: Option<(&LeanTheoremName, LeanIrAxiomPolicy)>,
+    audit: Option<(&LeanTheoremName, LeanAxiomPolicy)>,
     result: &mut LeanProofOutput,
 ) -> Result<(), LeanError> {
     let verification = tempfile::Builder::new()
@@ -456,23 +521,19 @@ fn verify_compiled_proof(
         root.join(verifier).into_os_string(),
         objects.into_os_string(),
     ];
-    if let Some((theorem, policy)) = ir_audit {
+    if let Some((theorem, policy)) = audit {
         let mode = match policy {
-            LeanIrAxiomPolicy::ReplayNativeChecks => "ir",
-            LeanIrAxiomPolicy::RejectNativeChecks => "ir-strict",
+            LeanAxiomPolicy::ReplayNativeChecks => "named",
+            LeanAxiomPolicy::RejectNativeChecks => "named-strict",
         };
         args.push(mode.into());
         args.push(theorem.as_str().into());
     } else {
-        args.push("aig".into());
+        args.push("body".into());
     }
     for module in proof_modules {
         if module != Path::new("UserProof.lean") {
-            args.push(
-                proof_module_name(module, ir_audit.is_none())?
-                    .as_str()
-                    .into(),
-            );
+            args.push(proof_module_name(module, audit.is_none())?.as_str().into());
         }
     }
     let output = run_lean_process(lean, root, &[], "equivalence check", &args)?;
@@ -483,12 +544,12 @@ fn verify_compiled_proof(
             "equivalence verifier exited without confirming the root theorem".into(),
         ));
     }
-    if ir_audit.is_some() {
+    if audit.is_some() {
         // Read only the verifier's private output, independently of diagnostics
         // produced while compiling source modules.
         let path = root.join("native-checks-replayed.json");
         let bytes = fs::read(&path).map_err(|source| LeanError::Io {
-            operation: "reading IR axiom audit result",
+            operation: "reading axiom audit result",
             path,
             source,
         })?;
@@ -589,8 +650,8 @@ fn stage_proof_sources(
     artifacts: &[&str],
 ) -> Result<Vec<PathBuf>, LeanError> {
     let (root, entry, helpers, theorem) = match sources {
-        ProofInputs::Aig(s) => (&s.root, &s.body, &s.modules, None),
-        ProofInputs::Ir(s, _) => (&s.root, &s.module, &s.modules, Some(&s.theorem)),
+        ProofInputs::Body(s) => (&s.root, &s.body, &s.modules, None),
+        ProofInputs::Named(s, _) => (&s.root, &s.module, &s.modules, Some(&s.theorem)),
     };
     let root = absolute_path(root)?;
     let entry = absolute_path(entry)?;

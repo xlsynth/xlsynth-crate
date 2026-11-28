@@ -167,92 +167,76 @@ values; it does not generate a theorem for each test vector.
 
 ## Check an equivalence proof
 
-Prepare a target from two `GateFn` graphs, then run a supplied proof:
-
-```rust
-use std::path::{Path, PathBuf};
-use xlsynth_lean::{LeanProofSources, prepare_equivalence_target, run_equivalence_proof};
-
-prepare_equivalence_target(&lhs, &rhs)?.write_to(Path::new("prepared"))?;
-let sources = LeanProofSources {
-    root: PathBuf::from("proof"),
-    body: PathBuf::from("proof/Body.lean"),
-    modules: vec![PathBuf::from("proof/Helpers/Partition.lean")],
-};
-let output = run_equivalence_proof(
-    Path::new("/path/to/lean/bin/lean"),
-    Path::new("prepared"),
-    &sources,
-    Path::new("work"),
-)?;
-```
-
-The input and output interfaces must have the same port names and widths in the
-same order. Interface mismatches return structured `LeanError` variants before
-Lean is invoked. The generated `Target.lean` embeds `Lhs.aag` and `Rhs.aag`
-through the shared AAG loader, defines `Generated.Lhs.circuit` and
-`Generated.Rhs.circuit`, and defines `Target.Equivalent` for that pair. Its meaning
-is equality of the complete output vectors for every shared input vector:
+Prepare a target from two combinational `GateFn` graphs. Their input and
+output ports must have matching names, widths, and order. The generated
+`Target.lean` embeds `Lhs.aag` and `Rhs.aag` through the shared AAG loader.
+Its proposition compares every output bit for every shared input vector:
 
 ```lean
 def Circuit.Equivalent (lhs rhs : Circuit inputCount outputCount) : Prop :=
   ∀ inputs, lhs.denote inputs = rhs.denote inputs
 ```
 
-The proof file contains a complete Lean term for `Target.Equivalent`, including
-`by` when using tactics. For example, the small three-input AND test uses:
+Write a Lean module defining a theorem of type `Target.Equivalent`. For example,
+this proof checks all eight input vectors of a three-input circuit:
 
 ```lean
-by
+import Target
+
+theorem Decision.equivalent : Target.Equivalent := by
   unfold Target.Equivalent XlsynthLean.Aig.Circuit.Equivalent
   native_decide
 ```
 
-The runner generates `UserProof.lean` with `import Target`, imports for every
-supplied helper module, and the declaration
-`theorem UserProof.equivalent : Target.Equivalent := (...)`. The body is placed
-verbatim inside those parentheses, preserving its whitespace and literals. A
-direct term such as `Helpers.Proof.equivalent` is also accepted. The body is a
-term fragment rather than a standalone Lean module, so it does not contain
-top-level imports or a theorem declaration.
+Select the theorem by name when invoking the checker:
 
-This example's `native_decide` uses Lean's native execution trust and contributes
-a generated axiom to the proof.
+```rust
+use std::path::{Path, PathBuf};
+use xlsynth_lean::{
+    LeanAxiomPolicy, LeanNamedProofSources, LeanTheoremName, prepare_equivalence_target,
+    run_gate_equivalence_proof_with_policy,
+};
 
-The prepared directory contains the companion support sources, `Lhs.aag`,
-`Rhs.aag`, `Target.lean`, and `Check.lean`. It can be retained
-as a build artifact or inspected while developing the proof. `Check.lean`
-shows the expected root declaration for manual use.
+let target = Path::new("prepared");
+let policy = LeanAxiomPolicy::ReplayNativeChecks;
+prepare_equivalence_target(&lhs, &rhs)?.write_to_with_policy(target, policy)?;
+let sources = LeanNamedProofSources {
+    root: PathBuf::from("proof"),
+    module: PathBuf::from("proof/Decision.lean"),
+    theorem: LeanTheoremName::new("Decision.equivalent")?,
+    modules: vec![],
+};
+let output = run_gate_equivalence_proof_with_policy(
+    Path::new("/path/to/lean/bin/lean"), target, &sources, Path::new("work"), policy,
+)?;
+```
 
-The runner requires an empty work directory. It copies the fixed prepared
-artifacts and generates `UserProof.lean` at the work root. Helper modules keep
-their paths relative to `LeanProofSources.root`; every supplied file
-must be under that root. The generated wrapper imports helpers in the supplied
-order, and Lean's `--src-deps` mode determines their compilation order. The
-selected installation must include its Lean sources.
-Generated module roots and colliding paths are rejected. Before processing
-the proof, the driver saves the compiled target and its generated dependencies.
-A separate verifier loads those originals alongside the compiled proof modules,
-replays the proof declarations through Lean's kernel, and looks up
-`UserProof.equivalent` and `Target.Equivalent` by their internal names.
-It checks that the theorem's type is definitionally equal to the generated
-proposition. User syntax can therefore help write a proof without changing the
-verifier's interpretation of the goal.
+The entry module imports any helpers it uses. List the helper files in
+`modules`, with their module paths relative to `root`. The work directory
+must be empty. The runner snapshots the compiled target before compiling any
+user modules. An independent verifier replays the compiled proof declarations
+through Lean’s kernel, checks the selected theorem’s defining module and type
+against the original `Target.Equivalent`, and audits its transitive axioms.
 
-The runner invokes Lean directly and does not manage Lake projects. Lean's
-default solver lookup finds the bundled CaDiCaL beside the Lean executable.
-The caller chooses the proof tactics.
+In the default policy the audit permits `propext`, `Classical.choice`, and
+`Quot.sound` and replays closed native Boolean checks, including the AAG
+parsing witnesses. It rejects `sorry` and unverified axioms. The successful
+result includes the number of distinct checks replayed. Use
+`LeanAxiomPolicy::RejectNativeChecks` for both preparation and verification
+to kernel-check the parser witnesses and require a proof with zero native
+checks. For the small AND example, the following proof uses the circuit
+evaluator and kernel reduction:
 
-`check_equivalence_proof` remains a convenience API for a single proof body; it
-prepares and checks the target in a temporary directory.
+```lean
+theorem Decision.kernel : Target.Equivalent := by
+  unfold Target.Equivalent XlsynthLean.Aig.Circuit.Equivalent
+  simp only [← XlsynthLean.Aig.Circuit.eval_eq_denote]
+  decide +kernel
+```
 
-A successful `LeanProofOutput` means Lean accepted the named theorem at the
-generated target type. It returns `lean_version` and the captured `stdout` and
-`stderr` from successful compilation steps. A `LeanProofFailure` retains the
-underlying `LeanError`, the Lean version if its query succeeded, and diagnostics
-from completed compilation steps and the failed process. The checker performs
-no axiom audit: Lean's normal acceptance of declarations using axioms or
-`sorry` applies.
+The legacy `run_equivalence_proof` and `check_equivalence_proof` APIs accept
+a proof body. They check the generated root theorem’s type and omit the
+transitive axiom audit.
 
 ## Lean semantics and conversion trust
 
