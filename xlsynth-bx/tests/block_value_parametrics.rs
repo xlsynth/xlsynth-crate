@@ -102,6 +102,254 @@ pub block top(clk, x: bool) -> bool {{ x }}
 }
 
 #[test]
+fn unused_block_checks_bare_struct_arguments_of_known_type() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let template = "struct Tag<N: u32, Value: uN[N]> { data: u8 }";
+    fs::write(directory.path().join("words.x"), format!("pub {template}"))?;
+    let options = search_paths(&[directory.path()]);
+    for (decl, name, context) in [
+        (template, "Tag", "struct 'Tag' parametric 'Value': "),
+        ("use words;", "words::Tag", ""),
+    ] {
+        let source = format!(
+            "{decl} block stage<N: u32, S: bool>(clk, x: {name}<32, S>) -> bool {{ true }}"
+        );
+        assert_eq!(
+            check_module_with_options(&parse_module(&source)?, &options).unwrap_err(),
+            format!("block 'stage': {context}expected u32, got bool"),
+        );
+        // N may be one, in which case S is a valid argument for Value.
+        let dependent = source.replace("<32, S>", "<N, S>");
+        check_module_with_options(&parse_module(&dependent)?, &options)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn unused_block_checks_fixed_types_of_omitted_dslx_struct_arguments() -> Result<(), Box<dyn Error>>
+{
+    let directory = tempdir()?;
+    fs::write(
+        directory.path().join("words.x"),
+        "pub struct Tag<N: u32, Flag: bool = {N != u32:0}, X: u8 = {u8:2}> { data: uN[N] }",
+    )?;
+    let options = search_paths(&[directory.path()]);
+    for (width, context) in [("N", ""), ("32", "words::Tag<u32:32>: ")] {
+        let source = format!(
+            "use words; block stage<N: u32>(clk, x: words::Tag<{width}>) -> bool {{ true }}"
+        );
+        assert_eq!(
+            check_module_with_options(&parse_module(&source)?, &options).unwrap_err(),
+            format!(
+                "block 'stage': {context}DSLX struct parametric 'X' of 'words::Tag' has unsupported type 'uN[8]'; expected bool or u32"
+            ),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn unused_block_checks_dslx_struct_types_through_default_chains() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    fs::write(
+        directory.path().join("words.x"),
+        r#"
+const BASE = u32:3;
+fn width(v: u32) -> u32 { v + u32:5 }
+pub struct Known<N: u32, V: u32 = {BASE}, W: u32 = {width(V)}, X: uN[W] = {uN[W]:0}> { data: uN[N] }
+pub struct Dependent<N: u32, V: u32 = {N}, W: u32 = {width(V)}, X: uN[W] = {uN[W]:0}> { data: uN[N] }
+"#,
+    )?;
+    let options = search_paths(&[directory.path()]);
+    let source = "use words; block stage<N: u32>(clk, x: words::Known<N>) -> bool { true }";
+    assert_eq!(
+        check_module_with_options(&parse_module(source)?, &options).unwrap_err(),
+        "block 'stage': DSLX struct parametric 'X' of 'words::Known' has unsupported type 'uN[8]'; expected bool or u32",
+    );
+    let dependent = source.replace("::Known", "::Dependent");
+    check_module_with_options(&parse_module(&dependent)?, &options)?;
+    Ok(())
+}
+
+#[test]
+fn dslx_struct_parametrics_resolve_formal_names_in_their_lexical_scope()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let templates = r#"
+const N = u32:8;
+struct Dims { N: u32 }
+pub struct Local<N: u32, W: u32 = {{ let N = u32:8; N }}, X: uN[W] = {uN[W]:0}> { data: uN[N] }
+pub struct Field<N: u32, W: u32 = {(Dims { N: u32:8 }).N}, X: uN[W] = {uN[W]:0}> { data: uN[N] }
+pub struct FieldType<N: u32, V: uN[(Dims { N: u32:8 }).N]> { data: uN[N] }
+pub struct ShadowDependent<N: u32, M: uN[N], W: u32 = {{ let M = u32:8; M }}, X: uN[W] = {uN[W]:0}> { data: uN[N] }
+pub struct Forward<N: u32, W: u32 = {N}, X: uN[W] = {uN[W]:0}> { data: uN[N] }
+pub struct Shorthand<N: u32, W: u32 = {(Dims { N }).N}, X: uN[W] = {uN[W]:0}> { data: uN[N] }
+pub struct Select<N: u32, W: u32 = {const if N == u32:32 { u32:32 } else { u32:8 }}, X: uN[W] = {uN[W]:0}> { data: uN[N] }
+"#;
+    let options = search_paths(&[directory.path()]);
+    for inference in ["type_inference_v2", "type_inference_v1"] {
+        fs::write(
+            directory.path().join("words.x"),
+            format!("#![feature({inference})]{templates}"),
+        )?;
+        for (name, arguments, formal) in [
+            ("Local", "N", "X"),
+            ("Field", "N", "X"),
+            ("FieldType", "N, true", "V"),
+            ("ShadowDependent", "N, 0", "X"),
+        ] {
+            let source = format!(
+                "use words; block stage<N: u32>(clk, x: words::{name}<{arguments}>) -> bool {{ true }}"
+            );
+            assert_eq!(
+                check_module_with_options(&parse_module(&source)?, &options).err(),
+                Some(format!(
+                    "block 'stage': DSLX struct parametric '{formal}' of 'words::{name}' has unsupported type 'uN[8]'; expected bool or u32"
+                )),
+                "{name} {inference}"
+            );
+        }
+        for name in ["Forward", "Shorthand", "Select"] {
+            let source = format!(
+                r#"
+use words;
+block stage<N: u32>(clk, x: words::{name}<N>) -> bool {{ true }}
+pub block top(clk, x: words::{name}<32>) -> bool {{ let result = stage<32>(x); result }}
+"#,
+            );
+            check_module_with_options(&parse_module(&source)?, &options)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn imported_struct_parametric_probes_respect_declaration_order() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let file = directory.path().join("words.x");
+    let templates = br#"
+pub struct Word<N: u32, W: u32 = {clz(u32:1) + u32:1}, X: uN[W] = {uN[W]:0}> { data: uN[N] }
+pub struct Annotated<N: u32, X: uN[clz(u32:1) + u32:1]> { data: uN[N] }
+"#;
+    let shadow = b"fn clz(x: u32) -> u32 { u32:7 }\n";
+    let concrete = r#"
+use words;
+#[allow(combinational_block)]
+pub block circuit(clk, a: words::Word<8>, b: words::Annotated<8, 0>) -> u8 { a.data + b.data }
+"#;
+    let generic = r#"
+use words;
+#[allow(combinational_block)]
+block stage<N: u32>(clk, a: words::Word<N>, b: words::Annotated<N, 0>) -> bits[N] { a.data + b.data }
+#[allow(combinational_block)]
+pub block circuit(clk, a: words::Word<8>, b: words::Annotated<8, 0>) -> u8 {
+    let result = stage<8>(a, b);
+    result
+}
+"#;
+    let options = search_paths(&[directory.path()]);
+    for inference in ["type_inference_v2", "type_inference_v1"] {
+        let mut prefix = format!("#![feature({inference})]\n").into_bytes();
+        // This DSLX character occupies one raw byte before both declarations.
+        prefix.extend_from_slice(b"fn byte() -> u8 { '\xff' }\n");
+        fs::write(&file, [prefix.as_slice(), templates, shadow].concat())?;
+        for source in [concrete, generic] {
+            compile_with_options(
+                source,
+                empty_package("design"),
+                ResetBehavior::default(),
+                &options,
+            )
+            .map_err(|e| format!("{inference}: {e}"))?;
+        }
+
+        // When clz is already in scope, both expressions produce width 8.
+        fs::write(&file, [prefix.as_slice(), shadow, templates].concat())?;
+        for (name, args) in [("Word", "N"), ("Annotated", "N, 0")] {
+            let stage = format!(
+                "use words; block stage<N: u32>(clk, word: words::{name}<{args}>) -> bits[N] {{ word.data }}"
+            );
+            assert_eq!(
+                check_module_with_options(&parse_module(&stage)?, &options).err(),
+                Some(format!(
+                    "block 'stage': DSLX struct parametric 'X' of 'words::{name}' has unsupported type 'uN[8]'; expected bool or u32"
+                )),
+                "{inference}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn imported_struct_default_lambda_captures_a_fixed_or_forwarded_block_port_argument()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let word = r#"
+pub struct Word<N: u32, BASE: u32,
+                W: u32 = {map([u32:0], |x: u32| x + BASE)[u32:0]},
+                X: uN[W] = {uN[W]:0}> { data: uN[N], tag: uN[W] }
+"#;
+    let source = r#"
+use words;
+block fixed<N: u32>(clk, word: words::Word<N, 32>) -> u32 { word.tag }
+block forwarded<N: u32, BASE: u32>(clk, word: words::Word<N, BASE>) -> bits[BASE] { word.tag }
+pub block tags(clk, wide: words::Word<8, 32>, narrow: words::Word<32, 1>) -> (u32, u1) {
+    let a = fixed<8>(wide);
+    let b = forwarded<32, 1>(narrow);
+    (a, b)
+}
+"#;
+    let options = search_paths(&[directory.path()]);
+    let module = parse_module(source)?;
+    let unsupported = parse_module(
+        "use words; block fixed<N: u32>(clk, word: words::Word<N, 8>) -> u8 { word.tag }",
+    )?;
+    for inference in ["type_inference_v2", "type_inference_v1"] {
+        fs::write(
+            directory.path().join("words.x"),
+            format!("#![feature({inference})]{word}"),
+        )?;
+        check_module_with_options(&module, &options).map_err(|e| format!("{inference}: {e}"))?;
+        assert_eq!(
+            check_module_with_options(&unsupported, &options)
+                .err()
+                .as_deref(),
+            Some(
+                "block 'fixed': DSLX struct parametric 'X' of 'words::Word' has unsupported type 'uN[8]'; expected bool or u32"
+            ),
+            "{inference}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn imported_struct_literal_defaults_keep_their_contextual_types() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let word = r#"
+pub struct Word<TAG: u32, N: u32, V: uN[N] = {0},
+                X: uN[if V == uN[N]:0 { N } else { u32:8 }] = {0}> { data: uN[N] }
+"#;
+    let module = parse_module(
+        r#"
+use words;
+block stage<TAG: u32>(clk, flag: words::Word<TAG, 1>, value: words::Word<TAG, 32>)
+    -> (bool, u32) { (flag.data, value.data) }
+"#,
+    )?;
+    let options = search_paths(&[directory.path()]);
+    for inference in ["type_inference_v2", "type_inference_v1"] {
+        fs::write(
+            directory.path().join("words.x"),
+            format!("#![feature({inference})]{word}"),
+        )?;
+        check_module_with_options(&module, &options).map_err(|e| format!("{inference}: {e}"))?;
+    }
+    Ok(())
+}
+
+#[test]
 fn mixed_struct_value_type_can_depend_on_a_block_port_dimension() -> Result<(), String> {
     let source = r#"
 struct Stamp<T, Init: T, Width: u32 = {bit_count<T>()}> { data: T }
@@ -787,6 +1035,127 @@ block circuit(clk, bank: Bank<u9[4]>) -> Bank<u9[4]> {
 }
 
 #[test]
+fn block_ports_forward_nested_struct_value_arguments_and_defaults() -> Result<(), String> {
+    let source = r#"
+struct Word<N: u32, Wide: bool = {N == u32:8}> { data: uN[N] }
+struct Envelope<T> { item: T }
+
+block hold<N: u32 = {7}>(clk, x: Envelope<Word<{N + u32:1}>>)
+    -> Envelope<Word<{N + u32:1}>> {
+    reg q: Envelope<Word<{N + u32:1}>>;
+    q := x;
+    q
+}
+pub block circuit(clk, a: Envelope<Word<8, true>>, b: Envelope<Word<17, false>>) -> (u8, u17) {
+    let byte = hold(a);
+    let wide = hold<16>(b);
+    (byte.item.data, wide.item.data)
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let circuit = package.get_top_block().ok_or("missing circuit")?;
+    let [byte, wide] = circuit.instantiations.as_slice() else {
+        panic!("expected two hold instances");
+    };
+    for (instance, width) in [(byte, 8), (wide, 17)] {
+        let hold = package.get_block(&instance.block).ok_or("missing hold")?;
+        let output = hold.get_output_port("item").ok_or("missing item")?;
+        assert_eq!(
+            hold.port_type(output),
+            &Type::Tuple(vec![Box::new(Type::Bits(width))])
+        );
+    }
+    // The phantom argument gives these inputs different types despite their
+    // identical layouts.
+    let wrong = source.replace("a: Envelope<Word<8, true>>", "a: Envelope<Word<8, false>>");
+    assert!(check_module(&parse_module(&wrong)?).is_err());
+    // Only the specialized child port gives the nested unsized literal its
+    // width.
+    let literal = source.replace("hold(a)", "hold(Envelope { item: Word { data: 1 } })");
+    check_module(&parse_module(&literal)?)?;
+    Ok(())
+}
+
+#[test]
+fn mixed_block_port_infers_type_and_forwards_value_from_separate_sources() -> Result<(), String> {
+    let source = r#"
+struct Stamp<T, Tag: u32> { payload: T }
+block save<T, N: u32>(clk, packet: Stamp<T, N>) -> Stamp<T, N> {
+    reg q: T;
+    q := packet.payload;
+    Stamp { payload: q }
+}
+pub block circuit(clk, x: Stamp<s11, 5>) -> s11 {
+    let saved = save<5>(x);
+    saved.payload
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let top = package.get_top_block().ok_or("missing circuit")?;
+    let [instance] = top.instantiations.as_slice() else {
+        panic!("expected one save instance");
+    };
+    let save = package.get_block(&instance.block).ok_or("missing save")?;
+    assert_eq!(save.registers[0].ty, Type::Bits(11));
+    Ok(())
+}
+
+#[test]
+fn block_port_signedness_controls_extension_at_each_call() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+#[allow(combinational_block)]
+block widen<S: bool>(x: xN[S][8]) -> xN[S][16] { x as xN[S][16] }
+#[allow(combinational_block)]
+pub block circuit(x: u8) -> (s16, u16) {
+    let signed = widen<true>(x as s8);
+    let unsigned = widen<false>(x);
+    (signed, unsigned)
+}
+"#;
+    let mut package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    inline_all_blocks_in_package(&mut package)?;
+    let circuit = combinational_block_to_fn(package.get_top_block().ok_or("missing circuit")?)?;
+    assert_eq!(
+        eval_fn_in_package_value(&package, &circuit, &[IrValue::make_ubits(8, 255)?]),
+        IrValue::make_tuple(&[IrValue::make_sbits(16, -1)?, IrValue::make_ubits(16, 255)?]),
+    );
+    let wrong = source.replace("widen<true>(x as s8)", "widen<true>(x)");
+    assert_eq!(
+        check_module(&parse_module(&wrong)?).unwrap_err(),
+        "block 'circuit': let 'signed': input 'x', call to block 'widen': expected s8, got u8",
+    );
+    Ok(())
+}
+
+#[test]
+fn unused_block_with_dependent_signedness_checks_its_known_layout_size() -> Result<(), String> {
+    let source = r#"
+block oversized<S: bool>(clk, x: xN[S][600000][2]) -> bool { true }
+pub block top(clk, x: bool) -> bool { x }
+"#;
+    let err = check_module(&parse_module(source)?).unwrap_err();
+    assert!(err.contains("exceeds maximum concrete type size"), "{err}");
+    Ok(())
+}
+
+#[test]
+fn port_width_can_be_a_literal_typed_by_a_block_parameter() -> Result<(), String> {
+    let source = r#"
+block stage<T>(clk, sample: T, data: bits[T:0x8]) -> bits[T:0x8] {
+    reg q: bits[T:0x8];
+    q := data;
+    q
+}
+pub block circuit(clk, x: u8) -> u8 { let q = stage(u32:0, x); q }
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let circuit = package.get_top_block().ok_or("missing circuit")?;
+    let out = circuit.get_output_port("out").ok_or("missing output")?;
+    assert_eq!(circuit.port_type(out), &Type::Bits(8));
+    Ok(())
+}
+
+#[test]
 fn dimension_dependent_ports_preserve_the_nominal_type_behind_an_alias() -> Result<(), String> {
     let source = r#"
 struct Record { byte: u8 }
@@ -816,6 +1185,38 @@ pub block top(clk, x: u8) -> u8 { x }
 "#;
     let error = check_module(&parse_module(source)?).unwrap_err();
     assert_eq!(error, "block 'stage': duplicate name 'byte'");
+    Ok(())
+}
+
+#[test]
+fn unused_block_checks_known_output_names_on_value_parametric_structs() -> Result<(), String> {
+    let source = r#"
+struct Word<N: u32> { data: uN[N] }
+block stage<N: u32>(clk, data: uN[N]) -> Word<N> { Word { data } }
+pub block top(clk, x: u8) -> u8 { x }
+"#;
+    assert_eq!(
+        check_module(&parse_module(source)?).unwrap_err(),
+        "block 'stage': duplicate name 'data'",
+    );
+    Ok(())
+}
+
+#[test]
+fn specializing_a_struct_port_checks_its_expanded_array_layout() -> Result<(), String> {
+    let source = r#"
+struct Word<Tag: u32> { payload: u32 }
+block stage<N: u32>(clk, words: Word<N>[33000]) -> bool { true }
+pub block top(clk) -> bool {
+    let result = stage<1>(zero!());
+    result
+}
+"#;
+    let error = check_module(&parse_module(source)?).unwrap_err();
+    assert!(
+        error.contains("exceeds maximum concrete type size"),
+        "{error}"
+    );
     Ok(())
 }
 
@@ -959,9 +1360,11 @@ fn unused_dependent_block_dimensions_check_all_names_in_declaration_scope() -> R
         for signature in [
             format!("(clk, input: u32, x: bits[N + {name}]) -> u32 {{ input }}"),
             format!("(clk, input: u32) -> u8[N + {name}] {{ zero!() }}"),
+            format!("(clk, input: u32, x: Word<{{N + {name}}}>) -> u32 {{ input }}"),
+            format!("(clk, input: u32) -> xN[N == {name}][8] {{ zero!() }}"),
         ] {
             let source = format!(
-                "const input = u32:4; block bank<N: u32>{signature} pub block top(clk, x: u8) -> u8 {{ x }}"
+                "const input = u32:4; struct Word<W: u32> {{ data: uN[W] }} block bank<N: u32>{signature} pub block top(clk, x: u8) -> u8 {{ x }}"
             );
             let error = check_module(&parse_module(&source)?).unwrap_err();
             assert!(error.contains(name), "{signature}: {error}");

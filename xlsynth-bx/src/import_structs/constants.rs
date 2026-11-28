@@ -2,7 +2,7 @@
 
 //! Read constexpr values from their declaring module in the frozen DSLX graph.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::rc::Rc;
 
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember};
@@ -15,7 +15,7 @@ use crate::ast::Type;
 use crate::check::ImportedValueShapes;
 use crate::dslx_import::TypeWitness;
 use crate::layout::Layouts;
-use crate::typed::CheckedConstant;
+use crate::typed::{BoundParametricValue, CheckedConstant};
 
 /// Native constant declarations and the context that evaluated their
 /// initializers.
@@ -32,6 +32,7 @@ pub(super) struct ImportedConstants {
     owners: BTreeMap<String, ConstantOwner>,
     values: BTreeMap<String, Rc<CheckedConstant>>,
     shapes: ImportedValueShapes,
+    default_demand: BTreeMap<DeclId, Rc<[bool]>>,
     layouts: BTreeMap<String, ir::Type>,
 }
 
@@ -42,12 +43,13 @@ impl ImportedStructs {
         })
     }
 
-    /// Index original AST handles once per owner without materializing any
-    /// values.
-    fn index_constant_owner(&mut self, subject: &str, data: &mut ImportData) -> Result<(), String> {
-        if self.constants.owners.contains_key(subject) {
-            return Ok(());
-        }
+    /// Read the imported module with the type information from its declaration
+    /// scope.
+    pub(super) fn native_owner(
+        &self,
+        subject: &str,
+        data: &mut ImportData,
+    ) -> Result<(dslx::Module, dslx::TypeInfo), String> {
         let checked = self.check_probe(
             &format!("import {subject} as bx_owner;"),
             &format!("0bx_const_owner_{}", self.constants.owners.len()),
@@ -65,6 +67,16 @@ impl ImportedStructs {
         let context = root
             .get_imported_type_info(&owner)
             .ok_or_else(|| format!("missing type information for DSLX module '{subject}'"))?;
+        Ok((owner, context))
+    }
+
+    /// Index original AST handles once per owner without materializing any
+    /// values.
+    fn index_constant_owner(&mut self, subject: &str, data: &mut ImportData) -> Result<(), String> {
+        if self.constants.owners.contains_key(subject) {
+            return Ok(());
+        }
+        let (owner, context) = self.native_owner(subject, data)?;
         let mut declarations = BTreeMap::new();
         let mut templates = BTreeMap::new();
         for index in 0..owner.get_member_count() {
@@ -89,6 +101,51 @@ impl ImportedStructs {
                 templates,
             },
         );
+        Ok(())
+    }
+
+    /// Check omitted trailing struct bindings using the DSLX declaration's
+    /// defaults without instantiating the struct.
+    pub(crate) fn check_struct_defaults(
+        &mut self,
+        subject: &str,
+        member: &str,
+        mut previous: Vec<Option<BoundParametricValue>>,
+        data: &mut ImportData,
+    ) -> Result<(), String> {
+        self.index_constant_owner(subject, data)?;
+        let graph = Rc::clone(&self.graph);
+        let template = graph
+            .struct_template(subject, member)
+            .ok_or_else(|| format!("missing DSLX struct template '{subject}::{member}'"))?;
+        let owner = graph
+            .module_reference(subject, &[])
+            .expect("template declaring module");
+        let id = DeclId {
+            subject: subject.to_owned(),
+            name: member.to_owned(),
+        };
+        let needed = Rc::clone(match self.constants.default_demand.entry(id.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(template.default_demand()?.into()),
+        });
+        for (i, formal) in template.formals.iter().enumerate().skip(previous.len()) {
+            let default = formal.default_expr.as_deref().ok_or_else(|| {
+                format!(
+                    "missing required argument '{}' in type '{subject}::{member}'",
+                    formal.name
+                )
+            })?;
+            let ty =
+                self.struct_parametric_type_at(subject, member, i, |j| previous[j].as_ref())?;
+            let bound = match ty {
+                Some(ty) if needed[i] => {
+                    self.partial_struct_default(&id, owner, template, default, ty, &previous)?
+                }
+                _ => None,
+            };
+            previous.push(bound);
+        }
         Ok(())
     }
 

@@ -244,6 +244,16 @@ pub(crate) fn relocate_dslx_imports(
 /// positions. Invalid UTF-8 in literals keeps its value through DSLX's hex
 /// escape. An invalid byte in a comment or a Latin-1 space occupies one space.
 pub(crate) fn decode_dslx_source(bytes: &[u8]) -> Result<Cow<'_, str>, String> {
+    decode_dslx_source_with_offsets(bytes, |_, _| {})
+}
+
+/// Report the corresponding decoded and original byte offsets immediately
+/// after each expanded literal byte. Outside expansions, offsets advance
+/// equally in both source views.
+pub(crate) fn decode_dslx_source_with_offsets(
+    bytes: &[u8],
+    mut expanded: impl FnMut(usize, usize),
+) -> Result<Cow<'_, str>, String> {
     if let Ok(text) = std::str::from_utf8(bytes) {
         return Ok(Cow::Borrowed(text));
     }
@@ -262,6 +272,7 @@ pub(crate) fn decode_dslx_source(bytes: &[u8]) -> Result<Cow<'_, str>, String> {
                 Region::Code | Region::Identifier if byte == 0xa0 => output.push(' '),
                 Region::Character { .. } | Region::Quoted { escaped: false, .. } => {
                     write!(output, "\\x{byte:02x}").expect("writing to a String");
+                    expanded(output.len(), offset + 1);
                 }
                 _ => {
                     return Err(format!(

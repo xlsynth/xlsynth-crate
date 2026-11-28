@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
 
@@ -23,7 +23,7 @@ pub(super) struct ModuleDimensions<'a, 'm> {
 /// Bindings that become concrete when a block's data ports are specialized.
 pub(super) struct BlockDimensionFormals<'a> {
     pub(super) values: BTreeSet<String>,
-    pub(super) u32_values: BTreeSet<&'a str>,
+    pub(super) value_types: BTreeMap<&'a str, &'a Type>,
     pub(super) types: &'a Bindings,
 }
 
@@ -63,21 +63,67 @@ impl<'m> Declarations<'m> {
 }
 
 impl<'m> ModuleDimensions<'_, 'm> {
-    /// A width or length is a u32. Other formals can participate in an
-    /// expression computing it, including type operands such as bit_count<T>().
-    pub(super) fn is_dependent_block_size(&self, expr: &Expr) -> bool {
-        self.block_formals.is_some_and(|formals| match expr {
-            Expr::Name(name) => formals.u32_values.contains(name.as_str()),
-            _ => {
-                super::struct_parametrics::references_formal(SourceNode::Expression(expr), |name| {
-                    formals.values.contains(name) || formals.types.declares(name)
-                })
-            }
+    /// A bare block value formal has a concrete declared type before its value
+    /// is supplied at specialization.
+    pub(super) fn block_value_type(&self, expr: &Expr) -> Option<&Type> {
+        let Expr::Name(name) = expr else { return None };
+        self.block_formals?.value_types.get(name.as_str()).copied()
+    }
+
+    /// Does this expression need a value or type supplied at block
+    /// specialization?
+    pub(super) fn depends_on_block_formal(&self, expr: &Expr) -> bool {
+        self.block_formals.is_some_and(|formals| {
+            super::struct_parametrics::references_formal(SourceNode::Expression(expr), |name| {
+                formals.values.contains(name) || formals.types.declares(name)
+            })
         })
     }
 
-    /// Resolve a fixed size now, or check names and retain a dependent
-    /// expression until the block has concrete type and value arguments.
+    /// Find port operands that must be checked with the block's concrete
+    /// bindings.
+    pub(super) fn has_dependent_port_operand(&self, ty: &Type) -> bool {
+        if self.block_formals.is_none() {
+            return false;
+        }
+        let mut dependent = false;
+        super::type_dependencies(
+            ty,
+            |_, _| {},
+            |expr| {
+                dependent = dependent || self.depends_on_block_formal(expr);
+            },
+        );
+        dependent
+    }
+
+    /// Keep a dependent width, length or signedness symbolic after checking its
+    /// names.
+    pub(super) fn defer_bit_or_array_operand(
+        &self,
+        expr: &Expr,
+        expected: &Type,
+        is_local: &dyn Fn(&str) -> bool,
+        types: &mut TypeResolver<'_, 'm>,
+    ) -> Result<bool, String> {
+        if !self.depends_on_block_formal(expr) {
+            return Ok(false);
+        }
+        if matches!(expr, Expr::Name(_)) {
+            // A bare formal must have the operand's required type. Otherwise
+            // the ordinary resolver will diagnose the invalid dimension.
+            return Ok(self
+                .block_value_type(expr)
+                .is_some_and(|ty| compatible(ty, expected)));
+        }
+        let formals = self.block_formals.expect("dependent block port");
+        let mut checker = types.struct_scope(*self);
+        checker.enclosing_type_locals = Some(is_local);
+        checker.function_type_bindings = Some(formals.types.clone());
+        checker.check_block_dimension_names(expr, &formals.values)?;
+        Ok(true)
+    }
+
     pub(super) fn resolve_or_defer_size(
         &self,
         expr: &Expr,
@@ -85,17 +131,11 @@ impl<'m> ModuleDimensions<'_, 'm> {
         bindings: Option<&Bindings>,
         types: &mut TypeResolver<'_, 'm>,
     ) -> Result<Option<usize>, String> {
-        if !self.is_dependent_block_size(expr) {
-            return self.size(expr, is_local, bindings, types).map(Some);
+        if self.defer_bit_or_array_operand(expr, &Type::unsigned(32), is_local, types)? {
+            Ok(None)
+        } else {
+            self.size(expr, is_local, bindings, types).map(Some)
         }
-        if !matches!(expr, Expr::Name(_)) {
-            let formals = self.block_formals.expect("dependent block dimension");
-            let mut checker = types.struct_scope(*self);
-            checker.enclosing_type_locals = Some(is_local);
-            checker.function_type_bindings = Some(formals.types.clone());
-            checker.check_block_dimension_names(expr, &formals.values)?;
-        }
-        Ok(None)
     }
 
     /// Module constants already hold evaluated values. Stage inference needs
