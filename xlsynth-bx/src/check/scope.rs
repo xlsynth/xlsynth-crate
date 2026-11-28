@@ -4,7 +4,7 @@ use super::unroll::Shadowed;
 use super::{BodyChecker, CheckedStmt, K, TemporaryConstantBindings, Type, TypedExpr};
 use crate::ast::{
     BinaryOp, BindingPattern, ConstAssert, ConstDef, Expr, ForIterable, LetBinding, MatchArm,
-    MatchPattern, ScopeStatement, Stmt, StructArgument, UnrollMap, WidthSliceType,
+    MatchPattern, ScopeStatement, SourceNode, Stmt, StructArgument, UnrollMap, WidthSliceType,
 };
 use crate::infer_literal::{BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type};
 use crate::typed::TEST_DISCARD_PREFIX;
@@ -1184,8 +1184,17 @@ impl BodyChecker<'_, '_> {
                 then_value,
                 else_value,
             } => {
-                let lhs = self.prepare_scopes(then_value, mode, before_scope)?;
-                let rhs = self.prepare_scopes(else_value, mode, before_scope)?;
+                // A provisional constructor dimension may select its typed
+                // arm before scopes in the other arm can be elaborated.
+                let mut prepare = |arm: &'e Expr| {
+                    if self.constructor_binding_pending(SourceNode::Expression(arm)) {
+                        Ok(Cow::Borrowed(arm))
+                    } else {
+                        self.prepare_scopes(arm, mode, before_scope)
+                    }
+                };
+                let lhs = prepare(then_value)?;
+                let rhs = prepare(else_value)?;
                 if matches!(lhs, Cow::Owned(_)) || matches!(rhs, Cow::Owned(_)) {
                     prepared = Cow::Owned(Expr::If {
                         condition: condition.clone(),

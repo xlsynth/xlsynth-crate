@@ -687,6 +687,16 @@ For example, `xs: xN[S][N][L]` supplies the signedness, element width, and
 array length. In a computed dimension such as `uN[N + u32:1]`, supply `N`
 explicitly, give it a default, or infer it from another parameter.
 
+In function and block signatures, earlier data parameters are in scope in
+later annotations and in the result. A dimension must evaluate to a constant
+for the chosen specialization. For example, in
+`fn f<N: u32>(x: u32) -> uN[if N == u32:4 { u32:5 } else { x }]`,
+`f<4>` returns five bits. Calling `f<3>` requires the runtime value of
+`x` to determine the width and fails to typecheck, even with a literal
+argument. The same rule applies to a typed `let` or a local type alias in
+the function body. A formal shadows outer names in its own annotation.
+BX makes its runtime type available once that annotation is resolved.
+
 Explicit arguments bind a prefix of the declared parameters in source order.
 Use a bare name, number, boolean, or typed literal for a simple argument.
 Enclose a computed argument in braces, as in `resize<8, {width + u32:4}>(x)`.
@@ -1706,7 +1716,8 @@ block hold<N: u32>(clk, word: Word<N>) -> uN[N] {
 
 A port can likewise use an imported struct such as `words::Word<S, N>`
 or a bit type such as `xN[S][N]`, where `S` is a Boolean block parameter.
-At declaration, BX checks struct parameter types that are already known.
+At declaration, BX checks struct arguments that are independent of the
+block's parameters. It checks dependent arguments when the block specializes.
 For an omitted DSLX parameter, a default that is constant in the struct's
 declaration scope can supply the type of a later parameter. For example,
 `W: u32 = {u32:8}` makes a subsequent `X: uN[W]` an unsupported `u8`

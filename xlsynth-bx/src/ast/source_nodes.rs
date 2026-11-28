@@ -19,6 +19,26 @@ pub(crate) enum SourceNode<'a> {
 }
 
 impl<'a> SourceNode<'a> {
+    /// Visit names used as values, annotations or constructors outside their
+    /// nested lexical binders. A qualified name depends on its head.
+    pub(crate) fn free_names(self) -> impl Iterator<Item = &'a str> {
+        let mut nodes = ScopedSourceNodes::default();
+        nodes.push(self);
+        std::iter::from_fn(move || {
+            while let Some(node) = nodes.next() {
+                let name = match node {
+                    Annotation(Type::Named(name)) | Expression(Expr::Name(name)) => name.as_str(),
+                    Expression(expr) if let Some(literal) = expr.struct_literal() => literal.name,
+                    _ => continue,
+                };
+                if !nodes.is_local(name) {
+                    return Some(name.split_once("::").map_or(name, |(head, _)| head));
+                }
+            }
+            None
+        })
+    }
+
     fn struct_argument(arg: &'a StructArgument) -> Self {
         match arg {
             StructArgument::Type(ty) => Annotation(ty),

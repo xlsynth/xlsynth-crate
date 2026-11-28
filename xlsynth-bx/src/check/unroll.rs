@@ -1160,7 +1160,12 @@ impl BodyChecker<'_, '_> {
     /// Combine declaration kinds seen in this walk with the concrete
     /// enclosing scope, preserving lexical shadowing of either kind.
     fn lexical_kind(&self, locals: &LexicalScope<'_>, name: &str) -> Option<LexicalKind> {
-        let scope = locals.lookup(name)?;
+        let Some(scope) = locals.lookup(name) else {
+            return self
+                .signature_parameters
+                .filter(|params| params.contains(name))
+                .map(|_| LexicalKind::Value);
+        };
         Some(scope.declarations.get(name).cloned().unwrap_or_else(|| {
             if let Some(alias) = self.local_type_aliases.get(name) {
                 LexicalKind::TypeAlias {
@@ -1280,8 +1285,8 @@ impl BodyChecker<'_, '_> {
                     .map(|f| &f.callback_indices)
             });
         for param in &f.params {
-            self.check_type_names(&param.ty, &locals)?;
             locals.bind_pattern_name(&param.name);
+            self.check_type_names(&param.ty, &locals)?;
         }
         self.check_type_names(&f.result, &locals)?;
         self.function_position = position;
@@ -1735,7 +1740,12 @@ impl BodyChecker<'_, '_> {
             }
             return Ok(());
         }
-        if locals.contains(name) {
+        if locals.contains(name)
+            || (!callee
+                && self
+                    .signature_parameters
+                    .is_some_and(|params| params.contains(name)))
+        {
             return Ok(());
         }
         if !locals.contains(head) {

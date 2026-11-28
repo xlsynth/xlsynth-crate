@@ -497,7 +497,7 @@ pub block pipeline(data_in:Value[2], tags_in:u8[3]) -> frames::Frame<2,Value> {
 }
 
 #[test]
-fn mixed_struct_specializations_check_both_argument_kinds() {
+fn mixed_struct_specializations_check_both_argument_kinds() -> Result<(), String> {
     let template = "struct Tag<N:u32, T> { x:u8 }";
     for wrong in ["Tag<3,u8>", "Tag<2,s8>"] {
         let source = format!("{template} fn bad(v:Tag<2,u8>)->{wrong} {{ v }}");
@@ -513,7 +513,6 @@ fn mixed_struct_specializations_check_both_argument_kinds() {
         "struct Tag<T,N:u32> { x:u8 } block bad<T>(clk, p:Tag<T>) -> T { zero!() }",
         "struct Tag<T,N:u32> { x:u8 } block bad<T>(clk, p:Tag<T,MISSING>) -> T { zero!() }",
         "type A = u16; struct Tag<T,N:u32> { x:u8 } block bad<T>(clk, A:T, p:Tag<T,{bit_count<A>()}>) -> T { A }",
-        "const n = u32:2; struct Tag<T,N:u32> { x:u8 } block bad<T>(clk, n:u32, p:Tag<T,n>) -> T { zero!() }",
         "struct Bad<T, T:u32> { data:T }",
         "struct Tag<T,N:u32> { x:u8 } type Bad = Tag<u8>;",
         "struct Tag<T,N:u32> { x:u8 } fn bad(x:u8)->u8 { let v = Tag { x }; v.x }",
@@ -524,6 +523,16 @@ fn mixed_struct_specializations_check_both_argument_kinds() {
             "{source}"
         );
     }
+    let runtime = "const n = u32:2; struct Tag<T,N:u32> { x:u8 } block bad<T>(clk, n:u32, p:Tag<T,n>) -> T { zero!() }";
+    check_module(&parse_module(runtime)?)?;
+    let called =
+        format!("{runtime} block top(clk, p:Tag<u8,2>)->u8 {{ let q = bad(u32:2, p); q }}");
+    let error = check_module(&parse_module(&called)?).unwrap_err();
+    assert!(
+        error.contains("requires a compile-time constant"),
+        "{error}"
+    );
+    Ok(())
 }
 
 #[test]

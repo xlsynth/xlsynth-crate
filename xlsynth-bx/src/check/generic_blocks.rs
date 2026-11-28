@@ -289,13 +289,7 @@ impl<'m> BlockTemplate<'m> {
             let params = block
                 .params
                 .iter()
-                .map(|p| {
-                    definition.names.insert(p.name.clone());
-                    Ok(Param {
-                        name: p.name.clone(),
-                        ty: resolve(&mut definition, &p.ty)?,
-                    })
-                })
+                .map(|p| definition.resolve_runtime_formal(p, &mut resolve))
                 .collect::<Result<_, String>>()?;
             let result = resolve(&mut definition, &block.result)?;
             Ok(Some(BlockPortTypes { params, result }))
@@ -376,12 +370,6 @@ impl<'m> BlockTemplate<'m> {
                 .iter()
                 .map(|p| p.name.clone())
                 .collect(),
-            value_types: block
-                .value_parametrics
-                .iter()
-                .map(|p| p.name.as_str())
-                .zip(&value_types)
-                .collect(),
             types: bindings,
         };
         let mut port_dimensions = dimensions;
@@ -432,11 +420,8 @@ impl<'m> BlockTemplate<'m> {
             }
         }
         let (input_pattern_work, port_binding_work) = {
-            let types = params.iter().map(|p| &p.ty).chain([&result]);
-            if types
-                .clone()
-                .any(|ty| port_dimensions.has_dependent_port_operand(ty))
-            {
+            if port_dimensions.has_dependent_signature(&params, &result) {
+                let types = params.iter().map(|p| &p.ty).chain([&result]);
                 // Specialization revisits every written port, including fixed
                 // expressions that declaration resolution folded to a size.
                 let mut work: usize = types.map(source_type_nodes).sum();

@@ -11,6 +11,51 @@ use xlsynth_bx::{check_module, check_source_with_options, parse_module};
 use xlsynth_pir::{IrValue, ir::NodePayload};
 
 #[test]
+fn signature_dimensions_see_earlier_runtime_parameters_at_specialization()
+-> Result<(), Box<dyn Error>> {
+    let declarations = r#"
+const x = u32:9;
+fn narrow<N:u32>(x:u32) -> uN[if N == u32:4 { u32:5 } else { x }] {
+    x as uN[if N == u32:4 { u32:5 } else { x }]
+}
+fn later<N:u32>(x:u32, y:uN[if N == u32:4 { u32:5 } else { x }]) -> u32 { y as u32 }
+fn earlier<N:u32>(y:uN[x], x:u32) -> u32 { y as u32 }
+fn infer<N:u32>(witness:uN[N], x:u32) -> uN[if N == u32:4 { u32:5 } else { x }] {
+    x as uN[if N == u32:4 { u32:5 } else { x }]
+}
+"#;
+    let call = "(narrow<4>(v), later<4>(v, 31), earlier<4>(u9:511, v), infer(u4:0,v))";
+    let result = "(u5,u32,u32,u5)";
+    let bx = format!("{declarations}\n{}", bx_source("v:u32", result, call));
+    let checked = check_module(&parse_module(&bx)?)?;
+    let native = format!("{declarations}\n{}", dslx_source("v:u32", result, call));
+    assert_eq!(
+        BlockEvaluator::lower(&checked, &bx)?.compare_ir(
+            &compile_dslx_module(&native, &[])?,
+            &[IrValue::make_ubits(32, 63)?],
+        )?,
+        IrValue::parse_typed("(bits[5]:31, bits[32]:31, bits[32]:511, bits[5]:31)")?
+    );
+
+    for (call, result) in [
+        ("narrow<3>(u32:9)", "u9"),
+        ("later<3>(u32:9,u9:0)", "u32"),
+        ("infer(u3:0,u32:9)", "u9"),
+    ] {
+        let source = format!("{declarations}\nfn sample()->{result} {{ {call} }}");
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert!(
+            error.contains("requires a compile-time constant"),
+            "{error}"
+        );
+        assert!(
+            parse_and_typecheck(&source, "sample.x", "sample", &mut ImportData::default()).is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn scalar_and_enum_match_patterns_compare_against_the_bound_parametric()
 -> Result<(), Box<dyn Error>> {
     let declarations = r#"

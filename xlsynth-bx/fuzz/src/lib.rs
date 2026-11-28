@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod annotation_scope;
 mod array_concat;
 mod array_literals;
 mod array_ranges;
@@ -51,6 +52,7 @@ mod unroll_map;
 mod unroll_map_clocked;
 mod unroll_types;
 
+pub use annotation_scope::check_annotation_scope;
 pub use array_concat::check_array_concat;
 pub use array_literals::check_array_literals;
 pub use array_ranges::check_array_ranges;
